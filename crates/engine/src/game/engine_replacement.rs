@@ -10,7 +10,8 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    GameState, PendingCostMoveResume, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
+    CounterCostRootSubtree, GameState, PendingCostMoveResume, PendingCounterPostAction,
+    TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -229,6 +230,8 @@ fn handle_replacement_choice_inner(
     // "remove any number of counters" drain — captured before
     // `continue_replacement` consumes the pending record so the Prevented arm
     // can resume the remaining removals even when this one was fully prevented.
+    // The Prevented arm then routes the removal to its owner by the parked
+    // counter-cost root's replacement subtree (`counter_cost_root_subtree`).
     let pending_was_counter_removal = state
         .pending_replacement
         .as_ref()
@@ -563,6 +566,7 @@ fn handle_replacement_choice_inner(
                     }
                 },
                 // CR 122.1: Counter removal accepted after replacement choice.
+                // CR 118.11: the cost owner settles this removal by measurement.
                 ProposedEvent::RemoveCounter {
                     object_id,
                     counter_type,
@@ -923,7 +927,26 @@ fn handle_replacement_choice_inner(
                 // — the `spec` field carries the full self-describing token
                 // characteristics. Delegate to the shared helper.
                 create @ ProposedEvent::CreateToken { .. } => {
-                    if !apply_create_token_after_replacement(state, create, events) {
+                    let is_copy =
+                        matches!(create, ProposedEvent::CreateToken { copy: Some(_), .. });
+                    let completed = apply_create_token_after_replacement(state, create, events);
+                    // CR 614.1a + CR 608.2c: the created referent includes any
+                    // batch a replacement appended to this event; the window
+                    // spans the chosen replacement's application and the apply.
+                    //
+                    // Known residual: a copy event is left as is. A replacement-appended
+                    // batch is never in the CopyToken frame's created ids. On a
+                    // liminal-immediate copy the apply drains the frame and resolves the
+                    // effect's riders inside the apply, so publishing here would rewrite
+                    // the ledger after the riders read it; otherwise the frame's later
+                    // drain overwrites the ledger with the frame's ids.
+                    if !is_copy {
+                        effects::token::publish_replacement_appended_tokens(
+                            state,
+                            &events[replacement_action_event_start..],
+                        );
+                    }
+                    if !completed {
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -1190,6 +1213,19 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 614.6 + CR 616.1: settling a batch parked above its member's
+            // delivery-tail child exposes that child's counter-removal queue. Finish
+            // it here, in the same order as the queue drain above, before any parked
+            // cost root resumes below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.active_counter_removals().is_some()
+            {
+                effects::counters::drain_pending_counter_removals(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.active_copy_token().is_some()
             {
@@ -1367,10 +1403,33 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: a counter-cost root
+            // deferred at the delivery drain above because its replacement subtree
+            // was live: the continuation drain above stops at the moment the subtree
+            // retires (`counter_cost_root_is_due`), and the root resumes here, before
+            // any outer frame work and before any outer cast or activation it is
+            // paying for (a mana ability paying a spell's cost) is finished below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.counter_cost_root_subtree() == CounterCostRootSubtree::Retired
+            {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
+                    state,
+                    events,
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
+            }
+
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
-            // activation cost payment paused during discard or sacrifice.
+            // activation cost payment paused during discard or sacrifice. Never
+            // under a counter-cost root whose replacement subtree is still live:
+            // the common boundary below finishes that subtree and the root first.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+                && state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
             {
                 let resume_cost_event_start = state
                     .pending_discard_for_cost
@@ -1620,13 +1679,73 @@ fn handle_replacement_choice_inner(
                 }
                 return Ok(state.waiting_for.clone());
             }
+            // CR 616.1 + CR 608.2c: a prevented counter removal belongs to whatever owns
+            // the work it interrupted. Work the parked counter-cost root's replacement
+            // installed is that root's subtree (its post-effect, an effect removal queue,
+            // a rider): it finishes first, and the root resumes once it retires. With the
+            // subtree retired the removal is the root's own (CR 118.11: the cost is still
+            // paid). With no counter-cost root the owner is the resolving work (an effect
+            // queue, damage, a resolution-time cost) and any other parked root resumes after
+            // it, in the Execute arm's order.
             if pending_was_counter_removal {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
-                effects::counters::drain_pending_counter_removals(state, events);
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    effects::drain_pending_continuation(state, events);
+                // CR 614.6 + CR 616.1: a batch zone move whose member's delivery-tail
+                // post-effect proposed this removal is parked on top of the removal's own
+                // work (`zone_pipeline::deliver_batch`, `NewChild`). It is part of the same
+                // modified event, so it settles first, as `resume_resolution_frames`'
+                // BatchDelivery arm does, exposing the removal's queue. A top batch is not
+                // always this removal's: a mana ability activated at an earlier prompt that
+                // parked a batch (an unless payment raised by a delivery-tail post-effect)
+                // proposes its removal above that batch, which belongs to the outer prompt.
+                // So it settles only where it is this removal's own work: with no
+                // counter-cost root, or above an unfinished root's recorded boundary; never
+                // under a retired root, whose own removal it cannot be.
+                match state.counter_cost_root_subtree() {
+                    CounterCostRootSubtree::Unfinished => {
+                        let batch_in_subtree = state
+                            .pending_cost_move_resume
+                            .as_ref()
+                            .and_then(PendingCostMoveResume::paused_counter_removal)
+                            .is_some_and(|paused| {
+                                state.resolution_stack.len()
+                                    > paused.replacement_subtree.resolution_depth
+                            });
+                        if batch_in_subtree && !settle_parked_batch_delivery(state, events) {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        effects::counters::drain_pending_counter_removals(state, events);
+                        super::engine::resume_pending_continuation_if_priority(state, events)?;
+                    }
+                    CounterCostRootSubtree::Retired => {
+                        resume_cost_move_root_after_prevention(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        )?;
+                    }
+                    CounterCostRootSubtree::Absent => {
+                        if !settle_parked_batch_delivery(state, events) {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        effects::counters::drain_pending_counter_removals(state, events);
+                        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                            && !matches!(
+                                state.pending_cost_move_resume,
+                                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                            )
+                        {
+                            effects::drain_pending_continuation(state, events);
+                        }
+                        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            resume_cost_move_root_after_prevention(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            )?;
+                        }
+                    }
                 }
                 return Ok(state.waiting_for.clone());
             }
@@ -1649,35 +1768,22 @@ fn handle_replacement_choice_inner(
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 return Ok(state.waiting_for.clone());
             }
-            // CR 601.2h + CR 602.2b + CR 614.12a + CR 616.1: A fully
-            // substituted cost move still completes that cost-payment step.
-            // No fresh prompt remains at this point, so restore the normal
-            // reducer boundary before draining its typed continuation.
-            state.waiting_for = WaitingFor::Priority {
-                player: state.active_player,
-            };
-            let resumed_mana_ability_cost = matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
-            );
-            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+            // CR 616.1 + CR 608.2c: any other prevented event inside a parked counter-cost
+            // root's replacement subtree finishes that subtree first; the root resumes once
+            // it retires.
+            if state.counter_cost_root_subtree() == CounterCostRootSubtree::Unfinished {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
+            }
+            if let Some(waiting_for) = resume_cost_move_root_after_prevention(
                 state,
                 events,
-                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
-                    action_event_start: replacement_action_event_start,
-                },
+                replacement_action_event_start,
             )? {
-                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
-                // the same rider ordering as a delivered one: its typed root
-                // settles before any ordinary continuation drains.
-                if resumed_mana_ability_cost
-                    && matches!(waiting_for, WaitingFor::Priority { .. })
-                    && (state.active_ability_continuation().is_some()
-                        || state.active_change_zone_frame().is_some())
-                {
-                    effects::drain_pending_continuation(state, events);
-                }
-                return Ok(state.waiting_for.clone());
+                return Ok(waiting_for);
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
@@ -1723,6 +1829,56 @@ fn handle_replacement_choice_inner(
             Ok(state.waiting_for.clone())
         }
     }
+}
+
+/// CR 614.6 + CR 616.1: settle a batch zone move parked on top of the
+/// resolution stack, if there is one. Returns whether the action is still at an
+/// ordinary Priority boundary afterwards (a later member can surface its own
+/// prompt).
+fn settle_parked_batch_delivery(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
+    if state.active_batch_delivery().is_some() {
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+    }
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: resume the parked cost-move
+/// root at the Prevented boundary; a mana root's rider drains after it.
+fn resume_cost_move_root_after_prevention(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    action_event_start: usize,
+) -> Result<Option<WaitingFor>, EngineError> {
+    // CR 601.2h + CR 602.2b + CR 616.1: A fully substituted cost move still
+    // completes that cost-payment step. No fresh prompt remains at this point,
+    // so restore the normal reducer boundary before draining its typed
+    // continuation.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    let resumed_mana_ability_cost = matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+    );
+    let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+        state,
+        events,
+        super::engine::CostMoveDrainBoundary::ReplacementPrevented { action_event_start },
+    )?
+    else {
+        return Ok(None);
+    };
+    // CR 605.3b + CR 616.1: A prevented mana cost has the same rider ordering
+    // as a delivered one: its typed root settles before any ordinary
+    // continuation drains.
+    if resumed_mana_ability_cost
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+        && (state.active_ability_continuation().is_some()
+            || state.active_change_zone_frame().is_some())
+    {
+        effects::drain_pending_continuation(state, events);
+    }
+    Ok(Some(state.waiting_for.clone()))
 }
 
 /// CR 614.12a: Commit a pre-entry controller choice onto the exact parked

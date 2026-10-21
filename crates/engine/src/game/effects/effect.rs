@@ -229,6 +229,9 @@ fn evaluate_static_condition_for_ability(
             resolve_quantity_with_targets(state, lhs, ability),
             resolve_quantity_with_targets(state, rhs, ability),
         ),
+        StaticCondition::QuantityQuality { quantity, quality } => quality.matches(i64::from(
+            resolve_quantity_with_targets(state, quantity, ability),
+        )),
         StaticCondition::And { conditions } => conditions
             .iter()
             .all(|condition| evaluate_static_condition_for_ability(state, condition, ability)),
@@ -839,6 +842,30 @@ fn register_transient_effect(
                 .and_then(|id| state.tracked_object_sets.get(&id).cloned())
                 .unwrap_or_default();
             for obj_id in tracked {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: obj_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
+        // CR 608.2k + CR 400.7: "it doesn't untap ..." after "tap that
+        // creature" names the trigger event's recipient — an untargeted referent, not
+        // a battlefield population. Bind only the incarnation the event recorded and
+        // only while it is a phased-in permanent, so a recipient that left and
+        // returned before resolution is a new object and receives nothing. A delayed
+        // trigger that pinned its referent into `targets` (CR 603.7c) keeps the
+        // existing path.
+        Some(TargetFilter::EventTarget) if ability.targets.is_empty() => {
+            for obj_id in crate::game::targeting::resolve_event_referent_permanents(
+                state,
+                &TargetFilter::EventTarget,
+                ability.source_id,
+            ) {
                 install_transient(
                     state,
                     end_permission,
@@ -1473,6 +1500,62 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn quantity_quality_static_condition_for_ability_resolves_targets() {
+        use crate::types::ability::{NumberQuality, Parity, PlayerScope, TargetRef};
+        // The ability-scoped evaluator resolves the quantity against the
+        // ability's targets: "target player has an odd number of cards in hand".
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0x0D000),
+            PlayerId(0),
+            "Quality Target Source".to_string(),
+            Zone::Battlefield,
+        );
+        for (owner, count) in [(PlayerId(1), 3_u64), (PlayerId(0), 2)] {
+            for i in 0..count {
+                create_object(
+                    &mut state,
+                    CardId(0x0D100 + u64::from(owner.0) * 0x10 + i),
+                    owner,
+                    format!("Hand Card {i}"),
+                    Zone::Hand,
+                );
+            }
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Proliferate,
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let target_hand = |quality| StaticCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            quality,
+        };
+        assert!(
+            evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Odd)),
+                &ability
+            ),
+            "the targeted player's 3 cards are odd"
+        );
+        assert!(
+            !evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Even)),
+                &ability
+            ),
+            "the targeted player's 3 cards are not even"
+        );
+    }
 
     #[test]
     fn generic_effect_registers_transient_effect_for_self_ref() {
@@ -2789,6 +2872,133 @@ mod tests {
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste,
             }));
+    }
+
+    /// CR 608.2k + CR 400.7: Kashi-Tribe Warriors' "it doesn't untap
+    /// during its controller's next untap step" (`affected: EventTarget`, no
+    /// chosen targets) binds exactly the damage recipient the trigger event
+    /// recorded. A recipient that left the battlefield and returned before
+    /// resolution is a new object and receives no restriction.
+    #[test]
+    fn generic_effect_event_target_skips_blinked_recipient() {
+        use crate::types::ability::PlayerScope;
+        use crate::types::game_state::DamageRecord;
+        use crate::types::phase::Phase;
+        use crate::types::statics::StaticMode;
+
+        // Source and recipient with distinct incarnations, the published
+        // combat damage event, and the matching ledger record (same source,
+        // source incarnation, amount and combat-ness) stamping the recipient.
+        fn fixture(blink_recipient: bool) -> (GameState, ResolvedAbility, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Kashi-Tribe Warriors".to_string(),
+                Zone::Battlefield,
+            );
+            let recipient = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Wall of Wood".to_string(),
+                Zone::Battlefield,
+            );
+            for _ in 0..3 {
+                state.objects.get_mut(&source).unwrap().bump_incarnation();
+            }
+            let source_epoch = state.objects[&source].incarnation;
+            let recipient_epoch = state.objects[&recipient].incarnation;
+            assert_ne!(source_epoch, recipient_epoch, "fixture reach guard");
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation: Some(source_epoch),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_epoch),
+                amount: 2,
+                is_combat: true,
+                ..Default::default()
+            });
+            state.current_trigger_event = Some(GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Object(recipient),
+                amount: 2,
+                is_combat: true,
+                excess: 0,
+                source_incarnation: Some(source_epoch),
+            });
+            if blink_recipient {
+                let mut zone_events = Vec::new();
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    recipient,
+                    Zone::Exile,
+                    &mut zone_events,
+                );
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    recipient,
+                    Zone::Battlefield,
+                    &mut zone_events,
+                );
+                assert_eq!(state.objects[&recipient].zone, Zone::Battlefield);
+                assert_ne!(
+                    state.objects[&recipient].incarnation, recipient_epoch,
+                    "fixture reach guard: the blink must create a new incarnation"
+                );
+            }
+            let duration = Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            };
+            let static_def = StaticDefinition::new(StaticMode::CantUntap)
+                .affected(TargetFilter::EventTarget)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantUntap,
+                }]);
+            let ability = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![static_def],
+                    duration: Some(duration.clone()),
+                    target: None,
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .duration(duration);
+            (state, ability, recipient)
+        }
+
+        // Positive half: the recipient the event recorded is bound.
+        let (mut state, ability, recipient) = fixture(false);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "{:?}",
+            state.transient_continuous_effects
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: recipient }
+        );
+
+        // Negative half: the recipient blinked before resolution.
+        let (mut state, ability, recipient) = fixture(true);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state
+                .transient_continuous_effects
+                .iter()
+                .any(|tce| tce.affected == TargetFilter::SpecificObject { id: recipient }),
+            "CR 400.7: the returned permanent is a new object and gets no restriction; TCEs: {:?}",
+            state.transient_continuous_effects
+        );
     }
 
     /// Issue #323 class: propagated `ability.targets` must not override TriggeringSource.

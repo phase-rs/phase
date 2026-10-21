@@ -34,13 +34,13 @@ use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    ChooseFromZoneConstraint, CoinFlipRun, Comparator, ContinuousModification,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -1127,16 +1127,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
         // "you may choose new targets for the copy" on the win branch (Krark)
         // lives in `win_effect`, not at `def.optional`.
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        } => win_effect
-            .as_ref()
-            .is_some_and(|def| def_tree_has_optional(def))
-            || lose_effect
-                .as_ref()
-                .is_some_and(|def| def_tree_has_optional(def)),
         Effect::FlipCoins {
             win_effect,
             lose_effect,
@@ -1147,7 +1137,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             || lose_effect
                 .as_ref()
                 .is_some_and(|def| def_tree_has_optional(def)),
-        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -1159,7 +1148,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 /// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
 /// Condition_If, and Duration_ThisTurn detectors when the original text matches
 /// the "die this turn, exile instead" rider grammar. Flip-coin branches
-/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// (Desperate Gambit) nest these under `Effect::FlipCoins`, so recurse there too.
 /// Flip-coin branch payloads may carry one-shot damage replacements.
 fn flip_branch_has_target_replacement(
     win_effect: &Option<Box<AbilityDefinition>>,
@@ -1178,12 +1167,8 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
         Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
             return true
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -4890,8 +4875,14 @@ fn detect_condition_if(
     }) {
         return;
     }
-    // CR 603.4: an explicit quantity comparison IS the conditional gate.
-    if evidence.any::<AbilityCondition>(|c| matches!(c, AbilityCondition::QuantityCheck { .. })) {
+    // CR 603.4: an explicit quantity comparison or arithmetic-quality predicate IS the
+    // conditional gate.
+    if evidence.any::<AbilityCondition>(|c| {
+        matches!(
+            c,
+            AbilityCondition::QuantityCheck { .. } | AbilityCondition::QuantityQuality { .. }
+        )
+    }) {
         return;
     }
     // CR 614.1a: replacement riders whose carried event/destination IS the "if X would Y"
@@ -4904,8 +4895,10 @@ fn detect_condition_if(
             e,
             Effect::AddTargetReplacement { .. }
                 | Effect::CreatePlaneswalkReplacement { .. }
-                | Effect::FlipCoin { .. }
-                | Effect::FlipCoins { .. }
+                | Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly { .. },
+                    ..
+                }
                 | Effect::RollDie { .. }
                 | Effect::ForceBlock { .. }
                 | Effect::ForceAttack { .. }
@@ -10150,7 +10143,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
     /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
-    /// into `FlipCoin.win_effect`.
+    /// into `FlipCoins.win_effect`.
     #[test]
     fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
         let parsed = parse_named(
@@ -12934,12 +12927,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
         match def.effect.as_ref() {
             Effect::CreateDamageReplacement { .. } => return true,
-            Effect::FlipCoin {
-                win_effect,
-                lose_effect,
-                ..
-            }
-            | Effect::FlipCoins {
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -12961,7 +12949,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
     /// one-shot damage replacements; the Replacement_Instead detector must walk
-    /// `FlipCoin` payloads (issue #2236).
+    /// `FlipCoins` payloads (issue #2236).
     #[test]
     fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
         let parsed = parse_named(

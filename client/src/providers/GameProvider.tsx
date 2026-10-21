@@ -32,7 +32,8 @@ import type { CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
-import { cedhSeatProblem, pickAiSeatDecks } from "../services/aiRandomPool";
+import { withCatalogSavedNames } from "../services/randomPoolSelection";
+import { cedhSeatProblem, pickAiSeatDecks, resolveRandomDrawPool } from "../services/aiRandomPool";
 import { resolveLocalAiSeatPlan, type LocalAiSeatPlan } from "../services/localAiSeatPlan";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { CEDH_DIFFICULTY, effectiveAiDifficulty } from "../services/cedhLock";
@@ -386,7 +387,13 @@ async function buildLocalAiDeckList(
     };
   }
 
-  const { aiArchetypeFilter, aiCoverageFloor, aiBracketFilter } = usePreferencesStore.getState();
+  const {
+    aiArchetypeFilter,
+    aiCoverageFloor,
+    aiBracketFilter,
+    humanPoolSelection,
+    aiPoolSelection,
+  } = usePreferencesStore.getState();
   // The seat snapshot already maps table cEDH into each seat's difficulty, and
   // the engine's cEDH bracket gate fires per seat — so the table is cEDH
   // exactly when any seat plays at cEDH difficulty.
@@ -438,7 +445,16 @@ async function buildLocalAiDeckList(
   let playerDeck = deck;
   let resolvedPlayerBracket = playerBracket;
   if (!playerDeck) {
-    const playerPick = pickRandomDeckCandidate(catalog.candidates, {
+    // A deferred human Random pick draws from the shared bracket-then-curation
+    // layering, so it lands in the same bracket(s) as the AI seats (falling
+    // back the same way when the selection matches nothing).
+    const playerPool = resolveRandomDrawPool(withCatalogSavedNames(catalog.candidates), {
+      bracketFilter: aiBracketFilter,
+      cedhMode: tableCedh,
+      selectedFormat: formatConfig?.format,
+      poolSelection: humanPoolSelection,
+    }).pool;
+    const playerPick = pickRandomDeckCandidate(playerPool, {
       selectedFormat: formatConfig?.format,
     });
     if (!playerPick) {
@@ -461,6 +477,7 @@ async function buildLocalAiDeckList(
     bracketFilter: aiBracketFilter,
     cedhMode: tableCedh,
     selectedFormat: formatConfig?.format,
+    poolSelection: aiPoolSelection,
     excludeIds,
   });
 

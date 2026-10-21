@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4549
-- **Total card appearances across root causes:** 4582 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4545
+- **Total card appearances across root causes:** 4578 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -15,21 +15,21 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 735 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 1 | Relative-clause / filter restriction on target dropped | 734 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 574 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 402 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 382 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 331 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
-| 7 | Wrong / dropped zone parameters on zone-change effect | 208 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 165 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
-| 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 128 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
-| 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 80 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
@@ -45,11 +45,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2424/4582 ≈ 53% of all misparse appearances; the top 10 cover 3413/4582 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2423/4578 ≈ 53% of all misparse appearances; the top 10 cover 3413/4578 ≈ 74.6%. Fix these first.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (735 cards)
+### 1. Relative-clause / filter restriction on target dropped  (734 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -206,7 +206,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Desert
 - Destined Confrontation
 - Detention Sphere
-- Detritivore
 - Devoted Sultai
 - Devout Harpist
 - Dewdrop Cure
@@ -2767,7 +2766,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 7. Wrong / dropped zone parameters on zone-change effect  (208 cards)
+### 7. Wrong / dropped zone parameters on zone-change effect  (209 cards)
 
 **Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
 
@@ -2916,6 +2915,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Radagast the Brown
 - Ransack
 - Realms Uncharted
+- Rebuking Ceremony
 - Reins of the Vinesteed
 - Reset
 - Resurgence
@@ -3574,7 +3574,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 11. Replacement / prevention / 'instead' effect mis-modeled  (152 cards)
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (151 cards)
 
 **Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
 
@@ -3583,7 +3583,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 <details><summary>Cards</summary>
 
 - Abandoned Sarcophagus
-- Aberrant Return
 - Advancing the Spirit
 - All Hallow's Eve
 - Anafenza, the Foremost
@@ -4145,11 +4144,21 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 15. Multi-target / 'up to N' optionality or count dropped  (83 cards)
+### 15. Multi-target / 'up to N' optionality or count dropped  (80 cards)
 
 **Signature.** MultiTargetSpec / 'up to one/two target' optionality dropped to a mandatory single Typed target (or collapsed into DamageAll), losing the multi_target / up_to slot and per-target distinctness.
 
-**Fix hint.** oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting
+**Fix hint.** parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op
+
+**Status (2026-10-18).** Partially closed by the clause-level optional-count fixup. Residual classes: `Effect::DealDamage`
+(a declined damage continuation inherits the previous segment's player target through `inherited_parent_occurrences`),
+`Effect::Transform` (a declined declared target falls through to the source and aborts the chain), untyped
+`TargetFilter::Any` slots (Razorgrass Invoker's subject `Pump`), `Effect::Token` with an `attach_to` host, `Effect::Counter`
+(no count field), `Effect::MoveCounters` (engine arms read only the ability flag), `Effect::BecomeCopy` (empty-source
+`MissingParam`), and `Effect::CopySpell` (zero-target decline copies the top of the stack); attachment-operand
+optionality and the Attach per-operand minimum are separate follow-ups; cards whose clauses remain unsupported stay
+listed; Capricious Efreet (mandatory first target), Time Spiral (no "target"), and Kaya, Ghost Assassin (SelfRef head)
+are outside the detector's class.
 
 <details><summary>Cards</summary>
 
@@ -4177,11 +4186,9 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Conjurer's Bauble
 - Fire Juggler
 - Flame Sweep
-- Gold Rush
 - Gravegouger
 - Griffnaut Tracker
 - Grime Gorger
-- Here Comes a New Hero!
 - Hundred-Handed One
 - Hunter's Bow
 - Impractical Joke
@@ -4209,7 +4216,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Raiding Party
 - Rakdos Firewheeler
 - Razorgrass Invoker
-- Rebuking Ceremony
 - Reconstruct History
 - Redeem
 - Redirect

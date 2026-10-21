@@ -1,3 +1,4 @@
+import { generateProtocolVersions, protocolGenerationPlugin } from "./protocol-generation";
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -10,6 +11,8 @@ import { compression } from "vite-plugin-compression2";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
 import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 import type { Plugin } from "vite";
+
+generateProtocolVersions();
 
 
 
@@ -262,7 +265,7 @@ export default defineConfig(({ mode }) => {
       "@wasm/draft": path.resolve(__dirname, "src/wasm/draft_wasm"),
     },
   },
-  plugins: [
+  plugins: [protocolGenerationPlugin(),
     wasmEnvShim(),
     externalEngineWasm(),
     trimManaFont(),

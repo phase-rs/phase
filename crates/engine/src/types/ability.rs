@@ -34,7 +34,7 @@ use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
 use crate::game::game_object::{BackFaceData, DisplaySource};
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::events::{ActivatedAbilityKind, ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -794,6 +794,9 @@ pub enum ChooseFromZoneConstraint {
     /// The chosen cards must admit an injective assignment to distinct card types
     /// from the listed categories.
     DistinctCardTypes { categories: Vec<CoreType> },
+    /// CR 608.2c/d + CR 202.3: the resolution-time chosen set's combined
+    /// mana value must satisfy the printed fixed bound.
+    TotalManaValue { comparator: Comparator, value: i32 },
 }
 
 /// Selection constraint applied to multi-card library searches at the
@@ -1821,6 +1824,52 @@ pub enum Parity {
     Even,
 }
 
+impl Parity {
+    /// True when `n` has this parity. Shared by the mana-value parity filter and `NumberQuality`; zero is even.
+    pub fn matches(self, n: i64) -> bool {
+        // CR 107.1 + CR 107.1b: integer game values (negatives included); zero is even.
+        match self {
+            Parity::Even => n.rem_euclid(2) == 0,
+            Parity::Odd => n.rem_euclid(2) == 1,
+        }
+    }
+}
+
+/// CR 107.1 + CR 107.1b: an arithmetic quality of an integer game value
+/// (negative values included).
+/// Prime/odd/even are mathematical; no CR rule defines them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum NumberQuality {
+    Parity(Parity),
+    Prime,
+}
+
+impl NumberQuality {
+    /// True when `n` has this arithmetic quality.
+    pub fn matches(self, n: i64) -> bool {
+        match self {
+            NumberQuality::Parity(parity) => parity.matches(n),
+            NumberQuality::Prime => is_prime(n),
+        }
+    }
+}
+
+/// True mathematical primality; not bounded by any card's reminder list.
+fn is_prime(n: i64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n.rem_euclid(2) == 0 {
+        return n == 2;
+    }
+    // `d <= n / d` bounds the trial divisor at sqrt(n) without overflow.
+    (3_i64..)
+        .step_by(2)
+        .take_while(|&d| d <= n / d)
+        .all(|d| n % d != 0)
+}
+
 /// Source for odd/even parity predicates over mana value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
@@ -1854,7 +1903,8 @@ pub enum DieRollModifier {
     Subtract { value: QuantityExpr },
 }
 
-impl DieRollModifier {
+macro_rules! define_die_roll_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this modifier. Composed into
     /// `Effect::for_each_quantity_expr` (the exhaustive authority over every
     /// quantity an effect resolves in the current chain): the modifier's
@@ -1864,11 +1914,17 @@ impl DieRollModifier {
     ///
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             DieRollModifier::Add { value } | DieRollModifier::Subtract { value } => f(value),
         }
     }
+    };
+}
+
+impl DieRollModifier {
+    define_die_roll_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_die_roll_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 }
 
 /// CR 706.6: What a die-roll replacement does with the extra dice it caused to
@@ -3591,7 +3647,8 @@ pub enum ManaProduction {
     TriggerEventManaType,
 }
 
-impl ManaProduction {
+macro_rules! define_mana_production_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this production descriptor.
     /// Composed into `Effect::for_each_quantity_expr` (the exhaustive
     /// authority over every quantity an effect resolves in the current
@@ -3604,7 +3661,7 @@ impl ManaProduction {
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here rather than silently reporting no
     /// quantities.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             // --- Dynamic-count productions: `count` resolves at effect
             // --- resolution time.
@@ -3629,6 +3686,12 @@ impl ManaProduction {
             | ManaProduction::TriggerEventManaType => {}
         }
     }
+    };
+}
+
+impl ManaProduction {
+    define_mana_production_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_mana_production_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -4681,7 +4744,7 @@ pub enum RestrictionPlayerScope {
     /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
     /// this derives a player from an *object* target's controller (CR 109.4).
     /// Mirrors `PlayerFilter::ParentObjectTargetController` /
-    /// `PlayerScope::ParentObjectTargetController` on the sibling enums.
+    /// `PlayerScope::ParentObjectTarget` on the sibling enums.
     ParentObjectTargetController,
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
@@ -8744,12 +8807,22 @@ pub enum PlayerScope {
     /// intervening-if quantities such as "no opponent has more life than that
     /// player."
     DefendingPlayer,
-    /// CR 109.4 + CR 608.2c: The controller of the first object target of
-    /// the resolving ability ("that opponent" anaphoring the controller of
-    /// a bounced/destroyed creature). The player-scalar-axis analogue of
-    /// `ControllerRef::ParentTargetController`. Resolved via
-    /// `ability_utils::parent_target_controller`.
-    ParentObjectTargetController,
+    /// CR 109.4 + CR 108.3 + CR 608.2c: The controller or owner (per
+    /// `possession`) of the first object target of the resolving ability —
+    /// "that opponent" anaphoring the controller of a bounced creature, or
+    /// "that graveyard" anaphoring the owner of a targeted card in a graveyard
+    /// or exile. The player-scalar-axis analogue of
+    /// `ControllerRef::ParentTargetController` / `ParentTargetOwner`. Resolved
+    /// via `ability_utils::parent_target_controller` / `parent_target_owner`.
+    ///
+    /// Backward-compat: deserializes from the legacy tag
+    /// `ParentObjectTargetController` (no fields) via `#[serde(alias)]`,
+    /// defaulting `possession = PossessionAxis::Controller`.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget {
+        #[serde(default = "default_parent_object_target_possession")]
+        possession: PossessionAxis,
+    },
     /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
     /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
     /// player" replacement). The player-scalar-axis analogue of
@@ -10648,6 +10721,106 @@ impl LetterQuery {
 }
 
 impl QuantityRef {
+    /// Borrows the same single player-relativity axis as `player_scope_mut`.
+    pub(crate) fn player_scope(&self) -> Option<&PlayerScope> {
+        match self {
+            QuantityRef::HandSize { player }
+            | QuantityRef::LifeTotal { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::PartySize { player }
+            | QuantityRef::Speed { player }
+            | QuantityRef::SacrificedThisTurn { player, .. }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
+            | QuantityRef::LandsPlayedThisTurn { player, .. }
+            | QuantityRef::PlayerChosenNumber { player }
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+            | QuantityRef::CardsDiscardedThisTurn { player }
+            | QuantityRef::TokensCreatedThisTurn { player, .. }
+            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            QuantityRef::LifeAboveStarting
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::PropertyAggregate(_)
+            | QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::ChosenNumber
+            | QuantityRef::NotedNumber
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ManaSpentToCast { .. }
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::VoteCount { .. } => None,
+        }
+    }
+
     /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
     /// object, by either of the two structural axes a ref can carry it on:
     ///
@@ -11926,7 +12099,7 @@ pub enum PlayerFilter {
     /// CR 109.4 + CR 608.2c: The controller of the first object target of
     /// the resolving ability ("reduce that opponent's speed" anaphoring the
     /// controller of a bounced creature). The `PlayerFilter`-axis analogue
-    /// of `PlayerScope::ParentObjectTargetController` and
+    /// of `PlayerScope::ParentObjectTarget` and
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
@@ -12816,7 +12989,7 @@ impl StaticMode {
             | PlayerScope::Target
             | PlayerScope::Opponent { .. }
             | PlayerScope::AllPlayers { .. }
-            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
@@ -12909,6 +13082,12 @@ pub enum StaticCondition {
         lhs: QuantityExpr,
         comparator: Comparator,
         rhs: QuantityExpr,
+    },
+    /// CR 107.1 + CR 611.3a: true while the resolved quantity has the given
+    /// arithmetic quality ("you control a prime number of lands").
+    QuantityQuality {
+        quantity: QuantityExpr,
+        quality: NumberQuality,
     },
     /// CR 702.178a: The relevant player has max speed.
     HasMaxSpeed,
@@ -13344,8 +13523,8 @@ impl StaticCondition {
     ///
     /// Boolean combinators return `None`; the tree predicate descends into
     /// them through `any_leaf`.
-    /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
-    /// not a designation.
+    /// `QuantityComparison` and `QuantityQuality` return `None` BY DEFINITION —
+    /// they test a quantity, not a designation.
     pub(crate) fn designation_anchor(&self) -> Option<(Designation, &PlayerScope)> {
         match self {
             StaticCondition::IsMonarch { player } => Some((Designation::Monarch, player)),
@@ -13358,6 +13537,7 @@ impl StaticCondition {
             | StaticCondition::ChosenColorIs { .. }
             | StaticCondition::ChosenLabelIs { .. }
             | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::QuantityQuality { .. }
             | StaticCondition::HasMaxSpeed
             | StaticCondition::SpeedGE { .. }
             | StaticCondition::And { .. }
@@ -13469,6 +13649,7 @@ impl StaticCondition {
             | StaticCondition::ChosenColorIs { .. }
             | StaticCondition::ChosenLabelIs { .. }
             | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::QuantityQuality { .. }
             | StaticCondition::HasMaxSpeed
             | StaticCondition::SpeedGE { .. }
             | StaticCondition::And { .. }
@@ -13704,6 +13885,7 @@ impl StaticCondition {
             | StaticCondition::ChosenColorIs { .. }
             | StaticCondition::ChosenLabelIs { .. }
             | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::QuantityQuality { .. }
             | StaticCondition::HasMaxSpeed
             | StaticCondition::SpeedGE { .. }
             | StaticCondition::And { .. }
@@ -13826,6 +14008,7 @@ impl StaticCondition {
             | StaticCondition::ChosenColorIs { .. }
             | StaticCondition::ChosenLabelIs { .. }
             | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::QuantityQuality { .. }
             | StaticCondition::HasMaxSpeed
             | StaticCondition::SpeedGE { .. }
             | StaticCondition::DayNightIs { .. }
@@ -15115,7 +15298,8 @@ pub enum CostCategory {
     KeywordCost,
 }
 
-impl AbilityCost {
+macro_rules! define_ability_cost_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this cost, recursing through
     /// the compositional forms (`Composite`, `OneOf`, `PerCounter`) and into
     /// the embedded effect of `EffectCost` (whose body resolves on the source
@@ -15132,7 +15316,7 @@ impl AbilityCost {
     /// Exhaustive match — no wildcard arm — so a newly added variant must be
     /// explicitly classified here rather than silently reporting no
     /// quantities.
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         match self {
             // --- Direct `QuantityExpr` carriers ---
             AbilityCost::ManaDynamic { quantity } => f(quantity),
@@ -15144,13 +15328,13 @@ impl AbilityCost {
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
                 for cost in costs {
-                    cost.for_each_quantity_expr(f);
+                    cost.$name(f);
                 }
             }
-            AbilityCost::PerCounter { base, .. } => base.for_each_quantity_expr(f),
+            AbilityCost::PerCounter { base, .. } => base.$name(f),
             // CR 118.3: the cost's effect body resolves on the source before
             // the ability's own effect — its quantity slots are live.
-            AbilityCost::EffectCost { effect } => effect.for_each_quantity_expr(f),
+            AbilityCost::EffectCost { effect } => effect.$name(f),
             // --- Quantity-free costs: static mana pips, fixed `u32`/`i32`
             // --- counts and aggregate thresholds, or purely structural
             // --- payments with no `QuantityExpr` field.
@@ -15180,6 +15364,12 @@ impl AbilityCost {
             | AbilityCost::Unimplemented { .. } => {}
         }
     }
+    };
+}
+
+impl AbilityCost {
+    define_ability_cost_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_ability_cost_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 
     /// Visit every node of this cost tree in pre-order, recursing the container
     /// arms (`Composite`, `OneOf`, `PerCounter`). The exhaustive match keeps
@@ -20375,7 +20565,7 @@ pub enum Effect {
     /// six-sided dice", "roll X d12"). Each die is rolled independently with
     /// the same `sides`/`modifier`/`results`. Defaults to one for back-compat
     /// with cards printed in the single-die JSON shape. Mirrors the
-    /// `FlipCoins.count` precedent (CR 705).
+    /// `FlipCoins.flips` count precedent (CR 705).
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
     /// `None` means the natural result is used unchanged.
     RollDie {
@@ -20387,7 +20577,11 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modifier: Option<DieRollModifier>,
     },
-    /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
+    /// CR 705.1 + CR 705.2: flip coins. `flips` says how many and when the run stops.
+    /// `Exactly`: each flip's `win_effect` / `lose_effect` runs as that flip settles.
+    /// `UntilLoss`: `win_effect` is the reward "for each flip you won", paid once per won
+    /// flip after the losing flip (CR 608.2c: the reward instruction follows the flipping
+    /// instruction); `lose_effect` runs as the losing flip settles.
     ///
     /// CR 705.2: "only the player who flips a coin wins or loses the flip." The
     /// `flipper` selects WHICH player flips (and therefore whose win/lose result
@@ -20403,29 +20597,10 @@ pub enum Effect {
     /// surrounding `AbilityDefinition.player_scope` iteration (CR 101.4 APNAP),
     /// which rebinds the acting controller per player so `flipper = Controller`
     /// flips once for each player.
-    FlipCoin {
-        #[serde(default)]
-        win_effect: Option<Box<AbilityDefinition>>,
-        #[serde(default)]
-        lose_effect: Option<Box<AbilityDefinition>>,
-        #[serde(
-            default = "default_target_filter_controller",
-            skip_serializing_if = "is_target_filter_controller"
-        )]
-        flipper: TargetFilter,
-    },
-    /// CR 705: Flip N coins. `win_effect` runs once per heads (win),
-    /// `lose_effect` runs once per tails (loss). Generalization of `FlipCoin`
-    /// for "flip N coins, for each heads …" patterns (Ral Zarek, Guest
-    /// Lecturer). The one-flip degenerate case stays as `FlipCoin` — this
-    /// variant is only emitted when `count > 1` or when the Oracle text
-    /// explicitly binds a count.
-    ///
-    /// CR 705.2: `flipper` selects which player flips all `count` coins (see
-    /// `FlipCoin::flipper`). Defaults to `Controller`.
     FlipCoins {
-        #[serde(default = "default_quantity_one")]
-        count: QuantityExpr,
+        /// No serde default: a legacy `{"type":"FlipCoins","count":…}` payload must fail
+        /// closed ("missing field `flips`") instead of silently reading as one flip.
+        flips: CoinFlipRun,
         #[serde(default)]
         win_effect: Option<Box<AbilityDefinition>>,
         #[serde(default)]
@@ -20435,10 +20610,6 @@ pub enum Effect {
             skip_serializing_if = "is_target_filter_controller"
         )]
         flipper: TargetFilter,
-    },
-    /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
-    FlipCoinUntilLose {
-        win_effect: Box<AbilityDefinition>,
     },
     /// CR 701.54a: The Ring tempts the controller. Increments ring level and prompts
     /// ring-bearer selection if the controller has creatures on the battlefield.
@@ -21220,16 +21391,28 @@ pub enum Effect {
         )]
         count: QuantityExpr,
     },
-    /// CR 606.3: Grant the resolved target player the right to activate each of
-    /// their planeswalkers' loyalty abilities `amount` additional times this
-    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
-    /// planeswalker's loyalty ability an additional time this turn." Stored as
-    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
-    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
-    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
-    /// `target` defaults to `Controller` (printed wording is "you may
-    /// activate..."); parameterized for future cards that grant the bonus to a
-    /// different player.
+    /// CR 606.3 + CR 101.1: Grant extra loyalty-ability activations for the rest
+    /// of this turn. The card's text overrides CR 606.3's once-per-permanent
+    /// limit (CR 101.1) by raising the cap by `amount`; both recipient axes feed
+    /// the one gate, `planeswalker::loyalty_activation_cap`.
+    ///
+    /// `target` is the recipient axis (absent in serialized data means `Controller`):
+    /// - `Controller` — every planeswalker the controller controls (The Chain
+    ///   Veil: "For each planeswalker you control, you may activate one of its
+    ///   loyalty abilities once this turn as though none of its loyalty abilities
+    ///   have been activated this turn."). Stored in the per-player map
+    ///   `GameState::extra_loyalty_activations_this_turn`.
+    /// - `SelfRef` — only the resolving permanent ("You may activate ~'s loyalty
+    ///   ability two more times this turn"). Stored in
+    ///   `GameObject::extra_loyalty_activations_this_turn` and usable only for that
+    ///   permanent's own characteristic loyalty abilities; a loyalty ability it
+    ///   gained in layer 6 (CR 613.1f) is not covered. That ability-level scope is
+    ///   the card's ruling, not CR text.
+    ///
+    /// The "may" is the later activation permission, not a choice made while
+    /// applying the effect (CR 608.2d), so the grant itself is mandatory. Both
+    /// stores are cleared at turn start (CR 514.2); the per-permanent store is
+    /// also cleared when the permanent enters the battlefield (CR 400.7).
     GrantExtraLoyaltyActivations {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
@@ -21648,11 +21831,8 @@ pub enum NestedDefinitionEdge {
     CreateDelayedTriggerEffect,
     CreateBoonTrigger,
     RollDieResult,
-    FlipCoinWin,
-    FlipCoinLose,
     FlipCoinsWin,
     FlipCoinsLose,
-    FlipCoinUntilLoseWin,
     ChooseOneOfBranch,
 }
 
@@ -21799,6 +21979,12 @@ fn default_counter_transfer_mode() -> CounterTransferMode {
 
 fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
+}
+
+/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Old saves carried no `possession` field; the tag itself meant the controller.
+fn default_parent_object_target_possession() -> PossessionAxis {
+    PossessionAxis::Controller
 }
 
 /// Backward-compat default for the legacy
@@ -23218,6 +23404,20 @@ pub(crate) enum AttachmentHostSlot {
     Donor,
 }
 
+/// CR 608.2c: which kind of created-referent publisher an `Effect` node's own
+/// resolver is. The return type of `Effect::created_referent_publication`, the
+/// single classification `Effect::is_token_creator` and
+/// `Effect::publishes_created_referent` derive from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatedReferentPublisher {
+    /// CR 111.1 + CR 701.36a + CR 707.2: a token-creation effect whose own
+    /// parameters define the token(s) — a spec, a copy source, the populated token.
+    TokenCreator,
+    /// Every other resolver that assigns the referent: face-down entry, conjure /
+    /// spellbook draft, a keyword action or copy batch that creates as one step.
+    OtherProducer,
+}
+
 impl Effect {
     /// Single authority for constructing the "parser couldn't handle this"
     /// effect. Parser code must use this instead of a literal
@@ -23491,9 +23691,7 @@ impl Effect {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -23741,9 +23939,7 @@ impl Effect {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -24351,9 +24547,7 @@ impl Effect {
             | Effect::Cloak { .. }
             | Effect::TurnFaceUp { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -24813,9 +25007,7 @@ impl Effect {
             | Effect::Cloak { .. }
             | Effect::TurnFaceUp { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -25376,9 +25568,7 @@ impl Effect {
             // itself moves no card.
             Effect::Vote { .. }
             | Effect::SeparateIntoPiles { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RollDie { .. }
             | Effect::ChooseOneOf { .. } => false,
 
@@ -25562,6 +25752,356 @@ impl Effect {
         }
     }
 
+    /// CR 608.2c: which kind of created-referent publisher THIS node's own
+    /// resolver is — the single classification both
+    /// [`Effect::is_token_creator`] and [`Effect::publishes_created_referent`]
+    /// derive from.
+    ///
+    /// A publisher's resolver assigns the referent `TargetFilter::LastCreated`
+    /// reads (`GameState::last_created_token_ids`) on at least one resolution
+    /// path. This method answers for **THIS NODE ONLY**; an `AbilityDefinition`
+    /// payload the node resolves inline is classified by the own-resolution walk
+    /// in [`Effect::publishes_created_referent`].
+    ///
+    /// The match is **wildcard-free on purpose**: a new `Effect` variant is a
+    /// compile error here, forcing its author to answer "does this resolver
+    /// publish the created referent, and is it a token creator?" at the one
+    /// place both predicates read. Do not add an `_ =>` arm.
+    fn created_referent_publication(&self) -> Option<CreatedReferentPublisher> {
+        match self {
+            // CR 111.1 + CR 701.36a + CR 707.2: the token-creation effects whose
+            // own parameters define the token(s) — a spec, a copy source, the
+            // populated token.
+            Effect::Token { .. } | Effect::CopyTokenOf { .. } | Effect::Populate => {
+                Some(CreatedReferentPublisher::TokenCreator)
+            }
+
+            // CR 701.40a + CR 701.58a + CR 701.62a: a face-down entry puts a new
+            // 2/2 permanent onto the battlefield; `ChainReferentIntent::Publishes`
+            // makes it the chain's referent.
+            Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            // Digital-only (no CR entry): conjure and the spellbook draft (which
+            // conjures the drafted card) assign the referent to the card they
+            // just made, including after a paused draft choice resumes.
+            | Effect::Conjure { .. }
+            | Effect::DraftFromSpellbook { .. }
+            // CR 707.2: token copies made by a batch or per-player resolver,
+            // which republish every token they created.
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::CreateTokenCopyFromPool { .. }
+            // Keyword actions and abilities that create a token as one step of a
+            // larger action: CR 701.16a (investigate), CR 701.47a (amass),
+            // CR 701.63a (endure), CR 702.116a (myriad), CR 702.141a (encore),
+            // and the digital-only empower Jace. `Amass`, `EmpowerJace` and
+            // `Endure` write the referent only on the path that creates a token
+            // (no Army, no Jace, the Spirit branch); on the other path an earlier
+            // referent stays in place.
+            | Effect::Investigate
+            | Effect::Amass { .. }
+            | Effect::Endure { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::EmpowerJace { .. } => Some(CreatedReferentPublisher::OtherProducer),
+
+            // CR 608.2c + CR 608.2d: inline-payload wrappers. Their own node
+            // writes nothing; the payload they resolve inline is classified by the
+            // own-resolution walk in `publishes_created_referent`.
+            Effect::ChooseOneOf { .. }
+            | Effect::RollDie { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::Vote { .. }
+            | Effect::ExileTopCardContest { .. }
+            | Effect::RevealFromHand { .. }
+            // CR 603.7a + CR 603.3: boundary carriers. Their payload resolves
+            // later as a separate ability, so it never writes this resolution's
+            // referent; the own-resolution walk stops at them.
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateBoon { .. }
+            // CR 614.1 + CR 611.2 + CR 114.1: registered replacements, continuous
+            // effects and emblems apply to a later event or another object.
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::CreateEmblem { .. }
+            // CR 701.53a: incubate creates its token outside the token pipeline
+            // and assigns no referent; a gift token likewise records no referent.
+            | Effect::Incubate { .. }
+            | Effect::GiftDelivery { .. }
+            // Every other resolver assigns no created referent. The match is
+            // wildcard-free, so the compiler is the census for this list.
+            | Effect::Adapt { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::Animate { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ArrangePlanarDeckTop { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::Attach { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::BecomeMonarch { .. }
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::Behold { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Bolster { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Cascade
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::ChaosEnsues
+            | Effect::Choose { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::Clash
+            | Effect::Cleanup { .. }
+            | Effect::CollectEvidence { .. }
+            | Effect::CombineHost { .. }
+            | Effect::CompletePlayerAction { .. }
+            | Effect::Connive { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::CopySpell { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::CrankContraptions { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DealDamage { .. }
+            | Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Detain { .. }
+            | Effect::Dig { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::Discover { .. }
+            | Effect::Double { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::Draw { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::EndCombatPhase
+            | Effect::EndTheTurn
+            | Effect::EpicCopy { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::ExileTop { .. }
+            | Effect::Exploit { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::Fight { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::ForEachCategory { .. }
+            | Effect::Forage
+            | Effect::ForceAttack { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GainLife { .. }
+            | Effect::GiveControl { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::GrantCastingPermission { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::Harness
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::HideawayConceal { .. }
+            | Effect::Intensify { .. }
+            | Effect::Learn
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::LoseLife { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::Mana { .. }
+            | Effect::Meld { .. }
+            | Effect::Mill { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::NoOp
+            | Effect::NoteManaSpent
+            | Effect::NoteNumber { .. }
+            | Effect::OpenAttractions { .. }
+            | Effect::OpenBoosterPack { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::PairWith { .. }
+            | Effect::PayCost { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhysicalContest { .. }
+            | Effect::Planeswalk
+            | Effect::PreventDamage { .. }
+            | Effect::ProcessRadCounters
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Pump { .. }
+            | Effect::PumpAll { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::RedistributeLifeTotals
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::RememberCard { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::Renown { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealChosenNumbers { .. }
+            | Effect::RevealHand { .. }
+            | Effect::RevealTop { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::ReverseTurnOrder
+            | Effect::RingTemptsYou
+            | Effect::Ripple { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::RuntimeHandled { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::Scry { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::Seek { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::SetTapState { .. }
+            | Effect::Shuffle { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SolveCase
+            | Effect::Specialize
+            | Effect::StartYourEngines { .. }
+            | Effect::Surveil { .. }
+            | Effect::Suspect { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::TakeTheInitiative
+            | Effect::TargetOnly { .. }
+            | Effect::TimeTravel
+            | Effect::Transform { .. }
+            | Effect::Tribute { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Unimplemented { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::VentureInto { .. }
+            | Effect::VentureIntoDungeon
+            | Effect::WinTheGame { .. }
+            => None,
+        }
+    }
+
+    /// CR 111.1: the token-creation effects whose own parameters define the
+    /// token(s) — a spec, a copy source, or the populated token.
+    ///
+    /// Node-only, and a subset of [`Effect::publishes_created_referent`] by
+    /// construction (both read `created_referent_publication`). Keyword actions
+    /// that create a token as one step, and wrappers whose payload creates one,
+    /// publish the referent but are deliberately not members: this set keys the
+    /// parser's nearest-token-creator and tracked-set scans and the player-scope
+    /// created-token union, and widening it moves those scans.
+    pub fn is_token_creator(&self) -> bool {
+        self.created_referent_publication() == Some(CreatedReferentPublisher::TokenCreator)
+    }
+
+    /// CR 608.2c: true when this effect's own resolution writes the referent
+    /// `TargetFilter::LastCreated` reads (`GameState::last_created_token_ids`) on
+    /// at least one resolution path: this node's resolver, or a publisher in an
+    /// `AbilityDefinition` payload it resolves inline (CR 608.2d). A payload
+    /// registered to resolve later (CR 603.3, CR 603.7a, CR 603.12) does not
+    /// count; `ResolutionScope::OwnResolutionOnly` is that boundary. Each write
+    /// is an assignment, so the referent a later instruction reads is the
+    /// nearest publisher's product.
+    ///
+    /// Known limitation: a conditional-write publisher may leave an earlier
+    /// referent in place on a path that does not write — `Amass` with an Army,
+    /// `EmpowerJace` with a Jace, `Endure`'s counter branch, a wrapper whose
+    /// chosen payload creates nothing. That is why a placement after one of them
+    /// must not be paired with an earlier `Token`.
+    ///
+    /// A created token, a face-down entry and a conjured card are
+    /// indistinguishable to a following same-chain anaphor: each clause produces
+    /// a new object and declares no target, so "it" / "that creature" has exactly
+    /// one possible referent — the object the clause just made. Keying the
+    /// referent on "token" alone left the face-down producers with no referent
+    /// (Conductive Machete attached to nothing, Weight Room put its counters on
+    /// the Room, #7531) and mis-bound Agent of Raffine's "Conjure a duplicate …
+    /// It perpetually gains …" to the ability's chosen target.
+    ///
+    /// Consumers: the parser's anaphor passes (through
+    /// `oracle_effect::lower::publishes_chain_created_referent`), the declined
+    /// "if you do" walk (`game::effects::declined_gate_surviving_instructions`),
+    /// the player-scope tail's created-referent reader walk
+    /// (`game::effects::tail_reads_created_referent`, which stops at the tail's
+    /// nearest own publisher), and phase-ai's created-token pairing.
+    pub fn publishes_created_referent(&self) -> bool {
+        crate::types::ability_visit::visit_effect_scoped(
+            self,
+            crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            &mut |effect| {
+                if effect.created_referent_publication().is_some() {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        )
+        .is_break()
+    }
+}
+
+macro_rules! define_effect_quantity_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
     /// Visits every `QuantityExpr` carried by this effect —
     /// including the secondary quantity slots that `count_expr()` (the
     /// PRIMARY count/amount accessor) intentionally does not expose, such as
@@ -25601,8 +26141,8 @@ impl Effect {
     /// Exhaustive match — no wildcard arm — so a newly added Effect variant
     /// must be explicitly classified here rather than silently reporting no
     /// quantities (same convention as `count_expr()`/`target_filter()`).
-    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
-        fn visit_pt<'a>(value: &'a PtValue, f: &mut dyn FnMut(&'a QuantityExpr)) {
+    pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
+        fn visit_pt<'a>(value: &'a $($mut_)? PtValue, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
             match value {
                 PtValue::Fixed(_) | PtValue::Variable(_) => {}
                 PtValue::Quantity(expr) => f(expr),
@@ -25612,8 +26152,8 @@ impl Effect {
         // `RandomWithinTop::n`) are resolved at effect-resolution time by the
         // library-insertion authority; the fixed slots carry no quantity.
         fn visit_library_position<'a>(
-            position: &'a LibraryPosition,
-            f: &mut dyn FnMut(&'a QuantityExpr),
+            position: &'a $($mut_)? LibraryPosition,
+            f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr),
         ) {
             match position {
                 LibraryPosition::Top
@@ -25624,17 +26164,17 @@ impl Effect {
             }
         }
         fn visit_resolved_ability<'a>(
-            ability: &'a ResolvedAbility,
-            f: &mut dyn FnMut(&'a QuantityExpr),
+            ability: &'a $($mut_)? ResolvedAbility,
+            f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr),
         ) {
-            ability.effect.for_each_quantity_expr(f);
-            if let Some(repeat_for) = ability.repeat_for.as_ref() {
+            ability.effect.$name(f);
+            if let Some(repeat_for) = ability.repeat_for.$as_ref() {
                 f(repeat_for);
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
+            if let Some(sub) = ability.sub_ability.$as_deref() {
                 visit_resolved_ability(sub, f);
             }
-            if let Some(else_branch) = ability.else_ability.as_deref() {
+            if let Some(else_branch) = ability.else_ability.$as_deref() {
                 visit_resolved_ability(else_branch, f);
             }
         }
@@ -25746,10 +26286,14 @@ impl Effect {
             Effect::Dig {
                 count,
                 keep_count_expr,
+                rest_split_top_count,
                 ..
             } => {
                 f(count);
                 if let Some(q) = keep_count_expr {
+                    f(q);
+                }
+                if let Some(q) = rest_split_top_count {
                     f(q);
                 }
             }
@@ -25791,7 +26335,7 @@ impl Effect {
             } => {
                 f(count);
                 if let Some(condition) = target_condition {
-                    f(&condition.rhs);
+                    f(&$($mut_)? condition.rhs);
                 }
             }
             Effect::PutCounterAll { count, .. } => {
@@ -25849,7 +26393,7 @@ impl Effect {
                 // Discard, PayEnergy/PaySpeed, and the recursive
                 // Composite/OneOf/EffectCost/PerCounter forms) resolve when
                 // the cost is paid during THIS effect's resolution.
-                cost.for_each_quantity_expr(f);
+                cost.$name(f);
                 if let Some(q) = scale {
                     f(q);
                 }
@@ -25862,12 +26406,12 @@ impl Effect {
             Effect::CreateDrawReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.for_each_quantity_expr(f);
+                replacement_effect.$name(f);
             }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
             } => {
-                replacement_effect.for_each_quantity_expr(f);
+                replacement_effect.$name(f);
             }
             Effect::RollDie {
                 count, modifier, ..
@@ -25877,18 +26421,18 @@ impl Effect {
                 // resolved against each natural roll during THIS effect's
                 // resolution (`game/effects/roll_die.rs`).
                 if let Some(m) = modifier {
-                    m.for_each_quantity_expr(f);
+                    m.$name(f);
                 }
             }
-            Effect::FlipCoins { count, .. } => {
-                f(count);
+            Effect::FlipCoins { flips, .. } => {
+                flips.$name(f);
             }
             Effect::Mana { produced, .. } => {
                 // The production descriptor's dynamic `count` slots (Colorless,
                 // AnyOneColor, AnyOneColorAmongPermanents, …) resolve during
                 // THIS effect's resolution (`resolve_count` in
                 // `game/effects/mana.rs`).
-                produced.for_each_quantity_expr(f);
+                produced.$name(f);
             }
             // CR 401.7: the countered spell's replacement destination may be a
             // dynamic library slot, resolved when the counter moves the spell
@@ -25915,7 +26459,7 @@ impl Effect {
             },
             // A proposition guess resolves both comparison sides live
             // (`game/effects/opponent_guess.rs`).
-            Effect::OpponentGuess { subject, .. } => match &**subject {
+            Effect::OpponentGuess { subject, .. } => match &$($mut_)? **subject {
                 GuessSubject::CommittedChoice { .. } => {}
                 GuessSubject::Proposition { lhs, rhs, .. } => {
                     f(lhs);
@@ -25931,7 +26475,7 @@ impl Effect {
                 ..
             } => {
                 for card in cards {
-                    f(&card.count);
+                    f(&$($mut_)? card.count);
                 }
                 if let Some(position) = library_position {
                     visit_library_position(position, f);
@@ -25974,7 +26518,7 @@ impl Effect {
                 }
                 // CR 608.2c + CR 122.1: the printed keeper mark's count.
                 if let Some(mark) = keeper_counter {
-                    f(&mark.count);
+                    f(&$($mut_)? mark.count);
                 }
             }
             Effect::GainEnergy { amount, .. } => {
@@ -26161,8 +26705,6 @@ impl Effect {
             | Effect::CreateDamageReplacement { .. }
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -26229,6 +26771,12 @@ impl Effect {
             | Effect::Unimplemented { .. } => {}
         }
     }
+    };
+}
+
+impl Effect {
+    define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
 
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
@@ -26329,19 +26877,7 @@ impl Effect {
                     f(NestedDefinitionEdge::RollDieResult, &result.effect);
                 }
             }
-            // CR 705.1: coin-flip branches. Each side is its own edge.
-            Effect::FlipCoin {
-                win_effect,
-                lose_effect,
-                ..
-            } => {
-                if let Some(win_effect) = win_effect {
-                    f(NestedDefinitionEdge::FlipCoinWin, win_effect);
-                }
-                if let Some(lose_effect) = lose_effect {
-                    f(NestedDefinitionEdge::FlipCoinLose, lose_effect);
-                }
-            }
+            // CR 705.1: coin-flip branches, in every run mode. Each side is its own edge.
             Effect::FlipCoins {
                 win_effect,
                 lose_effect,
@@ -26353,9 +26889,6 @@ impl Effect {
                 if let Some(lose_effect) = lose_effect {
                     f(NestedDefinitionEdge::FlipCoinsLose, lose_effect);
                 }
-            }
-            Effect::FlipCoinUntilLose { win_effect } => {
-                f(NestedDefinitionEdge::FlipCoinUntilLoseWin, win_effect)
             }
             // CR 608.2d: each choice's body, offered while applying the effect.
             Effect::ChooseOneOf { branches, .. } => {
@@ -26612,6 +27145,9 @@ impl Effect {
     /// a new count/amount-bearing Effect variant is added.
     pub fn count_expr(&self) -> Option<&QuantityExpr> {
         match self {
+            // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
+            Effect::FlipCoins { flips, .. } => flips.count_expr(),
+
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -26634,7 +27170,6 @@ impl Effect {
             | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
-            | Effect::FlipCoins { count, .. }
             | Effect::GivePlayerCounter { count, .. }
             | Effect::PutAtLibraryPosition { count, .. }
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
@@ -26818,8 +27353,6 @@ impl Effect {
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -26881,6 +27414,9 @@ impl Effect {
     /// `count_expr` arm-for-arm.
     pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
         match self {
+            // Only an `Exactly` run carries a flip count; `UntilLoss` has none.
+            Effect::FlipCoins { flips, .. } => flips.count_expr_mut(),
+
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -26903,7 +27439,6 @@ impl Effect {
             | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
-            | Effect::FlipCoins { count, .. }
             | Effect::GivePlayerCounter { count, .. }
             | Effect::PutAtLibraryPosition { count, .. }
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
@@ -27087,8 +27622,6 @@ impl Effect {
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::FlipCoin { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -27297,9 +27830,13 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::LoseTheGame { .. } => "LoseTheGame",
         Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
-        Effect::FlipCoin { .. } => "FlipCoin",
-        Effect::FlipCoins { .. } => "FlipCoins",
-        Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
+        // The card-data label keeps the three pre-merge run names (SetTapState
+        // precedent), reconstructed from `flips`.
+        Effect::FlipCoins { flips, .. } => match flips {
+            CoinFlipRun::UntilLoss => "FlipCoinUntilLose",
+            CoinFlipRun::Exactly { .. } if flips.is_single_flip() => "FlipCoin",
+            CoinFlipRun::Exactly { .. } => "FlipCoins",
+        },
         Effect::RingTemptsYou => "RingTemptsYou",
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
@@ -27552,9 +28089,10 @@ pub enum EffectKind {
     LoseTheGame,
     WinTheGame,
     RollDie,
-    FlipCoin,
+    // CR 705.1 / CR 705.2: one label for every coin-flip run (single, counted,
+    // until-loss). The older labels are read back from persisted state.
+    #[serde(alias = "FlipCoin", alias = "FlipCoinUntilLose")]
     FlipCoins,
-    FlipCoinUntilLose,
     RingTemptsYou,
     VentureIntoDungeon,
     VentureInto,
@@ -27831,9 +28369,7 @@ impl From<&Effect> for EffectKind {
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
             Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
-            Effect::FlipCoin { .. } => EffectKind::FlipCoin,
             Effect::FlipCoins { .. } => EffectKind::FlipCoins,
-            Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
@@ -29817,6 +30353,11 @@ pub enum AbilityCondition {
         comparator: Comparator,
         rhs: QuantityExpr,
     },
+    /// CR 608.2h: effect-level arithmetic-quality gate, determined when the effect is applied.
+    QuantityQuality {
+        quantity: QuantityExpr,
+        quality: NumberQuality,
+    },
     /// CR 608.2c + CR 120.10: Compares the numeric result tracked from
     /// the previous instruction in the same resolution against `rhs`. The
     /// `channel` selects which resolution-local tally is read:
@@ -30268,6 +30809,7 @@ impl AbilityCondition {
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
             | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -30350,6 +30892,7 @@ impl AbilityCondition {
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
             | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -30503,6 +31046,7 @@ impl AbilityCondition {
             | AbilityCondition::CastVariantPaid { .. }
             | AbilityCondition::CastVariantPaidInstead { .. }
             | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -30576,6 +31120,7 @@ impl AbilityCondition {
             | AbilityCondition::ObjectsShareQuality { .. }
             | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
             | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -30935,6 +31480,20 @@ pub struct SpellContext {
     /// stays with a paused payment's continuation until that cost completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pay_cost_paid_life_amount: Option<u32>,
+    /// CR 602.2b + CR 601.2h + CR 608.2h: counters actually removed while paying
+    /// THIS activated ability's cost (summed over its counter leaves), written by the
+    /// activation's own cost payment as each counter leg completes (a removal that
+    /// waits on a replacement choice is credited once it settles, CR 118.11); the
+    /// mana route binds it at production (CR 605.3b). Taken off the
+    /// root at the chain's depth-0 entry and seeded into `last_effect_amount`, so
+    /// "… removed this way" / "that much" read it. `None` = no counter cost;
+    /// `Some(0)` = a counter cost that removed none. CR 707.10: a copy of the
+    /// ability copies all decisions made for it and can't pay the cost again, so a
+    /// copy keeps the original's count (the official copier rulings: "If the activated
+    /// ability's cost contains a choice, such as … a number of counters to remove,
+    /// the copy uses that same information").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_removed_counter_amount: Option<u32>,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
@@ -31466,6 +32025,12 @@ pub enum TriggerCondition {
         comparator: Comparator,
         rhs: QuantityExpr,
     },
+    /// CR 603.4: intervening-if form of the arithmetic-quality predicate;
+    /// checked on trigger and again on resolution.
+    QuantityQuality {
+        quantity: QuantityExpr,
+        quality: NumberQuality,
+    },
     /// CR 702.178a: The trigger functions only while its controller has max speed.
     HasMaxSpeed,
 
@@ -31853,6 +32418,7 @@ impl TriggerCondition {
             | TriggerCondition::FirstCombatPhaseOfTurn
             | TriggerCondition::CastSpellThisTurn { .. }
             | TriggerCondition::QuantityComparison { .. }
+            | TriggerCondition::QuantityQuality { .. }
             | TriggerCondition::HasMaxSpeed
             | TriggerCondition::IsInitiative
             | TriggerCondition::NoMonarch
@@ -32376,6 +32942,69 @@ impl CoinFlipResult {
             CoinFlipResult::Won
         } else {
             CoinFlipResult::Lost
+        }
+    }
+}
+
+/// CR 705.1 + CR 705.2: how many coins one flip instruction flips, and when the run stops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CoinFlipRun {
+    /// CR 705.1: flip exactly `count` coins. "Flip a coin" is `Fixed 1`; "flip five coins" and
+    /// "flip X coins" bind their count. CR 608.2h: `count` is resolved once, when the run starts.
+    Exactly { count: QuantityExpr },
+    /// CR 705.2: flip until the flipper loses a flip.
+    UntilLoss,
+}
+
+impl CoinFlipRun {
+    /// CR 705.1: the run "flip a coin", a single flip.
+    pub fn single() -> Self {
+        CoinFlipRun::Exactly {
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 705.1: whether the run is exactly one flip.
+    ///
+    /// Parser invariant: `try_parse_flip_n_coins` never emits `Fixed 1`, so the grammatical
+    /// "flip a coin" form and `is_single_flip()` coincide.
+    pub fn is_single_flip(&self) -> bool {
+        matches!(
+            self,
+            CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: 1 }
+            }
+        )
+    }
+
+    /// The flip count of an `Exactly` run; `UntilLoss` has no count.
+    pub fn count_expr(&self) -> Option<&QuantityExpr> {
+        match self {
+            CoinFlipRun::Exactly { count } => Some(count),
+            CoinFlipRun::UntilLoss => None,
+        }
+    }
+
+    /// Mutable form of [`CoinFlipRun::count_expr`].
+    pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
+        match self {
+            CoinFlipRun::Exactly { count } => Some(count),
+            CoinFlipRun::UntilLoss => None,
+        }
+    }
+
+    /// Visit every quantity expression the run carries (CR 608.2h: the `Exactly` count).
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        if let Some(count) = self.count_expr() {
+            f(count);
+        }
+    }
+
+    /// Mutable form of [`CoinFlipRun::for_each_quantity_expr`].
+    pub fn for_each_quantity_expr_mut<'a>(&'a mut self, f: &mut dyn FnMut(&'a mut QuantityExpr)) {
+        if let Some(count) = self.count_expr_mut() {
+            f(count);
         }
     }
 }
@@ -35163,6 +35792,24 @@ pub enum ContinuousModification {
         /// rather than a bool so the cap axis can grow to other use-restrictions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cap: Option<ActivationRestriction>,
+        /// CR 606.1 + CR 606.2: An optional kind selector narrowing which
+        /// activated abilities this grant donates. `None` (the default)
+        /// donates all activated abilities; `Some(Loyalty)` donates only the
+        /// loyalty subset (Nicol Bolas, Dragon-God "has all loyalty abilities
+        /// of all other planeswalkers on the battlefield"). The kind filter is
+        /// ability-level (CR 606.2: an activated ability with a loyalty symbol
+        /// in its cost is a loyalty ability) while `source` is object-level —
+        /// the selector lives on the modification because planeswalkers can
+        /// hold non-loyalty activated abilities, which the unqualified grant
+        /// would over-grant. A typed `Option<ActivatedAbilityKind>` rather
+        /// than a bool so the axis can grow to other kind subsets.
+        /// The parser never pairs `Some(Loyalty)` with `Some(cap)` — an
+        /// implementation limitation (the rider fold declines kind-selected
+        /// grants), not a rules exemption: a use-restriction acquired with an
+        /// ability still applies to it (CR 602.5c). Enforced at the rider fold
+        /// in `fold_grant_cap_rider`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ActivatedAbilityKind>,
     },
     /// CR 613.1f + CR 603.1 + CR 603.2: Grant the affected object **all triggered
     /// abilities of** the objects matching `source` (Koh, the Face Stealer "Koh
@@ -37095,9 +37742,7 @@ impl ResolvedAbility {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -40263,6 +40908,251 @@ mod tests {
         assert_eq!(visited, vec![count, rhs]);
     }
 
+    #[test]
+    fn shared_and_mutable_quantity_walks_preserve_identity_order_and_secondary_slots() {
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let value = |quantity: &QuantityExpr| match quantity {
+            QuantityExpr::Fixed { value } => *value,
+            _ => panic!("fixed marker expected"),
+        };
+        let mut token: Effect =
+            serde_json::from_value(serde_json::json!({"type":"Token","name":"Marker"})).unwrap();
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            enter_with_counters,
+            ..
+        } = &mut token
+        else {
+            unreachable!()
+        };
+        *power = PtValue::Quantity(fixed(11));
+        *toughness = PtValue::Quantity(fixed(12));
+        *count = fixed(13);
+        *enter_with_counters = vec![(CounterType::Plus1Plus1, fixed(14))];
+        let mut movement: Effect = serde_json::from_value(
+            serde_json::json!({"type":"ChangeZone","destination":"Battlefield"}),
+        )
+        .unwrap();
+        let Effect::ChangeZone {
+            enter_with_counters,
+            conditional_enter_with_counters,
+            ..
+        } = &mut movement
+        else {
+            unreachable!()
+        };
+        *enter_with_counters = vec![(CounterType::Plus1Plus1, fixed(21))];
+        *conditional_enter_with_counters = vec![(TargetFilter::Any, CounterType::Lore, fixed(22))];
+        let dig: Effect = serde_json::from_value(serde_json::json!({"type":"Dig","count":{"type":"Fixed","value":31},"keep_count_expr":{"type":"Fixed","value":32},"rest_split_top_count":{"type":"Fixed","value":33}})).unwrap();
+        let payment = Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife { amount: fixed(41) },
+                    AbilityCost::OneOf {
+                        costs: vec![AbilityCost::PerCounter {
+                            counter: CounterType::Age,
+                            target: TargetFilter::SelfRef,
+                            base: Box::new(AbilityCost::EffectCost {
+                                effect: Box::new(Effect::Draw {
+                                    count: fixed(42),
+                                    target: TargetFilter::Controller,
+                                }),
+                            }),
+                        }],
+                    },
+                ],
+            },
+            scale: Some(fixed(43)),
+            payer: TargetFilter::Controller,
+        };
+        let mana = Effect::Mana {
+            produced: ManaProduction::Colorless { count: fixed(51) },
+            target: None,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        };
+        let die = Effect::RollDie {
+            count: fixed(61),
+            sides: 20,
+            modifier: Some(DieRollModifier::Subtract { value: fixed(62) }),
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: fixed(999),
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            }],
+        };
+        let placement = Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            count: fixed(71),
+            position: LibraryPosition::BeneathTop { depth: fixed(72) },
+        };
+        let mut nested = ResolvedAbility::new(
+            Effect::Draw {
+                count: fixed(81),
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        nested.repeat_for = Some(fixed(82));
+        nested.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: fixed(83),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        )));
+        nested.else_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: fixed(84),
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            crate::types::player::PlayerId(0),
+        )));
+        for (mut effect, expected) in [
+            (token, vec![11, 12, 13, 14]),
+            (movement, vec![21, 22]),
+            (dig, vec![31, 32, 33]),
+            (payment, vec![41, 42, 43]),
+            (mana, vec![51]),
+            (die, vec![61, 62]),
+            (placement, vec![71, 72]),
+            (
+                Effect::EpicCopy {
+                    spell: Box::new(nested),
+                },
+                vec![81, 82, 83, 84],
+            ),
+        ] {
+            let mut addresses = Vec::new();
+            let mut shared = Vec::new();
+            effect.for_each_quantity_expr(&mut |q| {
+                addresses.push(q as *const QuantityExpr as usize);
+                shared.push(value(q));
+            });
+            assert_eq!(
+                shared, expected,
+                "hardcoded carrier order catches a shared omission"
+            );
+            let mut mutable_addresses = Vec::new();
+            effect.for_each_quantity_expr_mut(&mut |q| {
+                mutable_addresses.push(q as *const QuantityExpr as usize);
+                *q = fixed(value(q) + 100);
+            });
+            assert_eq!(mutable_addresses, addresses);
+            // These read the concrete fields, independently of either visitor.
+            match &effect {
+                Effect::Token {
+                    power: PtValue::Quantity(power),
+                    toughness: PtValue::Quantity(toughness),
+                    count,
+                    enter_with_counters,
+                    ..
+                } => {
+                    assert_eq!(
+                        [
+                            value(power),
+                            value(toughness),
+                            value(count),
+                            value(&enter_with_counters[0].1)
+                        ],
+                        [111, 112, 113, 114]
+                    );
+                }
+                Effect::ChangeZone {
+                    enter_with_counters,
+                    conditional_enter_with_counters,
+                    ..
+                } => {
+                    assert_eq!(value(&enter_with_counters[0].1), 121);
+                    assert_eq!(value(&conditional_enter_with_counters[0].2), 122);
+                }
+                Effect::Dig {
+                    count,
+                    keep_count_expr,
+                    rest_split_top_count,
+                    ..
+                } => {
+                    assert_eq!(
+                        [
+                            value(count),
+                            value(keep_count_expr.as_ref().unwrap()),
+                            value(rest_split_top_count.as_ref().unwrap())
+                        ],
+                        [131, 132, 133]
+                    );
+                }
+                Effect::PayCost {
+                    cost: AbilityCost::Composite { costs },
+                    scale,
+                    ..
+                } => {
+                    assert!(
+                        matches!(&costs[0], AbilityCost::PayLife { amount } if *amount == fixed(141))
+                    );
+                    let AbilityCost::OneOf { costs } = &costs[1] else {
+                        unreachable!()
+                    };
+                    let AbilityCost::PerCounter { base, .. } = &costs[0] else {
+                        unreachable!()
+                    };
+                    assert!(
+                        matches!(&**base, AbilityCost::EffectCost { effect } if matches!(&**effect, Effect::Draw { count, .. } if *count == fixed(142)))
+                    );
+                    assert_eq!(scale, &Some(fixed(143)));
+                }
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(value(count), 151),
+                Effect::RollDie {
+                    count,
+                    modifier: Some(DieRollModifier::Subtract { value: modifier }),
+                    results,
+                    ..
+                } => {
+                    assert_eq!([value(count), value(modifier)], [161, 162]);
+                    assert!(
+                        matches!(&*results[0].effect.effect, Effect::Draw { count, .. } if *count == fixed(999)),
+                        "deferred definitions stay outside both walks"
+                    );
+                }
+                Effect::PutAtLibraryPosition {
+                    count,
+                    position: LibraryPosition::BeneathTop { depth },
+                    ..
+                } => assert_eq!([value(count), value(depth)], [171, 172]),
+                Effect::EpicCopy { spell } => {
+                    assert!(
+                        matches!(&spell.effect, Effect::Draw { count, .. } if *count == fixed(181))
+                    );
+                    assert_eq!(spell.repeat_for, Some(fixed(182)));
+                    assert!(
+                        matches!(&spell.sub_ability.as_ref().unwrap().effect, Effect::GainLife { amount, .. } if *amount == fixed(183))
+                    );
+                    assert!(
+                        matches!(&spell.else_ability.as_ref().unwrap().effect, Effect::Draw { count, .. } if *count == fixed(184))
+                    );
+                }
+                _ => panic!("fixture must exercise its concrete carrier"),
+            }
+        }
+    }
+
     /// V-QE: the digital-Alchemy quantity carriers are visited — the noted
     /// `value` of `NoteNumber`, and both delta exprs of a perpetual P/T
     /// modification (live pre-freeze, `Fixed` after). Without these arms a
@@ -41956,6 +42846,18 @@ mod tests {
     }
 
     #[test]
+    fn player_scope_legacy_parent_object_target_controller_alias_defaults_to_controller() {
+        let json = r#"{"type": "ParentObjectTargetController"}"#;
+        let deserialized: PlayerScope = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            }
+        );
+    }
+
+    #[test]
     fn player_filter_any_of_and_target_player_round_trip() {
         let filter = PlayerFilter::AnyOf {
             filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
@@ -42441,6 +43343,144 @@ mod tests {
         let json = serde_json::to_string(&conditions).unwrap();
         let deserialized: Vec<StaticCondition> = serde_json::from_str(&json).unwrap();
         assert_eq!(conditions, deserialized);
+    }
+
+    /// Independent Eratosthenes sieve over `0..=limit`, the reference reading
+    /// `NumberQuality::Prime` is measured against.
+    fn sieve_primes(limit: usize) -> Vec<bool> {
+        let mut is_prime = vec![true; limit + 1];
+        is_prime[0] = false;
+        if limit >= 1 {
+            is_prime[1] = false;
+        }
+        let mut p = 2;
+        while p * p <= limit {
+            if is_prime[p] {
+                let mut multiple = p * p;
+                while multiple <= limit {
+                    is_prime[multiple] = false;
+                    multiple += p;
+                }
+            }
+            p += 1;
+        }
+        is_prime
+    }
+
+    #[test]
+    fn number_quality_matches_mathematical_primes_and_parity() {
+        let sieve = sieve_primes(100);
+        for n in -3_i64..=100 {
+            let expected = usize::try_from(n).is_ok_and(|i| sieve[i]);
+            assert_eq!(
+                NumberQuality::Prime.matches(n),
+                expected,
+                "primality of {n} must match the sieve"
+            );
+        }
+        // Primes past any reminder-text list (Zimone's ruling: 37 … 97 and beyond).
+        for n in [2, 3, 37, 41, 97, 7919] {
+            assert!(NumberQuality::Prime.matches(n), "{n} is prime");
+        }
+        for n in [0, 1, 4, 9, 25, 91, 7917, -2, -3] {
+            assert!(!NumberQuality::Prime.matches(n), "{n} is not prime");
+        }
+        // The trial-division bound must not overflow at the top of the range.
+        assert!(!NumberQuality::Prime.matches(i64::MAX));
+
+        let even = NumberQuality::Parity(Parity::Even);
+        let odd = NumberQuality::Parity(Parity::Odd);
+        assert!(even.matches(0), "zero is even");
+        assert!(!odd.matches(0));
+        assert!(odd.matches(-3), "negative odd values are odd");
+        assert!(!even.matches(-3));
+        assert!(even.matches(-4));
+        assert!(!odd.matches(-4));
+        assert!(odd.matches(7));
+        assert!(!even.matches(7));
+    }
+
+    #[test]
+    fn parity_matches_preserves_mana_value_parity_reading() {
+        for mv in 0_u32..=20 {
+            assert_eq!(
+                Parity::Even.matches(i64::from(mv)),
+                mv.is_multiple_of(2),
+                "even parity of mana value {mv}"
+            );
+            assert_eq!(
+                Parity::Odd.matches(i64::from(mv)),
+                !mv.is_multiple_of(2),
+                "odd parity of mana value {mv}"
+            );
+        }
+    }
+
+    #[test]
+    fn number_quality_conditions_roundtrip_and_pin_shape() {
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::land().controller(ControllerRef::You).into(),
+            },
+        };
+        for quality in [NumberQuality::Prime, NumberQuality::Parity(Parity::Even)] {
+            let stat = StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality,
+            };
+            let trig = TriggerCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality,
+            };
+            let abil = AbilityCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality,
+            };
+            let stat_back: StaticCondition =
+                serde_json::from_str(&serde_json::to_string(&stat).unwrap()).unwrap();
+            let trig_back: TriggerCondition =
+                serde_json::from_str(&serde_json::to_string(&trig).unwrap()).unwrap();
+            let abil_back: AbilityCondition =
+                serde_json::from_str(&serde_json::to_string(&abil).unwrap()).unwrap();
+            assert_eq!(stat, stat_back);
+            assert_eq!(trig, trig_back);
+            assert_eq!(abil, abil_back);
+        }
+
+        // Wire contract pin: the condition tag and the adjacently tagged quality.
+        let quantity_json = serde_json::to_value(&quantity).unwrap();
+        let expected = serde_json::json!({
+            "type": "QuantityQuality",
+            "quantity": quantity_json,
+            "quality": { "type": "Prime" },
+        });
+        for value in [
+            serde_json::to_value(StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: NumberQuality::Prime,
+            })
+            .unwrap(),
+            serde_json::to_value(TriggerCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: NumberQuality::Prime,
+            })
+            .unwrap(),
+            serde_json::to_value(AbilityCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: NumberQuality::Prime,
+            })
+            .unwrap(),
+        ] {
+            assert_eq!(value, expected);
+        }
+        assert_eq!(
+            serde_json::to_value(NumberQuality::Parity(Parity::Odd)).unwrap(),
+            serde_json::json!({ "type": "Parity", "value": "Odd" })
+        );
+        assert_eq!(
+            serde_json::to_value(NumberQuality::Parity(Parity::Even)).unwrap(),
+            serde_json::json!({ "type": "Parity", "value": "Even" })
+        );
     }
 
     #[test]
@@ -45427,6 +46467,80 @@ mod monarch_subject_axis_tests {
         );
     }
 
+    #[test]
+    fn quantity_ref_player_scope_borrows_every_actual_axis() {
+        let player = PlayerScope::Target;
+        for mut reference in [
+            QuantityRef::HandSize {
+                player: player.clone(),
+            },
+            QuantityRef::LifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::GraveyardSize {
+                player: player.clone(),
+            },
+            QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::LifeLostThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::PartySize {
+                player: player.clone(),
+            },
+            QuantityRef::Speed {
+                player: player.clone(),
+            },
+            QuantityRef::SacrificedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LifeGainedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDrawnThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::LandsPlayedThisTurn {
+                player: player.clone(),
+                from_zones: None,
+            },
+            QuantityRef::PlayerChosenNumber {
+                player: player.clone(),
+            },
+            QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::CardsDiscardedThisTurn {
+                player: player.clone(),
+            },
+            QuantityRef::TokensCreatedThisTurn {
+                player: player.clone(),
+                filter: TargetFilter::Any,
+            },
+            QuantityRef::PlayerActionsThisTurn {
+                player: player.clone(),
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+            },
+        ] {
+            assert_eq!(reference.player_scope(), Some(&player));
+            let borrowed = reference.player_scope().unwrap() as *const PlayerScope;
+            assert_eq!(
+                borrowed,
+                reference.player_scope_mut().unwrap() as *const PlayerScope
+            );
+            *reference.player_scope_mut().unwrap() = PlayerScope::ScopedPlayer;
+            assert_eq!(reference.player_scope(), Some(&PlayerScope::ScopedPlayer));
+        }
+        assert!(QuantityRef::SelfManaValue.player_scope().is_none());
+        assert!(QuantityRef::TrackedSetSize.player_scope().is_none());
+    }
+
     /// CR 109.4: the mutable player-axis accessor must reach every reference
     /// that carries one, and must leave object-axis references alone.
     #[test]
@@ -46285,5 +47399,310 @@ mod chain_description_backfill_tests {
                 .as_deref(),
             Some("tap"),
         );
+    }
+}
+
+#[cfg(test)]
+mod created_referent_classification_tests {
+    //! `Effect::created_referent_publication` and the two predicates derived from
+    //! it, over the D1.1 membership: token creators, other producers, measured
+    //! non-members, inline-payload wrappers and later-resolution boundaries.
+    use super::*;
+    use serde_json::json;
+
+    fn effect(value: serde_json::Value) -> Effect {
+        serde_json::from_value(value).expect("fixture effect deserializes")
+    }
+
+    fn fixed(value: i32) -> serde_json::Value {
+        json!({ "type": "Fixed", "value": value })
+    }
+
+    fn token() -> Effect {
+        effect(json!({
+            "type": "Token",
+            "name": "Soldier",
+            "power": fixed(1),
+            "toughness": fixed(1),
+            "types": ["Creature", "Soldier"],
+            "colors": [],
+            "keywords": [],
+            "tapped": false,
+            "count": fixed(1),
+            "owner": { "type": "Controller" },
+            "enters_attacking": false
+        }))
+    }
+
+    fn gain_life() -> Effect {
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    }
+
+    fn draw() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    /// A `head` definition with `tail` as its sub-ability.
+    fn chain(head: Effect, tail: Effect) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, head);
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, tail)));
+        def
+    }
+
+    /// A payload whose only `Token` is a non-head sub-node.
+    fn publishing_payload() -> AbilityDefinition {
+        chain(gain_life(), token())
+    }
+
+    fn quiet_payload() -> AbilityDefinition {
+        chain(gain_life(), draw())
+    }
+
+    /// One fixture per `OtherProducer` row of the D1.1 table.
+    fn other_producers() -> Vec<Effect> {
+        vec![
+            effect(
+                json!({ "type": "Manifest", "target": { "type": "Controller" }, "count": fixed(1) }),
+            ),
+            Effect::ManifestDread,
+            effect(
+                json!({ "type": "Cloak", "target": { "type": "Controller" }, "count": fixed(1) }),
+            ),
+            effect(json!({
+                "type": "Conjure",
+                "cards": [{ "name": "Forest", "count": fixed(1) }],
+                "destination": "Battlefield"
+            })),
+            effect(
+                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "random": true }),
+            ),
+            effect(json!({
+                "type": "CopyTokenBlockingAttacker",
+                "source_filter": { "type": "Any" },
+                "owner": { "type": "Controller" }
+            })),
+            effect(json!({
+                "type": "EachPlayerCopyChosen",
+                "choose_filter": { "type": "Any" },
+                "min": 1,
+                "max": 1
+            })),
+            effect(json!({
+                "type": "CreateTokenCopyFromPool",
+                "mv": "LE",
+                "mv_bound": fixed(3),
+                "selection": "Random"
+            })),
+            Effect::Investigate,
+            effect(json!({ "type": "Amass", "subtype": "Orc", "count": fixed(1) })),
+            effect(
+                json!({ "type": "Endure", "amount": fixed(2), "subject": { "type": "SelfRef" } }),
+            ),
+            Effect::Myriad,
+            Effect::Encore,
+            effect(json!({ "type": "EmpowerJace", "count": fixed(2) })),
+        ]
+    }
+
+    /// Each inline-payload wrapper variant carrying `payload` in its own-resolution
+    /// slot.
+    fn wrappers(payload: &AbilityDefinition) -> Vec<Effect> {
+        let boxed = || Box::new(payload.clone());
+        let payload_json = serde_json::to_value(payload).expect("payload serializes");
+        vec![
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, draw()),
+                    payload.clone(),
+                ],
+                kind: ChooseOneOfKind::Ordinary,
+            },
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: vec![DieResultBranch {
+                    min: 1,
+                    max: 6,
+                    effect: boxed(),
+                }],
+                modifier: None,
+            },
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(boxed()),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                win_effect: Some(boxed()),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                win_effect: Some(boxed()),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            effect(json!({
+                "type": "SeparateIntoPiles",
+                "partition_subject": { "type": "EachOpponent" },
+                "chooser": { "type": "Controller" },
+                "chosen_pile_effect": payload_json.clone()
+            })),
+            effect(json!({
+                "type": "Vote",
+                "choices": ["a", "b"],
+                "per_choice_effect": [
+                    serde_json::to_value(AbilityDefinition::new(AbilityKind::Spell, draw()))
+                        .expect("payload serializes"),
+                    payload_json
+                ]
+            })),
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(boxed()),
+            },
+        ]
+    }
+
+    /// P1 (subset invariant): the token creators are both token creators and
+    /// publishers.
+    #[test]
+    fn token_creators_are_publishers() {
+        let creators = [
+            token(),
+            effect(json!({
+                "type": "CopyTokenOf",
+                "target": { "type": "Any" },
+                "owner": { "type": "Controller" },
+                "count": fixed(1)
+            })),
+            Effect::Populate,
+        ];
+        for creator in &creators {
+            assert!(creator.is_token_creator(), "{creator:?}");
+            assert!(creator.publishes_created_referent(), "{creator:?}");
+        }
+    }
+
+    /// P2: every other producer publishes the referent but is not a token
+    /// creator.
+    #[test]
+    fn other_producers_publish_without_being_token_creators() {
+        let producers = other_producers();
+        assert_eq!(producers.len(), 14, "one fixture per OtherProducer row");
+        for producer in &producers {
+            assert!(producer.publishes_created_referent(), "{producer:?}");
+            assert!(!producer.is_token_creator(), "{producer:?}");
+        }
+    }
+
+    /// P3: measured non-members — effects that create a token without writing
+    /// the referent, battlefield movers, a plain counter placement, and the
+    /// sweep's false positive.
+    #[test]
+    fn non_members_neither_publish_nor_create_tokens() {
+        let non_members = [
+            effect(json!({ "type": "Incubate", "count": fixed(2) })),
+            effect(json!({ "type": "GiftDelivery", "kind": { "type": "Treasure" } })),
+            effect(json!({
+                "type": "Mill",
+                "count": fixed(2),
+                "target": { "type": "Controller" },
+                "destination": "Graveyard"
+            })),
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::LastCreated,
+            },
+            effect(json!({
+                "type": "ChangeZone",
+                "origin": "Graveyard",
+                "destination": "Battlefield",
+                "target": { "type": "Any" }
+            })),
+            effect(json!({
+                "type": "Meld",
+                "source": "Graf Rats",
+                "partner": "Midnight Scavengers",
+                "result": "Chittering Host"
+            })),
+            effect(json!({ "type": "ChooseAndSacrificeRest", "categories": ["Creature"] })),
+            gain_life(),
+        ];
+        for non_member in &non_members {
+            assert!(!non_member.publishes_created_referent(), "{non_member:?}");
+            assert!(!non_member.is_token_creator(), "{non_member:?}");
+        }
+    }
+
+    /// P4 (option (a)): a wrapper publishes through its own-resolution payload,
+    /// and is never a token creator; with a payload that creates nothing it is
+    /// neither.
+    #[test]
+    fn wrappers_publish_through_their_inline_payload() {
+        let publishing = wrappers(&publishing_payload());
+        let quiet = wrappers(&quiet_payload());
+        assert_eq!(publishing.len(), 8, "one fixture per wrapper variant");
+        for wrapper in &publishing {
+            assert!(wrapper.publishes_created_referent(), "{wrapper:?}");
+            assert!(!wrapper.is_token_creator(), "{wrapper:?}");
+        }
+        for wrapper in &quiet {
+            assert!(!wrapper.publishes_created_referent(), "{wrapper:?}");
+            assert!(!wrapper.is_token_creator(), "{wrapper:?}");
+        }
+        // A wrapper nested in a wrapper publishes through both levels.
+        let nested = Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                wrappers(&publishing_payload()).swap_remove(1),
+            )],
+            kind: ChooseOneOfKind::Ordinary,
+        };
+        assert!(nested.publishes_created_referent());
+    }
+
+    /// P5 (CR 603.7a + CR 603.12): a payload registered to resolve later never
+    /// publishes this resolution's referent.
+    #[test]
+    fn later_resolution_payloads_do_not_publish() {
+        let delayed = effect(json!({
+            "type": "CreateDelayedTrigger",
+            "condition": { "type": "WhenDies", "filter": { "type": "SelfRef" } },
+            "effect": serde_json::to_value(AbilityDefinition::new(AbilityKind::Spell, token()))
+                .expect("payload serializes")
+        }));
+        assert!(!delayed.publishes_created_referent());
+        assert!(!delayed.is_token_creator());
+
+        let mut reflexive = AbilityDefinition::new(AbilityKind::Spell, token());
+        reflexive.condition = Some(AbilityCondition::WhenYouDo);
+        let reflexive_branch = Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![reflexive],
+            kind: ChooseOneOfKind::Ordinary,
+        };
+        assert!(!reflexive_branch.publishes_created_referent());
+        // Paired positive: the same branch without the reflexive marker publishes.
+        let ordinary_branch = Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![AbilityDefinition::new(AbilityKind::Spell, token())],
+            kind: ChooseOneOfKind::Ordinary,
+        };
+        assert!(ordinary_branch.publishes_created_referent());
     }
 }

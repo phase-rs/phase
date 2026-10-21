@@ -48,8 +48,7 @@ use super::lower::{
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
-    extract_optional_target_multi_target, extract_verb_up_to_multi_target,
-    fold_copy_spell_gains_haste_and_quoted_grant,
+    extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
@@ -3286,7 +3285,41 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // provably arrives here unstamped. Stated explicitly because the
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
-            if def.optional_for.is_none() && def.optional_player.is_none() {
+            // CR 115.1 + CR 608.2d: a `"target opponent may draw …"` clause names
+            // the ANNOUNCED target opponent as the actor — the targeted opponent
+            // announces the may. Provenance is the clause's own printed grammar,
+            // never the lowered shape: "you may have target opponent draw a card"
+            // (the CONTROLLER decides) lowers to a byte-identical
+            // `Draw{Typed{Opponent}}, optional:true` node, which is why
+            // `subject_anchored_optional_actor` refuses that slot by design and the
+            // clause provenance picks the actor here instead.
+            //
+            // The stamped ref is the clause's own DECLARED-player reference: the
+            // group this node declares, whose announced player target
+            // `declared_group_player_slot` reads back. `TargetFilter::DeclaredPlayer`
+            // is a context ref, so it claims no target slot of its own and
+            // fail-closes to nobody when that player is illegal (CR 608.2b). The
+            // Draw keeps its announced `Typed{controller: Opponent}` player target,
+            // so the seat that announces the may and the seat that draws are the
+            // same announced opponent WITHOUT rebinding the chain's controller —
+            // `player_scope` would rebind it, and every later "you" in the chain
+            // would then be read from the opponent's seat.
+            let fragment_lower = clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase();
+            if super::subject::targeted_opponent_may_player_action(&fragment_lower) {
+                // The clause always carries an explicit player target (the Draw's
+                // `Typed { controller: Opponent }`), so `tag_player_declarations`
+                // stamps the group. `TargetFilter::Opponent` is the fail-soft
+                // spelling if that stamp is ever absent (its resolver also prefers
+                // the announced player).
+                def.optional_player = Some(match def.declares_chosen_group {
+                    Some(group) => TargetFilter::DeclaredPlayer { group },
+                    None => TargetFilter::Opponent,
+                });
+            } else if def.optional_for.is_none() && def.optional_player.is_none() {
                 def.optional_player =
                     subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
             }
@@ -3429,10 +3462,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
             {
                 def = def.multi_target(spec);
-            } else if let Some(spec) = extract_optional_target_multi_target(
-                clause_ir.source.fragment().unwrap_or_default(),
-            ) {
-                def = def.multi_target(spec);
             } else if let Some(spec) =
                 extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
             {
@@ -3442,6 +3471,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             } else if let Some(ref spec) = clause_ir.parsed.multi_target {
                 def = def.multi_target(spec.clone());
             }
+        }
+        // CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: the Attach
+        // host frame's declared zero-target authority (the only writer of this
+        // clause field). OR-only: never clears a flag, and never rescans the
+        // text — the clause detector owns the non-Attach class.
+        if clause_ir.parsed.optional_targeting {
+            def = def.optional_targeting();
         }
         // CR 601.2c + CR 608.2c: A conjugated continuation after an "any
         // number of target players/opponents each" head shares the targets
@@ -3998,7 +4034,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // re-cut this as JSON containers. Re-run if a candidate carries Dig; if the
     // Elemental-Appeal (a)∧(b) consumer probe exceeds one or T-ROW5 reds (the
     // silent-wrong-binding, highest-severity exposure); if CopySpell with
-    // ParentTarget/TrackedSet(0) is nonterminal; if a bare FlipCoin/RollDie and
+    // ParentTarget/TrackedSet(0) is nonterminal; if a bare single-flip FlipCoins/RollDie and
     // its branch share a payload; if ChooseDamageSource/ChosenDamageSource occurs
     // at any depth; or if an antecedent gains else_ability or an instead condition.
     // Record the data md5 for every re-run.
@@ -4177,7 +4213,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     fold_cast_copy_of_card_defs(&mut defs);
 
     // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
-    // and coin flip conditional branches into their parent FlipCoin.
+    // and coin flip conditional branches into their parent FlipCoins.
     consolidate_die_and_coin_defs(&mut defs, kind);
 
     // CR 609.7a + CR 608.2c: Desperate Gambit — a preceding

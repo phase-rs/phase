@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Read-only scout: a cheap agent gathers located facts for a planner or critic.
 //   verify  checks a scout agent's JSON-lines report against the repository and prints the fact pack.
-//   run     launches the scout from the command line when the orchestrator has no native sub-agent:
-//           GPT-6 Luna through `codex exec` when codex is installed, otherwise Sonnet 5.5 through `claude -p`.
+//   run     launches one scout from the command line for a model the orchestrator has no native sub-agent for:
+//           GPT-6 Luna through `codex exec` (--backend codex) or Haiku 5.5 through `claude -p` (--backend claude).
 // Only facts whose quote is the whole line at (or within a few lines of) the cited location are kept.
 // A launched scout that has not finished after --timeout seconds (default one hour) is stopped and reported as failed.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -22,7 +22,7 @@ const BACKENDS = {
     prompt: task => `${CONTRACT}\n${task}`,
   },
   claude: {
-    model: 'claude-sonnet-5-5',
+    model: 'claude-haiku-5-5',
     args: ({ model, effort }) => [
       '-p', '--model', model, '--effort', effort, '--tools', 'Read,Grep,Glob', '--strict-mcp-config',
       '--no-session-persistence', '--append-system-prompt', CONTRACT, '--output-format', 'stream-json', '--verbose',
@@ -48,16 +48,16 @@ const repo = resolve(values.repo);
 
 if (command === 'verify' && values['report-file']) {
   emit(readFileSync(values['report-file'], 'utf8'), {});
-} else if (command === 'run' && values['task-file']) {
+} else if (command === 'run' && values['task-file'] && values.backend) {
   emit(...await launch(readFileSync(values['task-file'], 'utf8')));
 } else {
   console.error(`usage: scout.mjs verify --report-file FILE [--repo DIR] [--label L]
-       scout.mjs run --task-file FILE [--repo DIR] [--backend codex|claude] [--model ID] [--effort LEVEL] [--timeout SECONDS] [--label L]`);
+       scout.mjs run --task-file FILE --backend codex|claude [--repo DIR] [--model ID] [--effort LEVEL] [--timeout SECONDS] [--label L]`);
   process.exit(2);
 }
 
 async function launch(task) {
-  const name = values.backend ?? (spawnSync('codex', ['--version']).error ? 'claude' : 'codex');
+  const name = values.backend;
   const backend = BACKENDS[name];
   if (!backend) fail(`unknown backend ${name}`);
   const model = values.model ?? backend.model;

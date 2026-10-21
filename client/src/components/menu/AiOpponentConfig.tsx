@@ -5,8 +5,17 @@ import type { GameFormat, MatchType } from "../../adapter/types";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
-import { candidatePassesFilters, restrictAiPoolByBracket } from "../../services/aiRandomPool";
+import { useAiDeckCatalog, type UseAiDeckCatalogResult } from "../../services/aiDeckCatalog";
+import {
+  resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
+  restrictAiPoolByBracket,
+} from "../../services/aiRandomPool";
+import {
+  summarizePoolSelection,
+  withCatalogSavedNames,
+} from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
@@ -20,6 +29,7 @@ import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { AiDeckPicker } from "./AiDeckPicker";
 import { BracketFilter } from "./BracketFilter";
+import { RandomPoolTree } from "./RandomPoolTree";
 
 const AI_MENU_CLASS =
   "min-h-[44px] rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm sm:min-h-0";
@@ -34,6 +44,12 @@ interface Props {
    *  page's player-count context. */
   opponentCount?: number;
   onCandidateCountChange?: (count: number | null) => void;
+  /**
+   * Hoisted catalog from the setup page, which shares one analysis between
+   * the AI seats and the human pool's bracket base. When absent the component
+   * runs its own analysis (other mounts, tests).
+   */
+  catalog?: UseAiDeckCatalogResult;
 }
 
 /** Sentinel for "this seat is driven by the built-in engine AI". */
@@ -70,6 +86,7 @@ export function AiOpponentConfig({
   selectedMatchType,
   opponentCount = 1,
   onCandidateCountChange,
+  catalog,
 }: Props) {
   const { t } = useTranslation("menu");
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
@@ -84,6 +101,11 @@ export function AiOpponentConfig({
   const setCoverageFloor = usePreferencesStore((s) => s.setAiCoverageFloor);
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the preview memos below resolve through this
+  // index so a deck moved between folders recomputes instead of serving
+  // stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
   const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
   const effectiveCedhMode = cedhMode && isCedhFormat;
   // Fixed-deck formats (Momir's Madness) have the engine supply every AI seat's
@@ -109,7 +131,12 @@ export function AiOpponentConfig({
     }
   }, [selectedFormat, isCedhFormat, cedhMode, setCedhMode]);
 
-  const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
+  const fallbackCatalog = useAiDeckCatalog({
+    selectedFormat,
+    selectedMatchType,
+    enabled: catalog === undefined,
+  });
+  const { candidates, allCandidates, loading, error } = catalog ?? fallbackCatalog;
 
   useEffect(() => {
     onCandidateCountChange?.(loading ? null : candidates.length);
@@ -131,10 +158,63 @@ export function AiOpponentConfig({
       }),
     [candidates, bracketFilter, cedhMode, selectedFormat],
   );
+  // The "Random (N)" counts resolve the full production layering — bracket
+  // with catalog fallback, curation with bracket-pool fallback, soft
+  // preferences with draw-pool fallback — through the same authority game
+  // start uses, so the preview matches what seats can actually draw. The raw
+  // bracket pool above stays separate for the empty-bracket diagnostic below.
   const filteredDecks = useMemo(
-    () => bracketPool.filter((d) => candidatePassesFilters(d, archetypeFilter, coverageFloor)),
-    [bracketPool, coverageFloor, archetypeFilter],
+    () =>
+      resolveEffectiveAiRandomPool(
+        withCatalogSavedNames(candidates),
+        {
+          bracketFilter,
+          cedhMode,
+          selectedFormat: selectedFormat ?? null,
+          poolSelection: aiPoolSelection,
+          archetypeFilter,
+          coverageFloor,
+        },
+        poolFolderIndex,
+      ),
+    [
+      candidates,
+      bracketFilter,
+      cedhMode,
+      selectedFormat,
+      aiPoolSelection,
+      archetypeFilter,
+      coverageFloor,
+      poolFolderIndex,
+    ],
   );
+  // The tree lists the full legal catalog (the curation is format-global),
+  // but reports playable counts against the draw base — the same base
+  // `pickAiSeatDecks` draws from — so a selection the bracket filter empties
+  // warns instead of silently falling back.
+  const poolTreeItems = useMemo(() => withCatalogSavedNames(candidates), [candidates]);
+  // Group toggles clear overrides against the complete raw universe: the
+  // curation is format-global, so an override on a currently-unlisted deck
+  // must not survive a folder-wide unselect.
+  const poolToggleItems = useMemo(() => withCatalogSavedNames(allCandidates), [allCandidates]);
+  const poolBaseIds = useMemo(
+    () =>
+      new Set(
+        resolveBracketDrawBase(candidates, {
+          bracketFilter,
+          cedhMode,
+          selectedFormat: selectedFormat ?? null,
+        }).map((candidate) => candidate.id),
+      ),
+    [candidates, bracketFilter, cedhMode, selectedFormat],
+  );
+  // Decks are selected but none survive the bracket restriction, so Random
+  // seats silently fall back to the full bracket pool. Say so next to the
+  // seats (the tree warns too) — the "Random (N)" count alone hides the why.
+  const poolConflict = useMemo(() => {
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex);
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex]);
   // Soft gate: the catalog is non-empty but the bracket constraint matched
   // nothing, so game start will fall back to the full legal catalog. Warn
   // here (Start stays enabled) rather than failing the game.
@@ -287,6 +367,13 @@ export function AiOpponentConfig({
                 {effectiveCedhMode ? t("aiOpponent.cedhPoolEmpty") : t("aiOpponent.bracketPoolEmpty")}
               </div>
             )}
+          </div>
+        )}
+
+        <RandomPoolTree pool="ai" items={poolTreeItems} allItems={poolToggleItems} baseIds={poolBaseIds} />
+        {poolConflict !== null && (
+          <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            {t("aiOpponent.poolBracketConflict", { selected: poolConflict.selected, total: poolConflict.baseSize })}
           </div>
         )}
       </div>

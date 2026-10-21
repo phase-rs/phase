@@ -77,19 +77,50 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
+/// about an object's keywords. The door declares it; the authority never
+/// infers liveness from an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldObject {
+    /// The live object of its id, or a view of it that the door rescoped only
+    /// in who controls it (`matches_target_filter_in_owner_zone`'s CR 109.5
+    /// owner substitution). Off the battlefield it answers through the live
+    /// object's off-zone effective keywords, which include off-zone grants.
+    Live,
+    /// A snapshot of an earlier moment (attack, counter, damage and event
+    /// records; entry observations) or a projection of a hypothetical one
+    /// (CR 614.12 entry projections, face-down and token entry objects). It
+    /// answers from its own keywords: the object `FilterProp::WithKeyword` reads.
+    Detached,
+}
+
+/// CR 603.10 + CR 608.2i + CR 400.7: whether the object a caller holds has a
+/// keyword of `kind`. A caller holding a rescoped view of the live object
+/// (same object, one attribute substituted) passes `HeldObject::Live`.
+pub(crate) fn effective_keyword_kind_of(
+    state: &GameState,
+    obj: &GameObject,
+    held: HeldObject,
+    kind: KeywordKind,
+) -> bool {
+    match held {
+        HeldObject::Detached => has_keyword_kind(obj, kind),
+        HeldObject::Live if obj.zone == Zone::Battlefield => has_keyword_kind(obj, kind),
+        HeldObject::Live => {
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, obj.id, kind)
+        }
+    }
+}
+
 pub fn object_has_effective_keyword_kind(
     state: &GameState,
     object_id: ObjectId,
     kind: KeywordKind,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if obj.zone == Zone::Battlefield {
-        return obj.keywords.iter().any(|keyword| keyword.kind() == kind);
-    }
-
-    crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| effective_keyword_kind_of(state, obj, HeldObject::Live, kind))
 }
 
 /// CR 702.61a: True when any spell on the stack has split second. While true,
@@ -906,6 +937,8 @@ pub fn activate_ninjutsu(
             cost: effective_cost,
         },
         None,
+        // CR 702.49a: this seam pays only the ninjutsu mana cost; no counter leg can join it.
+        &mut None,
         events,
     )
     .map_err(|e| e.to_string())?
@@ -1279,6 +1312,92 @@ mod tests {
         obj.keywords.push(Keyword::Flying);
         assert!(has_keyword(&obj, &Keyword::Flying));
         assert!(!has_keyword(&obj, &Keyword::Haste));
+    }
+
+    /// CR 603.10 + CR 608.2i + CR 400.7: the declared `HeldObject` decides the
+    /// kind answer. A graveyard card granted flashback by an identity-targeted
+    /// command-zone grant (not materialized into its `keywords`) answers true
+    /// as the live object, and as a rescoped clone of it declared `Live`; the
+    /// same clone declared `Detached` answers from its own keywords. A
+    /// battlefield object answers from its own keywords either way.
+    #[test]
+    fn effective_keyword_kind_of_live_and_detached() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let emblem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: card })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    }]),
+            );
+        }
+        let live = &state.objects[&card];
+        assert!(
+            !has_keyword_kind(live, KeywordKind::Flashback),
+            "guard: the grant is not materialized into the card's keywords"
+        );
+        assert!(object_has_effective_keyword_kind(
+            &state,
+            card,
+            KeywordKind::Flashback
+        ));
+        assert!(effective_keyword_kind_of(
+            &state,
+            live,
+            HeldObject::Live,
+            KeywordKind::Flashback
+        ));
+        let mut rescoped = live.clone();
+        rescoped.controller = PlayerId(1);
+        assert!(
+            effective_keyword_kind_of(&state, &rescoped, HeldObject::Live, KeywordKind::Flashback),
+            "a rescoped view of the live object keeps its off-zone grant"
+        );
+        assert!(
+            !effective_keyword_kind_of(
+                &state,
+                &rescoped,
+                HeldObject::Detached,
+                KeywordKind::Flashback
+            ),
+            "a detached object answers from its own keywords"
+        );
+
+        let mut flier = make_obj();
+        flier.keywords.push(Keyword::Flying);
+        for held in [HeldObject::Live, HeldObject::Detached] {
+            assert!(effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Flying
+            ));
+            assert!(!effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Haste
+            ));
+        }
     }
 
     #[test]

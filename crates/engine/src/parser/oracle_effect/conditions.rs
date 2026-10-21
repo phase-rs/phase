@@ -1616,6 +1616,61 @@ pub(super) fn card_type_condition_as_target_match(
     })
 }
 
+/// CR 614.1c + CR 614.12: an anaphoric "if it's a <type>" gate on an "enters with …
+/// counters" rider names the characteristics of the permanent an earlier instruction
+/// moved onto the battlefield, as it would exist there — the gate the "if a <type>
+/// enters this way" voice already expresses. Several types ("if it's an artifact or
+/// creature") → an any-of gate (CR 614.1c + CR 614.12), matching the condition's
+/// any-of reading. `None` for any other condition (no type, an additional or subtype
+/// filter, a negation), which stays a later gate.
+pub(super) fn card_type_condition_as_entry_this_way(
+    cond: &AbilityCondition,
+) -> Option<AbilityCondition> {
+    let AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter: None,
+        subtype_filter: None,
+    } = cond
+    else {
+        return None;
+    };
+    let type_filter = match card_types.as_slice() {
+        [] => return None,
+        [core] => core_type_to_type_filter(*core),
+        types => TypeFilter::AnyOf(
+            types
+                .iter()
+                .copied()
+                .map(core_type_to_type_filter)
+                .collect(),
+        ),
+    };
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+        destination: Some(Zone::Battlefield),
+    })
+}
+
+/// CR 614.1c + CR 614.12: the typed entry gate for an anaphoric entry-counter rider —
+/// `Some` exactly when `body` is the singular-subject rider (all-consuming, optional
+/// final ".") and `cond` converts through `card_type_condition_as_entry_this_way`.
+/// The distributive plural subject ("each of them enters with …") is not admitted:
+/// no printed rider gates it in a form this conversion represents (Semester's End's
+/// compound creature/planeswalker rider is not consumed whole), so it stays a later gate.
+pub(super) fn anaphoric_entry_counter_gate(
+    cond: &AbilityCondition,
+    body: &str,
+) -> Option<AbilityCondition> {
+    nom_parse_lower(&body.trim().to_lowercase(), |i| {
+        all_consuming(terminated(
+            super::parse_single_moved_object_enters_with_counters,
+            opt(tag(".")),
+        ))
+        .parse(i)
+    })?;
+    card_type_condition_as_entry_this_way(cond)
+}
+
 /// CR 701.20a: `"If a[n] <types> card [<property>] is revealed this way, …"` —
 /// gates a sub_ability on the card the preceding look/reveal step produced.
 /// CR 701.20a ("To reveal a card, show that card to all players…") is the
@@ -3199,7 +3254,9 @@ pub(super) fn strip_player_property_superlative_conditional(
     let lhs = QuantityExpr::Ref {
         qty: nom_quantity::player_property_quantity(
             lhs_property,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ),
     };
     let rhs = QuantityExpr::Ref {
@@ -3207,7 +3264,9 @@ pub(super) fn strip_player_property_superlative_conditional(
             lhs_property,
             PlayerScope::AllPlayers {
                 aggregate,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                })),
             },
         ),
     };
@@ -4777,6 +4836,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaid { .. }
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::QuantityQuality { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -6002,6 +6062,17 @@ pub(crate) fn static_condition_to_ability_condition(
             comparator: *comparator,
             rhs: rhs.clone(),
         }),
+        // CR 608.2h: 1:1 bridge, never None — a caller that drops a None lowers
+        // the effect to unconditional (see
+        // delayed_trigger_intervening_if_retains_the_commander_control_gate).
+        // `Not` over this variant goes through the generic `other =>` arm of the
+        // `Not` sub-match, giving `AbilityCondition::Not { QuantityQuality }`.
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            Some(AbilityCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
+            })
+        }
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
         // CR 103.1: Starting-player status — 1:1 bridge (same `controller` field).
         StaticCondition::WasStartingPlayer { controller } => {
@@ -6430,6 +6501,12 @@ pub(crate) fn ability_condition_to_static_condition(
                 lhs: lhs.clone(),
                 comparator: *comparator,
                 rhs: rhs.clone(),
+            })
+        }
+        AbilityCondition::QuantityQuality { quantity, quality } => {
+            Some(StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
             })
         }
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
@@ -9187,6 +9264,63 @@ mod tests {
         SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
+    /// returns `None` for it — a dropped `None` would lower the effect to
+    /// unconditional. Negation and conjunction ride the generic arms.
+    #[test]
+    fn quantity_quality_bridges_to_ability_condition_and_back() {
+        use crate::types::ability::NumberQuality;
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            },
+        };
+        let affirmative = StaticCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let ability_affirmative = AbilityCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&affirmative, &mut ParseContext::default()),
+            Some(ability_affirmative.clone())
+        );
+
+        let negated = StaticCondition::Not {
+            condition: Box::new(affirmative.clone()),
+        };
+        let ability_negated = AbilityCondition::Not {
+            condition: Box::new(ability_affirmative.clone()),
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&negated, &mut ParseContext::default()),
+            Some(ability_negated.clone()),
+            "Not(QuantityQuality) bridges structurally, never to None"
+        );
+
+        let conjunction = StaticCondition::And {
+            conditions: vec![affirmative.clone(), StaticCondition::DuringYourTurn],
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&conjunction, &mut ParseContext::default()),
+            Some(AbilityCondition::And {
+                conditions: vec![ability_affirmative.clone(), AbilityCondition::IsYourTurn],
+            })
+        );
+
+        // Reverse bridge round-trips both forms back to the static input.
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_affirmative),
+            Some(affirmative)
+        );
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_negated),
+            Some(negated)
+        );
+    }
 
     /// SHAPE: both adapters preserve the complete owner-relative negative predicate.
     /// CR 109.5 + CR 400.3: an owner's private zone must belong to the live controller.
@@ -13916,5 +14050,72 @@ mod tests {
             })
             .collect();
         assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 614.1c + CR 614.12 (V-L6): only a single-core-type, unqualified,
+    /// affirmative "if it's a <type>" gate converts to the entry-this-way gate.
+    #[test]
+    fn card_type_condition_as_entry_this_way_cases() {
+        let revealed = |card_types: Vec<CoreType>| AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter: None,
+            subtype_filter: None,
+        };
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![CoreType::Creature])),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            })
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: Some(FilterProp::Token),
+                subtype_filter: None,
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: Some(Box::new(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Subtype("Hero".to_string()),
+                )))),
+            }),
+            None
+        );
+        // CR 614.1c + CR 614.12: several types fold into an any-of entry gate.
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![
+                CoreType::Artifact,
+                CoreType::Creature
+            ])),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ]))),
+                destination: Some(Zone::Battlefield),
+            })
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![])),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::Not {
+                condition: Box::new(revealed(vec![CoreType::Creature])),
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            }),
+            None
+        );
     }
 }
