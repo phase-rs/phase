@@ -443,6 +443,7 @@ describe("openPhaseSocket", () => {
     });
     expect(ws.close).toHaveBeenCalled();
   });
+
   it.each([152, 153, 154, 155, 156, 157, 158, 159])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries, a merged coin-flip run or a parked coin-flip branch's inherited context", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];

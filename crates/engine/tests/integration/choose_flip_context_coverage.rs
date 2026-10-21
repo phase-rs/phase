@@ -368,7 +368,7 @@ fn second_chosen_player_receives_the_creature_inline() {
 
 #[test]
 fn second_chosen_player_receives_the_creature_after_krark() {
-    // REVERT: FlipCoin frame capture / resume_after_keep context forwarding,
+    // REVERT: FlipRun::park frame capture / resume_after_keep context forwarding,
     // or the parser's enclosing scope, loses or misindexes the second answer.
     let mut game = two_choices(true);
     game.keep(
@@ -425,8 +425,8 @@ fn multi_flip(until_lose: bool, thumb: bool) {
     assert!(branch.sub_ability.is_none());
     let mut game = Game::new(oracle, thumb);
     game.choose_creature();
-    // For FlipN the FIRST loss must leave the context available for the SECOND
-    // flip's win, including the resume path's re-pushed frame.
+    // For an Exactly run the FIRST loss must leave the context available for the
+    // SECOND flip's win, including the resume path's re-pushed frame.
     let outcomes: &[bool] = if until_lose {
         &[true, true, false]
     } else {
@@ -464,19 +464,20 @@ fn n_flip_branch_reads_chosen_player_inline() {
 
 #[test]
 fn n_flip_branch_reads_chosen_player_after_second_krark_prompt() {
-    // REVERT: flip_coin.rs FlipN frame capture, resume branch or re-push context.
+    // REVERT: flip_coin.rs FlipRun::park capture of an Exactly run,
+    // resume_after_keep or re-park context.
     multi_flip(false, true);
 }
 
 #[test]
 fn until_lose_branch_reads_chosen_player_inline() {
-    // REVERT: flip_coin.rs resolve_until_lose -> finish_until_lose -> branch context.
+    // REVERT: flip_coin.rs resolve -> complete_run reward branch context.
     multi_flip(true, false);
 }
 
 #[test]
 fn until_lose_branch_reads_chosen_player_after_repeated_krark_prompts() {
-    // REVERT: flip_coin.rs UntilLose loop/frame, resume or finish context threading.
+    // REVERT: flip_coin.rs UntilLoss run/frame, resume or finish context threading.
     multi_flip(true, true);
 }
 

@@ -192,7 +192,7 @@ impl Gamble {
     fn answer_opponent(&mut self, opponent: PlayerId, won: bool, own_thumb: bool) {
         self.assert_opponents();
         // Install the exact production Outcome stream immediately before the
-        // opponent answer resumes FlipCoin, after all preceding actions.
+        // opponent answer resumes FlipCoins, after all preceding actions.
         let seed = if own_thumb {
             seed_for_mixed_pair()
         } else {

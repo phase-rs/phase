@@ -229,8 +229,8 @@ pub struct PendingCoinFlip {
     /// resolution, carried across the Krark's Thumb keep-choice suspension so a
     /// resumed branch reads the same chosen players and completed-empty result
     /// as an inline one. `#[serde(default)]` decodes a frame written before this
-    /// field existed (wire version 7) to the default, which is exactly that
-    /// version's semantics: the branch inherited nothing.
+    /// field existed (wire version 8 or earlier) to the default, which is
+    /// exactly those versions' semantics: the branch inherited nothing.
     #[serde(default, skip_serializing_if = "FlipBranchContext::is_empty")]
     pub branch_context: FlipBranchContext,
 }
@@ -4170,7 +4170,7 @@ fn carries_resolved_change_zone_members(stack: &Value) -> Result<bool, String> {
 
 #[derive(Debug, Deserialize)]
 struct CoinFlipBoundaryData {
-    /// Present only in a v8 frame whose branch inherits something
+    /// Present only in a v9 frame whose branch inherits something
     /// (`FlipBranchContext::is_empty` skips the default); only its presence
     /// is inspected.
     #[serde(default)]
@@ -4194,7 +4194,7 @@ struct CoinFlipBoundaryStack {
 }
 
 /// Whether any parked coin-flip frame in a serialized `ResolutionStack`
-/// carries a v8 `branch_context`. No earlier writer emitted the key, so it
+/// carries a v9 `branch_context`. No earlier writer emitted the key, so it
 /// dates an unversioned payload.
 fn carries_coin_flip_branch_context(stack: &Value) -> Result<bool, String> {
     let stack = serde_json::from_value::<CoinFlipBoundaryStack>(stack.clone())
@@ -9591,7 +9591,7 @@ mod tests {
 
     /// U-E2b: a parked coin flip whose branch inherits something writes the
     /// current version and the `branch_context` key, and round-trips equal.
-    /// REVERT: dropping the field, or keeping the writer at 7, fails the
+    /// REVERT: dropping the field, or keeping the writer at 8, fails the
     /// version, key or equality assertion.
     #[test]
     fn a_parked_coin_flip_branch_context_survives_the_current_wire() {
@@ -9617,25 +9617,25 @@ mod tests {
         );
     }
 
-    /// U-E2a: a version-7 payload carries no `branch_context` and restores with
-    /// the default context, which is exactly version 7's semantics: the branch
+    /// U-E2a: a version-8 payload carries no `branch_context` and restores with
+    /// the default context, which is exactly version 8's semantics: the branch
     /// inherited nothing. The default is also never written.
     #[test]
-    fn a_version_7_coin_flip_frame_restores_with_an_empty_branch_context() {
+    fn a_version_8_coin_flip_frame_restores_with_an_empty_branch_context() {
         let default_wire = serde_json::to_value(ResolutionStateWire::from_game_state(
             state_with_parked_coin_flip(FlipBranchContext::default()),
         ))
         .expect("wire serializes");
         assert!(
             !coin_flip_frame_data(&default_wire).contains_key("branch_context"),
-            "reach: the default context is skipped, so a v7 writer's frame has the same shape"
+            "reach: the default context is skipped, so a v8 writer's frame has the same shape"
         );
 
         let mut v7 = default_wire;
         v7["resolution_state_version"] =
             Value::from(LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION);
         let restored = serde_json::from_value::<ResolutionStateWire>(v7)
-            .expect("a version-7 payload decodes")
+            .expect("a version-8 payload decodes")
             .into_game_state();
         assert_eq!(
             restored
@@ -9646,7 +9646,7 @@ mod tests {
     }
 
     /// An unversioned raw payload is dated by what its frames carry: a coin-flip
-    /// `branch_context` is written only by version 8.
+    /// `branch_context` is written only by version 9.
     #[test]
     fn an_unversioned_coin_flip_branch_context_dates_the_payload_to_the_current_version() {
         let declared_version = |branch_context: FlipBranchContext| {
