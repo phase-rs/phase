@@ -9117,8 +9117,9 @@ fn trigger_matchers_read_filter_population(
 
 /// Whether a replacement definition's MATCHERS and own values name a
 /// population satisfying `leaf`: `valid_card`, `damage_source_filter`,
-/// `redirect_target`, its condition, a `MayCost` cost, a damage magnitude, and
-/// the keywords, statics and sacrifice duration of the token specs it adds.
+/// `redirect_target`, its condition, a `MayCost` cost, a damage magnitude, an
+/// entry-payment cap, and the keywords, statics and sacrifice duration of the
+/// token specs it adds.
 /// They are evaluated each time the replaced event would happen (CR 614.1),
 /// against the live ledger. Its `execute` and decline chains are the nested
 /// walk's. The struct is destructured without `..`, so a new field is a
@@ -9167,6 +9168,7 @@ fn replacement_matchers_read_filter_population(
         origin: _,
         counter_replacement_subject: _,
         granting_object: _,
+        entry_payment_max,
     } = replacement;
     let token_spec_reads = |spec: &crate::types::proposed_event::TokenSpec| {
         spec.characteristics
@@ -9202,6 +9204,9 @@ fn replacement_matchers_read_filter_population(
             .as_deref()
             .is_some_and(token_spec_reads)
         || ensure_token_specs.iter().flatten().any(token_spec_reads)
+        || entry_payment_max
+            .as_ref()
+            .is_some_and(|max| quantity_expr_counts_population_matching(max, leaf))
 }
 
 /// Whether a damage modification's magnitude counts a population satisfying
