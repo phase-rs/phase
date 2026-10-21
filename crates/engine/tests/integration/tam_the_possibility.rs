@@ -286,11 +286,13 @@ fn saavik_deals_damage_equal_to_distinct_non_borg_creature_types() {
     outcome.assert_life_delta(P1, 0);
 }
 
-/// Ooze-rider scope: Saavik's text has NO changeling rider, so a changeling's
-/// types count. One Bear + a changeling (DB {Bear, Elf}) → 2 damage — the
-/// changeling ADDS Elf (excluded, it would read 1).
+/// Non-Borg scope: Saavik's text has NO changeling rider, but none is needed —
+/// a changeling IS every creature type (CR 702.73a), hence Borg, so
+/// `Non(Subtype("Borg"))` excludes it from the population (CR 205.3m scope).
+/// One Bear + a changeling (DB {Bear, Elf, Borg}) → 1 damage: the Bear
+/// contributes 1 type, the Vandal contributes 0.
 #[test]
-fn saavik_counts_changeling_types() {
+fn saavik_excludes_changelings_as_borg() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let saavik = scenario
@@ -305,8 +307,10 @@ fn saavik_counts_changeling_types() {
         .with_keyword(Keyword::Changeling);
     let victim = scenario.add_creature(P1, "Attacking Goblin", 3, 3).id();
     let mut runner = scenario.build();
-    // DB without Borg: the changeling ({Bear, Elf}) is non-Borg → included.
-    runner.state_mut().all_creature_types = vec!["Bear".to_string(), "Elf".to_string()];
+    // DB WITH Borg (production vocabulary always includes it): the changeling
+    // matches Borg → excluded by Non(Subtype("Borg")) → contributes 0.
+    runner.state_mut().all_creature_types =
+        vec!["Bear".to_string(), "Elf".to_string(), "Borg".to_string()];
     runner
         .state_mut()
         .combat
@@ -317,8 +321,8 @@ fn saavik_counts_changeling_types() {
     let outcome = runner.cast(saavik).target_object(victim).resolve();
     assert_eq!(
         outcome.state().objects[&victim].damage_marked,
-        2,
-        "changeling adds Elf to the count (no Ooze-style rider)"
+        1,
+        "changeling is Borg → excluded; Bear alone contributes 1"
     );
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
