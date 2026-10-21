@@ -257,6 +257,63 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
         _ => {}
     }
     match waiting {
+        WaitingFor::RevealChoice { filter, .. }
+        | WaitingFor::DamageSourceChoice {
+            source_filter: filter,
+            ..
+        } => filter.clear_typed_return_result_processes(&mut |_| {}),
+        WaitingFor::DiscardChoice {
+            unless_filter: Some(filter),
+            ..
+        }
+        | WaitingFor::WardDiscardChoice {
+            filter: Some(filter),
+            ..
+        } => filter.clear_typed_return_result_processes(&mut |_| {}),
+        WaitingFor::EffectZoneChoice {
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } => {
+            for (filter, _, count) in conditional_enter_with_counters {
+                filter.clear_typed_return_result_processes(&mut |_| {});
+                count.clear_typed_return_result_processes(&mut |_| {});
+            }
+            if let Some(filter) = enters_modified_if {
+                filter.clear_typed_return_result_processes(&mut |_| {});
+            }
+        }
+        WaitingFor::CategoryChoice {
+            choose_filter,
+            sacrifice_filter,
+            ..
+        }
+        | WaitingFor::KeepWithinTotalPowerChoice {
+            choose_filter,
+            sacrifice_filter,
+            ..
+        }
+        | WaitingFor::KeepExactPermanentsChoice {
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } => {
+            choose_filter.clear_typed_return_result_processes(&mut |_| {});
+            sacrifice_filter.clear_typed_return_result_processes(&mut |_| {});
+        }
+        WaitingFor::EachPlayerCopyChosenSelection {
+            choose_filter,
+            copy_modifications,
+            ..
+        } => {
+            choose_filter.clear_typed_return_result_processes(&mut |_| {});
+            for modification in copy_modifications {
+                modification.clear_embedded_return_result_processes();
+            }
+        }
+        _ => {}
+    }
+    match waiting {
         WaitingFor::ChooseOneOfBranch { branches, .. } => {
             for branch in branches {
                 branch.clear_embedded_return_result_processes();
@@ -304,6 +361,33 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
         } => {
             for modification in &mut enters_with_modifications.modifications {
                 modification.clear_embedded_return_result_processes();
+            }
+            if let Some(filter) = &mut enters_with_modifications.cast_filter {
+                filter.clear_typed_return_result_processes(&mut |_| {});
+            }
+        }
+        WaitingFor::NamedChoice {
+            choice_type: crate::types::ability::ChoiceType::Keyword { options },
+            ..
+        }
+        | WaitingFor::OpponentGuess {
+            choice_type: crate::types::ability::ChoiceType::Keyword { options },
+            ..
+        } => {
+            for keyword in options {
+                keyword.clear_embedded_return_result_processes();
+            }
+        }
+        WaitingFor::AbilityModeChoice {
+            ability_cost,
+            activation_cost_snapshot,
+            ..
+        } => {
+            if let Some(cost) = ability_cost {
+                cost.clear_embedded_return_result_processes();
+            }
+            if let Some(snapshot) = activation_cost_snapshot {
+                snapshot.base_cost.clear_embedded_return_result_processes();
             }
         }
         WaitingFor::UnlessPayment { cost, .. } => cost.clear_embedded_return_result_processes(),
@@ -4169,6 +4253,21 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
                 redact_record_payment(record, hidden_ids);
             }
         }
+        GameEvent::AbilityActivated {
+            departed_source_lki: Some(lki),
+            ..
+        } => lki.clear_embedded_return_result_processes(),
+        GameEvent::CreatureEnlisted {
+            tapped_snapshot, ..
+        } => tapped_snapshot.lki.clear_embedded_return_result_processes(),
+        GameEvent::EffectResolved {
+            subject: Some(subject),
+            ..
+        } => {
+            for keyword in &mut subject.keywords {
+                keyword.clear_embedded_return_result_processes();
+            }
+        }
         GameEvent::SagaChapterAbilityResolved {
             saga,
             controller: _,
@@ -4245,7 +4344,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// (cleared for every viewer); `created_tokens_this_turn` records carry no linked-exile
 /// vector by construction.
 ///
-/// Out of scope: the `cast_cost_paid_object` family (`GameObject`, `TriggerSourceContext`,
+/// Outside this hidden-identity payment census (its embedded private result
+/// authority is cleared separately below): the `cast_cost_paid_object` family (`GameObject`, `TriggerSourceContext`,
 /// `PendingManaAbility.cost_paid_object`, `SpellContext.cost_paid_object(s)`/
 /// `effect_context_object`/`amassed_army_object`), a different payload
 /// (`CostPaidObjectSnapshot`) and writer set; event carriers outside the loops above;
@@ -4259,6 +4359,7 @@ fn redact_payment_source_snapshots(
 ) {
     for snapshot in snapshots.iter_mut() {
         let crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki } = snapshot;
+        lki.clear_embedded_return_result_processes();
         if hidden_ids.contains(source_id) {
             redact_lki_snapshot(lki);
         }
@@ -4296,6 +4397,13 @@ fn redact_source_context_hidden_members(
     for entry in &mut context.trigger_entries {
         redact_raw_result_trigger(&mut entry.definition);
     }
+    context.lki.clear_embedded_return_result_processes();
+    for keyword in &mut context.cast_spell_keywords {
+        keyword.clear_embedded_return_result_processes();
+    }
+    if let Some(snapshot) = &mut context.cast_cost_paid_object {
+        snapshot.lki.clear_embedded_return_result_processes();
+    }
     redact_payment_source_snapshots(&mut context.mana_spent_source_snapshots, hidden_ids);
     redact_linked_exile_members(&mut context.linked_exile_snapshot, hidden_ids);
 }
@@ -4318,6 +4426,12 @@ fn redact_record_payment(
     record: &mut crate::types::game_state::ZoneChangeRecord,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    for keyword in &mut record.keywords {
+        keyword.clear_embedded_return_result_processes();
+    }
+    for entry in &mut record.trigger_definitions {
+        redact_raw_result_trigger(&mut entry.definition);
+    }
     redact_linked_exile_members(&mut record.linked_exile_snapshot, hidden_ids);
     if let Some(context) = record.trigger_source_context.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
@@ -4382,15 +4496,32 @@ fn redact_pending_cast_payment(
     hidden_ids: &HashSet<ObjectId>,
 ) {
     redact_ability_payment(&mut pending.ability, hidden_ids);
+    if let Some(snapshot) = &mut pending.activation_cost_snapshot {
+        snapshot.base_cost.clear_embedded_return_result_processes();
+    }
+    for cost in [
+        &mut pending.activation_cost,
+        &mut pending.deferred_required_additional_cost,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        cost.clear_embedded_return_result_processes();
+    }
 }
 
-/// A paused mana ability keeps the ability it pays for in its resume cursors. Its
-/// `cost_paid_object` is the out-of-scope `CostPaidObjectSnapshot` sibling (see
-/// `redact_payment_source_snapshots`).
+/// A paused mana ability keeps its definition and cost-paid source snapshot,
+/// along with the ability it pays for in its resume cursors.
 fn redact_pending_mana_ability_payment(
     pending: &mut crate::types::game_state::PendingManaAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    if let Some(definition) = &mut pending.ability_snapshot {
+        definition.clear_embedded_return_result_processes();
+    }
+    if let Some(snapshot) = &mut pending.cost_paid_object {
+        snapshot.lki.clear_embedded_return_result_processes();
+    }
     redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
     if let Some(resume) = pending.cost_move_resume.as_mut() {
         redact_mana_ability_resume_payment(resume, hidden_ids);
@@ -4585,14 +4716,124 @@ fn redact_raw_result_copiable(values: &mut crate::types::ability::CopiableValues
 }
 
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    // Public retained copies have their own typed custody, independent of the
+    // live object's definition and of hidden-identity removal.
+    for player in &mut state.players {
+        for attribute in &mut player.chosen_attributes {
+            attribute.clear_embedded_return_result_processes();
+        }
+        // Use the existing ordered unit projection; colors, grants, source facts
+        // and pip ids remain intact. Authoritative pool storage is untouched.
+        player.mana_pool = crate::types::mana::ManaPool::from_units(
+            player
+                .mana_pool
+                .units()
+                .map(|mut unit| {
+                    for grant in &mut unit.grants {
+                        grant.clear_embedded_return_result_processes();
+                    }
+                    unit
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    if let Some(choice) = &mut state.last_named_choice {
+        choice.clear_embedded_return_result_processes();
+    }
+    for pending in &mut state.pending_next_spell_modifiers {
+        pending.modifier.clear_embedded_return_result_processes();
+        if let Some(filter) = &mut pending.spell_filter {
+            filter.clear_typed_return_result_processes(&mut |_| {});
+        }
+    }
+    for (_, snapshot) in state.lki_cache.iter_mut() {
+        snapshot.clear_embedded_return_result_processes();
+    }
+    for (_, versions) in state.lki_by_incarnation.iter_mut() {
+        for (_, snapshot) in versions.iter_mut() {
+            snapshot.clear_embedded_return_result_processes();
+        }
+    }
+    for records in state
+        .spells_cast_this_turn_by_player
+        .values_mut()
+        .chain(state.spells_cast_this_game_by_player.values_mut())
+    {
+        for record in records.iter_mut() {
+            for keyword in &mut record.keywords {
+                keyword.clear_embedded_return_result_processes();
+            }
+        }
+    }
+    for record in state
+        .zone_changes_this_turn
+        .iter_mut()
+        .chain(state.sacrificed_permanents_this_turn.iter_mut())
+        .chain(state.created_tokens_this_turn.iter_mut())
+    {
+        redact_record_payment(record, hidden_ids);
+    }
+    for record in state.battlefield_entries_this_turn.iter_mut() {
+        for keyword in &mut record.keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+    }
+    for record in state.damage_dealt_this_turn.iter_mut() {
+        for keyword in &mut record.source_keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+    }
+    for record in state.counter_added_this_turn.iter_mut() {
+        for keyword in &mut record.keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+    }
+    for record in state.attacker_declarations_this_turn.iter_mut() {
+        record.lki.clear_embedded_return_result_processes();
+    }
+    if let Some(filter) = &mut state.current_combat_attacker_restriction {
+        filter.clear_typed_return_result_processes(&mut |_| {});
+    }
+    if let Some(choice) = &mut state.last_chosen_damage_source {
+        choice
+            .source_filter
+            .clear_typed_return_result_processes(&mut |_| {});
+    }
+    for phase in &mut state.extra_phases {
+        if let Some(filter) = &mut phase.attacker_restriction {
+            filter.clear_typed_return_result_processes(&mut |_| {});
+        }
+    }
+    for reduction in &mut state.pending_spell_cost_reductions {
+        if let Some(filter) = &mut reduction.spell_filter {
+            filter.clear_typed_return_result_processes(&mut |_| {});
+        }
+    }
     // Canonical templates and retained continuous grants can contain raw snapshots.
     // Clear only the projected typed payload; authoritative saves retain their stamps.
     for effect in &mut state.transient_continuous_effects {
+        effect
+            .affected
+            .clear_typed_return_result_processes(&mut |_| {});
+        effect.duration.clear_embedded_return_result_processes();
+        if let Some(condition) = &mut effect.condition {
+            condition.clear_embedded_return_result_processes();
+        }
+        if let Some(context) = &mut effect.duration_event_source {
+            context.clear_embedded_return_result_processes();
+        }
         for modification in &mut effect.modifications {
             modification.clear_embedded_return_result_processes();
         }
     }
     for (_, object) in state.objects.iter_mut() {
+        for attribute in &mut object.chosen_attributes {
+            attribute.clear_embedded_return_result_processes();
+        }
+        if let Some(snapshot) = &mut object.cast_cost_paid_object {
+            snapshot.lki.clear_embedded_return_result_processes();
+        }
+        redact_payment_source_snapshots(&mut object.mana_spent_source_snapshots, hidden_ids);
         for keyword in object
             .keywords
             .iter_mut()
@@ -8004,6 +8245,129 @@ mod tests {
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn departure_typed_paused_cost_and_mana_source_snapshots_clear_only_private_result_authority() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReturnResultId};
+        use crate::types::casting_costs::{
+            ActivationCostLock, ActivationCostLockPoint, ActivationCostSnapshot, ManaCarrier,
+        };
+        use crate::types::game_state::ReturnResultProcessId;
+        use crate::types::keywords::Keyword;
+        // Typed custody supplement, not a claim that this helper emitted a prompt.
+        let effect = serde_json::from_value(serde_json::json!({
+            "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"
+        }))
+        .unwrap();
+        let mut definition = AbilityDefinition::new(AbilityKind::Spell, effect);
+        definition.declares_return_result = Some(ReturnResultId(11));
+        let mut snapshot = crate::game::ability_utils::build_resolved_from_def(
+            &definition,
+            ObjectId(10),
+            PlayerId(0),
+        );
+        snapshot.return_result_process = Some(ReturnResultProcessId(901));
+        let cost = AbilityCost::EffectCost {
+            effect: Box::new(Effect::EpicCopy {
+                spell: Box::new(snapshot),
+            }),
+        };
+        let mut pending = dummy_pending_cast(ObjectId(10), CardId(1), PlayerId(0));
+        pending.activation_cost = Some(cost.clone());
+        pending.deferred_required_additional_cost = Some(cost.clone());
+        pending.activation_cost_snapshot = Some(Box::new(ActivationCostSnapshot {
+            base_cost: cost.clone(),
+            raise_total: 2,
+            reductions: vec![],
+            mana_carrier: ManaCarrier::Whole,
+            settlement_tail: None,
+            lock: ActivationCostLock::Open {
+                point: ActivationCostLockPoint::Announcement,
+            },
+        }));
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Public retained source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::CumulativeUpkeep(cost.clone()));
+        let mut mana = dummy_pending_mana_ability(PlayerId(0), source);
+        // Keep a complete ordinary definition with the private body in its printed cost.
+        mana.ability_snapshot = Some(AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp));
+        mana.ability_snapshot.as_mut().unwrap().cost = Some(cost.clone());
+        mana.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: source,
+            lki: state.objects[&source].snapshot_for_mana_spent(),
+            incarnation: 0,
+        });
+        let original = serde_json::to_value((&pending, &mana)).unwrap();
+        assert!(original
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        redact_pending_cast_payment(&mut pending, &HashSet::new());
+        redact_pending_mana_ability_payment(&mut mana, &HashSet::new());
+        let public = serde_json::to_value((&pending, &mana)).unwrap();
+        assert!(!public.to_string().contains("return_result_process"));
+        assert_eq!(
+            public.to_string().matches("EpicCopy").count(),
+            original.to_string().matches("EpicCopy").count()
+        );
+        assert_eq!(
+            pending
+                .activation_cost_snapshot
+                .as_ref()
+                .unwrap()
+                .raise_total,
+            2
+        );
+        assert_eq!(mana.cost_paid_object.as_ref().unwrap().object_id, source);
+        assert_eq!(
+            mana.cost_paid_object.as_ref().unwrap().lki.name,
+            "Public retained source"
+        );
+        assert!(serde_json::to_string(&cost)
+            .unwrap()
+            .contains("\"return_result_process\":901"));
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(0),
+            choice_type: crate::types::ability::ChoiceType::Keyword {
+                options: vec![Keyword::CumulativeUpkeep(cost)],
+            },
+            options: vec!["Public keyword option".into()],
+            source: None,
+            persist_player: None,
+        };
+        let authoritative = serde_json::to_value(&state).unwrap();
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projected = match viewer {
+                Some(seat) => filter_state_for_viewer(&state, seat),
+                None => filter_state_for_unseated_viewer(&state),
+            };
+            let plain = serde_json::to_value(&projected).unwrap();
+            let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+                &state, viewer,
+            ))
+            .unwrap();
+            for public in [&plain, &wire] {
+                assert!(!public.to_string().contains("return_result_process"));
+                assert!(public.to_string().contains("Public keyword option"));
+                assert_eq!(
+                    public.to_string().matches("EpicCopy").count(),
+                    authoritative.to_string().matches("EpicCopy").count()
+                );
+            }
+        }
+        assert_eq!(serde_json::to_value(&state).unwrap(), authoritative);
     }
 
     #[test]

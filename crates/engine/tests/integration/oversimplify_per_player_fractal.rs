@@ -12243,7 +12243,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
     use engine::types::ability::*;
     use engine::types::replacements::ReplacementEvent;
     use engine::types::triggers::TriggerMode;
-    for arm in 0..5 {
+    for arm in 0..7 {
         for mode in [0, 2] {
             let (mut runner, spell, subjects) =
                 departure_public_program_runner(false, false, 2, |scenario| {
@@ -12287,6 +12287,18 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                             printed_ref: None,
                             token_image_ref: None,
                             token_art: None,
+                        },
+                        5 => ContinuousModification::RemoveKeyword {
+                            keyword: engine::types::keywords::Keyword::CumulativeUpkeep(
+                                departure_independent_epic_cost(mode),
+                            ),
+                        },
+                        6 => ContinuousModification::AddStaticMode {
+                            mode: StaticMode::CastWithAlternativeCost {
+                                cost: departure_independent_epic_cost(mode),
+                                timing_permission: None,
+                                frequency: Default::default(),
+                            },
                         },
                         _ => unreachable!(),
                     };
@@ -12607,4 +12619,688 @@ fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_epi
         assert!(wire.to_string().contains("EpicCopy"));
     }
     assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+}
+
+#[test]
+fn departure_stateless_spell_history_thresholds_refuse_before_production_and_keep_matching_fixed_twins(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    for owner in 0..5 {
+        for recursive in [false, true] {
+            for addressed in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+                let victims = vec![
+                    scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                ];
+                let prior = scenario
+                    .add_spell_to_hand(P0, "Supplemental matching earlier cast", true)
+                    .with_mana_cost(ManaCost::generic(5))
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    ))
+                    .id();
+                let Effect::GainLife {
+                    amount: captured, ..
+                } = *departure_gain_definition(7, P0).effect
+                else {
+                    unreachable!()
+                };
+                let threshold = if addressed {
+                    if recursive {
+                        QuantityExpr::Sum {
+                            exprs: vec![
+                                QuantityExpr::Fixed { value: 0 },
+                                QuantityExpr::Offset {
+                                    inner: Box::new(captured),
+                                    offset: 0,
+                                },
+                            ],
+                        }
+                    } else {
+                        captured
+                    }
+                } else {
+                    QuantityExpr::Fixed { value: 5 }
+                };
+                let mut property = FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: threshold,
+                };
+                if recursive {
+                    property = FilterProp::Not {
+                        prop: Box::new(FilterProp::Not {
+                            prop: Box::new(FilterProp::AnyOf {
+                                props: vec![property],
+                            }),
+                        }),
+                    };
+                }
+                let mut typed = TypedFilter::new(TypeFilter::Instant);
+                typed.properties.push(property);
+                let mut filter = TargetFilter::Typed(typed);
+                if recursive {
+                    filter = TargetFilter::And {
+                        filters: vec![TargetFilter::Or {
+                            filters: vec![TargetFilter::Not {
+                                filter: Box::new(TargetFilter::Not {
+                                    filter: Box::new(filter),
+                                }),
+                            }],
+                        }],
+                    };
+                }
+                if owner == 2 {
+                    filter = TargetFilter::with_own_cast_exclusion(Some(filter));
+                }
+                let reference = match owner {
+                    0 => {
+                        let journal = CardTypeSetSource::TurnJournal {
+                            journal: TurnJournalKind::SpellsCast,
+                            scope: CountScope::Controller,
+                            filter: Some(filter),
+                        };
+                        QuantityRef::DistinctCardTypes {
+                            source: if recursive {
+                                CardTypeSetSource::any_of(vec![journal.clone(), journal]).unwrap()
+                            } else {
+                                journal
+                            },
+                        }
+                    }
+                    1 | 2 => QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                    3 => QuantityRef::SpellsCastBeforeTriggeringSpell {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                    4 => QuantityRef::SpellsCastThisGame {
+                        scope: CountScope::Controller,
+                        filter: Some(filter),
+                    },
+                    _ => unreachable!(),
+                };
+                let mut amount = QuantityExpr::Ref { qty: reference };
+                if recursive {
+                    amount = QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Sum {
+                            exprs: vec![QuantityExpr::Fixed { value: 0 }, amount],
+                        }),
+                        offset: 0,
+                    };
+                }
+                let mut root = departure_exile_definition(7);
+                let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                    unreachable!()
+                };
+                *target = TargetFilter::Or {
+                    filters: victims
+                        .iter()
+                        .map(|id| TargetFilter::SpecificObject { id: *id })
+                        .collect(),
+                };
+                root.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount,
+                    },
+                )));
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Supplemental history root", false)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .with_ability_definition(if owner == 3 {
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+                    } else {
+                        root.clone()
+                    })
+                    .id();
+                if owner == 3 {
+                    // A real SpellCast event supplies the before-trigger boundary.
+                    let mut trigger =
+                        TriggerDefinition::new(engine::types::triggers::TriggerMode::SpellCast)
+                            .execute(root.clone());
+                    let mut current = TypedFilter::new(TypeFilter::Sorcery);
+                    current.properties.push(FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    });
+                    trigger.valid_card = Some(TargetFilter::Typed(current));
+                    scenario
+                        .add_artifact(P0, "Supplemental history trigger")
+                        .with_trigger_definition(trigger);
+                }
+                scenario.with_mana_pool(
+                    P0,
+                    (0..6)
+                        .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                        .collect(),
+                );
+                let mut runner = scenario.build();
+                runner.cast(prior).resolve();
+                assert_eq!(runner.state().objects[&prior].zone, Zone::Graveyard);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+                assert!(runner.state().spells_cast_this_turn_by_player[&P0]
+                    .iter()
+                    .any(|record| record.spell_object_id == Some(prior) && record.mana_value == 5));
+                assert!(runner.state().spells_cast_this_game_by_player[&P0]
+                    .iter()
+                    .any(|record| record.spell_object_id == Some(prior) && record.mana_value == 5));
+                if addressed {
+                    let mut state = runner.state().clone();
+                    let before = serde_json::to_value(&state).unwrap();
+                    let mut events = vec![];
+                    let error = resolve_ability_chain(
+                        &mut state,
+                        &build_resolved_from_def(&root, spell, P0),
+                        &mut events,
+                    )
+                    .unwrap_err();
+                    assert!(
+                        format!("{error:?}").contains("executable context"),
+                        "history owner {owner}: {error:?}"
+                    );
+                    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                    assert!(events.is_empty());
+                }
+                runner.cast(spell).resolve();
+                assert_eq!(
+                    runner.state().players[0].mana_pool.total(),
+                    0,
+                    "public cast pays its real cost before resolution admission"
+                );
+                for victim in &victims {
+                    assert_eq!(
+                        runner.state().objects[victim].zone,
+                        if addressed {
+                            Zone::Battlefield
+                        } else {
+                            Zone::Exile
+                        }
+                    );
+                }
+                if addressed {
+                    assert_eq!(runner.state().next_return_result_process_id, 1);
+                }
+                departure_assert_program_complete(&runner, spell, if addressed { 0 } else { 1 }, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_its_complete_independent_body(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{ReturnResultProcessId, WaitingFor};
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    for imported in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let victims = vec![
+            scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+        ];
+        let recipient = scenario
+            .add_artifact(P0, "Supplemental perpetual recipient")
+            .id();
+        let mut body = if imported {
+            departure_gain_definition(7, P0)
+        } else {
+            let mut snapshot =
+                build_resolved_from_def(&departure_selected_local_body(true, false), recipient, P0);
+            snapshot.return_result_process = Some(ReturnResultProcessId(901));
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::EpicCopy {
+                    spell: Box::new(snapshot),
+                },
+            )
+        };
+        body.kind = AbilityKind::Activated;
+        let mut root = departure_exile_definition(7);
+        let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+            unreachable!()
+        };
+        *target = TargetFilter::Or {
+            filters: victims
+                .iter()
+                .map(|id| TargetFilter::SpecificObject { id: *id })
+                .collect(),
+        };
+        root.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::SpecificObject { id: recipient },
+                modification: PerpetualModification::GrantAbility {
+                    modifications: vec![PerpetualGrantModification::GrantAbility {
+                        definition: Box::new(body.clone()),
+                    }],
+                },
+            },
+        )));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Supplemental perpetual installer", false)
+            .with_mana_cost(ManaCost::generic(1))
+            .with_ability_definition(root.clone())
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+        );
+        let mut runner = scenario.build();
+        if imported {
+            let mut state = runner.state().clone();
+            let before = serde_json::to_value(&state).unwrap();
+            let mut events = vec![];
+            let error = resolve_ability_chain(
+                &mut state,
+                &build_resolved_from_def(&root, spell, P0),
+                &mut events,
+            )
+            .unwrap_err();
+            assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert!(events.is_empty());
+        }
+        runner.cast(spell).resolve();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        let object = &runner.state().objects[&recipient];
+        if imported {
+            for victim in victims {
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+            }
+            assert!(object.perpetual_mods.is_empty());
+            assert!(object.abilities.is_empty());
+            assert!(object.base_abilities.is_empty());
+            assert_eq!(runner.state().next_return_result_process_id, 1);
+            continue;
+        }
+        for victim in victims {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+        }
+        assert_eq!(object.abilities.len(), 1);
+        assert_eq!(object.base_abilities.len(), 1);
+        assert_eq!(object.perpetual_mods.len(), 1);
+        assert_eq!(object.abilities[0], body);
+        assert_eq!(object.base_abilities[0], body);
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        assert!(saved["objects"]
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        departure_assert_private_result_views(runner.state());
+        let next_process = runner.state().next_return_result_process_id;
+        runner.activate(recipient, 0).resolve();
+        let WaitingFor::ChooseOneOfBranch {
+            player,
+            branches,
+            expected_return_result_process,
+            return_result_occurrence,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("public activation and the real Epic copy reach the local R11 reader choice")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(branches.len(), 2);
+        let process = expected_return_result_process.unwrap();
+        assert_ne!(process, ReturnResultProcessId(901));
+        assert!(process.0 >= next_process);
+        assert_eq!(
+            runner.state().return_result_frames[&return_result_occurrence.unwrap()].process,
+            Some(process)
+        );
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        departure_assert_private_result_views(runner.state());
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        departure_assert_program_complete(&runner, spell, 3, 0);
+        assert_eq!(runner.state().objects[&recipient].abilities.len(), 1);
+        assert_eq!(runner.state().objects[&recipient].base_abilities.len(), 1);
+    }
+}
+
+#[test]
+fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_views_redact_private_bodies(
+) {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaColor, ManaCost, ManaSpellGrant, ManaType};
+    let (mut runner, spell, subjects) =
+        departure_public_program_runner(false, false, 2, |scenario| {
+            let marker = scenario
+                .add_spell_to_hand(P0, "Supplemental usable grant-bearing mana", false)
+                .with_mana_cost(ManaCost::generic(2))
+                .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
+                .id();
+            let keyword = Keyword::CumulativeUpkeep(departure_independent_epic_cost(0));
+            let filter = TargetFilter::Typed({
+                let mut typed = TypedFilter::default();
+                typed.properties.push(FilterProp::WithKeyword {
+                    value: keyword.clone(),
+                });
+                typed
+            });
+            let grants = vec![
+                ManaSpellGrant::CantBeCountered {
+                    filter: filter.clone(),
+                },
+                ManaSpellGrant::EntersWithCounters {
+                    filter,
+                    counter_type: engine::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                    keyword,
+                    restriction: None,
+                    duration: Box::new(Duration::UntilEndOfTurn),
+                },
+                ManaSpellGrant::TriggerOnSpend {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                    ability: Box::new(departure_retained_epic_definition(0)),
+                },
+            ];
+            (
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green, ManaColor::Blue],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants,
+                        expiry: None,
+                        target: None,
+                    },
+                ),
+                vec![marker],
+            )
+        });
+    departure_assert_program_complete(&runner, spell, 0, 0);
+    let units: Vec<_> = runner.state().players[0].mana_pool.units().collect();
+    assert_eq!(units.len(), 2);
+    assert_eq!(
+        units.iter().map(|unit| unit.color).collect::<Vec<_>>(),
+        vec![ManaType::Green, ManaType::Blue]
+    );
+    assert!(units
+        .iter()
+        .all(|unit| unit.grants.len() == 4 && unit.source_id == spell && unit.pip_id.0 != 0));
+    assert_ne!(units[0].pip_id, units[1].pip_id);
+    assert!(
+        serde_json::to_string(&units)
+            .unwrap()
+            .contains("\"return_result_process\":901"),
+        "actual production copied the independent snapshots into real pool units"
+    );
+    let authoritative = serde_json::to_value(runner.state()).unwrap();
+    *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+        let projected = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
+        let public_units: Vec<_> = projected.players[0].mana_pool.units().collect();
+        assert_eq!(public_units.len(), units.len());
+        for (before, after) in units.iter().zip(&public_units) {
+            assert_eq!(before.pip_id, after.pip_id);
+            assert_eq!(before.color, after.color);
+            assert_eq!(before.source_id, after.source_id);
+            assert_eq!(before.grants.len(), after.grants.len());
+            assert_eq!(
+                serde_json::to_value(&before.restrictions).unwrap(),
+                serde_json::to_value(&after.restrictions).unwrap()
+            );
+            assert!(!serde_json::to_string(&after.grants)
+                .unwrap()
+                .contains("return_result_process"));
+        }
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(runner.state(), viewer)).unwrap();
+        let plain = serde_json::to_value(&projected).unwrap();
+        assert_eq!(
+            wire["state"]["players"][0]["mana_pool"],
+            plain["players"][0]["mana_pool"]
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(runner.state()).unwrap(),
+        authoritative,
+        "six projections preserve authoritative grant snapshots before any copy clearing"
+    );
+    runner.cast(subjects[0]).resolve();
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the two actual retained grant-bearing units pay the real next spell cost"
+    );
+    assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Graveyard);
+    departure_assert_program_complete(&runner, spell, 0, 0);
+}
+
+#[test]
+fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_without_private_processes(
+) {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::{
+        AttackDeclarationRecord, BattlefieldEntryRecord, CounterAddedRecord, NextSpellModifier,
+        PendingNextSpellModifier,
+    };
+    use engine::types::identifiers::ObjectId;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    let keyword = Keyword::CumulativeUpkeep(departure_independent_epic_cost(0));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let public_source = scenario
+        .add_artifact(P0, "Supplemental public record source")
+        .with_keyword(keyword.clone())
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Supplemental actual keyword history producer", true)
+        .with_keyword(keyword.clone())
+        .with_mana_cost(ManaCost::generic(1))
+        .with_ability_definition(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+                excess: None,
+            },
+        ))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    departure_assert_program_complete(&runner, spell, -1, 0);
+    assert!(runner.state().spells_cast_this_turn_by_player[&P0]
+        .iter()
+        .any(|record| record.spell_object_id == Some(spell) && record.keywords.contains(&keyword)));
+    assert!(runner.state().spells_cast_this_game_by_player[&P0]
+        .iter()
+        .any(|record| record.spell_object_id == Some(spell) && record.keywords.contains(&keyword)));
+    assert!(runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .any(|record| record.source_id == spell && record.source_keywords.contains(&keyword)));
+    assert!(runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .any(|record| record.object_id == spell && record.keywords.contains(&keyword)));
+    // These remaining roots are explicit typed custody supplements. The above
+    // public cast/damage/zone pipelines are the actual emission witnesses.
+    let object = runner.state_mut().objects.get_mut(&public_source).unwrap();
+    object
+        .chosen_attributes
+        .push(ChosenAttribute::Keyword(keyword.clone()));
+    object.cast_spell_keywords.push(keyword.clone());
+    let snapshot = object.snapshot_for_mana_spent();
+    let record =
+        object.snapshot_for_zone_change(public_source, Some(Zone::Battlefield), Zone::Exile);
+    let incarnation = object.incarnation;
+    object.cast_cost_paid_object = Some(CostPaidObjectSnapshot::capture(object, snapshot.clone()));
+    runner.state_mut().players[0]
+        .chosen_attributes
+        .push(ChosenAttribute::Keyword(keyword.clone()));
+    runner.state_mut().last_named_choice = Some(ChoiceValue::Keyword(keyword.clone()));
+    runner
+        .state_mut()
+        .pending_next_spell_modifiers
+        .push(PendingNextSpellModifier {
+            player: P0,
+            modifier: NextSpellModifier::HasKeyword {
+                keyword: keyword.clone(),
+            },
+            spell_filter: None,
+            source_id: Some(public_source),
+        });
+    runner
+        .state_mut()
+        .lki_cache
+        .insert(public_source, snapshot.clone());
+    runner
+        .state_mut()
+        .lki_by_incarnation
+        .entry(public_source)
+        .or_default()
+        .insert(incarnation, snapshot.clone());
+    runner
+        .state_mut()
+        .zone_changes_this_turn
+        .push_back(record.clone());
+    runner
+        .state_mut()
+        .sacrificed_permanents_this_turn
+        .push_back(record.clone());
+    runner
+        .state_mut()
+        .created_tokens_this_turn
+        .push_back(record);
+    runner
+        .state_mut()
+        .battlefield_entries_this_turn
+        .push_back(BattlefieldEntryRecord {
+            object_id: public_source,
+            name: snapshot.name.clone(),
+            core_types: snapshot.card_types.clone(),
+            subtypes: snapshot.subtypes.clone(),
+            supertypes: snapshot.supertypes.clone(),
+            colors: snapshot.colors.clone(),
+            keywords: vec![keyword.clone()],
+            controller: P0,
+        });
+    runner
+        .state_mut()
+        .counter_added_this_turn
+        .push_back(CounterAddedRecord {
+            actor: P0,
+            object_id: public_source,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            name: snapshot.name.clone(),
+            core_types: snapshot.card_types.clone(),
+            subtypes: snapshot.subtypes.clone(),
+            supertypes: snapshot.supertypes.clone(),
+            keywords: vec![keyword.clone()],
+            power: snapshot.power,
+            toughness: snapshot.toughness,
+            colors: snapshot.colors.clone(),
+            mana_value: snapshot.mana_value,
+            controller: P0,
+            owner: P0,
+            counters: Default::default(),
+        });
+    runner
+        .state_mut()
+        .attacker_declarations_this_turn
+        .push(AttackDeclarationRecord {
+            object_id: public_source,
+            incarnation: Some(incarnation),
+            lki: snapshot,
+            is_token: false,
+            is_commander: false,
+        });
+    let authoritative = serde_json::to_value(runner.state()).unwrap();
+    assert!(authoritative
+        .to_string()
+        .contains("\"return_result_process\":901"));
+    *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+        let projected = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
+        assert_eq!(
+            projected.objects[&public_source].name,
+            "Supplemental public record source"
+        );
+        assert_eq!(projected.objects[&public_source].zone, Zone::Battlefield);
+        assert_eq!(projected.objects[&public_source].keywords.len(), 1);
+        assert_eq!(projected.objects[&public_source].chosen_attributes.len(), 1);
+        assert_eq!(projected.players[0].chosen_attributes.len(), 1);
+        assert_eq!(projected.pending_next_spell_modifiers.len(), 1);
+        assert_eq!(
+            projected.lki_cache[&public_source].name,
+            "Supplemental public record source"
+        );
+        assert_eq!(
+            projected.lki_by_incarnation[&public_source][&incarnation]
+                .keywords
+                .len(),
+            1
+        );
+        for public in [
+            serde_json::to_value(&projected).unwrap(),
+            serde_json::to_value(ClientGameStateRef::wrap(runner.state(), viewer)).unwrap()
+                ["state"]
+                .clone(),
+        ] {
+            for field in [
+                "spells_cast_this_turn_by_player",
+                "spells_cast_this_game_by_player",
+                "zone_changes_this_turn",
+                "sacrificed_permanents_this_turn",
+                "created_tokens_this_turn",
+                "battlefield_entries_this_turn",
+                "damage_dealt_this_turn",
+                "counter_added_this_turn",
+                "attacker_declarations_this_turn",
+                "lki_cache",
+                "lki_by_incarnation",
+            ] {
+                assert_eq!(
+                    public[field].to_string().matches("EpicCopy").count(),
+                    authoritative[field].to_string().matches("EpicCopy").count(),
+                    "public record/keyword payload retained at {field}"
+                );
+            }
+        }
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+    departure_assert_program_complete(&runner, spell, -1, 0);
 }
