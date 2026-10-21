@@ -21,6 +21,11 @@ enabled = config.parse().get('enable', [])
 # real file before renaming into place; without this, every such temp file
 # restarts the watching resources mid-build.
 TMP_IGNORE = ['**/*.tmp.*']
+PROTOCOL_INPUTS = ['protocol/', 'scripts/protocol-versions.mjs']
+CLIENT_PROTOCOL_INPUTS = PROTOCOL_INPUTS + ['client/protocol-generation.ts',
+    'client/vite.config.ts', 'client/vitest.config.ts', 'client/vitest.integration.config.ts',
+    'client/package.json', 'scripts/check-protocol-version.mjs']
+CLIENT_GENERATED_IGNORE = TMP_IGNORE + ['client/src/generated/protocol-versions.ts']
 
 # probe-pin isolates through `unshare --map-root-user --mount` (util-linux) and runs its target
 # under `timeout` (GNU coreutils). macOS ships neither, and there is no Darwin equivalent of an
@@ -199,6 +204,10 @@ local_resource('tauri',
 SERVER_SRC = ENGINE_SRC + AI_SRC + [
     'crates/server-core/src/',
     'crates/phase-server/src/',
+    'crates/lobby-broker/src/',
+    'crates/lobby-broker/Cargo.toml',
+    'crates/lobby-broker/build.rs',
+    'protocol/',
 ]
 
 local_resource('server',
@@ -259,8 +268,8 @@ local_resource('test-ai',
 local_resource('test-frontend',
     cmd = 'pnpm test -- --run',
     dir = 'client',
-    deps = ['client/src/'],
-    ignore = TMP_IGNORE,
+    deps = ['client/src/'] + CLIENT_PROTOCOL_INPUTS,
+    ignore = CLIENT_GENERATED_IGNORE,
     resource_deps = ['wasm'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -288,7 +297,7 @@ local_resource('clippy',
     # List-form cmd: see the 'wasm' resource above for why (a STRING 'bash -c "..."'
     # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
     cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check'],
-    deps = ['crates/', 'scripts/check-interaction-bindings.sh'] + CLIENT_ENGINE_INPUTS,
+    deps = ['crates/', 'protocol/', 'scripts/check-interaction-bindings.sh'] + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,
@@ -298,8 +307,8 @@ local_resource('clippy',
 local_resource('check-frontend',
     cmd = 'pnpm run type-check && pnpm lint',
     dir = 'client',
-    deps = ['client/src/'],
-    ignore = TMP_IGNORE,
+    deps = ['client/src/'] + CLIENT_PROTOCOL_INPUTS,
+    ignore = CLIENT_GENERATED_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,
     labels = ['lint'],
@@ -346,13 +355,12 @@ local_resource('pnpm-preflight',
 local_resource('lobby-servers',
     cmd = 'bash scripts/lib/lobby_servers_tests.sh',
     # Every file the gate READS, not just the ones it tests: the delta
-    # computation greps protocol.rs and V-U8e greps the Helm chart, so editing
+    # computation reads the registry and V-U8e reads the Helm chart, so editing
     # the chart to drop "/info" must re-trigger this resource -- that reverse
     # direction is the whole point of the assertion.
     deps = ['scripts/lobby-servers.sh', 'scripts/lib/lobby_servers_tests.sh',
             'crates/lobby-broker/src/directory.rs',
-            'crates/lobby-broker/src/protocol.rs',
-            'deploy/helm/phase-server/templates/ingress.yaml'],
+            'deploy/helm/phase-server/templates/ingress.yaml'] + PROTOCOL_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,

@@ -301,6 +301,14 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects the immediately previous Full protocol and closes the socket", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION - 1 }));
+    await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v142 before it can read modal history keyed by incarnation", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -466,21 +474,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it.each([159, 160])("rejects Full v%s before it can read the EachColor protection set", async (version) => {
+  it("accepts the current Full protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: version }));
-
-    await expect(promise).rejects.toMatchObject({
-      kind: "protocol_mismatch",
-    });
-    expect(ws.close).toHaveBeenCalled();
-  });
-
-  it("accepts the literal Full v161 each-color protection set, merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 161 }));
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

@@ -20343,7 +20343,7 @@ mod handshake_tests {
 
     #[test]
     fn total_mana_value_choice_full_game_refuses_previous_and_accepts_current() {
-        // Independent literals discriminate a reverted version bump. A current
+        // Full admission requires the exact current version. A current
         // lobby version cannot rescue an incompatible full GameState reader.
         let classify = |protocol_version| {
             classify_hello_gate(
@@ -20358,19 +20358,71 @@ mod handshake_tests {
                 hello_acceptance(ServerMode::Full),
             )
         };
-        // Every earlier protocol version, including the bumps already on main
-        // (156, 157, 159), is refused by a v161 server.
-        for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160] {
-            assert_eq!(
-                classify(client),
-                HelloGateOutcome::RejectProtocol {
-                    client,
-                    server: 161
-                }
-            );
-        }
         assert_eq!(
-            classify(161),
+            classify(150),
+            HelloGateOutcome::RejectProtocol {
+                client: 150,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(151),
+            HelloGateOutcome::RejectProtocol {
+                client: 151,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(152),
+            HelloGateOutcome::RejectProtocol {
+                client: 152,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(153),
+            HelloGateOutcome::RejectProtocol {
+                client: 153,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(154),
+            HelloGateOutcome::RejectProtocol {
+                client: 154,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(155),
+            HelloGateOutcome::RejectProtocol {
+                client: 155,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(156),
+            HelloGateOutcome::RejectProtocol {
+                client: 156,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(157),
+            HelloGateOutcome::RejectProtocol {
+                client: 157,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(PROTOCOL_VERSION - 1),
+            HelloGateOutcome::RejectProtocol {
+                client: PROTOCOL_VERSION - 1,
+                server: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            classify(PROTOCOL_VERSION),
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "zone-choice-peer".into(),
                 build_commit: "zone-choice-build".into(),
