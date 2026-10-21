@@ -4,7 +4,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::{extract_source_from_event, resolve_effect_player_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, EffectError, EffectKind, PtValue, QuantityExpr,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetFilter, TokenAttackDestination,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -63,6 +63,7 @@ pub fn resolve(
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

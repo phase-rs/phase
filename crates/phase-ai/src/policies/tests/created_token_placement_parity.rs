@@ -65,6 +65,7 @@ pub(crate) fn token_effect(
     enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 ) -> Effect {
     Effect::Token {
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: "Fractal".to_string(),
         power: PtValue::Fixed(power),
         toughness: PtValue::Fixed(toughness),

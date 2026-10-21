@@ -817,6 +817,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
         } => {
@@ -824,7 +825,13 @@ fn apply_pending_counter_post_action(
             // replacement-processed counters finish, preserving attacking
             // placement and the normal token ETB events.
             if enters_attacking {
-                crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+                crate::game::combat::enter_attacking_at_destination(
+                    state,
+                    object_id,
+                    source_id,
+                    controller,
+                    &attack_destination,
+                );
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
@@ -890,6 +897,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
             remaining_modifications,
@@ -898,6 +906,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
             remaining_modifications,
@@ -8613,6 +8622,7 @@ mod tests {
                     source_id,
                     controller: PlayerId(0),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     attach_to: None,
                     sacrifice_at: None,
                     created_ids: Vec::new(),
@@ -8625,6 +8635,7 @@ mod tests {
                     object_id,
                     name: "Saproling".to_string(),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
                 },
@@ -8644,6 +8655,8 @@ mod tests {
                         object_id,
                         name: "Saproling".to_string(),
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::EntryAttackDestination::AnyDefender,
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
@@ -8901,6 +8914,7 @@ mod tests {
                     object_id,
                     name: "Copy Token".to_string(),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
                 },
@@ -8909,6 +8923,8 @@ mod tests {
                         object_id,
                         name: "Copy Token".to_string(),
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::EntryAttackDestination::AnyDefender,
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),

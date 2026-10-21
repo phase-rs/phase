@@ -32,6 +32,7 @@ use super::{
     casting, casting_costs, engine_priority, mana_abilities, payment_transaction, public_state,
     zone_pipeline,
 };
+use crate::types::proposed_event::TokenAttackRequest;
 
 /// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
 /// an instruction's announced targets. Result-dependent instructions bind the
@@ -3437,6 +3438,7 @@ pub(super) fn handle_resolution_choice(
                                         additional_modifications: vec![],
                                         tapped: true,
                                         enters_attacking: false,
+                                        attack_request: TokenAttackRequest::Unspecified,
                                         sacrifice_at: None,
                                         source_id: ObjectId(0),
                                         controller: player,

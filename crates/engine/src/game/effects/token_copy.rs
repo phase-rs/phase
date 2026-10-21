@@ -4,8 +4,9 @@ use crate::game::layers::{compute_current_copiable_values, remove_core_type, rem
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
-    ContinuousModification, CopiableValues, Effect, EffectError, EffectKind, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
+    ContinuousModification, CopiableValues, Effect, EffectError, EffectKind,
+    EntryAttackDestination, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition,
 };
 use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub fn resolve(
         owner_filter,
         source_filter,
         enters_attacking,
+        attack_destination,
         tapped,
         count_expr,
         extra_keywords,
@@ -57,6 +59,7 @@ pub fn resolve(
             owner,
             source_filter,
             enters_attacking,
+            attack_destination,
             tapped,
             count,
             extra_keywords,
@@ -66,6 +69,7 @@ pub fn resolve(
             owner,
             source_filter,
             *enters_attacking,
+            attack_destination,
             *tapped,
             count.clone(),
             extra_keywords.clone(),
@@ -73,9 +77,13 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
     };
-    // CR 107.3a + CR 601.2b: `count` may be the X announced while casting, which resolves from `ability.chosen_x`.
-    let count =
-        crate::game::quantity::resolve_quantity_with_targets(state, &count_expr, ability).max(0);
+    let (count, enters_attacking, attack_request) = super::token::resolve_token_batch(
+        state,
+        ability,
+        &count_expr,
+        enters_attacking,
+        attack_destination,
+    );
 
     // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
     // determined by the `owner` filter. Resolved once, before the creation
@@ -252,7 +260,7 @@ pub fn resolve(
     for source in copy_sources {
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
-            count: count as u32,
+            count,
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(source.values),
                 display_source: source.display_source,
@@ -266,6 +274,7 @@ pub fn resolve(
                 additional_modifications: additional_modifications.clone(),
                 tapped,
                 enters_attacking,
+                attack_request: attack_request.clone(),
                 sacrifice_at: ability.duration.clone(),
                 source_id: ability.source_id,
                 controller: ability.controller,
@@ -708,6 +717,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         additional_modifications,
         tapped,
         enters_attacking,
+        attack_request,
         sacrifice_at,
         source_id,
         controller,
@@ -758,6 +768,9 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     let all_creature_types = state.all_creature_types.clone();
 
     for index in 0..final_count {
+        // CR 508.4: this token's own destination, selected by its creation
+        // ordinal within the batch.
+        let attack_destination = attack_request.for_entrant(created_ids.len());
         if liminal_immediate {
             let (token_id, mut token) =
                 super::token::reserve_liminal_token_object(state, token_owner, name.clone());
@@ -773,6 +786,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 additional_modifications: additional_modifications.clone(),
                 tapped,
                 enters_attacking,
+                attack_request: attack_request.clone(),
                 sacrifice_at: sacrifice_at.clone(),
                 source_id,
                 controller,
@@ -809,6 +823,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     source_id,
                     controller,
                     enters_attacking,
+                    attack_destination: attack_destination.clone(),
                     attach_to: None,
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
@@ -903,6 +918,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             additional_modifications: additional_modifications.clone(),
             tapped,
             enters_attacking,
+            attack_request: attack_request.clone(),
             sacrifice_at: sacrifice_at.clone(),
             source_id,
             controller,
@@ -1011,13 +1027,19 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 .expect("resolved copy-token creation must have a live journal cause");
         }
 
+        // CR 508.4: the tail resumes the rest of the batch counting its own
+        // tokens from zero, so its request starts past the tokens created so
+        // far, this one included.
+        let mut resume_copy = copy_spec.clone();
+        resume_copy.attack_request = attack_request.after_entrants(created_ids.len() + 1);
         let tail = CopyTokenEntryTail {
             owner: token_owner,
-            copy: copy_spec.clone(),
+            copy: resume_copy,
             enter_tapped,
             enter_with_counters: enter_with_counters.clone(),
             etb_counters: etb_counters.clone(),
             remaining_count: final_count.saturating_sub(index + 1),
+            attack_destination: attack_destination.clone(),
         };
 
         match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
@@ -1146,6 +1168,7 @@ pub(crate) enum CopyTokenApplyCompletion {
 struct CopyTokenFinalization {
     name: String,
     enters_attacking: bool,
+    attack_destination: EntryAttackDestination,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
 }
@@ -1210,6 +1233,7 @@ fn finish_non_liminal_copy_token_entry(
     let etb_counters = &tail.etb_counters;
     let remaining_count = tail.remaining_count;
     let enters_attacking = copy_spec.enters_attacking;
+    let attack_destination = tail.attack_destination.clone();
     let source_id = copy_spec.source_id;
     let controller = copy_spec.controller;
     let additional_modifications = copy_spec.additional_modifications.clone();
@@ -1218,6 +1242,7 @@ fn finish_non_liminal_copy_token_entry(
     let finalization = CopyTokenFinalization {
         name: name.clone(),
         enters_attacking,
+        attack_destination: attack_destination.clone(),
         source_id,
         controller,
     };
@@ -1284,6 +1309,7 @@ fn finish_non_liminal_copy_token_entry(
                             object_id: token_id,
                             name: name.clone(),
                             enters_attacking,
+                            attack_destination: attack_destination.clone(),
                             source_id,
                             controller,
                         },
@@ -1303,7 +1329,13 @@ fn finish_non_liminal_copy_token_entry(
 
     // CR 508.4: Uses shared helper for defending player resolution.
     if enters_attacking {
-        crate::game::combat::enter_attacking(state, token_id, source_id, controller);
+        crate::game::combat::enter_attacking_at_destination(
+            state,
+            token_id,
+            source_id,
+            controller,
+            &attack_destination,
+        );
     }
 
     // CR 111.10: Predefined token abilities for known subtypes (Treasure, Food, etc.).
@@ -1403,6 +1435,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     token_id: ObjectId,
     name: String,
     enters_attacking: bool,
+    attack_destination: EntryAttackDestination,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     remaining_modifications: Vec<ContinuousModification>,
@@ -1411,6 +1444,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     let finalization = CopyTokenFinalization {
         name: name.clone(),
         enters_attacking,
+        attack_destination,
         source_id,
         controller,
     };
@@ -1425,7 +1459,13 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     }
     finalize_copied_token(state, source_id, token_id);
     if enters_attacking {
-        crate::game::combat::enter_attacking(state, token_id, source_id, controller);
+        crate::game::combat::enter_attacking_at_destination(
+            state,
+            token_id,
+            source_id,
+            controller,
+            &finalization.attack_destination,
+        );
     }
     super::token::inject_predefined_token_abilities(state, token_id);
     crate::game::layers::mark_layers_entered(state, token_id);
@@ -1557,6 +1597,7 @@ fn apply_token_modifications(
                                 object_id: token_id,
                                 name: finalization.name.clone(),
                                 enters_attacking: finalization.enters_attacking,
+                                attack_destination: finalization.attack_destination.clone(),
                                 source_id: finalization.source_id,
                                 controller: finalization.controller,
                                 remaining_modifications: modifications[index + 1..].to_vec(),
@@ -2004,6 +2045,456 @@ mod tests {
     use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::triggers::TriggerMode;
 
+    /// CR 508.4: a copy batch's tokens are seated at the destinations its
+    /// request lists, in creation order.
+    #[test]
+    fn copy_batch_is_seated_at_each_requested_destination_in_order() {
+        use crate::game::combat::{AttackTarget, CombatState};
+        use crate::types::proposed_event::TokenAttackRequest;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.combat = Some(CombatState::default());
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(2);
+            source.base_toughness = Some(2);
+            source.power = Some(2);
+            source.toughness = Some(2);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+        let values =
+            crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source_id]);
+        let copy = CopyTokenSpec {
+            values: Box::new(values),
+            display_source: DisplaySource::Token,
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+            tapped: true,
+            enters_attacking: true,
+            attack_request: TokenAttackRequest::Named {
+                first: PlayerId(1),
+                rest: vec![PlayerId(2)],
+            },
+            sacrifice_at: None,
+            source_id,
+            controller: PlayerId(0),
+        };
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::Tapped,
+            Vec::new(),
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            status.created_ids.len(),
+            2,
+            "reach guard: both copies were created"
+        );
+        let seats: Vec<Option<AttackTarget>> = status
+            .created_ids
+            .iter()
+            .map(|id| {
+                state
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == *id)
+                    .map(|a| a.attack_target)
+            })
+            .collect();
+        assert_eq!(
+            seats,
+            vec![
+                Some(AttackTarget::Player(PlayerId(1))),
+                Some(AttackTarget::Player(PlayerId(2)))
+            ]
+        );
+    }
+
+    /// The attack target each created token holds in `state.combat`, in id order.
+    fn seats_of_battlefield_tokens(
+        state: &GameState,
+    ) -> Vec<Option<crate::game::combat::AttackTarget>> {
+        let mut token_ids: Vec<ObjectId> = state
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.zone == Zone::Battlefield)
+            .map(|obj| obj.id)
+            .collect();
+        token_ids.sort();
+        token_ids
+            .iter()
+            .map(|id| {
+                state
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == *id)
+                    .map(|a| a.attack_target)
+            })
+            .collect()
+    }
+
+    /// A creature copy source for the attack-destination batch tests.
+    fn add_copy_source(state: &mut GameState, name: &str) -> ObjectId {
+        let source_id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.base_power = Some(2);
+        source.base_toughness = Some(2);
+        source.power = Some(2);
+        source.toughness = Some(2);
+        source.base_card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Bear".to_string()],
+        };
+        source.card_types = source.base_card_types.clone();
+        source_id
+    }
+
+    fn named_attack_copy_spec(
+        state: &GameState,
+        source_id: ObjectId,
+        additional_modifications: Vec<ContinuousModification>,
+    ) -> CopyTokenSpec {
+        use crate::types::proposed_event::TokenAttackRequest;
+
+        CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&source_id],
+            )),
+            display_source: DisplaySource::Token,
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+            extra_keywords: Vec::new(),
+            additional_modifications,
+            tapped: true,
+            enters_attacking: true,
+            attack_request: TokenAttackRequest::Named {
+                first: PlayerId(1),
+                rest: vec![PlayerId(2)],
+            },
+            sacrifice_at: None,
+            source_id,
+            controller: PlayerId(0),
+        }
+    }
+
+    /// CR 508.4: a non-liminal copy batch keeps its creation ordinal across a
+    /// counter-replacement pause, so each token is still seated at the
+    /// destination its own position in the request names.
+    #[test]
+    fn copy_batch_ordinal_survives_a_counter_pause() {
+        use crate::game::combat::{AttackTarget, CombatState};
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.combat = Some(CombatState::default());
+        let replacement_source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&replacement_source).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+        let source_id = add_copy_source(&mut state, "Grizzly Bears");
+        let copy = named_attack_copy_spec(
+            &state,
+            source_id,
+            vec![ContinuousModification::AddCounterOnEnter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                if_type: None,
+            }],
+        );
+
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::Tapped,
+            Vec::new(),
+            3,
+            &mut events,
+        );
+        assert!(
+            matches!(status.completion, CopyTokenApplyCompletion::Paused),
+            "reach guard: the first token's counter placement paused the batch"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        for _ in 0..3 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        }
+
+        assert_eq!(
+            seats_of_battlefield_tokens(&state),
+            vec![
+                Some(AttackTarget::Player(PlayerId(1))),
+                Some(AttackTarget::Player(PlayerId(2))),
+                Some(AttackTarget::Player(PlayerId(1))),
+            ]
+        );
+    }
+
+    /// CR 508.4 + CR 614.1c: the same, when the pause is on the copied
+    /// creature's own "enters with a counter" self-replacement.
+    #[test]
+    fn copy_batch_ordinal_survives_an_entry_counter_pause() {
+        use crate::game::combat::{AttackTarget, CombatState};
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.combat = Some(CombatState::default());
+        let counter_choice = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&counter_choice).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+        let source_id = add_copy_source(&mut state, "Walking Ballista");
+        {
+            let enters_with_counter = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ));
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source
+                .replacement_definitions
+                .push(enters_with_counter.clone());
+            Arc::make_mut(&mut source.base_replacement_definitions).push(enters_with_counter);
+        }
+        let copy = named_attack_copy_spec(&state, source_id, Vec::new());
+        assert!(
+            !crate::game::printed_cards::self_etb_counter_replacements(
+                &copy.values.replacement_definitions
+            )
+            .is_empty(),
+            "reach guard: the copied values carry the entry counter"
+        );
+
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::Tapped,
+            Vec::new(),
+            3,
+            &mut events,
+        );
+        assert!(
+            matches!(status.completion, CopyTokenApplyCompletion::Paused),
+            "reach guard: the first token's entry counter paused the batch"
+        );
+        for _ in 0..3 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        }
+
+        let seats = seats_of_battlefield_tokens(&state);
+        assert_eq!(
+            seats,
+            vec![
+                Some(AttackTarget::Player(PlayerId(1))),
+                Some(AttackTarget::Player(PlayerId(2))),
+                Some(AttackTarget::Player(PlayerId(1))),
+            ]
+        );
+    }
+
+    /// CR 508.4 + CR 614.12: a liminal copy batch whose entry pauses on its
+    /// enter-as-a-copy target's own entry counters keeps its creation ordinal
+    /// for the tokens parked behind the pause.
+    #[test]
+    fn copy_batch_ordinal_survives_a_copy_target_entry_counter_pause() {
+        use crate::game::combat::{AttackTarget, CombatState};
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.combat = Some(CombatState::default());
+        let counter_choice = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&counter_choice).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cursed Mirror".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mirror = state.objects.get_mut(&source_id).unwrap();
+            mirror.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            mirror.card_types = mirror.base_card_types.clone();
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        recipient: crate::types::ability::CopyRecipient::Source,
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                ));
+            mirror.replacement_definitions.push(replacement.clone());
+            Arc::make_mut(&mut mirror.base_replacement_definitions).push(replacement);
+        }
+        // CR 614.1c: the creature the token becomes enters with a counter.
+        let target_id = add_copy_source(&mut state, "Walking Ballista");
+        {
+            let enters_with_counter = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ));
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target
+                .replacement_definitions
+                .push(enters_with_counter.clone());
+            Arc::make_mut(&mut target.base_replacement_definitions).push(enters_with_counter);
+        }
+        let copy = named_attack_copy_spec(&state, source_id, Vec::new());
+
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::Tapped,
+            Vec::new(),
+            2,
+            &mut events,
+        );
+        assert!(
+            matches!(status.completion, CopyTokenApplyCompletion::Paused),
+            "reach guard: the first token's entry paused the batch"
+        );
+        let mut counter_pauses = 0;
+        for _ in 0..12 {
+            match state.waiting_for.clone() {
+                WaitingFor::ReplacementChoice { .. } => {
+                    apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                        .unwrap();
+                }
+                WaitingFor::CopyTargetChoice { .. } => {
+                    apply_as_current(
+                        &mut state,
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(target_id)),
+                        },
+                    )
+                    .unwrap();
+                    if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                        counter_pauses += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            counter_pauses > 0,
+            "reach guard: a copy target's entry counters paused the batch"
+        );
+
+        assert_eq!(
+            seats_of_battlefield_tokens(&state),
+            vec![
+                Some(AttackTarget::Player(PlayerId(1))),
+                Some(AttackTarget::Player(PlayerId(2))),
+            ]
+        );
+    }
+
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
     /// color, and replaces creature subtypes (The Scarab God shape) stamps each
     /// characteristic onto both the live and base (copiable) values of the
@@ -2046,6 +2537,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2138,6 +2631,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2228,6 +2723,8 @@ mod tests {
             let mut events = Vec::new();
             let ability = ResolvedAbility::new(
                 Effect::CopyTokenOf {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     target: TargetFilter::SelfRef,
                     owner: TargetFilter::Controller,
                     source_filter: None,
@@ -2374,6 +2871,8 @@ mod tests {
                 let mut liminal = source.clone();
                 let ability = ResolvedAbility::new(
                     Effect::CopyTokenOf {
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         target: TargetFilter::SelfRef,
                         owner: TargetFilter::Controller,
                         source_filter: None,
@@ -2461,6 +2960,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2540,6 +3041,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2632,6 +3135,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2752,6 +3257,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2885,6 +3392,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2941,6 +3450,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 3 },
                 extra_keywords: vec![],
@@ -2991,6 +3502,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3056,6 +3569,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3102,6 +3617,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -3129,6 +3646,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3177,6 +3696,8 @@ mod tests {
                 ),
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3225,6 +3746,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3263,6 +3786,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3334,6 +3859,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
                 extra_keywords: vec![],
@@ -3401,6 +3928,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3461,6 +3990,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: true,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3511,6 +4042,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: true,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: true,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3564,6 +4097,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![Keyword::Haste],
@@ -3630,6 +4165,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![Keyword::Haste],
@@ -3719,6 +4256,8 @@ mod tests {
                     properties: vec![FilterProp::Token, FilterProp::EnteredThisTurn],
                 })),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3789,6 +4328,8 @@ mod tests {
                     ],
                 })),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3889,6 +4430,8 @@ mod tests {
                     ],
                 })),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -3974,6 +4517,8 @@ mod tests {
                     ],
                 })),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4031,6 +4576,8 @@ mod tests {
                     ],
                 })),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4105,6 +4652,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4170,6 +4719,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4232,6 +4783,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4529,6 +5082,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4605,6 +5160,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 2 },
                 extra_keywords: vec![],
@@ -4723,6 +5280,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4790,6 +5349,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4859,6 +5420,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -4981,6 +5544,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -5090,6 +5655,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -5206,6 +5773,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -5276,6 +5845,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

@@ -3710,6 +3710,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             target,
             owner,
             enters_attacking,
+            attack_destination,
             tapped,
             extra_keywords,
             additional_modifications,
@@ -3719,6 +3720,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             source_filter: None,
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             tapped: *tapped,
             count: count.clone(),
             extra_keywords: extra_keywords.clone(),
@@ -3735,6 +3737,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner,
             attach_to,
             enters_attacking,
+            attack_destination,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -3751,6 +3754,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
@@ -14057,6 +14061,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -15292,6 +15298,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: true,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -16559,6 +16567,7 @@ mod where_x_tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -16887,6 +16896,89 @@ mod token_anaphor_rewrite_tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 508.4: "create two of those tokens" rebuilds the antecedent token
+    /// with the new count and keeps the defender the antecedent named.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Goblin".to_string()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::Token {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a Token, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
+    }
+
+    /// CR 508.4: the same rewrite over a copy-token antecedent.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_copy_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::CopyTokenOf {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a CopyTokenOf, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
     }
 }
 

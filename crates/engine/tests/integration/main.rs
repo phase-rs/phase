@@ -2052,3 +2052,4 @@ mod put_target_count_entry_counters;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
+mod token_attack_destination;

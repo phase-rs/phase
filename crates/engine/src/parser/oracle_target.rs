@@ -6576,8 +6576,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 ///   attacking creature" and Echoing Assault is an Enchantment that can never
 ///   attack. Their antecedent is the attacked player the CR 508.3e trigger
 ///   fired for, carried on the firing's own synthesized event by
-///   `trigger_matchers::matching_you_attack_events_by_attacked_player` and read
-///   back as that event's `defending_player`.
+///   `trigger_matchers::matching_you_attack_events_by_attacked_player`.
 ///
 /// So a CR 508.5-shaped name on the runtime helper does not mean CR 508.5 binds
 /// every caller — for the CR 508.3e lane it is the per-firing event, not the
@@ -6617,8 +6616,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 ///
 /// 1. Inline token specs — `oracle_effect::token` scans word boundaries for the
 ///    `that's|that is|that are` + `tapped and attacking|attacking` clause and
-///    TRUNCATES the token body at that byte offset; the trailing "that player"
-///    is discarded with the clause.
+///    TRUNCATES the token body at that byte offset.
 /// 2. Battlefield-entry tails — `parse_battlefield_entry_qualifiers` matches
 ///    " tapped and attacking" and its qualifier boundary absorbs the trailing
 ///    player phrase; only `(enter_tapped, enters_attacking)` flags come back.
@@ -6635,7 +6633,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// copula ("are now ", "is "), not with `tag("attacking")`.
 ///
 /// "attacking that opponent" is deliberately EXCLUDED: a corpus scan shows it
-/// occurs only in the positions enumerated above (Kaalia of the Vast, Adeline,
+/// occurs only in the positions enumerated above (Kaalia of the Vast,
 /// Mardu Siegebreaker, ...), never as an object-filter suffix, so accepting it
 /// here would add zero coverage.
 fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {

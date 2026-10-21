@@ -854,8 +854,7 @@ pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetF
 }
 
 /// CR 506.3d + CR 508.1: "that opponent" inside an attack trigger's effect —
-/// the opponent being attacked in the triggering event (token enters attacking
-/// that opponent; Adeline / Ellie class).
+/// the opponent being attacked in the triggering event.
 pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
     value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
 }
