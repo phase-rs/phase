@@ -51,15 +51,16 @@ use super::oracle_util::{
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
-    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
-    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
-    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
-    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
+    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule,
+    DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryInstructionActor,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+    RoundingMode, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -1486,11 +1487,13 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
             // CR 614.1a: "instead flip two coins" — double the count the
             // replacement applier sees, then ignore all but one (CR 705.1).
             Effect::FlipCoins {
-                count: QuantityExpr::Multiply {
-                    factor: 2,
-                    inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    }),
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
                 },
                 win_effect: None,
                 lose_effect: None,

@@ -3473,13 +3473,20 @@ mod tests {
         }
     }
 
-    /// v157: `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`: the
+    /// v160: `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`: the
     /// players chosen earlier in the flipping resolution and a
     /// completed-but-empty forwarded result, CR 608.2c + CR 609.3), and the
-    /// persisted resolution state moves from version 7 to 8; a v156 peer
+    /// persisted resolution state moves from version 8 to 9; a v159 peer
     /// re-encoding a Krark's-Thumb-parked coin flip would drop the field and
     /// the resumed branch would lose its chosen opponent, so it must be refused
-    /// before it receives v157 state.
+    /// before it receives v160 state.
+    ///
+    /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+    /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
+    /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
+    /// it must be refused before it receives v159 state.
+    /// v157: `ChooseFromZoneConstraint::TotalManaValue` in paused zone choices
+    /// and ability state requires a versioned full-game peer.
     ///
     /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
     /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
@@ -3763,8 +3770,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_157_for_coin_flip_branch_context() {
-        assert_eq!(PROTOCOL_VERSION, 157);
+    fn protocol_version_is_160_for_coin_flip_branch_context() {
+        assert_eq!(PROTOCOL_VERSION, 160);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3775,7 +3782,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_157_for_coin_flip_branch_context` stays
+    /// `protocol_version_is_160_for_coin_flip_branch_context` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

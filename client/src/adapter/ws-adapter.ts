@@ -215,12 +215,22 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 157 — PendingCoinFlip gains branch_context, carrying the resolution's chosen
+ * 160 — PendingCoinFlip gains branch_context, carrying the resolution's chosen
  *      players and completed-empty object result across a coin-flip keep choice.
- *      The persisted resolution state moves from version 7 to 8 — see
- *      PROTOCOL_VERSION's own `/// 157` entry in crates/lobby-broker/src/protocol.rs.
- *      A v156 peer silently drops the context, so the exact-match version check
- *      refuses the pairing. Wire 139 moves with it.
+ *      The persisted resolution state moves from version 8 to 9 — see
+ *      PROTOCOL_VERSION's own `/// 160` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v159 peer silently drops the context, so the exact-match version check
+ *      refuses the pairing. Wire 142 moves with it.
+ * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
+ *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
+ *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
+ *       PROTOCOL_VERSION's own `/// 159` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v158 or older peer reads a multi-flip or
+ *       until-loss run as one flip; the exact-match version check at connect
+ *       refuses the pairing. Wire 141 moves with it.
+ * 157 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *      choices and ability state. Old native readers cannot decode the new tag.
+ *      Wire 139 moves with it.
  * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
  *      QuantityQuality { quantity, quality } with the new NumberQuality
  *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried
@@ -964,7 +974,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 157;
+export const PROTOCOL_VERSION = 160;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

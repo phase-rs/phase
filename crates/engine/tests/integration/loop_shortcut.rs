@@ -4296,12 +4296,12 @@ fn sprout_shell_scenario(body: &str) -> (GameRunner, ObjectId, Vec<ObjectId>) {
 /// A2 halves reverted this fixture wrongly OFFERS (the coin advances the RNG 2→6 yet the cover
 /// passes).
 ///
-/// Non-vacuity: (1) item-5 — the body parses to `Token` (deterministic growth) + a `FlipCoin`
+/// Non-vacuity: (1) item-5 — the body parses to `Token` (deterministic growth) + a `FlipCoins`
 /// sub-effect (asserted below), so the coin genuinely fires; (2) reach-guard — the SAME shell with
 /// a coin-free body offers, isolating the coin (not the shell) as the disqualifier.
 #[test]
 fn object_growth_random_recast_body_does_not_offer() {
-    // item-5: verify the recast body carries a deterministic Token AND a FlipCoin (so the board
+    // item-5: verify the recast body carries a deterministic Token AND a FlipCoins (so the board
     // grows each cycle while the coin advances the RNG — else the fixture would be vacuous).
     let body_def = engine::parser::oracle_effect::parse_effect_chain(
         "Create a 1/1 green Saproling creature token. Flip a coin.",
@@ -4313,11 +4313,11 @@ fn object_growth_random_recast_body_does_not_offer() {
         body_def.effect
     );
     assert!(
-        body_def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|s| matches!(*s.effect, Effect::FlipCoin { .. })),
-        "recast body must carry a FlipCoin sub-effect (the randomness A2 rejects), got {:?}",
+        body_def.sub_ability.as_ref().is_some_and(|s| matches!(
+            &*s.effect,
+            Effect::FlipCoins { flips, .. } if flips.is_single_flip()
+        )),
+        "recast body must carry a FlipCoins sub-effect (the randomness A2 rejects), got {:?}",
         body_def.sub_ability
     );
 

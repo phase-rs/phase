@@ -106,11 +106,19 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  139 — game_setup and state_update carry GameState whose parked coin-flip
+ *  142 — game_setup and state_update carry GameState whose parked coin-flip
  *       frame inherits chosen players and completed-empty object results in
- *       PendingCoinFlip.branch_context. Resolution state moves from version 7
- *       to 8; a v138 peer drops that context. Bumped in lockstep with full-game
- *       protocol 157 so first contact rejects the skew.
+ *       PendingCoinFlip.branch_context. Resolution state moves from version 8
+ *       to 9; a v141 peer drops that context. Bumped in lockstep with full-game
+ *       protocol 160 so first contact rejects the skew.
+ *  141 — game_setup and state_update carry GameState whose effects carry
+ *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
+ *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
+ *       as one flip, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
  *  138 — game_setup and state_update carry GameState whose ability conditions
  *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
  *       full-game protocol 156, which also adds the optional per-seat
@@ -742,7 +750,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 139 as const;
+export const WIRE_PROTOCOL_VERSION = 142 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

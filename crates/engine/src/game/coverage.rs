@@ -22,18 +22,19 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
     AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
-    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
-    ManaProduction, MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty,
-    ObjectScope, ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
-    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification,
+    ControllerRef, CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
+    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
+    LetterQuery, LibraryPosition, ManaProduction, MassLibraryShuffleMode, NameStickerSet,
+    NumberQuality, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, Parity, ParsedCondition, PerpetualModification, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -697,7 +698,12 @@ fn effect_type_name(effect: &Effect) -> String {
     // (Tap/Untap/TapAll/UntapAll) so per-effect coverage reporting reads the
     // same set as before the collapse. `effect_variant_name` reconstructs them
     // from `(scope, state)`.
-    if matches!(effect, Effect::SetTapState { .. }) {
+    // `Effect::FlipCoins` likewise serializes under one tag; the three run labels
+    // (FlipCoin / FlipCoins / FlipCoinUntilLose) are reconstructed from `flips`.
+    if matches!(
+        effect,
+        Effect::SetTapState { .. } | Effect::FlipCoins { .. }
+    ) {
         return crate::types::ability::effect_variant_name(effect).to_string();
     }
     serde_json::to_value(effect)
@@ -3753,41 +3759,39 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("modifier".into(), label.into()));
             }
         }
-        Effect::FlipCoin {
+        // Descriptors stay per run mode. `UntilLoss` reports its mode only, as
+        // the retired `FlipCoinUntilLose` did; `Exactly` reports the count unless it is the
+        // single flip, as the retired `FlipCoin` / `FlipCoins` pair did.
+        Effect::FlipCoins {
+            flips,
             win_effect,
             lose_effect,
             flipper,
         } => {
             // CR 705.2: surface a non-default flipper ("that player flips a coin").
-            if !matches!(flipper, TargetFilter::Controller) {
-                d.push(("flipper".into(), format!("{flipper:?}")));
+            let push_flipper = |d: &mut Vec<(String, String)>| {
+                if !matches!(flipper, TargetFilter::Controller) {
+                    d.push(("flipper".into(), format!("{flipper:?}")));
+                }
+            };
+            match flips {
+                CoinFlipRun::UntilLoss => {
+                    d.push(("mode".into(), "until lose".into()));
+                    push_flipper(&mut d);
+                }
+                CoinFlipRun::Exactly { count } => {
+                    if !flips.is_single_flip() {
+                        d.push(("count".into(), format!("{count:?}")));
+                    }
+                    push_flipper(&mut d);
+                    if win_effect.is_some() {
+                        d.push(("win".into(), "yes".into()));
+                    }
+                    if lose_effect.is_some() {
+                        d.push(("lose".into(), "yes".into()));
+                    }
+                }
             }
-            if win_effect.is_some() {
-                d.push(("win".into(), "yes".into()));
-            }
-            if lose_effect.is_some() {
-                d.push(("lose".into(), "yes".into()));
-            }
-        }
-        Effect::FlipCoins {
-            count,
-            win_effect,
-            lose_effect,
-            flipper,
-        } => {
-            d.push(("count".into(), format!("{count:?}")));
-            if !matches!(flipper, TargetFilter::Controller) {
-                d.push(("flipper".into(), format!("{flipper:?}")));
-            }
-            if win_effect.is_some() {
-                d.push(("win".into(), "yes".into()));
-            }
-            if lose_effect.is_some() {
-                d.push(("lose".into(), "yes".into()));
-            }
-        }
-        Effect::FlipCoinUntilLose { .. } => {
-            d.push(("mode".into(), "until lose".into()));
         }
         Effect::MoveCounters {
             source,
@@ -11130,7 +11134,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
 // ---------------------------------------------------------------------------
 
 /// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
-/// those embedded in compound effects (`FlipCoin`, `RollDie`, `GrantAbility`, etc.).
+/// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
 /// Returns `true` if the predicate returns `true` for any node in the tree.
 ///
 /// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
@@ -16000,7 +16004,7 @@ mod tests {
     /// #5601 (same swallowed-structure class as #5492/#5495/#5501): a parser
     /// change INSIDE a coin-flip branch — e.g. Desperate Gambit's lose-branch
     /// `damage_source_filter` flipping `SelfRef` → `ChosenDamageSource` — must be
-    /// visible to the coverage parse-diff. The FlipCoin branch effects are
+    /// visible to the coverage parse-diff. The FlipCoins branch effects are
     /// embedded `AbilityDefinition`s (not `sub_ability` links), so
     /// `build_ability_item` must recurse into `win_effect`/`lose_effect` rather
     /// than emit only the bare `("lose", "yes")` presence marker — otherwise the
@@ -16023,7 +16027,8 @@ mod tests {
         ));
         let def = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: Some(lose),
                 flipper: TargetFilter::Controller,
@@ -16034,10 +16039,79 @@ mod tests {
             item.children
                 .iter()
                 .any(|c| c.details.iter().any(|(k, _)| k == "damage_source_filter")),
-            "FlipCoin lose-branch damage_source_filter must be exposed as a child \
+            "FlipCoins lose-branch damage_source_filter must be exposed as a child \
              parse detail; got children {:#?}",
             item.children
         );
+    }
+
+    /// `Effect::FlipCoins` serializes under one tag, but the diagnostic labels and
+    /// detail rows keep the three pre-merge run names and descriptors, reconstructed from
+    /// `flips`: no `count` row for the single flip, a `count` row for N flips, and
+    /// `mode: until lose` only for the until-loss run.
+    #[test]
+    fn coin_flip_parse_labels_keep_their_run_names() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+
+        let branch = || {
+            Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )))
+        };
+        let row = |k: &str, v: &str| (k.to_string(), v.to_string());
+
+        let single = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: branch(),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        assert_eq!(effect_type_name(&single), "FlipCoin");
+        assert_eq!(effect_details(&single), vec![row("win", "yes")]);
+
+        let single_other_flipper = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: branch(),
+            flipper: TargetFilter::Opponent,
+        };
+        assert_eq!(effect_type_name(&single_other_flipper), "FlipCoin");
+        assert_eq!(
+            effect_details(&single_other_flipper),
+            vec![row("flipper", "Opponent"), row("lose", "yes")]
+        );
+
+        let count = QuantityExpr::Fixed { value: 3 };
+        let many = Effect::FlipCoins {
+            flips: CoinFlipRun::Exactly {
+                count: count.clone(),
+            },
+            win_effect: branch(),
+            lose_effect: branch(),
+            flipper: TargetFilter::Controller,
+        };
+        assert_eq!(effect_type_name(&many), "FlipCoins");
+        assert_eq!(
+            effect_details(&many),
+            vec![
+                row("count", &format!("{count:?}")),
+                row("win", "yes"),
+                row("lose", "yes"),
+            ]
+        );
+
+        let until_loss = Effect::FlipCoins {
+            flips: CoinFlipRun::UntilLoss,
+            win_effect: branch(),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        assert_eq!(effect_type_name(&until_loss), "FlipCoinUntilLose");
+        assert_eq!(effect_details(&until_loss), vec![row("mode", "until lose")]);
     }
 
     #[test]
@@ -19026,7 +19100,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: Some(payload("flip_coin_win")),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -19034,7 +19109,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: None,
                     lose_effect: Some(payload("flip_coin_lose")),
                     flipper: TargetFilter::Controller,
@@ -19043,7 +19119,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::FlipCoins {
-                    count: QuantityExpr::Fixed { value: 2 },
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
                     win_effect: Some(payload("flip_coins_win")),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -19052,7 +19130,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::FlipCoins {
-                    count: QuantityExpr::Fixed { value: 2 },
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
                     win_effect: None,
                     lose_effect: Some(payload("flip_coins_lose")),
                     flipper: TargetFilter::Controller,
@@ -19060,8 +19140,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::FlipCoinUntilLose {
-                    win_effect: payload("flip_until_lose_win"),
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::UntilLoss,
+                    win_effect: Some(payload("flip_until_lose_win")),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
                 },
             ),
             AbilityDefinition::new(
@@ -19145,11 +19228,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 DirectEffectPayloadEdge::CreateDelayedTriggerEffect,
                 DirectEffectPayloadEdge::RollDieResult,
                 DirectEffectPayloadEdge::RollDieResult,
-                DirectEffectPayloadEdge::FlipCoinWin,
-                DirectEffectPayloadEdge::FlipCoinLose,
                 DirectEffectPayloadEdge::FlipCoinsWin,
                 DirectEffectPayloadEdge::FlipCoinsLose,
-                DirectEffectPayloadEdge::FlipCoinUntilLoseWin,
+                DirectEffectPayloadEdge::FlipCoinsWin,
+                DirectEffectPayloadEdge::FlipCoinsLose,
+                DirectEffectPayloadEdge::FlipCoinsWin,
                 DirectEffectPayloadEdge::ChooseOneOfBranch,
                 DirectEffectPayloadEdge::ChooseOneOfBranch,
             ]
@@ -19160,7 +19243,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     fn direct_effect_payload_controls_are_empty_or_supported() {
         let empty = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,

@@ -400,14 +400,6 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v157 inherited coin-flip context and number-quality condition protocol", async () => {
-    const promise = openPhaseSocket("ws://test");
-    const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 157 }));
-
-    await expect(promise).resolves.toBeDefined();
-    expect(ws.close).not.toHaveBeenCalled();
-  });
 
   it("rejects Full v141 before it can read a linked-exile snapshot's incarnation", async () => {
     const promise = openPhaseSocket("ws://test");
@@ -451,8 +443,7 @@ describe("openPhaseSocket", () => {
     });
     expect(ws.close).toHaveBeenCalled();
   });
-
-  it.each([152, 153, 154, 155, 156])("rejects Full v%s before it can preserve a parked coin-flip branch's inherited context", async (version) => {
+  it.each([152, 153, 154, 155, 156, 157, 158, 159])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries, a merged coin-flip run or a parked coin-flip branch's inherited context", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: version }));
@@ -463,15 +454,24 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v155 before it can read number-quality conditions", async () => {
+  it.each([154, 155, 156])("rejects Full v%s before it can read a TotalManaValue zone choice", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 155 }));
+    ws.deliverMessage(helloFrame({ protocol_version: version }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
     });
     expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("accepts the literal Full v160 inherited coin-flip branch context, merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 160 }));
+
+    await expect(promise).resolves.toBeDefined();
+    expect(ws.close).not.toHaveBeenCalled();
   });
 
   it("rejects Full v139 before it can read the attack event's attacked players", async () => {

@@ -25594,7 +25594,7 @@ mod tests {
     }
 
     /// Production-path regression for the CR 608.2h chain-root propagation
-    /// through a `FlipCoin` win/lose branch, covering the Krark's Thumb
+    /// through a `FlipCoins` win/lose branch, covering the Krark's Thumb
     /// RESUME path specifically (`resume_after_keep`) — the entry point real
     /// trigger dispatch uses once the controller keeps one of the doubled
     /// flips. `chain_root_targets` must survive on the `PendingCoinFlip`
@@ -25650,7 +25650,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: Some(Box::new(win_effect)),
             lose_effect: None,
-            kind: crate::types::resolution::PendingCoinFlipKind::Single,
+            kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
             branch_context: crate::types::resolution::FlipBranchContext::default(),
         };

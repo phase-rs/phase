@@ -5,7 +5,9 @@ use std::collections::HashSet;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{ChoiceType, Effect, ForwardedResultContext, QuantityExpr};
+use engine::types::ability::{
+    ChoiceType, CoinFlipRun, Effect, ForwardedResultContext, QuantityExpr,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameRng, RandomDraw, WaitingFor};
@@ -266,7 +268,7 @@ fn two_choices(thumb: bool) -> Game {
         matches!(second.effect.as_ref(), Effect::Choose { choice_type, .. } if *choice_type == ChoiceType::player())
     );
     let flip = second.sub_ability.as_deref().expect("single flip");
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
         lose_effect: Some(branch),
         ..
     } = flip.effect.as_ref()
@@ -369,7 +371,11 @@ fn second_chosen_player_receives_the_creature_after_krark() {
     // REVERT: FlipCoin frame capture / resume_after_keep context forwarding,
     // or the parser's enclosing scope, loses or misindexes the second answer.
     let mut game = two_choices(true);
-    game.keep(false, PendingCoinFlipKind::Single, &[P0, P2]);
+    game.keep(
+        false,
+        PendingCoinFlipKind::Exactly { remaining: 0 },
+        &[P0, P2],
+    );
     game.finish(&[false], P2);
 }
 
@@ -395,12 +401,20 @@ fn multi_flip(until_lose: bool, thumb: bool) {
         .expect("multi-flip instruction");
     let branch = match flip.effect.as_ref() {
         Effect::FlipCoins {
-            count: QuantityExpr::Fixed { value: 2 },
+            flips:
+                CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
             win_effect: Some(branch),
             lose_effect: None,
             ..
         } if !until_lose => branch,
-        Effect::FlipCoinUntilLose { win_effect } if until_lose => win_effect,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::UntilLoss,
+            win_effect: Some(win_effect),
+            lose_effect: None,
+            ..
+        } if until_lose => win_effect,
         other => panic!("required production multi-flip shape: {other:?}"),
     };
     let Effect::GiveControl { recipient, .. } = branch.effect.as_ref() else {
@@ -428,11 +442,11 @@ fn multi_flip(until_lose: bool, thumb: bool) {
     if thumb {
         for (index, &won) in outcomes.iter().enumerate() {
             let kind = if until_lose {
-                PendingCoinFlipKind::UntilLose {
+                PendingCoinFlipKind::UntilLoss {
                     wins_so_far: index as u32,
                 }
             } else {
-                PendingCoinFlipKind::FlipN {
+                PendingCoinFlipKind::Exactly {
                     remaining: (outcomes.len() - index - 1) as u32,
                 }
             };
@@ -516,7 +530,7 @@ fn branch_local_player_choice(thumb: bool) {
     game.pin(if thumb { &[false, true] } else { &[false] });
     game.choose_player(ChoiceType::player(), &["0", "1", "2"], P0);
     if thumb {
-        game.keep(false, PendingCoinFlipKind::Single, &[P0]);
+        game.keep(false, PendingCoinFlipKind::Exactly { remaining: 0 }, &[P0]);
     }
     game.choose_player(ChoiceType::player(), &["0", "1", "2"], P2);
     for _ in 0..12 {
