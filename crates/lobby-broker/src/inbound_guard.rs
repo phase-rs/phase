@@ -25,10 +25,14 @@ pub const MAX_MAIN_DECK_ENTRIES: usize = 500;
 pub const MAX_SIDEBOARD_ENTRIES: usize = 100;
 /// Max commander slots accepted on the wire.
 pub const MAX_COMMANDER_ENTRIES: usize = 4;
+/// Max companion and signature-spell entries accepted on the wire.
+pub const MAX_SINGLETON_ROLE_ENTRIES: usize = 4;
 /// Max supplementary Planechase planar-deck entries accepted on the wire.
 pub const MAX_PLANAR_DECK_ENTRIES: usize = 200;
 /// Max supplementary Archenemy scheme-deck entries accepted on the wire.
 pub const MAX_SCHEME_DECK_ENTRIES: usize = 200;
+/// Max entries in other supplementary card-name lists accepted on the wire.
+pub const MAX_SUPPLEMENTARY_DECK_ENTRIES: usize = 200;
 /// Max byte length of a single card name string inside a deck payload.
 pub const MAX_DECK_CARD_NAME_LEN: usize = 256;
 
@@ -79,6 +83,16 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         MAX_COMMANDER_ENTRIES,
     )?;
     validate_deck_list(
+        &format!("{field}.companion"),
+        &deck.companion,
+        MAX_SINGLETON_ROLE_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.attraction_deck"),
+        &deck.attraction_deck,
+        MAX_SUPPLEMENTARY_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
         &format!("{field}.planar_deck"),
         &deck.planar_deck,
         MAX_PLANAR_DECK_ENTRIES,
@@ -87,6 +101,21 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &format!("{field}.scheme_deck"),
         &deck.scheme_deck,
         MAX_SCHEME_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.contraption_deck"),
+        &deck.contraption_deck,
+        MAX_SUPPLEMENTARY_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.sticker_sheets"),
+        &deck.sticker_sheets,
+        MAX_SUPPLEMENTARY_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.signature_spell"),
+        &deck.signature_spell,
+        MAX_SINGLETON_ROLE_ENTRIES,
     )?;
     Ok(())
 }
@@ -162,7 +191,8 @@ pub fn guard_lookup_join_target_inbound(fields: LookupJoinTargetInbound<'_>) -> 
 
 /// Validate every inbound lobby message before handler dispatch. Applies the
 /// string/shape bounds from [`validate_lobby_message`] plus deck payload limits
-/// on the two messages that carry a [`DeckData`] body.
+/// on create/join messages; tournament submissions receive the same deck
+/// validation through [`validate_lobby_message`].
 pub fn guard_inbound(msg: &LobbyClientMessage) -> Result<(), String> {
     match msg {
         LobbyClientMessage::CreateGameWithSettings {
