@@ -2645,7 +2645,7 @@ mod tests {
         const FORMAT_DERIVED_DUNGEON_POOL_LOBBY_VERSION: u32 = HOSTED_MATCH_LOBBY_VERSION + 1;
         // Adds the `Dandan` built-in format name, guarded by a client floor.
         const DANDAN_FORMAT_LOBBY_VERSION: u32 = FORMAT_DERIVED_DUNGEON_POOL_LOBBY_VERSION + 1;
-        assert!(LOBBY_PROTOCOL_VERSION >= DANDAN_FORMAT_LOBBY_VERSION);
+        const { assert!(LOBBY_PROTOCOL_VERSION >= DANDAN_FORMAT_LOBBY_VERSION) };
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and

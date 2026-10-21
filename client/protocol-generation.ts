@@ -21,7 +21,11 @@ export function protocolGenerationPlugin(): Plugin {
       const regenerate = (event: string, path: string) => {
         if (["add", "change", "unlink", "addDir", "unlinkDir"].includes(event)
           && (path === baseline || path === generator || path === changes || path.startsWith(changes + sep))) {
-          generateProtocolVersions();
+          try {
+            generateProtocolVersions();
+          } catch (error) {
+            server.config.logger.error(`protocol-generation failed: ${String(error)}`);
+          }
         }
       };
       server.watcher.on("all", regenerate);

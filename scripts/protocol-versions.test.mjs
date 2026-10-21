@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -222,6 +222,21 @@ test("generation renders exact exports, skips identical writes, and check never 
   assert.equal(git(path, "check-ignore", outputPath).trim(), outputPath);
   git(path, "add", ".");
   assert.equal(git(path, "ls-files", outputPath), "");
+});
+
+test("generation replaces output while existing readers retain the complete prior module", (t) => {
+  const path = fixture(t);
+  const output = join(path, outputPath);
+  generateProtocolVersions(path);
+  const previous = readFileSync(output, "utf8");
+  const reader = openSync(output, "r");
+  t.after(() => closeSync(reader));
+  addProtocolChange(path, ["directory"], "new directory version");
+  generateProtocolVersions(path);
+  assert.equal(readFileSync(reader, "utf8"), previous);
+  assert.equal(readFileSync(output, "utf8"), previous.replace("DIRECTORY_VERSION = 1", "DIRECTORY_VERSION = 2"));
+  assert.deepEqual(readdirSync(dirname(output)), ["protocol-versions.ts"]);
+  checkProtocolVersions(path);
 });
 
 test("import has no CLI or filesystem side effects even with CLI-like argv", (t) => {

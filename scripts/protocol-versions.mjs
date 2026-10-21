@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -181,7 +181,9 @@ export function generateProtocolVersions(root = repositoryRoot) {
   const contents = renderVersions(versions);
   if (!existsSync(output) || readFileSync(output, "utf8") !== contents) {
     mkdirSync(dirname(output), { recursive: true });
-    writeFileSync(output, contents);
+    const temporary = `${output}.${process.pid}.tmp`;
+    writeFileSync(temporary, contents);
+    renameSync(temporary, output);
   }
   return versions;
 }
