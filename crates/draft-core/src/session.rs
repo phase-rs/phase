@@ -438,7 +438,8 @@ pub fn apply(
             seat,
             main_deck,
             commanders,
-        } => apply_submit_deck(session, seat, main_deck, commanders),
+            companion,
+        } => apply_submit_deck(session, seat, main_deck, commanders, companion),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -1321,6 +1322,7 @@ fn apply_submit_deck(
     seat: u8,
     main_deck: Vec<String>,
     commanders: Vec<String>,
+    companion: Option<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Deckbuilding {
         return Err(DraftError::InvalidTransition {
@@ -1371,6 +1373,7 @@ fn apply_submit_deck(
         // assumed -- `0` for every kind whose decks are not Commander decks
         // (the four CR 905.1a kinds and `Winston`), `1` for CommanderDraft.
         usize::from(session.kind.procedure().commanders_required),
+        companion.as_deref(),
     ) {
         return Err(DraftError::ValidationFailed { errors });
     }
@@ -1389,6 +1392,7 @@ fn apply_submit_deck(
             // CR 903.3: snapshotted, not re-derived. A later pool change
             // must never silently re-designate this seat's commander(s).
             commanders,
+            companion,
         },
     );
 
@@ -1923,6 +1927,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -1957,6 +1962,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         );
@@ -2015,6 +2021,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -2059,6 +2066,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -2071,6 +2079,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -2146,6 +2155,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
             },
             None,
         )
@@ -2251,6 +2261,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
             },
             None,
         )
@@ -2274,6 +2285,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
             },
             None,
         )
@@ -2337,6 +2349,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -2351,6 +2364,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -2375,6 +2389,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         );
@@ -3966,6 +3981,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(2),
                 commanders: designations.clone(),
+                companion: None,
             },
             None,
         )
@@ -3980,6 +3996,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(3),
                 commanders: designations,
+                companion: None,
             },
             None,
         );
@@ -4005,6 +4022,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec![filler.card_name.clone()],
+                companion: None,
             },
             None,
         )
@@ -4035,6 +4053,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: over_bound,
+                companion: None,
             },
             None,
         );
@@ -4062,6 +4081,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: at_bound,
+                companion: None,
             },
             None,
         )
@@ -4087,6 +4107,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: vec!["Card 999".to_string()],
+                companion: None,
             },
             None,
         );
@@ -4108,6 +4129,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
             },
             None,
         )
@@ -4282,6 +4304,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -4307,6 +4330,7 @@ mod tests {
                     seat: 0,
                     main_deck: deck.clone(),
                     commanders: Vec::new(),
+                    companion: None,
                 },
                 None,
             )
@@ -4340,6 +4364,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -4368,6 +4393,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
             },
             None,
         )
@@ -4388,6 +4414,7 @@ mod tests {
                 seat: 0,
                 main_deck: pooled_deck(40),
                 commanders: Vec::new(),
+                companion: None,
             },
             None,
         )
@@ -4408,6 +4435,7 @@ mod tests {
                     "Card 1".to_string(),
                     "Card 2".to_string(),
                 ],
+                companion: None,
             },
             None,
         )

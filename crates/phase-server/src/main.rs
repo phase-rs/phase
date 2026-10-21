@@ -20879,6 +20879,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                companion: None,
             },
             draft_core::types::DraftAction::ReportMatchResult {
                 match_id: "m1".into(),

@@ -422,6 +422,9 @@
     "moreNeeded": "あと{{count}}枚必要です",
     "commanderRequired": "提出するにはカードプールから統率者を指定してください。",
     "commanderUnavailable": "カードデータベースを読み込めなかったため、現在統率者を指定できません。",
+    "companionMet": "相棒条件を満たしています",
+    "companionUnmet": "相棒条件を満たしていません",
+    "setCompanion": "相棒に設定",
     "compatibilityPending": "デッキの適合性を確認中…",
     "compatibilityUnavailable": "現在デッキの適合性を確認できません。提出前にもう一度お試しください。",
     "grantedFiller": "カードプールには{{name}}も最大{{maximum}}枚含まれます。統率者としてのみ使用できます。"

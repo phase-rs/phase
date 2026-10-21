@@ -137,6 +137,7 @@ export interface PersistedDraftDeckSubmission {
    * silently rather than surfacing an error.
    */
   commanders: string[];
+  companion?: string | null;
   timestamp: number;
 }
 
@@ -736,6 +737,7 @@ export async function saveDraftDeckSubmission(
     submissionId: submission.submissionId,
     mainDeck: [...submission.mainDeck],
     commanders: [...submission.commanders],
+    ...(submission.companion !== undefined ? { companion: submission.companion } : {}),
     timestamp: Date.now(),
   };
   await set(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, value, getDraftStore());

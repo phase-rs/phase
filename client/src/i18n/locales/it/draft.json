@@ -361,6 +361,9 @@
     "moreNeeded": "{{count}} altre necessarie",
     "commanderRequired": "Designa un comandante dalla tua riserva per inviare.",
     "commanderUnavailable": "La designazione del comandante non è disponibile al momento: non è stato possibile caricare il database delle carte.",
+    "companionMet": "Requisito del compagno soddisfatto",
+    "companionUnmet": "Requisito del compagno non soddisfatto",
+    "setCompanion": "Imposta come compagno",
     "compatibilityPending": "Verifica della compatibilità del mazzo...",
     "compatibilityUnavailable": "La compatibilità del mazzo non è disponibile al momento: riprova prima di inviarlo.",
     "grantedFiller": "La tua riserva include anche fino a {{maximum}} × {{name}}, utilizzabile solo come comandante."
