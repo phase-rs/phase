@@ -2077,6 +2077,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_uses_recipient(lhs) || quantity_expr_uses_recipient(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_uses_recipient(quantity),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().any(condition_uses_recipient_context)
         }
@@ -2153,6 +2157,10 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
             crate::game::quantity::quantity_expr_uses_object_count(lhs)
                 || crate::game::quantity::quantity_expr_uses_object_count(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => crate::game::quantity::quantity_expr_uses_object_count(quantity),
         // Devotion is a sum of mana symbols across permanents you control — pure
         // board composition.
         StaticCondition::DevotionGE { .. } => true,
@@ -2283,6 +2291,11 @@ fn static_condition_characteristic_reads_at(
             quantity_expr_characteristic_reads_at(lhs, depth)
                 .union(quantity_expr_characteristic_reads_at(rhs, depth))
         }
+        // Arithmetic-quality gate: only its single quantity is read.
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_characteristic_reads_at(quantity, depth),
         // CR 700.5: devotion sums mana symbols in the mana costs of the
         // permanents the source's controller controls.
         StaticCondition::DevotionGE { .. } => {
@@ -2426,6 +2439,10 @@ fn entered_object_perturbs_static_condition(
             entered_perturbs_static_quantity(state, entered_id, ctx, lhs)
                 || entered_perturbs_static_quantity(state, entered_id, ctx, rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => entered_perturbs_static_quantity(state, entered_id, ctx, quantity),
         // CR 700.5: devotion gate flips only if the entered object's mana cost
         // contributes a symbol for one of the gate colors (mirrors the Devotion
         // magnitude leaf). LOW-1: controller-blind.
@@ -2645,6 +2662,19 @@ fn evaluate_condition_inner(
                 )
             };
             comparator.evaluate(resolve(lhs), resolve(rhs))
+        }
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            // CR 611.3a: evaluated at any given moment, never locked in.
+            let value = crate::game::quantity::resolve_quantity_with_ctx(
+                state,
+                quantity,
+                controller,
+                QuantityContext {
+                    recipient: context.recipient,
+                    ..QuantityContext::new(source_id)
+                },
+            );
+            quality.matches(i64::from(value))
         }
         StaticCondition::HasMaxSpeed => has_max_speed(state, controller),
         StaticCondition::SpeedGE { threshold } => effective_speed(state, controller) >= *threshold,
@@ -4206,6 +4236,10 @@ fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zon
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_zone(lhs, zone) || quantity_expr_reads_zone(rhs, zone)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_zone(quantity, zone),
         StaticCondition::Not { condition } => {
             static_condition_reads_zone_membership(condition, zone)
         }
@@ -5121,6 +5155,10 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_life(lhs) || quantity_expr_reads_life(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_life(quantity),
         // Nested-filter condition surfaces (doc-comment conventions are not
         // type-enforced, so all are routed).
         StaticCondition::DefendingPlayerControls { filter }
@@ -15067,6 +15105,75 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    #[test]
+    fn quantity_quality_static_condition_evaluates_live() {
+        use crate::types::ability::{NumberQuality, Parity};
+        // CR 611.3a: the gate is re-read at any given moment. The source is a
+        // non-creature, so it never counts itself among "creatures you control".
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(0x0B000),
+            PlayerId(0),
+            "Quality Static Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        let creatures_you_control = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            },
+        };
+        let gate = |quality| StaticCondition::QuantityQuality {
+            quantity: creatures_you_control.clone(),
+            quality,
+        };
+        let even = gate(NumberQuality::Parity(Parity::Even));
+        let prime = gate(NumberQuality::Prime);
+        let not_even = StaticCondition::Not {
+            condition: Box::new(even.clone()),
+        };
+        let add_creature = |state: &mut GameState, i: u64| {
+            let id = create_object(
+                state,
+                CardId(0x0B100 + i),
+                PlayerId(0),
+                format!("Creature {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        };
+
+        assert!(
+            evaluate_condition(&state, &even, PlayerId(0), source),
+            "zero creatures: zero is even"
+        );
+        add_creature(&mut state, 1);
+        assert!(!evaluate_condition(&state, &even, PlayerId(0), source));
+        assert!(!evaluate_condition(&state, &prime, PlayerId(0), source));
+        assert!(
+            evaluate_condition(&state, &not_even, PlayerId(0), source),
+            "structural negation of an odd count"
+        );
+        add_creature(&mut state, 2);
+        assert!(evaluate_condition(&state, &even, PlayerId(0), source));
+        assert!(evaluate_condition(&state, &prime, PlayerId(0), source));
     }
 
     fn six_unspent_mana_condition() -> StaticCondition {

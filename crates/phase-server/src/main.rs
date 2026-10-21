@@ -20358,7 +20358,7 @@ mod handshake_tests {
                 hello_acceptance(ServerMode::Full),
             )
         };
-        // v156-v159 are other open PRs' reserved versions; each is refused by a
+        // v157-v159 are other open PRs' reserved versions; each is refused by a
         // v160 server.
         for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159] {
             assert_eq!(

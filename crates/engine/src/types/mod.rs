@@ -39,9 +39,10 @@ pub mod zones;
 pub use ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, BasicLandType,
     ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect,
-    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, ParitySource, PtValue,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, NumberQuality, Parity,
+    ParitySource, PtValue, ReplacementDefinition, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 pub use action_rejection::{ActionRejection, ActionRejectionCode, ActionRejectionDisposition};
 pub use actions::{GameAction, ResolutionOptionalPaymentChoice};

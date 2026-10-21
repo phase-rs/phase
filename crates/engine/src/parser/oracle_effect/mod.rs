@@ -637,6 +637,10 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_reads_source_counters(lhs) || quantity_expr_reads_source_counters(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_source_counters(quantity),
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
             condition_refs_source_object(condition)
@@ -706,6 +710,10 @@ fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectS
             rebind_source_counter_quantity_expr(lhs, to);
             rebind_source_counter_quantity_expr(rhs, to);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rebind_source_counter_quantity_expr(quantity, to),
         AbilityCondition::Not { condition }
         | AbilityCondition::ConditionInstead { inner: condition } => {
             rebind_source_counter_condition(condition, to);
@@ -1561,6 +1569,10 @@ fn condition_reads_player_chosen_number(condition: &AbilityCondition) -> bool {
             quantity_expr_reads_player_chosen_number(lhs)
                 || quantity_expr_reads_player_chosen_number(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_player_chosen_number(quantity),
         AbilityCondition::ConditionInstead { inner } => condition_reads_player_chosen_number(inner),
         AbilityCondition::Not { condition } => condition_reads_player_chosen_number(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -2179,6 +2191,7 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaid { .. }
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::QuantityQuality { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
@@ -34478,6 +34491,10 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
             rewrite_quantity_expr_keyword(lhs, new_keyword);
             rewrite_quantity_expr_keyword(rhs, new_keyword);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rewrite_quantity_expr_keyword(quantity, new_keyword),
         AbilityCondition::TargetHasKeywordInstead { keyword }
         | AbilityCondition::SourceLacksKeyword { keyword } => {
             *keyword = new_keyword.clone();
@@ -37891,6 +37908,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 rewrite_condition_quantity_expr(lhs);
                 rewrite_condition_quantity_expr(rhs);
             }
+            AbilityCondition::QuantityQuality {
+                quantity,
+                quality: _,
+            } => rewrite_condition_quantity_expr(quantity),
             AbilityCondition::TargetMatchesFilter { filter, .. }
             | AbilityCondition::SourceMatchesFilter { filter }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
@@ -38434,9 +38455,10 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 /// `effective_condition` read — but a ONE-operand counter-gate operand rather
 /// than a two-operand difference. Two gates feed it: a spell's leading
 /// counter-threshold clause ("If that artifact had counters on it, …" —
-/// Dismantle) and a trigger's positive past-tense intervening-if ("if it had
-/// one or more counters on it, …" — Yuna, Grand Summoner; bound from
-/// `lower_trigger_ir`).
+/// Dismantle) and a trigger's positive intervening-if count gate, bound from
+/// `lower_trigger_ir` via `positive_count_gate_qty` ("if it had one or more
+/// counters on it, …" — Yuna, Grand Summoner; "if … you control a prime
+/// number of lands, …" — Zimone, All-Questioning).
 ///
 /// The effect's own direct count/amount slot (`Effect::count_expr_mut`, the
 /// uniform accessor for `Draw`/`LoseLife`/`PutCounter`/`Token`/… magnitudes) is
@@ -38476,10 +38498,14 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 /// object's future resolution, gated there by `ResolutionScope`). This
 /// function has no such scope parameter because it always operates in the
 /// "bake in now" mode CR 608.2h requires — but that mode does not reach past
-/// those five either: a static/replacement grant they carry attaches to a
-/// DIFFERENT object's independent lifecycle, not a value snapshot of THIS
-/// resolution, so they are leaves here too, explicitly listed alongside the
-/// module's own leaf set below rather than folded into it silently.
+/// those grants either: a static/replacement grant attaches to a DIFFERENT
+/// object's independent lifecycle, not a value snapshot of THIS resolution.
+/// So four of them (`GenericEffect`, `CreateEmblem`, `AddTargetReplacement`,
+/// `Counter`) are leaves here, explicitly listed alongside the module's own
+/// leaf set below rather than folded into it silently. `Token` is descended
+/// only into its entry-counter magnitudes (CR 122.6: counters it is given as
+/// it enters are counters this resolution puts on it), never its granted
+/// statics.
 fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRef) {
     // CR 608.2c + CR 608.2h: the effect's own magnitude slot. Leaves any
     // non-placeholder quantity untouched (`rebind_event_context_amount` only
@@ -38589,10 +38615,21 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         // each grants a static/replacement to ANOTHER object's independent
         // future resolution, not a value snapshot of the CURRENT one.
         Effect::GenericEffect { .. }
-        | Effect::Token { .. }
         | Effect::CreateEmblem { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Counter { .. } => {}
+        // CR 122.6 + CR 608.2h: counters a token is given as it enters are counters this
+        // resolution puts on it, so each entry-counter count is a magnitude of THIS
+        // resolution (its `count` was rebound above via `count_expr_mut`). Its granted
+        // statics stay out of reach: they belong to the token's own later application.
+        Effect::Token {
+            enter_with_counters,
+            ..
+        } => {
+            for (_, count) in enter_with_counters.iter_mut() {
+                count.rebind_event_context_amount(gate_qty);
+            }
+        }
         // Leaf effects with no nested ability/effect carrier — verbatim from
         // `ability_visit::visit_effect_scoped`'s own leaf-arm enumeration.
         // `PutCounter`'s direct `count` slot was already rebound above via
@@ -38843,6 +38880,10 @@ pub(crate) fn trigger_condition_references_controller_life_gained(
         TriggerCondition::QuantityComparison { lhs, .. } => {
             quantity_expr_references_controller_life_gained(lhs)
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_references_controller_life_gained(quantity),
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
             .iter()
             .any(trigger_condition_references_controller_life_gained),

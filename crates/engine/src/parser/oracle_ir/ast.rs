@@ -594,8 +594,19 @@ pub(crate) enum ContinuationAst {
     /// | each of them> enters with N additional <counter> counter(s) on it" after
     /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
     /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
-    /// producer.)
+    /// producer.) The imperative "put … counters on it" form is
+    /// [`Self::PutCountersOnLastCreated`].
     TokenEntersWithCounters {
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    /// CR 608.2c + CR 122.1: imperative "put N <type> counter(s) on it" after a
+    /// create-token clause — a separate, later instruction on the token(s) that
+    /// clause just created, not counters the token enters with. Lowers to a
+    /// `ContinuationStep` `Effect::PutCounter { target: LastCreated }` sub
+    /// directly under the `Effect::Token`: the token enters first, then
+    /// receives the counters (Zaxara, the Exemplary rulings).
+    PutCountersOnLastCreated {
         counter_type: CounterType,
         count: QuantityExpr,
     },

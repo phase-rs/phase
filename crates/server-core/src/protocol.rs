@@ -3476,8 +3476,21 @@ mod tests {
     /// v160: `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
     /// "protection from each color that's not in your commander's color
     /// identity", Commander's Plate), which card data and `GameState` static
-    /// definitions can now carry; a v155 peer cannot parse it, so it must be
+    /// definitions can now carry; a v156 peer cannot parse it, so it must be
     /// refused before it receives v160 state.
+    ///
+    /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v155
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v156 state.
+    /// The same bump adds the optional per-seat `created_tokens` channel (each
+    /// seat's pinned creation result) to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
     ///
     /// v155: `PendingChangeZoneIteration.remaining` carries each member's
     /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
@@ -3502,6 +3515,12 @@ mod tests {
     /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
     /// drops them, so it must be refused before it receives v152 state.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v150: the cast-this-way gains rider is reshaped —
+    /// `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+    /// `PendingEntersModifications` object and
+    /// `Effect::AddPendingEntersModifications` carries its `rider`; a v149 peer
+    /// cannot parse either new shape, so it must be refused before it receives
+    /// v150 state.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
     /// paused instant or sorcery still owes; a v148 peer drops the key and would

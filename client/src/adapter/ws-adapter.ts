@@ -217,8 +217,22 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 160 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
  *      each color that's not in your commander's color identity", Commander's Plate) in
- *      card data and GameState static definitions; a v155 peer cannot parse it. Wire 142
- *      moves with it. v156-v159 are held by other open PRs.
+ *      card data and GameState static definitions; a v156 peer cannot parse it. Wire 142
+ *      moves with it. v157-v159 are held by other open PRs.
+ * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
+ *      QuantityQuality { quantity, quality } with the new NumberQuality
+ *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried
+ *      in GameState ability definitions (CR 107.1, CR 603.4) — see
+ *      PROTOCOL_VERSION's own `/// 156` entry in
+ *      crates/lobby-broker/src/protocol.rs. A pre-v156 peer cannot parse the
+ *      tag; the exact-match version check at connect refuses the pairing.
+ *      The same bump adds the optional per-seat `created_tokens` channel (each
+ *      seat's pinned creation result) to the private
+ *      player-scope tail sidecar that `PendingContinuation` carries under its
+ *      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+ *      tokens every seat created, for a paused "each player creates … The
+ *      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+ *      as the linked-exile-only sidecar. Wire 138 moves with it.
  * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
  *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
  *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry

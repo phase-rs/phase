@@ -5982,6 +5982,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
         | StaticCondition::HasMaxSpeed
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
@@ -26119,6 +26120,10 @@ fn ability_condition_is_board_state_evaluable(condition: &AbilityCondition) -> b
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_is_board_state_relative(lhs) && quantity_expr_is_board_state_relative(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_is_board_state_relative(quantity),
         _ => false,
     }
 }

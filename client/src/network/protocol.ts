@@ -107,9 +107,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  142 — game_setup and state_update carry GameState whose static definitions may
- *       hold ProtectionTarget EachColor (CR 702.16i); a v137 peer cannot parse it.
- *       Bumped in lockstep with full-game protocol 160 (wire 138-141 are held by
+ *       hold ProtectionTarget EachColor (CR 702.16i); a v138 peer cannot parse it.
+ *       Bumped in lockstep with full-game protocol 160 (wire 139-141 are held by
  *       other open PRs).
+ *  138 — game_setup and state_update carry GameState whose ability conditions
+ *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
+ *       full-game protocol 156, which also adds the optional per-seat
+ *       created_tokens channel (each seat's pinned creation result) on the
+ *       player-scope tail sidecar inside paused resolution frames.
  *  137 — game_setup and state_update carry GameState whose parked ChangeZone
  *       frame stores each remaining member with its pre-event entry
  *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves

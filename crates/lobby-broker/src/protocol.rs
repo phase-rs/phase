@@ -63,9 +63,23 @@ pub struct TournamentRequestId(pub u64);
 /// 160 — `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
 ///      "protection from each color that's not in your commander's color
 ///      identity", Commander's Plate) in card data and `GameState` static
-///      definitions; a v155 peer cannot parse it. Full-game peers and P2P move in
-///      lockstep (wire 142); no lobby carrier names it. v156-v159 are held by
+///      definitions; a v156 peer cannot parse it. Full-game peers and P2P move in
+///      lockstep (wire 142); no lobby carrier names it. v157-v159 are held by
 ///      other open PRs.
+///
+/// 156 — `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+///      `QuantityQuality { quantity, quality }`, with new `NumberQuality`
+///      (`{"type":"Prime"}` / `{"type":"Parity","value":"Odd"|"Even"}`), carried
+///      in ability definitions inside `GameState` (CR 107.1, CR 603.4). A pre-v156
+///      peer cannot parse the tag. Full-game peers and P2P move in lockstep
+///      (wire 138); no lobby carrier names it.
+///      The same bump adds the optional per-seat `created_tokens` channel (each
+///      seat's pinned creation result) to the private
+///      player-scope tail sidecar that `PendingContinuation` carries under its
+///      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+///      tokens every seat created, for a paused "each player creates … The
+///      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+///      as the linked-exile-only sidecar.
 ///
 /// 155 — `PendingChangeZoneIteration` members carry their pre-event entry
 ///      modifications (CR 603.6a + CR 614.12): `remaining` becomes
@@ -103,6 +117,7 @@ pub struct TournamentRequestId(pub u64);
 ///      export names it), so no migration shim exists; branch-era saved states
 ///      fail loudly on the unknown variant. P2P moves in lockstep (wire 135);
 ///      lobby messages are unchanged.
+///
 /// 152 — `ShortcutDecisionSchema` gains `suggested_declaration` (the offer's
 ///      eliminating suggestion) and `leading_aims` (published slots a trigger on
 ///      the stack already targets), and `ShortcutProposal` gains `leading_aims`.
