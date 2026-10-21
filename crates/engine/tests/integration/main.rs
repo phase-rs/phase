@@ -1100,6 +1100,7 @@ mod kotis_the_fangkeeper_where_x_damage_dealt;
 mod kozilek_broken_reality_manifest_from_hands;
 mod krark_clan_ironworks_castability;
 mod krark_thumb_coin_flip;
+mod krark_thumb_multiple_coin_flip_replacements;
 mod kroxa_titan_nonland_discard_life_loss;
 mod kutzils_flanker_mode_one_counter;
 mod kwain_drew_this_way_gains_life;

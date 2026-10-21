@@ -61,8 +61,21 @@ fn flip_through_replacement(
         ReplacementResult::Execute(_) => 1,
         ReplacementResult::Prevented => return CoinFlipOutcome::Prevented,
         ReplacementResult::NeedsChoice(choice_player) => {
-            // CR 614 interactive replacement (none ship for CoinFlip today, but
-            // stay correct if one is added): defer to the replacement-choice UI.
+            // CR 616.1: unreachable for every shipped coin-flip replacement.
+            // Krark's Thumb — the only parsed one — is a count multiplier that
+            // `candidate_materiality` classifies as a commuting `Count` writer,
+            // and its mode is Mandatory, so competing Thumbs auto-apply and no
+            // ordering or optional choice is ever opened.
+            //
+            // This arm is NOT a correct suspension either, so do not lean on it
+            // if such a choice ever appears: the callers below push a `CoinFlip`
+            // keep frame whose `DirectChoiceGate::CoinFlipKeep` does not match
+            // `WaitingFor::ReplacementChoice`, which the resolution-stack prompt
+            // invariant rejects, and `handle_replacement_choice` has no CoinFlip
+            // delivery. A non-commuting coin-flip replacement needs its flip
+            // context parked OUTSIDE the resolution stack (the
+            // `pending_die_roll_instruction` precedent in `roll_dice`) plus a
+            // delivery in `engine_replacement`, not this arm.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
             return CoinFlipOutcome::Suspended;
