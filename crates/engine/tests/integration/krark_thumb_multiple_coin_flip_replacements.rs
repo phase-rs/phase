@@ -171,7 +171,7 @@ fn cast_spell(runner: &mut GameRunner, spell: ObjectId, x: Option<u32>) {
         .expect("the cast action must be accepted");
     for _ in 0..16 {
         match &result.waiting_for {
-            // CR 601.2f: X is announced as part of determining the total cost.
+            // CR 601.2b: X (a variable cost) is announced while proposing the spell.
             WaitingFor::ChooseXValue { .. } => {
                 let value = x.expect("this spell announces an X value");
                 result = runner
@@ -343,7 +343,7 @@ fn green_mana(count: usize) -> Vec<ManaUnit> {
 // --- T1: a single flip under two Thumbs -------------------------------------
 
 /// Two legendary Thumbs plus Mirror Gallery, P1 holding a 2/2 and a 4/4, and
-/// Puppet's Verdict in P0's hand. Puppet's Verdict is a sorcery with no mana cost
+/// Puppet's Verdict in P0's hand. Puppet's Verdict is an instant with no mana cost
 /// set on the fixture, so the cast needs no mana.
 fn t1_fixture(seed: u64) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -354,7 +354,7 @@ fn t1_fixture(seed: u64) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let small = scenario.add_creature(P1, "Small Bear", 2, 2).id();
     let big = scenario.add_creature(P1, "Big Dreadmaw", 4, 4).id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Puppet's Verdict", false, PUPPETS_VERDICT)
+        .add_spell_to_hand_from_oracle(P0, "Puppet's Verdict", true, PUPPETS_VERDICT)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().rng = GameRng::seed_from_u64(seed);
@@ -559,7 +559,7 @@ fn t2_seed_with_a_kept_win() -> u64 {
     panic!("no seed in 0..64 kept a win inside two four-coin prompts");
 }
 
-/// CR 705.2: each coin of "flip X coins" is replaced separately, so X = 2 under
+/// Krark's Thumb 2019-01-25 ruling: each coin of "flip X coins" is replaced separately, so X = 2 under
 /// two Thumbs opens two independent keep prompts of four coins, and the win
 /// branch runs once per kept win.
 #[test]
@@ -724,7 +724,7 @@ fn thumbs_under_different_controllers_double_only_the_flippers_flip() {
     add_thumb_for(&mut scenario, P0);
     add_thumb_for(&mut scenario, P1);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Puppet's Verdict", false, PUPPETS_VERDICT)
+        .add_spell_to_hand_from_oracle(P0, "Puppet's Verdict", true, PUPPETS_VERDICT)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().rng = GameRng::seed_from_u64(0);
