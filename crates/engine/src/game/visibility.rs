@@ -1945,6 +1945,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.stack_trigger_firings.clear();
     filtered.resolving_trigger_firing = None;
     for trigger in &mut filtered.delayed_triggers {
+        trigger.condition.clear_embedded_return_result_processes();
         trigger.provenance = crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed;
     }
     for context in &mut filtered.deferred_triggers {
@@ -2273,6 +2274,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     let mut redact_lookback =
         |event: &mut GameEvent| redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
     for trigger in &mut filtered.delayed_triggers {
+        trigger.condition.clear_embedded_return_result_processes();
         trigger
             .ability
             .for_each_creation_lookback_event_mut(&mut redact_lookback);
@@ -4715,6 +4717,130 @@ fn redact_raw_result_copiable(values: &mut crate::types::ability::CopiableValues
     values.clear_embedded_return_result_processes();
 }
 
+fn redact_object_result_payloads(
+    object: &mut crate::game::game_object::GameObject,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    if let Some(crate::types::ability::ExiledSpellRider::ReturnTo { timing, .. }) =
+        &mut object.exile_from_stack_rider
+    {
+        timing.clear_embedded_return_result_processes();
+    }
+    for attribute in &mut object.chosen_attributes {
+        attribute.clear_embedded_return_result_processes();
+    }
+    if let Some(snapshot) = &mut object.cast_cost_paid_object {
+        snapshot.lki.clear_embedded_return_result_processes();
+    }
+    redact_payment_source_snapshots(&mut object.mana_spent_source_snapshots, hidden_ids);
+    for keyword in object
+        .keywords
+        .iter_mut()
+        .chain(&mut object.base_keywords)
+        .chain(&mut object.cast_spell_keywords)
+    {
+        keyword.clear_embedded_return_result_processes();
+    }
+    if let Some(cost) = &mut object.additional_cost {
+        cost.clear_embedded_return_result_processes();
+    }
+    for option in &mut object.casting_options {
+        if let Some(cost) = &mut option.cost {
+            cost.clear_embedded_return_result_processes();
+        }
+    }
+    for modification in &mut object.perpetual_mods {
+        modification.clear_embedded_return_result_processes();
+    }
+    for definition in Arc::make_mut(&mut object.abilities)
+        .iter_mut()
+        .chain(Arc::make_mut(&mut object.base_abilities).iter_mut())
+    {
+        definition.clear_embedded_return_result_processes();
+    }
+    for index in 0..object.trigger_definitions.len() {
+        if let Some(entry) = object.trigger_definitions.get_mut(index) {
+            redact_raw_result_trigger(&mut entry.definition);
+        }
+    }
+    for trigger in Arc::make_mut(&mut object.base_trigger_definitions) {
+        redact_raw_result_trigger(trigger);
+    }
+    for index in 0..object.static_definitions.len() {
+        if let Some(definition) = object.static_definitions.get_mut(index) {
+            redact_raw_result_static(definition);
+        }
+    }
+    for definition in Arc::make_mut(&mut object.base_static_definitions) {
+        redact_raw_result_static(definition);
+    }
+    for index in 0..object.replacement_definitions.len() {
+        if let Some(definition) = object.replacement_definitions.get_mut(index) {
+            redact_raw_result_replacement(definition);
+        }
+    }
+    for definition in Arc::make_mut(&mut object.base_replacement_definitions) {
+        redact_raw_result_replacement(definition);
+    }
+    if let Some(face) = &mut object.back_face {
+        face.clear_embedded_return_result_processes();
+    }
+    if let Some(faces) = &mut object.specialize_faces {
+        for face in faces.values_mut() {
+            face.clear_embedded_return_result_processes();
+        }
+    }
+    if let Some(face) = &mut object.copied_prepare_face {
+        Arc::make_mut(face).clear_embedded_return_result_processes();
+    }
+    if let Some(cleave) = &mut object.cleave_form {
+        for definition in Arc::make_mut(&mut cleave.abilities)
+            .iter_mut()
+            .chain(Arc::make_mut(&mut cleave.base_abilities).iter_mut())
+        {
+            definition.clear_embedded_return_result_processes();
+        }
+        for index in 0..cleave.triggers.len() {
+            if let Some(entry) = cleave.triggers.get_mut(index) {
+                redact_raw_result_trigger(&mut entry.definition);
+            }
+        }
+        for definition in Arc::make_mut(&mut cleave.base_triggers) {
+            redact_raw_result_trigger(definition);
+        }
+        for index in 0..cleave.statics.len() {
+            if let Some(definition) = cleave.statics.get_mut(index) {
+                redact_raw_result_static(definition);
+            }
+        }
+        for definition in Arc::make_mut(&mut cleave.base_statics) {
+            redact_raw_result_static(definition);
+        }
+        for index in 0..cleave.replacements.len() {
+            if let Some(definition) = cleave.replacements.get_mut(index) {
+                redact_raw_result_replacement(definition);
+            }
+        }
+        for definition in Arc::make_mut(&mut cleave.base_replacements) {
+            redact_raw_result_replacement(definition);
+        }
+    }
+    if let Some(cleave) = &mut object.cleave_variant {
+        for definition in &mut cleave.abilities {
+            definition.clear_embedded_return_result_processes();
+        }
+        for definition in &mut cleave.triggers {
+            redact_raw_result_trigger(definition);
+        }
+        for definition in &mut cleave.static_abilities {
+            redact_raw_result_static(definition);
+        }
+        for definition in &mut cleave.replacements {
+            redact_raw_result_replacement(definition);
+        }
+    }
+}
+
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
     // Public retained copies have their own typed custody, independent of the
     // live object's definition and of hidden-identity removal.
@@ -4827,119 +4953,18 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
         }
     }
     for (_, object) in state.objects.iter_mut() {
-        for attribute in &mut object.chosen_attributes {
-            attribute.clear_embedded_return_result_processes();
+        redact_object_result_payloads(object, hidden_ids);
+    }
+    for (_, departed) in state.departed_stack_spells.iter_mut() {
+        for (_, departed) in departed.iter_mut() {
+            redact_object_result_payloads(&mut departed.object, hidden_ids);
         }
-        if let Some(snapshot) = &mut object.cast_cost_paid_object {
-            snapshot.lki.clear_embedded_return_result_processes();
-        }
-        redact_payment_source_snapshots(&mut object.mana_spent_source_snapshots, hidden_ids);
-        for keyword in object
-            .keywords
-            .iter_mut()
-            .chain(&mut object.base_keywords)
-            .chain(&mut object.cast_spell_keywords)
-        {
-            keyword.clear_embedded_return_result_processes();
-        }
-        if let Some(cost) = &mut object.additional_cost {
-            cost.clear_embedded_return_result_processes();
-        }
-        for option in &mut object.casting_options {
-            if let Some(cost) = &mut option.cost {
-                cost.clear_embedded_return_result_processes();
-            }
-        }
-        for modification in &mut object.perpetual_mods {
-            modification.clear_embedded_return_result_processes();
-        }
-        for definition in Arc::make_mut(&mut object.abilities)
-            .iter_mut()
-            .chain(Arc::make_mut(&mut object.base_abilities).iter_mut())
-        {
-            definition.clear_embedded_return_result_processes();
-        }
-        for index in 0..object.trigger_definitions.len() {
-            if let Some(entry) = object.trigger_definitions.get_mut(index) {
-                redact_raw_result_trigger(&mut entry.definition);
-            }
-        }
-        for trigger in Arc::make_mut(&mut object.base_trigger_definitions) {
-            redact_raw_result_trigger(trigger);
-        }
-        for index in 0..object.static_definitions.len() {
-            if let Some(definition) = object.static_definitions.get_mut(index) {
-                redact_raw_result_static(definition);
-            }
-        }
-        for definition in Arc::make_mut(&mut object.base_static_definitions) {
-            redact_raw_result_static(definition);
-        }
-        for index in 0..object.replacement_definitions.len() {
-            if let Some(definition) = object.replacement_definitions.get_mut(index) {
-                redact_raw_result_replacement(definition);
-            }
-        }
-        for definition in Arc::make_mut(&mut object.base_replacement_definitions) {
-            redact_raw_result_replacement(definition);
-        }
-        if let Some(face) = &mut object.back_face {
-            face.clear_embedded_return_result_processes();
-        }
-        if let Some(faces) = &mut object.specialize_faces {
-            for face in faces.values_mut() {
-                face.clear_embedded_return_result_processes();
-            }
-        }
-        if let Some(face) = &mut object.copied_prepare_face {
-            Arc::make_mut(face).clear_embedded_return_result_processes();
-        }
-        if let Some(cleave) = &mut object.cleave_form {
-            for definition in Arc::make_mut(&mut cleave.abilities)
-                .iter_mut()
-                .chain(Arc::make_mut(&mut cleave.base_abilities).iter_mut())
-            {
-                definition.clear_embedded_return_result_processes();
-            }
-            for index in 0..cleave.triggers.len() {
-                if let Some(entry) = cleave.triggers.get_mut(index) {
-                    redact_raw_result_trigger(&mut entry.definition);
-                }
-            }
-            for definition in Arc::make_mut(&mut cleave.base_triggers) {
-                redact_raw_result_trigger(definition);
-            }
-            for index in 0..cleave.statics.len() {
-                if let Some(definition) = cleave.statics.get_mut(index) {
-                    redact_raw_result_static(definition);
-                }
-            }
-            for definition in Arc::make_mut(&mut cleave.base_statics) {
-                redact_raw_result_static(definition);
-            }
-            for index in 0..cleave.replacements.len() {
-                if let Some(definition) = cleave.replacements.get_mut(index) {
-                    redact_raw_result_replacement(definition);
-                }
-            }
-            for definition in Arc::make_mut(&mut cleave.base_replacements) {
-                redact_raw_result_replacement(definition);
-            }
-        }
-        if let Some(cleave) = &mut object.cleave_variant {
-            for definition in &mut cleave.abilities {
-                definition.clear_embedded_return_result_processes();
-            }
-            for definition in &mut cleave.triggers {
-                redact_raw_result_trigger(definition);
-            }
-            for definition in &mut cleave.static_abilities {
-                redact_raw_result_static(definition);
-            }
-            for definition in &mut cleave.replacements {
-                redact_raw_result_replacement(definition);
-            }
-        }
+    }
+    if let Some(authority) = state.entering_aura_authority.as_mut() {
+        redact_object_result_payloads(&mut authority.entrant, hidden_ids);
+    }
+    for trigger in &mut state.delayed_triggers {
+        trigger.condition.clear_embedded_return_result_processes();
     }
     for values in state.lki_copiable_values.values_mut() {
         redact_raw_result_copiable(values);

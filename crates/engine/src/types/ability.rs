@@ -11885,6 +11885,13 @@ impl Effect {
         self.clear_payload_return_result_processes(&mut |_| {});
         match self {
             Effect::EpicCopy { spell } => spell.clear_return_result_process_recursive(),
+            Effect::CreateDelayedTrigger { condition, .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard {
+                on_exile:
+                    Some(ExiledSpellRider::ReturnTo {
+                        timing: condition, ..
+                    }),
+            } => condition.clear_embedded_return_result_processes(),
             // The generic visitor's Mana leaf remains intentional.
             Effect::Mana { grants, .. } => {
                 for grant in grants {
@@ -12009,6 +12016,14 @@ pub(crate) fn clear_registered_result_processes(
     use crate::types::ability_visit::DefinitionNodeMut;
     match node {
         DefinitionNodeMut::Replacement(definition) => {
+            if let Some(spec) = &mut definition.additional_token_spec {
+                spec.clear_embedded_return_result_processes();
+            }
+            if let Some(specs) = &mut definition.ensure_token_specs {
+                for spec in specs {
+                    spec.clear_embedded_return_result_processes();
+                }
+            }
             for filter in [
                 &mut definition.valid_card,
                 &mut definition.damage_source_filter,
@@ -12696,6 +12711,50 @@ impl CopiableValues {
     }
 }
 
+impl crate::types::proposed_event::TokenSpec {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        for keyword in &mut self.characteristics.keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+        for definition in &mut self.static_abilities {
+            definition.clear_embedded_return_result_processes();
+        }
+        if let Some(duration) = &mut self.sacrifice_at {
+            duration.clear_embedded_return_result_processes();
+        }
+    }
+}
+
+impl DelayedTriggerCondition {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        match self {
+            Self::WhenDies { filter }
+            | Self::WhenLeavesPlayFiltered { filter }
+            | Self::WhenEntersBattlefield { filter }
+            | Self::WhenDiesOrExiled { filter } => {
+                filter.clear_typed_return_result_processes(&mut |_| {});
+            }
+            Self::WheneverEvent { trigger, .. } => {
+                trigger.clear_embedded_return_result_processes();
+            }
+            Self::WhenNextEvent {
+                trigger,
+                or_trigger,
+                ..
+            } => {
+                trigger.clear_embedded_return_result_processes();
+                if let Some(trigger) = or_trigger {
+                    trigger.clear_embedded_return_result_processes();
+                }
+            }
+            Self::AtNextPhase { .. }
+            | Self::AtNextPhaseForPlayer { .. }
+            | Self::AtBeginningOfAddedPhase { .. }
+            | Self::WhenLeavesPlay { .. } => {}
+        }
+    }
+}
+
 impl<'a> ResultScopeNode<'a> {
     fn effect(self) -> &'a Effect {
         match self {
@@ -13161,6 +13220,15 @@ fn validate_persistent_result_modification(
         ContinuousModification::GrantStaticAbility { definition } => {
             validate_persistent_result_static(definition)
         }
+        ContinuousModification::CopyValues { values, .. } => {
+            for keyword in &values.keywords {
+                validate_persistent_result_keyword(keyword)?;
+            }
+            if let Some(face) = &values.prepare_face {
+                validate_persistent_result_face(face)?;
+            }
+            Ok(())
+        }
         ContinuousModification::AddStaticMode { mode } => validate_persistent_result_mode(mode),
         // Executable/trigger/replacement/copiable descendants are also visited by
         // the shared IncludeRegisteredLater node walk, with an empty environment.
@@ -13346,9 +13414,82 @@ fn validate_persistent_result_static(definition: &StaticDefinition) -> Result<()
         validate_persistent_result_parsed_condition(condition)?;
     }
     for modification in &definition.modifications {
-        validate_persistent_result_modification(modification)?;
+        validate_independent_result_modification(modification)?;
     }
     Ok(())
+}
+
+fn validate_persistent_result_face(face: &BackFaceData) -> Result<(), EffectError> {
+    use crate::types::ability_visit::DefinitionNode;
+    for definition in &face.abilities {
+        validate_instruction_result_definition(definition)?;
+    }
+    for definition in face.trigger_definitions.iter_all() {
+        validate_persistent_result_definition_node(DefinitionNode::Trigger(definition))?;
+    }
+    for definition in face.static_definitions.iter_all() {
+        validate_persistent_result_static(definition)?;
+    }
+    for definition in face.replacement_definitions.iter_all() {
+        validate_persistent_result_definition_node(DefinitionNode::Replacement(definition))?;
+    }
+    for keyword in &face.keywords {
+        validate_persistent_result_keyword(keyword)?;
+    }
+    if let Some(cost) = &face.additional_cost {
+        match cost {
+            AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
+                validate_persistent_result_cost(cost)?;
+            }
+            AdditionalCost::Kicker { costs, .. } => {
+                for cost in costs {
+                    validate_persistent_result_cost(cost)?;
+                }
+            }
+            AdditionalCost::Choice(first, second) => {
+                validate_persistent_result_cost(first)?;
+                validate_persistent_result_cost(second)?;
+            }
+        }
+    }
+    for option in &face.casting_options {
+        if let Some(cost) = &option.cost {
+            validate_persistent_result_cost(cost)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_persistent_result_delayed_condition(
+    condition: &DelayedTriggerCondition,
+) -> Result<(), EffectError> {
+    use crate::types::ability_visit::DefinitionNode;
+    match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            validate_persistent_result_filter(filter)
+        }
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
+            validate_persistent_result_definition_node(DefinitionNode::Trigger(trigger))
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => {
+            validate_persistent_result_definition_node(DefinitionNode::Trigger(trigger))?;
+            if let Some(trigger) = or_trigger {
+                validate_persistent_result_definition_node(DefinitionNode::Trigger(trigger))?;
+            }
+            Ok(())
+        }
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => Ok(()),
+    }
 }
 
 fn validate_persistent_result_trigger_condition(
@@ -13425,6 +13566,9 @@ fn validate_persistent_result_definition_node(
         DefinitionNode::Ability(_) => Ok(()), // Its independent process is classified at the exact definition edge below.
         DefinitionNode::Static(definition) => validate_persistent_result_static(definition),
         DefinitionNode::Trigger(definition) => {
+            if let Some(body) = &definition.execute {
+                validate_instruction_result_definition(body)?;
+            }
             for filter in [
                 &definition.valid_card,
                 &definition.valid_target,
@@ -13458,6 +13602,21 @@ fn validate_persistent_result_definition_node(
             Ok(())
         }
         DefinitionNode::Replacement(definition) => {
+            if let Some(body) = &definition.execute {
+                validate_instruction_result_definition(body)?;
+            }
+            match &definition.mode {
+                ReplacementMode::MayCost {
+                    decline: Some(body),
+                    ..
+                }
+                | ReplacementMode::Optional {
+                    decline: Some(body),
+                } => {
+                    validate_instruction_result_definition(body)?;
+                }
+                _ => {}
+            }
             for filter in [
                 &definition.valid_card,
                 &definition.damage_source_filter,
@@ -13730,6 +13889,13 @@ pub(crate) fn validate_source_only_result_player_counts(
 fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectError> {
     validate_instruction_result_effect_context(effect)?;
     match effect {
+        Effect::CreateDelayedTrigger { condition, .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard {
+            on_exile:
+                Some(ExiledSpellRider::ReturnTo {
+                    timing: condition, ..
+                }),
+        } => validate_persistent_result_delayed_condition(condition)?,
         Effect::PayCost { cost, .. } => validate_result_cost_payloads(cost)?,
         Effect::CreateDamageReplacement {
             source_filter,

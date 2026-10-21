@@ -31,7 +31,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
-use engine::types::identifiers::CardId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -10348,7 +10348,7 @@ fn departure_opponent_restriction_refuses_before_root_and_keeps_this_turn_fixed_
             let before = serde_json::to_value(&state).unwrap();
             let mut events = Vec::new();
             let resolved = build_resolved_from_def(&root, spell, P0);
-            let error = resolve_ability_chain(&mut state, &resolved, &mut events).unwrap_err();
+            let error = resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap_err();
             assert!(
                 format!("{error:?}").contains("opponent restriction requires executable context")
             );
@@ -10461,6 +10461,7 @@ fn departure_raw_replacements_refuse_outer_imports_before_producers_and_install_
                     &mut state,
                     &build_resolved_from_def(&root, spell, P0),
                     &mut events,
+                    0,
                 )
                 .unwrap_err();
                 assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
@@ -10488,7 +10489,8 @@ fn departure_raw_replacements_refuse_outer_imports_before_producers_and_install_
                 // Supplemental independent invocation of the actually installed body;
                 // public selection and priority complete its nested local process.
                 let mut events = Vec::new();
-                resolve_ability_chain(runner.state_mut(), &substitute, &mut events).unwrap();
+                // Supplemental installed-body invocation; actual event-driven installations have separate production regressions.
+                resolve_ability_chain(runner.state_mut(), &substitute, &mut events, 0).unwrap();
                 if mode == 3 {
                     assert!(matches!(
                         runner.state().waiting_for,
@@ -10808,6 +10810,7 @@ fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
         &mut state,
         &build_resolved_from_def(&root, spell, P0),
         &mut events,
+        0,
     )
     .unwrap_err();
     assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
@@ -11085,6 +11088,7 @@ fn departure_source_only_bolster_prevention_step_and_player_thresholds_refuse_be
                         &mut state,
                         &build_resolved_from_def(&root, spell, P0),
                         &mut events,
+                        0,
                     )
                     .unwrap_err();
                     assert!(format!("{error:?}").contains("executable context"));
@@ -11297,6 +11301,7 @@ fn departure_direct_damage_shields_validate_later_formulas_and_both_filter_axes_
                         &mut state,
                         &build_resolved_from_def(&root, spell, P0),
                         &mut events,
+                        0,
                     )
                     .unwrap_err();
                     assert!(format!("{error:?}").contains("instruction-result"));
@@ -11545,6 +11550,7 @@ fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_
                 &mut state,
                 &build_resolved_from_def(&root, spell, P0),
                 &mut events,
+                0,
             )
             .unwrap_err();
             assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
@@ -11744,6 +11750,7 @@ fn departure_source_only_object_predicate_refuses_before_root_and_ordinary_filte
                     &mut state,
                     &build_resolved_from_def(&root, spell, P0),
                     &mut events,
+                    0,
                 )
                 .unwrap_err();
                 assert!(
@@ -11957,6 +11964,7 @@ fn departure_five_contextual_source_only_thresholds_refuse_before_the_complete_r
                             &mut state,
                             &build_resolved_from_def(&root, spell, P0),
                             &mut events,
+                            0,
                         )
                         .unwrap_err();
                         assert!(
@@ -12143,6 +12151,7 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
                     &mut state,
                     &build_resolved_from_def(&root, spell, P0),
                     &mut events,
+                    0,
                 )
                 .unwrap_err();
                 assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
@@ -12801,6 +12810,7 @@ fn departure_stateless_spell_history_thresholds_refuse_before_production_and_kee
                         &mut state,
                         &build_resolved_from_def(&root, spell, P0),
                         &mut events,
+                        0,
                     )
                     .unwrap_err();
                     assert!(
@@ -12907,6 +12917,7 @@ fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_
                 &mut state,
                 &build_resolved_from_def(&root, spell, P0),
                 &mut events,
+                0,
             )
             .unwrap_err();
             assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
@@ -13303,4 +13314,1147 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
     }
     assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
     departure_assert_program_complete(&runner, spell, -1, 0);
+}
+
+// Supplemental canonical payload constructors: no printed-card or Epic-payment claim.
+fn departure_opaque_epic_cost(mode: u8) -> engine::types::ability::AbilityCost {
+    use engine::types::ability::*;
+    if mode != 4 {
+        return departure_independent_epic_cost(mode);
+    }
+    let mut body = departure_exile_definition(7);
+    body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
+    let mut snapshot = build_resolved_from_def(&body, ObjectId(0), PlayerId(0));
+    snapshot.return_result_process = Some(engine::types::game_state::ReturnResultProcessId(901));
+    AbilityCost::EffectCost {
+        effect: Box::new(Effect::EpicCopy {
+            spell: Box::new(snapshot),
+        }),
+    }
+}
+
+fn departure_opaque_token_spec() -> engine::types::proposed_event::TokenSpec {
+    use engine::types::proposed_event::*;
+    TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: "Supplemental retained Food".into(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            core_types: vec![engine::types::card_type::CoreType::Artifact],
+            subtypes: vec!["Food".into()],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+        },
+        script_name: "Supplemental retained Food".into(),
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: ObjectId(0),
+        controller: PlayerId(0),
+        attach_to: TokenHostRequest::NotRequested,
+    }
+}
+
+fn departure_opaque_filter(mode: u8) -> engine::types::ability::TargetFilter {
+    use engine::types::ability::*;
+    TargetFilter::Typed({
+        let mut filter = TypedFilter::default();
+        filter.properties.push(FilterProp::WithKeyword {
+            value: engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_epic_cost(
+                mode,
+            )),
+        });
+        filter
+    })
+}
+
+fn departure_opaque_conditions(mode: u8) -> Vec<engine::types::ability::DelayedTriggerCondition> {
+    use engine::types::ability::*;
+    use engine::types::phase::Phase;
+    use engine::types::triggers::TriggerMode;
+    let filter = departure_opaque_filter(mode);
+    let mut matcher = TriggerDefinition::new(TriggerMode::SpellCast).valid_card(filter.clone());
+    matcher.unless_pay = Some(UnlessPayModifier {
+        cost: departure_opaque_epic_cost(mode),
+        payer: filter.clone(),
+    });
+    vec![
+        DelayedTriggerCondition::WhenDies {
+            filter: filter.clone(),
+        },
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: filter.clone(),
+        },
+        DelayedTriggerCondition::WhenEntersBattlefield {
+            filter: filter.clone(),
+        },
+        DelayedTriggerCondition::WhenDiesOrExiled { filter },
+        DelayedTriggerCondition::WheneverEvent {
+            trigger: Box::new(matcher.clone()),
+            expiry: Default::default(),
+        },
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(matcher.clone()),
+            or_trigger: None,
+            lifetime: Default::default(),
+        },
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
+            or_trigger: Some(Box::new(matcher)),
+            lifetime: Default::default(),
+        },
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: Phase::End,
+            player: PlayerId(0),
+            gate: Default::default(),
+            binding: Default::default(),
+        },
+        DelayedTriggerCondition::AtBeginningOfAddedPhase {
+            phase: Phase::BeginCombat,
+            entry: None,
+        },
+        DelayedTriggerCondition::WhenLeavesPlay {
+            object_id: ObjectId(0),
+        },
+    ]
+}
+
+fn departure_opaque_payloads(
+    mode: u8,
+    face: &engine::game::game_object::BackFaceData,
+) -> Vec<engine::types::ability::Effect> {
+    use engine::types::ability::*;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
+    use std::sync::Arc;
+    let keyword =
+        engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_epic_cost(mode));
+    let body = if mode == 4 {
+        let mut body = departure_exile_definition(7);
+        body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
+        body
+    } else if mode == 3 {
+        departure_gain_definition(7, PlayerId(0))
+    } else if mode == 0 {
+        departure_selected_local_body(false, false)
+    } else {
+        let mut body = departure_gain_definition(7, PlayerId(0));
+        let Effect::GainLife { amount, .. } = body.effect.as_mut() else {
+            unreachable!()
+        };
+        if mode == 1 {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate { source, .. },
+            } = amount
+            else {
+                unreachable!()
+            };
+            *source = ZoneChangeRecordSource::ThisTurn;
+        } else {
+            *amount = QuantityExpr::Fixed { value: 5 };
+        }
+        body
+    };
+    let trigger = TriggerDefinition::new(TriggerMode::SpellCast).execute(body.clone());
+    let mut nested_replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+    nested_replacement.execute = Some(Box::new(body.clone()));
+    let mods = vec![
+        ContinuousModification::GrantAbility {
+            definition: Box::new(body.clone()),
+        },
+        ContinuousModification::GrantTrigger {
+            trigger: Box::new(trigger),
+        },
+        ContinuousModification::GrantReplacement {
+            replacement: Box::new(nested_replacement),
+        },
+        ContinuousModification::GrantStaticAbility {
+            definition: Box::new(StaticDefinition::new(StaticMode::Continuous).modifications(
+                vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(body),
+                }],
+            )),
+        },
+        ContinuousModification::CopyValues {
+            values: Box::new({
+                let mut values = departure_retained_epic_values(2);
+                values.abilities = Arc::new(vec![]);
+                values.keywords = vec![keyword.clone()];
+                values
+            }),
+            display_source: Default::default(),
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+        },
+    ];
+    let mut effects = vec![];
+    for ensure in [false, true] {
+        for modification in mods.clone() {
+            let mut spec = departure_opaque_token_spec();
+            spec.static_abilities.push(
+                StaticDefinition::new(StaticMode::Continuous).modifications(vec![modification]),
+            );
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+            if ensure {
+                replacement.ensure_token_specs = Some(vec![spec]);
+            } else {
+                replacement.additional_token_spec = Some(spec);
+            }
+            effects.push(Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            });
+        }
+    }
+    for leaf in 0..3 {
+        let mut values = departure_retained_epic_values(2);
+        values.abilities = Arc::new(vec![]);
+        if leaf == 0 {
+            values.keywords = vec![keyword.clone()];
+        } else {
+            let mut copied_face = face.clone();
+            copied_face.abilities.clear();
+            copied_face.keywords.clear();
+            if leaf == 1 {
+                let AbilityCost::EffectCost { effect } = departure_opaque_epic_cost(mode) else {
+                    unreachable!()
+                };
+                copied_face
+                    .abilities
+                    .push(AbilityDefinition::new(AbilityKind::Activated, *effect));
+            } else {
+                copied_face.additional_cost =
+                    Some(AdditionalCost::Required(departure_opaque_epic_cost(mode)));
+            }
+            values.prepare_face = Some(Arc::new(copied_face));
+        }
+        effects.push(Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous).modifications(
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: Default::default(),
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        });
+    }
+    for condition in departure_opaque_conditions(mode) {
+        effects.push(Effect::CreateDelayedTrigger {
+            condition: condition.clone(),
+            effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            uses_tracked_set: false,
+        });
+        effects.push(Effect::ExileResolvingSpellInsteadOfGraveyard {
+            on_exile: Some(ExiledSpellRider::ReturnTo {
+                destination: Zone::Hand,
+                timing: condition,
+            }),
+        });
+    }
+    effects
+}
+
+#[test]
+fn departure_opaque_installed_payloads_refuse_before_any_producer_and_preserve_independent_controls(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    for mode in 0..5 {
+        let mut fixture = GameScenario::new();
+        let face_source = fixture.add_artifact(P0, "Supplemental face source").id();
+        let fixture = fixture.build();
+        let face = engine::game::printed_cards::snapshot_object_face(
+            &fixture.state().objects[&face_source],
+        );
+        for (slot, effect) in departure_opaque_payloads(mode, &face)
+            .into_iter()
+            .enumerate()
+        {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+            let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+            let mut root = departure_exile_definition(7);
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Supplemental opaque installer", false)
+                .with_mana_cost(ManaCost::generic(1))
+                .with_ability_definition(root.clone())
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+            );
+            let mut runner = scenario.build();
+            let mut state = runner.state().clone();
+            let before = serde_json::to_value(&state).unwrap();
+            let mut events = vec![];
+            let result = resolve_ability_chain(
+                &mut state,
+                &build_resolved_from_def(&root, spell, P0),
+                &mut events,
+                0,
+            );
+            // Last eight slots are four body-free condition variants on both routes.
+            let rejects = mode == 3 && slot < 27;
+            if rejects {
+                assert!(
+                    format!("{:?}", result.unwrap_err())
+                        .contains("foreign instruction-result dependency"),
+                    "opaque slot {slot}"
+                );
+                assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                assert!(events.is_empty());
+                runner.cast(spell).resolve();
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+                assert_eq!(runner.state().next_return_result_process_id, 1);
+                assert!(runner.state().pending_damage_replacements.is_empty());
+                assert!(runner.state().delayed_triggers.is_empty());
+                assert!(runner.state().transient_continuous_effects.is_empty());
+                departure_assert_program_complete(&runner, spell, 0, 0);
+            } else {
+                // Typed admission supplement; public real installation positives follow separately.
+                result.unwrap_or_else(|error| panic!("opaque slot {slot}, mode {mode}: {error:?}"));
+                assert_eq!(state.objects[&victim].zone, Zone::Exile);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_both_replacement_token_specs_install_real_later_triggers_with_private_prototypes() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{ReturnResultProcessId, WaitingFor};
+    use engine::types::keywords::Keyword;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
+    for ensure in [false, true] {
+        let (mut runner, spell, subjects) =
+            departure_public_program_runner(false, false, 2, |scenario| {
+                let mut spec = departure_opaque_token_spec();
+                spec.characteristics
+                    .keywords
+                    .push(Keyword::CumulativeUpkeep(departure_independent_epic_cost(
+                        0,
+                    )));
+                let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)))
+                    .execute(departure_selected_local_body(true, false));
+                spec.static_abilities.push(
+                    StaticDefinition::new(StaticMode::Continuous)
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(vec![
+                            ContinuousModification::GrantTrigger {
+                                trigger: Box::new(trigger),
+                            },
+                            ContinuousModification::GrantAbility {
+                                definition: Box::new(departure_retained_epic_definition(0)),
+                            },
+                        ]),
+                );
+                // Retained duration matcher/cost/filter custody is tested before the token event;
+                // no claim that UntilEvent is a newly implemented token-sacrifice scheduler.
+                spec.sacrifice_at = Some(Duration::UntilEvent {
+                    event: Box::new({
+                        let mut event = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .valid_card(departure_opaque_filter(0));
+                        event.unless_pay = Some(UnlessPayModifier {
+                            cost: departure_independent_epic_cost(0),
+                            payer: departure_opaque_filter(0),
+                        });
+                        event
+                    }),
+                });
+                let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                    .token_owner_scope(ControllerRef::You);
+                if ensure {
+                    replacement.ensure_token_specs = Some(vec![spec]);
+                } else {
+                    replacement.additional_token_spec = Some(spec);
+                }
+                let token = scenario
+                    .add_spell_to_hand(P0, "Supplemental real token event", false)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Token {
+                            name: "Supplemental Seed".into(),
+                            power: PtValue::Fixed(0),
+                            toughness: PtValue::Fixed(0),
+                            types: vec!["Artifact".into(), "Treasure".into()],
+                            colors: vec![],
+                            keywords: vec![],
+                            tapped: false,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            owner: TargetFilter::Controller,
+                            attach_to: None,
+                            enters_attacking: false,
+                            supertypes: vec![],
+                            static_abilities: vec![],
+                            enter_with_counters: vec![],
+                        },
+                    ))
+                    .id();
+                let marker = scenario
+                    .add_spell_to_hand(P0, "Supplemental later sorcery", false)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    ))
+                    .id();
+                (
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::AddTargetReplacement {
+                            replacement: Box::new(replacement),
+                            target: TargetFilter::None,
+                        },
+                    ),
+                    vec![token, marker],
+                )
+            });
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+        let installed = &runner.state().pending_damage_replacements[0];
+        let spec = if ensure {
+            &installed.ensure_token_specs.as_ref().unwrap()[0]
+        } else {
+            installed.additional_token_spec.as_ref().unwrap()
+        };
+        assert_eq!(spec.characteristics.keywords.len(), 1);
+        assert_eq!(spec.static_abilities.len(), 1);
+        let authoritative = serde_json::to_value(runner.state()).unwrap();
+        assert!(authoritative["pending_damage_replacements"]
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+        departure_assert_private_result_views(runner.state());
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projected = match viewer {
+                Some(seat) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), seat)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            let plain = serde_json::to_value(&projected).unwrap();
+            let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+                runner.state(),
+                viewer,
+            ))
+            .unwrap();
+            for view in [&plain, &wire["state"]] {
+                let field = &view["pending_damage_replacements"];
+                assert_eq!(field.as_array().unwrap().len(), 1);
+                assert_eq!(
+                    field.to_string().matches("EpicCopy").count(),
+                    authoritative["pending_damage_replacements"]
+                        .to_string()
+                        .matches("EpicCopy")
+                        .count()
+                );
+                let value = if ensure {
+                    &field[0]["ensure_token_specs"][0]
+                } else {
+                    &field[0]["additional_token_spec"]
+                };
+                assert_eq!(
+                    value["characteristics"]["display_name"],
+                    "Supplemental retained Food"
+                );
+                assert_eq!(
+                    value["characteristics"]["keywords"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(value["static_abilities"].as_array().unwrap().len(), 1);
+                assert!(!value["sacrifice_at"].is_null());
+            }
+        }
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+        runner.cast(subjects[0]).resolve();
+        let token = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| runner.state().objects[id].name == "Supplemental retained Food")
+            .expect("real replacement creates its retained token");
+        assert_eq!(runner.state().objects[&token].keywords.len(), 1);
+        assert_eq!(runner.state().objects[&token].trigger_definitions.len(), 1);
+        assert_eq!(
+            runner.state().objects[&token].base_static_definitions.len(),
+            1
+        );
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        let next = runner.state().next_return_result_process_id;
+        runner.cast(subjects[1]).resolve();
+        let WaitingFor::ChooseOneOfBranch {
+            player,
+            branches,
+            expected_return_result_process,
+            return_result_occurrence,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual installed SpellCast trigger runs its independent producer and parks")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(branches.len(), 2);
+        let process = expected_return_result_process.unwrap();
+        assert_ne!(process, ReturnResultProcessId(901));
+        assert!(process.0 >= next);
+        assert_eq!(
+            runner.state().return_result_frames[&return_result_occurrence.unwrap()].process,
+            Some(process)
+        );
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).unwrap();
+        departure_assert_private_result_views(runner.state());
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        for _ in 0..12 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        departure_drain_retained_public_program(&mut runner);
+        departure_assert_program_complete(&runner, spell, 3, 0);
+        assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&subjects[1]].zone, Zone::Graveyard);
+    }
+}
+
+#[test]
+fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_activation() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::keywords::Keyword;
+    use std::sync::Arc;
+    let mut fixture = engine::game::scenario::GameScenario::new();
+    let face_source = fixture.add_artifact(P0, "Supplemental prepare source").id();
+    let fixture = fixture.build();
+    let mut face =
+        engine::game::printed_cards::snapshot_object_face(&fixture.state().objects[&face_source]);
+    face.layout_kind = Some(engine::types::card::LayoutKind::Prepare);
+    face.additional_cost = Some(AdditionalCost::Required(departure_independent_epic_cost(0)));
+    let artifact_types = fixture.state().objects[&face_source].card_types.clone();
+    let (mut runner, spell, subjects) =
+        departure_public_program_runner(false, false, 2, |scenario| {
+            let recipient = scenario
+                .add_artifact(P0, "Supplemental layered recipient")
+                .id();
+            // Typed face setup; real resolution installs both leaves before layers apply the copy.
+            let mut values = departure_retained_epic_values(0);
+            values.card_types = artifact_types.clone();
+            values.prepare_face = Some(Arc::new(face.clone()));
+            let mut snapshot =
+                build_resolved_from_def(&departure_selected_local_body(true, false), recipient, P0);
+            snapshot.return_result_process =
+                Some(engine::types::game_state::ReturnResultProcessId(901));
+            values.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::EpicCopy {
+                    spell: Box::new(snapshot),
+                },
+            )]);
+            values.keywords = vec![Keyword::CumulativeUpkeep(departure_independent_epic_cost(
+                0,
+            ))];
+            // snapshot_object_face requires the real scenario object after build; supply it below using the existing setup callback instead.
+            (
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                            .affected(TargetFilter::SpecificObject { id: recipient })
+                            .modifications(vec![ContinuousModification::CopyValues {
+                                values: Box::new(values),
+                                display_source: Default::default(),
+                                printed_ref: None,
+                                token_image_ref: None,
+                                token_art: None,
+                            }])],
+                        duration: Some(Duration::UntilEndOfTurn),
+                        target: None,
+                        end_cost: None,
+                    },
+                ),
+                vec![recipient],
+            )
+        });
+    departure_assert_program_complete(&runner, spell, 0, 0);
+    assert_eq!(runner.state().transient_continuous_effects.len(), 1);
+    let recipient = subjects[0];
+    assert_eq!(runner.state().objects[&recipient].keywords.len(), 1);
+    assert_eq!(runner.state().objects[&recipient].abilities.len(), 1);
+    assert!(runner.state().objects[&recipient]
+        .copied_prepare_face
+        .is_some());
+    let saved = serde_json::to_value(runner.state()).unwrap();
+    assert!(saved["transient_continuous_effects"]
+        .to_string()
+        .contains("\"return_result_process\":901"));
+    *runner.state_mut() = serde_json::from_value(saved.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+        let projected = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
+        assert_eq!(projected.objects[&recipient].keywords.len(), 1);
+        assert!(projected.objects[&recipient].copied_prepare_face.is_some());
+        let plain = serde_json::to_value(&projected).unwrap();
+        let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+            runner.state(),
+            viewer,
+        ))
+        .unwrap();
+        for view in [&plain, &wire["state"]] {
+            assert_eq!(
+                view["transient_continuous_effects"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                view["transient_continuous_effects"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count(),
+                saved["transient_continuous_effects"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count()
+            );
+        }
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), saved);
+    let next = runner.state().next_return_result_process_id;
+    runner.activate(recipient, 0).resolve();
+    let WaitingFor::ChooseOneOfBranch {
+        player,
+        branches,
+        expected_return_result_process,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("later independent copied ability must reach its real local choice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(branches.len(), 2);
+    let process = expected_return_result_process.unwrap();
+    assert_ne!(
+        process,
+        engine::types::game_state::ReturnResultProcessId(901)
+    );
+    assert!(process.0 >= next);
+    assert!(runner
+        .state()
+        .return_result_frames
+        .values()
+        .any(|frame| frame.process == Some(process)));
+    let saved = serde_json::to_value(runner.state()).unwrap();
+    *runner.state_mut() = serde_json::from_value(saved).unwrap();
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    departure_assert_program_complete(&runner, spell, 3, 0);
+    assert!(runner.state().objects[&recipient]
+        .copied_prepare_face
+        .is_some());
+}
+
+#[test]
+fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_private() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::triggers::TriggerMode;
+    // Actual installations cover the filter-bearing conditions; embedded matchers
+    // carry filters (not execute bodies). All remaining variants have typed custody below.
+    for route in [false, true] {
+        let (mut runner, spell, subjects) =
+            departure_public_program_runner(false, false, 2, |scenario| {
+                let condition = DelayedTriggerCondition::WhenDies {
+                    filter: departure_opaque_filter(0),
+                };
+                if route {
+                    let marker = scenario
+                        .add_spell_to_hand(P0, "Supplemental returned spell", false)
+                        .with_ability_definition(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::NoOp,
+                        ))
+                        .id();
+                    let host = scenario
+                        .add_artifact(P0, "Supplemental ReturnTo stamper")
+                        .with_trigger_definition(
+                            TriggerDefinition::new(TriggerMode::SpellCast)
+                                .valid_card(TargetFilter::SpecificObject { id: marker })
+                                .execute(AbilityDefinition::new(
+                                    AbilityKind::Spell,
+                                    Effect::ExileResolvingSpellInsteadOfGraveyard {
+                                        on_exile: Some(ExiledSpellRider::ReturnTo {
+                                            destination: Zone::Hand,
+                                            timing: condition,
+                                        }),
+                                    },
+                                )),
+                        )
+                        .id();
+                    (
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                        vec![marker, host],
+                    )
+                } else {
+                    (
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::CreateDelayedTrigger {
+                                condition,
+                                effect: Box::new(AbilityDefinition::new(
+                                    AbilityKind::Spell,
+                                    Effect::NoOp,
+                                )),
+                                uses_tracked_set: false,
+                            },
+                        ),
+                        vec![],
+                    )
+                }
+            });
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        if route {
+            runner.cast(subjects[0]).commit();
+            for _ in 0..12 {
+                if runner.state().objects[&subjects[0]]
+                    .exile_from_stack_rider
+                    .is_some()
+                {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Stack);
+            assert!(runner.state().delayed_triggers.is_empty(), "the stamped timing is retained on the public spell before the exile replacement applies");
+            assert!(matches!(
+                runner.state().objects[&subjects[0]].exile_from_stack_rider,
+                Some(ExiledSpellRider::ReturnTo { .. })
+            ));
+            let stamped = serde_json::to_value(runner.state()).unwrap();
+            assert!(serde_json::to_string(
+                &runner.state().objects[&subjects[0]].exile_from_stack_rider
+            )
+            .unwrap()
+            .contains("\"return_result_process\":901"));
+            *runner.state_mut() = serde_json::from_value(stamped.clone()).unwrap();
+            departure_assert_private_result_views(runner.state());
+            for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+                let projected = match viewer {
+                    Some(seat) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), seat)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                let plain = serde_json::to_value(&projected).unwrap();
+                let wire = serde_json::to_value(
+                    engine::game::derived_views::ClientGameStateRef::wrap(runner.state(), viewer),
+                )
+                .unwrap();
+                for view in [&plain, &wire["state"]] {
+                    let object = &view["objects"][subjects[0].0.to_string()];
+                    assert_eq!(object["name"], "Supplemental returned spell");
+                    assert_eq!(object["zone"], "Stack");
+                    assert_eq!(
+                        object["exile_from_stack_rider"]
+                            .to_string()
+                            .matches("EpicCopy")
+                            .count(),
+                        1
+                    );
+                }
+            }
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), stamped);
+            for _ in 0..12 {
+                if runner.state().objects[&subjects[0]].zone == Zone::Exile {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(
+                runner.state().objects[&subjects[0]].zone,
+                Zone::Exile,
+                "real cast trigger stamps the rider, and actual resolution applies it"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
+        assert_eq!(runner.state().delayed_triggers.len(), 1);
+        assert!(matches!(
+            runner.state().delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenDies { .. }
+        ));
+        let authoritative = serde_json::to_value(runner.state()).unwrap();
+        assert!(authoritative["delayed_triggers"]
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+        departure_assert_private_result_views(runner.state());
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projected = match viewer {
+                Some(seat) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), seat)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            let plain = serde_json::to_value(&projected).unwrap();
+            let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+                runner.state(),
+                viewer,
+            ))
+            .unwrap();
+            for view in [&plain, &wire["state"]] {
+                assert_eq!(view["delayed_triggers"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    view["delayed_triggers"]
+                        .to_string()
+                        .matches("EpicCopy")
+                        .count(),
+                    authoritative["delayed_triggers"]
+                        .to_string()
+                        .matches("EpicCopy")
+                        .count()
+                );
+                assert_eq!(
+                    view["delayed_triggers"][0]["source_id"],
+                    authoritative["delayed_triggers"][0]["source_id"]
+                );
+            }
+        }
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+        // Explicit typed-custody supplements for all 11 shapes / 3 embedded-trigger slots.
+        for condition in departure_opaque_conditions(0) {
+            let mut supplement = runner.state().clone();
+            supplement.delayed_triggers[0].condition = condition;
+            let original = serde_json::to_value(&supplement).unwrap();
+            departure_assert_private_result_views(&supplement);
+            assert_eq!(serde_json::to_value(&supplement).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_redacts_private_payload(
+) {
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::keywords::Keyword;
+    use engine::types::triggers::TriggerMode;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Supplemental public countered spell", false)
+        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_epic_cost(
+            0,
+        )))
+        .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
+        .id();
+    let watcher = scenario
+        .add_artifact(P0, "Supplemental pending cast watcher")
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SpecificObject { id: spell })
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    scenario
+        .add_artifact(P1, "Supplemental counter on cast")
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SpecificObject { id: spell })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::CounterAll {
+                        target: TargetFilter::SpecificObject { id: spell },
+                    },
+                )),
+        );
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    for _ in 0..12 {
+        if runner.state().departed_stack_spells.contains_key(&spell) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == watcher),
+        "actual cast trigger is still pending when its spell departs"
+    );
+    let departed = runner.state().departed_stack_spells[&spell]
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(departed.object.name, "Supplemental public countered spell");
+    assert_eq!(departed.object.keywords.len(), 1);
+    assert_eq!(departed.entry.id, spell);
+    let authoritative = serde_json::to_value(runner.state()).unwrap();
+    assert!(serde_json::to_string(&departed.object)
+        .unwrap()
+        .contains("\"return_result_process\":901"));
+    *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(P0), Some(P1), None] {
+        let projected = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
+        let departed = projected.departed_stack_spells[&spell]
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(departed.object.name, "Supplemental public countered spell");
+        assert_eq!(departed.entry.id, spell);
+        assert_eq!(departed.object.keywords.len(), 1);
+        assert_eq!(departed.object.base_keywords.len(), 1);
+        let plain = serde_json::to_value(&projected).unwrap();
+        let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+            runner.state(),
+            viewer,
+        ))
+        .unwrap();
+        for view in [&plain, &wire["state"]] {
+            assert_eq!(
+                view["departed_stack_spells"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count(),
+                authoritative["departed_stack_spells"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count()
+            );
+            assert!(view["departed_stack_spells"]
+                .to_string()
+                .contains("Supplemental public countered spell"));
+        }
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    departure_drain_retained_public_program(&mut runner);
+    departure_assert_program_complete(&runner, spell, 0, 0);
+}
+
+#[test]
+fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_snapshot_authority()
+{
+    use engine::game::game_object::AttachTarget;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::ManaColor;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let maker = scenario
+        .add_artifact(P0, "Supplemental copy maker")
+        .with_ability(Effect::CopyTokenOf {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::Blue],
+            }],
+        })
+        .id();
+    let hosts = [
+        scenario
+            .add_creature(P0, "Supplemental first host", 2, 2)
+            .id(),
+        scenario
+            .add_creature(P0, "Supplemental second host", 2, 2)
+            .id(),
+    ];
+    let original_host = scenario
+        .add_creature(P1, "Supplemental original host", 2, 2)
+        .id();
+    // Established non-liminal copy fixture, with the exact complete Fylgja source
+    // already used by yenna_aura_token_copy. Its enter-with-counters replacement
+    // selects the real projected-entrant host-pause route; the extra keyword is typed custody.
+    let aura = scenario.add_enchantment_from_oracle(P1, "Fylgja", "Enchant creature\nThis Aura enters with four healing counters on it.\nRemove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to enchanted creature this turn.\n{2}{W}: Put a healing counter on this Aura.")
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))))
+        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_epic_cost(0))).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&aura)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(original_host));
+    runner.activate(maker, 0).target_object(aura).resolve();
+    let WaitingFor::ReturnAsAuraTarget {
+        player,
+        returned_id,
+        legal_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual non-liminal copy must park at the public host choice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(legal_targets.len(), 2);
+    assert!(hosts
+        .iter()
+        .all(|host| legal_targets.contains(&TargetRef::Object(*host))));
+    let copy = *returned_id;
+    let parked = runner
+        .state()
+        .entering_aura_authority
+        .as_ref()
+        .expect("actual projected entrant is retained independently of the live object map");
+    assert_eq!(parked.aura_id, copy);
+    assert_eq!(parked.entrant.name, "Fylgja");
+    assert_eq!(parked.entrant.color, vec![ManaColor::Blue]);
+    assert!(serde_json::to_string(&parked.entrant)
+        .unwrap()
+        .contains("\"return_result_process\":901"));
+    let authoritative = serde_json::to_value(runner.state()).unwrap();
+    *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(P0), Some(P1), None] {
+        let projected = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
+        let parked = projected.entering_aura_authority.as_ref().unwrap();
+        assert_eq!(parked.aura_id, copy);
+        assert_eq!(parked.entrant.name, "Fylgja");
+        assert_eq!(
+            parked.entrant.keywords.len(),
+            runner
+                .state()
+                .entering_aura_authority
+                .as_ref()
+                .unwrap()
+                .entrant
+                .keywords
+                .len()
+        );
+        let WaitingFor::ReturnAsAuraTarget {
+            player,
+            legal_targets,
+            ..
+        } = &projected.waiting_for
+        else {
+            panic!("public host prompt retained")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(legal_targets.len(), 2);
+        let plain = serde_json::to_value(&projected).unwrap();
+        let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+            runner.state(),
+            viewer,
+        ))
+        .unwrap();
+        for view in [&plain, &wire["state"]] {
+            assert_eq!(view["entering_aura_authority"]["entrant"]["name"], "Fylgja");
+            assert_eq!(
+                view["entering_aura_authority"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count(),
+                authoritative["entering_aura_authority"]
+                    .to_string()
+                    .matches("EpicCopy")
+                    .count()
+            );
+        }
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(hosts[1])),
+        })
+        .unwrap();
+    departure_drain_retained_public_program(&mut runner);
+    assert_eq!(runner.state().objects[&copy].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&copy].attached_to,
+        Some(AttachTarget::Object(hosts[1]))
+    );
+    assert_eq!(
+        runner.state().objects[&copy].counters.values().sum::<u32>(),
+        4
+    );
+    assert!(runner.state().entering_aura_authority.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().return_result_frames.is_empty());
 }
