@@ -10341,8 +10341,10 @@ pub(crate) fn parse_target_player_relative_clause<'a>(
     Ok((rest, filters))
 }
 
-/// CR 608.2c: player-choice nouns share the ordinal distinctness signal;
-/// an opponent choice uses the same domain as a standalone player-choice clause.
+/// CR 608.2d + CR 102.3: a player-choice noun names a choice made as the effect
+/// resolves; an ordinal ("a second player") asks for a player distinct from the
+/// earlier choices, and "an opponent" ranges over the chooser's opponents, the
+/// same domain as a standalone player-choice clause.
 pub(super) fn parse_player_choice_noun(i: &str) -> OracleResult<'_, ChoiceType> {
     let player_arm = |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>("a ").parse(i)?;
