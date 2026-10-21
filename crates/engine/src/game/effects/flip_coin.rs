@@ -133,16 +133,17 @@ fn run_flip_branch(
                 targets.to_vec(),
                 chain_root_targets.to_vec(),
             );
-        // CR 608.2d + CR 115.10: the flip's object targets reach the branch root
-        // only where an ordinary sub-ability would inherit its parent's
-        // (`can_inherit_parent_targets`). A root that owns an independent
-        // choice ("choose a creature you control and an opponent") makes its
-        // own pick; handing it an object chosen before the flip would answer
-        // that choice with the wrong object.
+        // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
+        // they include the branch's OWN announced targets ("if you win the flip,
+        // ~ deals 2 damage to target opponent"). Only an untargeted
+        // resolution-time chooser at the branch root is denied them: it makes
+        // its own pick ("choose a creature you control and an opponent"), and
+        // handing it an object chosen before the flip would answer that choice
+        // with the wrong object.
         if !targets.is_empty() {
             let mut probe = sub.clone();
             probe.clear_targets();
-            if !super::can_inherit_parent_targets(&probe) {
+            if super::awaits_resolution_object_choice(&probe) {
                 sub.clear_targets();
             }
         }
@@ -2638,5 +2639,97 @@ mod branch_context_tests {
         assert_eq!(runner.state().objects[&bear].controller, P1);
         assert_eq!(runner.state().objects[&artifact].controller, P0);
         assert_eq!(runner.state().objects[&other_bear].controller, P0);
+    }
+
+    /// A winning-branch instruction that declares its own player target (the
+    /// shape of Goblin Lyre's and Ral Zarek's branches): the flip's targets
+    /// include the announced player, so the branch root must receive them even
+    /// though it declares a chosen group. Only an untargeted resolution-time
+    /// chooser at the branch root is denied the flip's targets.
+    fn declaring_branch(effect: Effect) -> AbilityDefinition {
+        let mut branch = AbilityDefinition::new(AbilityKind::Spell, effect);
+        branch.declares_chosen_group =
+            Some(crate::types::ability::ChosenGroupId::declared_player(0));
+        branch
+    }
+
+    fn opponent() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    /// Goblin Lyre shape: "If you win the flip, ~ deals 2 damage to target
+    /// opponent or planeswalker." with P2 (not the default first opponent) announced.
+    #[test]
+    fn announced_player_reaches_a_declaring_win_branch() {
+        let (mut state, _creature, source) = game_losing_the_flip();
+        state.rng = GameRng::seed_from_u64(seed_for(&[true]));
+        let win = declaring_branch(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: opponent(),
+            damage_source: None,
+            excess: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P2)],
+            source,
+            P0,
+        );
+        let before = state.players.iter().map(|p| p.life).collect::<Vec<_>>();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CoinFlipped { won: true, .. })),
+            "reach: a won flip"
+        );
+        assert_eq!(state.players[2].life, before[2] - 2, "the announced player");
+        assert_eq!(state.players[1].life, before[1]);
+    }
+
+    /// Ral Zarek, Guest Lecturer -7 shape: five flips, the announced opponent
+    /// skips one turn per heads.
+    #[test]
+    fn announced_player_reaches_every_declaring_win_branch_of_a_multi_flip() {
+        let (mut state, _creature, source) = game_losing_the_flip();
+        state.rng = GameRng::seed_from_u64(seed_for(&[true, true, true, true, false]));
+        let win = declaring_branch(Effect::SkipNextTurn {
+            target: opponent(),
+            count: QuantityExpr::Fixed { value: 1 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 5 },
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P2)],
+            source,
+            P0,
+        );
+
+        let mut events = Vec::new();
+        resolve_flip_coins(&mut state, &ability, &mut events).unwrap();
+
+        let heads = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::CoinFlipped { won: true, .. }))
+            .count();
+        assert_eq!(heads, 4, "reach: four heads");
+        let skips = |player: usize| state.turns_to_skip.get(player).copied().unwrap_or(0);
+        assert_eq!(
+            skips(2),
+            4,
+            "the announced opponent skips one turn per heads"
+        );
+        assert_eq!(skips(1), 0);
     }
 }
