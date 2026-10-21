@@ -18954,7 +18954,7 @@ fn resolve_chain_body(
                             Some(Box::new(empty_result.clone()));
                     }
                     bound.context.forwarded_result_context = Some(Box::new(empty_result));
-                    return resolve_chain_body(state, &bound, events, depth);
+                    return resolve_chain_body(state, &bound, events, depth, payment_choice);
                 }
                 [only] => {
                     // Re-enter the body, not the chain entry: the depth-0
@@ -18963,7 +18963,7 @@ fn resolve_chain_body(
                     // result context at depth 0).
                     let mut bound = ability.clone();
                     bound.set_unpinned_targets(vec![TargetRef::Object(*only)]);
-                    return resolve_chain_body(state, &bound, events, depth);
+                    return resolve_chain_body(state, &bound, events, depth, payment_choice);
                 }
                 _ => {
                     state.park_ability_continuation(PendingContinuation::new(
