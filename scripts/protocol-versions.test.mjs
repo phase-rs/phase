@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { addProtocolChange, checkProtocolVersions, generateProtocolVersions, loadProtocolVersions } from "./protocol-versions.mjs";
+import { addProtocolChange, checkProtocolHistory, checkProtocolVersions, generateProtocolVersions, loadProtocolVersions } from "./protocol-versions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baseline = { full: 159, wire: 141, lobby: 16, draft: 30, directory: 1, minimumLobby: 2 };
@@ -269,5 +269,269 @@ for (const [label, left, right, expected] of [
     cli(path, "generate");
     assert.deepEqual(checkProtocolVersions(path), expected);
     assert.equal(git(path, "status", "--porcelain"), "");
+    checkProtocolHistory(path, "left");
+    checkProtocolHistory(path, "right");
+    const prior = Object.keys(leftRecords).find((name) => name !== ".gitkeep");
+    rmSync(join(path, "protocol/changes", prior));
+    cli(path, "generate");
+    assert.throws(() => checkProtocolHistory(path, "left"), (error) => error.message.includes(prior));
   });
 }
+
+function ownershipFixture(path) {
+  for (const file of ["scripts/check-protocol-version.mjs", "crates/lobby-broker/src/protocol.rs",
+    "crates/lobby-broker/src/lib.rs", "crates/lobby-broker/src/directory.rs", "crates/server-core/src/protocol.rs",
+    "client/src/adapter/ws-adapter.ts", "client/src/network/protocol.ts", "client/src/network/draftProtocol.ts",
+    "crates/draft-core/src/types.rs", "client/src/services/serverDirectory.ts", "scripts/card-bot/servers.ts",
+    "lobby-worker/src/hello-gate.ts"]) {
+    mkdirSync(dirname(join(path, file)), { recursive: true });
+    copyFileSync(join(root, file), join(path, file));
+  }
+  generateProtocolVersions(path);
+  checker(path);
+}
+
+function checker(path, ...args) {
+  return execFileSync(process.execPath, [join(path, "scripts/check-protocol-version.mjs"), ...args], {
+    cwd: tmpdir(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function commit(path) {
+  git(path, "add", ".");
+  git(path, "commit", "-m", "fixture");
+  return git(path, "rev-parse", "HEAD").trim();
+}
+
+test("history preserves every path and byte while allowing additions and explicit later bases", (t) => {
+  const path = fixture(t);
+  ownershipFixture(path);
+  git(path, "init", "-b", "main");
+  const first = record(path);
+  const second = record(path, { surfaces: ["draft"], reason: "second" });
+  const base = commit(path);
+  git(path, "tag", "snapshot", base);
+  const added = record(path);
+  generateProtocolVersions(path);
+  checker(path, "--base", "snapshot");
+  const later = commit(path);
+  rmSync(added);
+  generateProtocolVersions(path);
+  checker(path, "--base", base);
+  assert.throws(() => checker(path, "--base", later), (e) => e.stderr.includes(added.split("/").at(-1)) && e.stderr.includes(later));
+  const baselinePath = join(path, "protocol/baseline.json");
+  for (const [file, mutate] of [
+    [first, (file) => rmSync(file)],
+    [second, (file) => { const value = readFileSync(file); rmSync(file); writeFileSync(record(path), value); }],
+    [first, (file) => writeFileSync(file, JSON.stringify({ surfaces: ["full"], reason: "same reason" }))],
+    [second, (file) => writeFileSync(file, JSON.stringify({ surfaces: ["draft"], reason: "changed" }))],
+    [first, (file) => writeFileSync(file, `${readFileSync(file)}\n`)],
+    [baselinePath, (file) => writeFileSync(file, `${readFileSync(file)}\n`)],
+    [baselinePath, (file) => writeFileSync(file, JSON.stringify({ ...baseline, full: 160 }))],
+  ]) {
+    const bytes = readFileSync(file);
+    checker(path, "--base", base);
+    mutate(file);
+    generateProtocolVersions(path);
+    checker(path);
+    assert.throws(() => checker(path, "--base", base), (e) => e.stderr.includes(file.split("/").at(-1)) && e.stderr.includes(base));
+    writeFileSync(file, bytes);
+    generateProtocolVersions(path);
+  }
+  const bytes = readFileSync(baselinePath);
+  const target = join(path, "baseline-copy");
+  writeFileSync(target, bytes);
+  rmSync(baselinePath);
+  symlinkSync(target, baselinePath);
+  assert.throws(() => checkProtocolHistory(path, base), /baseline.json: prior file must remain a regular file/);
+});
+
+test("checker rejects unsupported argv and unresolved, option-like or noncommit bases", (t) => {
+  const path = fixture(t);
+  ownershipFixture(path);
+  git(path, "init", "-b", "main");
+  const base = commit(path);
+  checker(path, "--base", base);
+  for (const args of [["--base"], ["--base", ""], ["--base", " "], ["--other"],
+    ["--base", base, "extra"], ["--base", base, "--base", base]]) {
+    assert.throws(() => checker(path, ...args), (e) => /Usage:/.test(e.stderr));
+  }
+  for (const ref of ["missing", "--help", `${base}:protocol/baseline.json`]) {
+    assert.throws(() => checker(path, "--base", ref), (e) => e.stderr.includes(`cannot resolve base ${ref}`));
+  }
+  assert.throws(() => checkProtocolHistory(path, ""), /nonempty base/);
+});
+
+function migrationSource(path, values) {
+  const files = {
+    "crates/lobby-broker/src/protocol.rs": `pub const PROTOCOL_VERSION: u32 = ${values.full};\npub const LOBBY_PROTOCOL_VERSION: u32 = ${values.lobby};\npub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = ${values.minimumLobby};\n`,
+    "client/src/network/protocol.ts": `export const WIRE_PROTOCOL_VERSION = ${values.wire};\n`,
+    "client/src/network/draftProtocol.ts": `export const DRAFT_PROTOCOL_VERSION = ${values.draft} as const;\n`,
+    "crates/lobby-broker/src/directory.rs": `pub const DIRECTORY_VERSION: u32 = ${values.directory};\n`,
+  };
+  for (const [file, source] of Object.entries(files)) {
+    mkdirSync(dirname(join(path, file)), { recursive: true });
+    writeFileSync(join(path, file), source);
+  }
+}
+
+test("migration reads all six historical literals, including varied values and appended changes", (t) => {
+  for (const values of [baseline, { full: 201, wire: 182, lobby: 22, draft: 45, directory: 8, minimumLobby: 3 }]) {
+    const path = fixture(t);
+    rmSync(join(path, "protocol"), { recursive: true });
+    migrationSource(path, values);
+    git(path, "init", "-b", "main");
+    const base = commit(path);
+    mkdirSync(join(path, "protocol/changes"), { recursive: true });
+    const file = join(path, "protocol/baseline.json");
+    writeFileSync(file, JSON.stringify(values));
+    record(path);
+    ownershipFixture(path);
+    checker(path, "--base", base);
+    assert.equal(loadProtocolVersions(path).full, values.full + 1);
+    for (const key of Object.keys(values)) {
+      writeFileSync(file, JSON.stringify({ ...values, [key]: values[key] + 1 }));
+      generateProtocolVersions(path);
+      assert.throws(() => checker(path, "--base", base), (e) => e.stderr.includes(`${key} differs from historical`));
+    }
+  }
+});
+
+test("migration rejects missing, renamed, expression, duplicate and partial historical inputs", (t) => {
+  for (const kind of ["missing", "renamed", "expression", "duplicate", "partial"]) {
+    const path = fixture(t);
+    rmSync(join(path, "protocol"), { recursive: true });
+    migrationSource(path, baseline);
+    git(path, "init", "-b", "main");
+    const valid = commit(path);
+    const file = join(path, "client/src/network/protocol.ts");
+    if (kind === "missing") rmSync(file);
+    if (kind === "renamed") writeFileSync(file, "export const RENAMED = 141;\n");
+    if (kind === "expression") writeFileSync(file, "export const WIRE_PROTOCOL_VERSION = 140 + 1;\n");
+    if (kind === "duplicate") writeFileSync(file, readFileSync(file, "utf8").repeat(2));
+    if (kind === "partial") { mkdirSync(join(path, "protocol/changes"), { recursive: true }); record(path); }
+    const bad = commit(path);
+    mkdirSync(join(path, "protocol/changes"), { recursive: true });
+    writeFileSync(join(path, "protocol/baseline.json"), JSON.stringify(baseline));
+    ownershipFixture(path);
+    checker(path, "--base", valid);
+    assert.throws(() => checker(path, "--base", bad), (e) => e.stderr.includes(bad) && /historical|bare integer/.test(e.stderr));
+  }
+});
+
+function integrationShell() {
+  const workflow = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  const frontend = workflow.split("  frontend:\n")[1].split("\n  draft-match-wasm-proof:")[0];
+  assert.match(frontend, /uses: actions\/checkout@v4\n        with:\n          fetch-depth: 0/);
+  assert.match(frontend, /run: node --test scripts\/protocol-versions.test.mjs scripts\/engine-fingerprint.test.mjs/);
+  assert.match(workflow.split("  pull_request:")[0], /- 'protocol\/\*\*'/);
+  const blocks = [...frontend.matchAll(/      - name: Protocol integration history\n([\s\S]*?)(?=\n      - name:)/g)];
+  assert.equal(blocks.length, 1);
+  const block = blocks[0][1];
+  for (const [key, field] of [["EVENT", "event_name"], ["PR_BASE", "event.pull_request.base.sha"],
+    ["MERGE_BASE", "event.merge_group.base_sha"], ["PUSH_BASE", "event.before"]]) {
+    assert.ok(block.includes("PROTOCOL_" + key + ": ${{ github." + field + " }}"));
+  }
+  assert.doesNotMatch(block, /continue-on-error:|\n\s+if:/);
+  const shell = block.split("        run: |\n")[1].split("\n").map((line) => line.replace(/^          /, "")).join("\n");
+  assert.ok(shell.trim());
+  return shell;
+}
+
+function runIntegration(path, env) {
+  return spawnSync("bash", ["-c", integrationShell()], {
+    cwd: path, encoding: "utf8", env: { ...process.env, PROTOCOL_PR_BASE: "", PROTOCOL_MERGE_BASE: "", PROTOCOL_PUSH_BASE: "", ...env },
+  });
+}
+
+test("actual CI shell selects each event snapshot and enforces even nonancestor push history", (t) => {
+  const path = fixture(t);
+  ownershipFixture(path);
+  git(path, "init", "-b", "main");
+  const initial = commit(path);
+  const branches = [];
+  for (const event of ["pull_request", "merge_group", "push"]) {
+    git(path, "checkout", "-b", event, initial);
+    const file = record(path);
+    branches.push({ event, file, bytes: readFileSync(file), sha: commit(path) });
+  }
+  git(path, "checkout", "main");
+  for (const { file, bytes } of branches) writeFileSync(file, bytes);
+  git(path, "update-ref", "refs/remotes/origin/main", initial);
+  const fields = { PROTOCOL_PR_BASE: branches[0].sha, PROTOCOL_MERGE_BASE: branches[1].sha, PROTOCOL_PUSH_BASE: branches[2].sha };
+  for (const { event, file, bytes, sha } of branches) {
+    const env = { ...fields, PROTOCOL_EVENT: event };
+    let result = runIntegration(path, env);
+    assert.equal(result.status, 0, result.stderr);
+    rmSync(file);
+    result = runIntegration(path, env);
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(file.split("/").at(-1)) && result.stderr.includes(sha), result.stderr);
+    writeFileSync(file, bytes);
+  }
+  for (const [event, field] of [["push", "PROTOCOL_PUSH_BASE"], ["pull_request", "PROTOCOL_PR_BASE"], ["merge_group", "PROTOCOL_MERGE_BASE"]]) {
+    for (const invalid of ["", "invalid", "f".repeat(40), ...(event === "push" ? [] : ["0".repeat(40)])]) {
+      const result = runIntegration(path, { ...fields, PROTOCOL_EVENT: event, [field]: invalid });
+      assert.notEqual(result.status, 0, `${event} ${invalid}`);
+      assert.match(result.stderr, /Invalid protocol base|origin|remote/);
+    }
+  }
+  assert.notEqual(runIntegration(path, { ...fields, PROTOCOL_EVENT: "unknown" }).status, 0);
+  const firstPush = { ...fields, PROTOCOL_EVENT: "push", PROTOCOL_PUSH_BASE: "0".repeat(40) };
+  const bootstrap = runIntegration(path, firstPush);
+  assert.equal(bootstrap.status, 0, bootstrap.stderr);
+  assert.match(bootstrap.stdout, /Branch creation has no predecessor/);
+  writeFileSync(join(path, "client/src/network/protocol.ts"), "export const WIRE_PROTOCOL_VERSION = 141;\n");
+  assert.notEqual(runIntegration(path, firstPush).status, 0);
+});
+
+test("actual CI shell fetches the exact absent base from origin", (t) => {
+  const origin = fixture(t);
+  ownershipFixture(origin);
+  git(origin, "init", "-b", "main");
+  commit(origin);
+  const file = record(origin);
+  const base = commit(origin);
+  const path = fixture(t);
+  ownershipFixture(path);
+  git(path, "init", "-b", "main");
+  commit(path);
+  git(path, "remote", "add", "origin", origin);
+  assert.throws(() => git(path, "cat-file", "-e", `${base}^{commit}`));
+  const current = join(path, "protocol/changes", file.split("/").at(-1));
+  copyFileSync(file, current);
+  const env = { PROTOCOL_EVENT: "push", PROTOCOL_PUSH_BASE: base };
+  const result = runIntegration(path, env);
+  assert.equal(result.status, 0, result.stderr);
+  git(path, "cat-file", "-e", `${base}^{commit}`);
+  rmSync(current);
+  assert.notEqual(runIntegration(path, env).status, 0);
+});
+
+test("history refuses malformed historical entries and current record symlinks", (t) => {
+  for (const kind of ["unexpected", "marker", "symlink", "malformed"]) {
+    const path = fixture(t);
+    ownershipFixture(path);
+    git(path, "init", "-b", "main");
+    const first = record(path);
+    const bytes = readFileSync(first);
+    const valid = commit(path);
+    let bad = first;
+    if (kind === "unexpected") bad = join(path, "protocol/unexpected");
+    if (kind === "marker") bad = join(path, "protocol/changes/.gitkeep");
+    if (kind === "symlink") {
+      rmSync(first);
+      symlinkSync("../baseline.json", first);
+    } else writeFileSync(bad, "invalid");
+    const invalid = commit(path);
+    rmSync(bad);
+    writeFileSync(first, bytes);
+    if (kind === "marker") writeFileSync(bad, "");
+    generateProtocolVersions(path);
+    checker(path, "--base", valid);
+    assert.throws(() => checker(path, "--base", invalid), (e) => e.stderr.includes(invalid) && e.stderr.includes(bad.split("/").at(-1)));
+    rmSync(first);
+    symlinkSync("../baseline.json", first);
+    assert.throws(() => checker(path, "--base", valid), (e) => e.stderr.includes(valid) && e.stderr.includes(first.split("/").at(-1)));
+  }
+});

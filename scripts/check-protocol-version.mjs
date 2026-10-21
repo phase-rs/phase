@@ -1,9 +1,14 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkProtocolVersions } from "./protocol-versions.mjs";
+import { checkProtocolHistory, checkProtocolVersions } from "./protocol-versions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+if (args.length !== 0 && (args.length !== 2 || args[0] !== "--base" || args[1].trim().length === 0)) {
+  throw new Error("Usage: node scripts/check-protocol-version.mjs [--base <ref>]");
+}
+if (args.length) checkProtocolHistory(root, args[1]);
 const versions = checkProtocolVersions(root);
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 

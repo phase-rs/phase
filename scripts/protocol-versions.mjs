@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -79,6 +80,71 @@ export function loadProtocolVersions(root = repositoryRoot) {
   return versions;
 }
 
+// History is an integration concern; ordinary generation never invokes Git.
+export function checkProtocolHistory(root, baseRef) {
+  if (typeof baseRef !== "string" || baseRef.trim().length === 0) {
+    throw new Error("Protocol history requires a nonempty base ref");
+  }
+  const git = (...args) => execFileSync("git", args, {
+    cwd: root, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let base;
+  try {
+    base = git("rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`).toString().trim();
+  } catch {
+    throw new Error(`Protocol history: cannot resolve base ${baseRef} to a commit`);
+  }
+  const fail = (path, message) => {
+    throw new Error(`Protocol history base ${baseRef} (${base}): ${path}: ${message}`);
+  };
+  try { loadProtocolVersions(root); }
+  catch (error) { fail("current registry", error.message); }
+  const entries = git("ls-tree", "-r", "-z", base, "--", "protocol").toString().split("\0").filter(Boolean).map((entry) => {
+    const [header, path] = entry.split("\t");
+    const [mode, type] = header.split(" ");
+    return { mode, type, path };
+  });
+  const blob = (path) => {
+    try { return git("show", `${base}:${path}`); }
+    catch { fail(path, "cannot read historical file"); }
+  };
+  if (!entries.some(({ path }) => path === "protocol/baseline.json")) {
+    if (entries.length) fail(entries[0].path, "partial historical registry has no baseline");
+    const baseline = readJson(join(root, "protocol/baseline.json"));
+    const declarations = [
+      ["full", "crates/lobby-broker/src/protocol.rs", "PROTOCOL_VERSION", "rust"],
+      ["lobby", "crates/lobby-broker/src/protocol.rs", "LOBBY_PROTOCOL_VERSION", "rust"],
+      ["minimumLobby", "crates/lobby-broker/src/protocol.rs", "MIN_SUPPORTED_LOBBY_PROTOCOL", "rust"],
+      ["wire", "client/src/network/protocol.ts", "WIRE_PROTOCOL_VERSION", "ts"],
+      ["draft", "client/src/network/draftProtocol.ts", "DRAFT_PROTOCOL_VERSION", "ts"],
+      ["directory", "crates/lobby-broker/src/directory.rs", "DIRECTORY_VERSION", "rust"],
+    ];
+    for (const [key, path, name, language] of declarations) {
+      const prefix = language === "rust" ? `pub\\s+const\\s+${name}\\s*:\\s*u32` : `export\\s+const\\s+${name}`;
+      const matches = [...blob(path).toString().matchAll(new RegExp(`^${prefix}\\s*=\\s*([^;]+);`, "gm"))];
+      const literal = language === "rust" ? /^(\d+)$/ : /^(\d+)(?:\s+as\s+const)?$/;
+      const value = matches.length === 1 && matches[0][1].trim().match(literal);
+      if (!value) fail(path, `${name} must have exactly one bare integer declaration`);
+      if (Number(value[1]) !== baseline[key]) fail("protocol/baseline.json", `${key} differs from historical ${path} ${name}`);
+    }
+    return;
+  }
+  for (const { mode, type, path } of entries) {
+    if (type !== "blob" || !["100644", "100755"].includes(mode)) fail(path, "expected a regular historical file");
+    if (path === "protocol/changes/.gitkeep") {
+      if (blob(path).length !== 0) fail(path, "marker must be empty");
+      continue;
+    }
+    if (path !== "protocol/baseline.json"
+      && !(path.startsWith("protocol/changes/") && recordName.test(path.slice("protocol/changes/".length)))) {
+      fail(path, "unexpected historical registry entry");
+    }
+    const current = join(root, path);
+    if (!existsSync(current) || !lstatSync(current).isFile()) fail(path, "prior file must remain a regular file");
+    if (!readFileSync(current).equals(blob(path))) fail(path, "prior file bytes must remain unchanged");
+  }
+}
+
 export function addProtocolChange(root, selected, reason) {
   if (!Array.isArray(selected) || selected.length === 0) {
     throw new Error("bump: select at least one surface");
@@ -139,7 +205,7 @@ Surfaces: full, wire, lobby, draft, directory; game expands to full + wire.
 Independent UUID records merge additively. Commit the new record, not generated output.
 Revert a protocol change by adding a new record; never delete prior records.
 Equal-count unmerged branches remain numerically indistinguishable.
-Runtime adoption arrives in phase 2; append-only history enforcement in phase 3.
+Integration checks: node scripts/check-protocol-version.mjs --base <ref>.
 `;
 
 function main(args) {
