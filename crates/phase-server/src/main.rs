@@ -20358,8 +20358,8 @@ mod handshake_tests {
                 hello_acceptance(ServerMode::Full),
             )
         };
-        // v157-v159 are earlier bumps already on main; each is refused by a v160
-        // server.
+        // Every earlier protocol version, including the bumps already on main
+        // (156, 157, 159), is refused by a v160 server.
         for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159] {
             assert_eq!(
                 classify(client),
