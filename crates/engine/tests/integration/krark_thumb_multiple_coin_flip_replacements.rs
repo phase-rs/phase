@@ -5,7 +5,7 @@
 //! two coins and ignore one." Two copies under one controller are two applicable
 //! replacement effects on the SAME `CoinFlip` event (CR 616.1), but each is a
 //! pure count multiplier — ×2 then ×2 (or the reverse) takes the count 1 → 2 → 4,
-//! and CR 616.1f applies each exactly once — so the ordering choice is immaterial
+//! and CR 614.5 applies each exactly once (CR 616.1f repeats until none remain) — so the ordering choice is immaterial
 //! and `candidate_materiality` must classify both as commuting `Count` writers
 //! for `pipeline_loop` to auto-apply them. Before that classification the
 //! pipeline parked a CR 616.1 `ReplacementChoice` (a debug resolution-invariant

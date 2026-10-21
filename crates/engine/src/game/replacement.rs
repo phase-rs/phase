@@ -10686,8 +10686,9 @@ fn mana_commute_class(modification: &crate::types::ability::ManaModification) ->
 /// `null`-execute side field (`quantity_modification`) and therefore cannot take
 /// a `QuantityExpr`. Both effects of this class read the event's live count and
 /// multiply it (`resolve_event_replacement_quantity`), so two of them commute
-/// (×a then ×b == ×b then ×a; CR 616.1f applies each exactly once) and the
-/// affected player's CR 616.1 ordering choice is immaterial — the same call the
+/// (×a then ×b == ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f
+/// repeats the choice until none remain) and the affected player's CR 616.1
+/// ordering choice is immaterial — the same call the
 /// engine already makes for the null-execute count doublers (Doubling Season +
 /// Ojer Taq) and for `ManaModification::Multiply` / `DamageModification::Double`.
 ///
@@ -10987,8 +10988,8 @@ fn candidate_materiality(
     };
     // CR 616.1 + CR 614.5: an execute-side COUNT SCALING replacement reads the
     // event's own count and multiplies it, so two of them commute (×a then ×b ==
-    // ×b then ×a, and CR 616.1f applies each exactly once). The ordering choice
-    // is therefore immaterial — the same call the `quantity_modification`
+    // ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f repeats the
+    // choice until none remain). The ordering choice is therefore immaterial — the same call the `quantity_modification`
     // doubler path above makes. Two shipped shapes reach here: Tekuthal's
     // "proliferate twice instead" and Krark's Thumb's "instead flip two coins
     // and ignore one". Without this arm both fall to the conservative
