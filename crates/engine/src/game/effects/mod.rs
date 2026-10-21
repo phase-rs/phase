@@ -10102,9 +10102,13 @@ pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool
         // (no literal "target") is made while the instruction resolves. Only an
         // OBJECT target counts as the made choice, as for `PutCounter` above.
         // A context reference or an attachment host ("enchanted creature") is
-        // determined by the game, not chosen, so it never prompts. Once the
-        // choice has completed with no candidates (`bound_result_is_empty`), it
-        // is not asked again: that stops the empty re-entry from looping.
+        // determined by the game, not chosen, so it never prompts. The
+        // completed-empty marker (`bound_result_is_empty`) is deliberately NOT
+        // read here: it is inherited chain context describing an EARLIER
+        // producer's absent referent, so keying on it would make a later,
+        // populated chooser skip its own legitimate prompt. A chooser that found
+        // no candidates retires itself by switching its own timing instead (see
+        // the park block in `resolve_chain_body`).
         Effect::TargetOnly { target } => {
             !target.is_context_ref()
                 && !target.contains_source_attachment_host()
@@ -10112,7 +10116,6 @@ pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool
                     .targets
                     .iter()
                     .any(|target| matches!(target, TargetRef::Object(_)))
-                && !bound_result_is_empty(ability)
         }
         _ => false,
     };
@@ -18937,9 +18940,11 @@ fn resolve_chain_body(
                     // CR 608.2c + CR 609.3: the choice was made and named nothing.
                     // Stamp the completed-but-empty result (the same vocabulary
                     // as the partition complement and the forward-result seam)
-                    // and re-enter the body: `bound_result_is_empty` now keeps
-                    // this node from asking again, and the chain's dependents
-                    // are pruned by the shared missing-forward-result authority.
+                    // and re-enter the body. This node is retired from asking
+                    // again by its OWN timing (node-local), not by the marker,
+                    // which is inherited chain context that a later chooser must
+                    // be free to ignore. The chain's dependents are pruned by
+                    // the shared missing-forward-result authority.
                     //
                     // The next instruction is stamped as well, exactly as the
                     // partition forward does: the sub-boundary seam reads the
@@ -18954,6 +18959,9 @@ fn resolve_chain_body(
                             Some(Box::new(empty_result.clone()));
                     }
                     bound.context.forwarded_result_context = Some(Box::new(empty_result));
+                    // The choice is made: the re-entered node is no longer a
+                    // pending resolution-time choice, so it cannot re-park.
+                    bound.target_choice_timing = TargetChoiceTiming::Stack;
                     return resolve_chain_body(state, &bound, events, depth, payment_choice);
                 }
                 [only] => {
@@ -18962,12 +18970,21 @@ fn resolve_chain_body(
                     // twice (and the chain entry would clear the forwarded
                     // result context at depth 0).
                     let mut bound = ability.clone();
+                    // A chooser that names an object is a new producer: it
+                    // supersedes any absent-referent marker inherited from an
+                    // earlier chooser, which would otherwise prune its own
+                    // dependents ("that creature").
+                    bound.context.forwarded_result_context = None;
                     bound.set_unpinned_targets(vec![TargetRef::Object(*only)]);
                     return resolve_chain_body(state, &bound, events, depth, payment_choice);
                 }
                 _ => {
+                    let mut parked = ability.clone();
+                    // As for the single candidate: the pick supersedes an
+                    // inherited absent-referent marker.
+                    parked.context.forwarded_result_context = None;
                     state.park_ability_continuation(PendingContinuation::new(
-                        Box::new(ability.clone()),
+                        Box::new(parked),
                         state,
                     ));
                     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
@@ -21967,6 +21984,15 @@ fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
+    // CR 608.2c + CR 115.10a: an untargeted resolution-time choice ("choose a
+    // creature you control") is a NEW producer. Its own subtree names ITS pick,
+    // not the earlier producer's absent referent, so pruning stops here; the
+    // chooser re-binds (and supersedes the inherited marker) when it resolves.
+    if matches!(ability.effect, Effect::TargetOnly { .. })
+        && awaits_resolution_object_choice(ability)
+    {
+        return Some(ability.clone());
+    }
     let mut remaining = ability.clone();
     if let Effect::GenericEffect {
         static_abilities,
@@ -54439,13 +54465,98 @@ mod untargeted_target_only_choice_tests {
         };
         assert!(!awaits_resolution_object_choice(&context_ref));
 
-        // CR 608.2c + CR 609.3: a completed-but-empty choice is not asked again,
-        // which is what stops the empty re-entry from looping.
-        let mut empty = chooser;
-        empty.context.forwarded_result_context = Some(Box::new(
+        // CR 608.2c + CR 609.3: an INHERITED completed-empty marker describes an
+        // earlier producer's absent referent and must not suppress this
+        // chooser's own prompt.
+        let mut inherited = chooser;
+        inherited.context.forwarded_result_context = Some(Box::new(
             ForwardedResultContext::from_object_ids(&GameState::new_two_player(42), &[]),
         ));
-        assert!(!awaits_resolution_object_choice(&empty));
+        assert!(awaits_resolution_object_choice(&inherited));
+
+        // A chooser that found no candidates retires itself node-locally, by
+        // its own timing (the re-entry in `resolve_chain_body`).
+        let mut retired = inherited;
+        retired.target_choice_timing = TargetChoiceTiming::Stack;
+        assert!(!awaits_resolution_object_choice(&retired));
+    }
+
+    /// An untargeted chooser over `filter`, as the second sentence of a
+    /// two-chooser spell lowers it.
+    fn chooser_over(filter: TypedFilter) -> ResolvedAbility {
+        let mut head = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(filter.controller(ControllerRef::You)),
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        );
+        head.target_choice_timing = TargetChoiceTiming::Resolution;
+        head
+    }
+
+    /// "Choose an artifact you control. Choose a creature you control. That
+    /// player gains control of that creature." with no artifact: the first
+    /// chooser names nothing, but its inherited marker must not stop the second
+    /// chooser from prompting, nor prune the handoff that names the second
+    /// chooser's pick.
+    #[test]
+    fn empty_chooser_does_not_silence_a_later_populated_chooser() {
+        for creatures in [2, 1] {
+            let mut scenario = GameScenario::new();
+            let picked = scenario.add_creature(P0, "Bear A", 2, 2).id();
+            let other = (creatures == 2).then(|| {
+                scenario
+                    .add_creature(P0, "Shroud Bear", 2, 2)
+                    .with_keyword(Keyword::Shroud)
+                    .id()
+            });
+            let mut runner = scenario.build();
+
+            let mut second = chooser_over(TypedFilter::creature());
+            second.sub_link = SubAbilityLink::SequentialSibling;
+            let second = second.sub_ability(give_that_creature_to_p1());
+            let chain = chooser_over(TypedFilter::new(
+                crate::types::ability::TypeFilter::Artifact,
+            ))
+            .sub_ability(second);
+            let mut events = Vec::new();
+            resolve_ability_chain(runner.state_mut(), &chain, &mut events, 0).unwrap();
+
+            if let Some(other) = other {
+                let WaitingFor::ChooseFromZoneChoice { cards, .. } =
+                    runner.state().waiting_for.clone()
+                else {
+                    panic!(
+                        "the second chooser must prompt, got {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(
+                    cards.into_iter().collect::<HashSet<_>>(),
+                    HashSet::from([picked, other])
+                );
+                assert!(!controller_changed(&events));
+                runner
+                    .act(GameAction::SelectCards { cards: vec![other] })
+                    .unwrap();
+                crate::game::layers::evaluate_layers(runner.state_mut());
+                assert_eq!(runner.state().objects[&other].controller, P1);
+                assert_eq!(
+                    runner.state().objects[&picked].controller,
+                    P0,
+                    "only the chosen creature is handed over"
+                );
+            } else {
+                crate::game::layers::evaluate_layers(runner.state_mut());
+                assert_eq!(
+                    runner.state().objects[&picked].controller,
+                    P1,
+                    "a lone candidate is forced and still handed over"
+                );
+            }
+        }
     }
 
     /// U-D2: a single candidate is forced and binds without a prompt. The

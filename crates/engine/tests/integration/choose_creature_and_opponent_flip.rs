@@ -464,8 +464,12 @@ fn s1_8_zero_creatures_lost_flip_does_not_steal_the_sorcery() {
 
 #[test]
 fn s1_9_zero_creatures_krark_keep_lost_does_not_steal_the_sorcery() {
-    // Discriminates E's suspended forwarded_result_context carrier as well as
-    // D's completed-empty binding: defaulting the parked context self-steals.
+    // Discriminates D's completed-empty binding through the Krark's Thumb
+    // suspension. Defaulting the whole parked carrier also loses the chosen
+    // player, so the handoff errors before installing a control effect and this
+    // row can still pass; the marker-only loss is killed by the flip_coin unit
+    // tests (`completed_empty_result_prunes_the_dependent_branch_node`, resumed
+    // path, and the nested-flip rows).
     zero_creatures_lost_flip(true);
 }
 

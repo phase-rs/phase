@@ -145,18 +145,34 @@ fn run_flip_branch(
         // still happens. The shared missing-forward-result authority drops
         // exactly the dependent nodes; if the whole branch depended on the
         // absent object, there is nothing left to run.
-        if targets.is_empty()
+        let named_nothing = targets.is_empty()
             && branch_context
                 .forwarded_result_context
                 .as_deref()
-                .is_some_and(|context| context.targets.is_empty())
-        {
-            let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
-                return Ok(());
-            };
-            sub = pruned;
+                .is_some_and(|context| context.targets.is_empty());
+        if !named_nothing {
+            resolve_ability_chain(state, &sub, events, 0)?;
+            return Ok(());
         }
-        resolve_ability_chain(state, &sub, events, 0)?;
+        let Some(mut pruned) = super::without_missing_forward_result_dependencies(&sub) else {
+            return Ok(());
+        };
+        // CR 608.2c + CR 609.3: the surviving instructions are still part of the
+        // resolution that found nothing, so they keep that fact: a nested flip
+        // inside this branch captures it (`FlipBranchContext::from_ability`) and
+        // prunes ITS dependent branch the same way, instead of falling back to
+        // the ability's own source. The pruning above only reaches this branch's
+        // own node chain, not the payloads of a nested coin effect.
+        //
+        // The branch is therefore entered at the chain body, not the chain entry
+        // (`resolve_ability_chain` at depth 0), because the entry discards a
+        // root's forwarded-result context as stale resumed-root state and would
+        // erase exactly this marker. The enclosing resolution's per-resolution
+        // prelude has already run; re-running it for a branch is the latent
+        // defect FU-2, which this path does not repeat. Children receive the
+        // marker through the ordinary parent-to-child context hand-off.
+        pruned.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
+        super::resolve_chain_body(state, &pruned, events, 0, None)?;
     }
     Ok(())
 }
@@ -2272,5 +2288,224 @@ mod branch_context_tests {
 
         assert!(lost_flip(&events));
         assert_eq!(state.objects[&creature].controller, P1);
+    }
+
+    /// A nested "flip a coin" whose BOTH outcomes hand "that creature" to P1, so
+    /// no nested outcome can be the one that happens to be harmless.
+    fn nested_flip() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 }))),
+                lose_effect: Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 }))),
+                flipper: TargetFilter::Controller,
+            },
+        )
+    }
+
+    /// Where the nested flip sits in the surviving lose branch.
+    #[derive(Clone, Copy, Debug)]
+    enum NestedAt {
+        /// The branch is itself the nested flip.
+        BranchRoot,
+        /// An independent instruction (P0 gains 3 life), then the nested flip.
+        AfterIndependentInstruction,
+    }
+
+    fn lose_branch_with_nested_flip(at: NestedAt) -> AbilityDefinition {
+        match at {
+            NestedAt::BranchRoot => nested_flip(),
+            NestedAt::AfterIndependentInstruction => {
+                let mut flip = nested_flip();
+                flip.sub_link = SubAbilityLink::SequentialSibling;
+                let mut life = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                );
+                life.sub_ability = Some(Box::new(flip));
+                life
+            }
+        }
+    }
+
+    /// A seed whose first Outcome draws are exactly `draws`.
+    fn seed_for(draws: &[bool]) -> u64 {
+        use crate::types::game_state::RandomDraw;
+        (0u64..100_000)
+            .find(|&seed| {
+                let mut rng = GameRng::seed_from_u64(seed);
+                draws
+                    .iter()
+                    .all(|&want| rng.draw(RandomDraw::Outcome).random_bool(0.5) == want)
+            })
+            .expect("a seed exists for the wanted draw prefix")
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Path {
+        /// The outer flip is lost inline and the nested flip follows.
+        Inline,
+        /// The outer flip's lost branch resumes from a parked frame.
+        Resumed,
+        /// As `Resumed`, and the NESTED flip is doubled by the flipper's own
+        /// Krark's Thumb, so it parks a frame of its own before it resumes.
+        NestedKrark,
+    }
+
+    /// Everything the empty-result rows assert on.
+    struct NestedRun {
+        source_controller: PlayerId,
+        creature_controller: PlayerId,
+        life_gained: i32,
+        events: Vec<GameEvent>,
+        control_effects: usize,
+        flip_results: Vec<bool>,
+    }
+
+    /// Resolve an outer lost flip whose branch holds a nested flip, in a
+    /// resolution whose chooser found nothing (`marker`) or in one that did not.
+    fn run_nested(at: NestedAt, path: Path, nested_won: bool, marker: bool) -> NestedRun {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        let creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let source = scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+        if matches!(path, Path::NestedKrark) {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
+        let mut runner = scenario.build();
+
+        let mut ability = flip_ability(lose_branch_with_nested_flip(at), Vec::new(), source);
+        if marker {
+            ability.context.forwarded_result_context = Some(Box::new(
+                ForwardedResultContext::from_object_ids(runner.state(), &[]),
+            ));
+        }
+        let life_before = runner.state().players[0].life;
+        let control_before = runner.state().transient_continuous_effects.len();
+
+        let mut events = Vec::new();
+        match path {
+            Path::Inline => {
+                runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[false, nested_won]));
+                resolve(runner.state_mut(), &ability, &mut events).unwrap();
+            }
+            Path::Resumed => {
+                runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[nested_won]));
+                resume_after_keep(
+                    runner.state_mut(),
+                    parked(&ability),
+                    vec![false],
+                    &mut events,
+                )
+                .unwrap();
+            }
+            Path::NestedKrark => {
+                runner.state_mut().rng =
+                    GameRng::seed_from_u64(seed_for(&[nested_won, !nested_won]));
+                resume_after_keep(
+                    runner.state_mut(),
+                    parked(&ability),
+                    vec![false],
+                    &mut events,
+                )
+                .unwrap();
+                let WaitingFor::CoinFlipKeepChoice { results, .. } =
+                    runner.state().waiting_for.clone()
+                else {
+                    panic!(
+                        "reach: the nested flip must be doubled, got {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(results[0], nested_won);
+                let frame = runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .expect("the doubled nested flip parked a frame");
+                assert_eq!(
+                    frame.branch_context.forwarded_result_context.is_some(),
+                    marker,
+                    "the nested frame carries the enclosing completed-empty result"
+                );
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![0],
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+        }
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        // Every path records the lost outer flip, then the nested one.
+        let flip_results: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect();
+        NestedRun {
+            source_controller: runner.state().objects[&source].controller,
+            creature_controller: runner.state().objects[&creature].controller,
+            life_gained: runner.state().players[0].life - life_before,
+            events,
+            control_effects: runner.state().transient_continuous_effects.len() - control_before,
+            flip_results,
+        }
+    }
+
+    /// B1 through a NESTED flip: the enclosing resolution's chooser found
+    /// nothing, so a nested flip inside the surviving lost branch must hand over
+    /// nothing, whichever way it lands, whether the nested flip is the branch
+    /// itself or follows an independent instruction, and whether the whole thing
+    /// runs inline, resumes from a parked frame, or parks again under the
+    /// flipper's Krark's Thumb. The independent instruction still happens.
+    #[test]
+    fn nested_flip_in_an_empty_result_branch_hands_over_nothing() {
+        for at in [NestedAt::BranchRoot, NestedAt::AfterIndependentInstruction] {
+            for path in [Path::Inline, Path::Resumed, Path::NestedKrark] {
+                for nested_won in [false, true] {
+                    let run = run_nested(at, path, nested_won, true);
+                    let label = format!("{at:?} {path:?} nested_won={nested_won}");
+                    assert_eq!(
+                        run.flip_results,
+                        vec![false, nested_won],
+                        "reach: the lost outer flip, then the nested flip ({label})"
+                    );
+                    assert!(!controller_changed(&run.events), "{label}");
+                    assert_eq!(run.control_effects, 0, "{label}");
+                    assert_eq!(run.source_controller, P0, "{label}");
+                    assert_eq!(run.creature_controller, P0, "{label}");
+                    let expected_life = match at {
+                        NestedAt::BranchRoot => 0,
+                        NestedAt::AfterIndependentInstruction => 3,
+                    };
+                    assert_eq!(run.life_gained, expected_life, "{label}");
+                }
+            }
+        }
+    }
+
+    /// Control for the row above: with no completed-empty result the very same
+    /// nested handoff falls back to the ability's own source, which is the defect
+    /// the marker prevents. Without this the row above could pass vacuously.
+    #[test]
+    fn nested_flip_without_the_marker_reaches_the_source_fallback() {
+        let run = run_nested(NestedAt::BranchRoot, Path::Inline, false, false);
+        assert_eq!(run.flip_results, vec![false, false]);
+        assert!(controller_changed(&run.events));
+        assert_eq!(run.source_controller, P1);
     }
 }
