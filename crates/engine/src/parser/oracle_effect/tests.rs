@@ -6,7 +6,7 @@ use super::sequence::split_clause_sequence;
 use super::*;
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
-use crate::parser::oracle_ir::ast::EntersUnderSpec;
+use crate::parser::oracle_ir::ast::{EntersUnderSpec, TargetedImperativeAst};
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
     bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
@@ -25,6 +25,352 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
+
+/// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
+/// choice, whose immediate continuation moves only the selected parents.
+#[test]
+fn technomancer_total_mana_value_return_shape() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, mill three cards, then return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.",
+        "Technomancer", &[], &["Artifact".to_string(), "Creature".to_string()], &[],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(execute.effect.as_ref(), Effect::Mill { .. }));
+    let chosen = execute.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: u32::MAX,
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        chosen.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: explicitly synthetic selection-boundary fixture. CR 608.2c/d
+/// binds the delivery to the chosen cards, and the zone choice is a
+/// chosen-object boundary for the event-source lift: like a library search
+/// (`event_source_lift_stops_at_search_across_independent_siblings`), later
+/// siblings keep the chosen-object antecedent rather than the entering object.
+#[test]
+fn event_source_lift_stops_at_zone_choice_across_independent_siblings() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield. Then exile that creature.",
+        "Zone Choice Boundary Fixture", &[], &["Creature".to_string()], &[],
+    );
+    let chosen = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    let delivery = chosen.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    let sibling = delivery.sub_ability.as_ref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(matches!(
+        sibling.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: an origin-less aggregate-budget return fails closed (CR 608.2d)
+/// instead of dropping its total-mana-value budget, while the same return
+/// with its printed origin still lowers to the subset choice.
+#[test]
+fn origin_less_total_mana_value_return_fails_closed_but_origin_return_composes() {
+    let origin_less = "Return any number of artifact creature cards with total mana value 6 or less to the battlefield";
+    // Reach-guard: the AST really carries the budget with no origin, so the
+    // composing subset arm cannot consume it.
+    let lower = origin_less.to_lowercase();
+    let ast =
+        imperative::parse_targeted_action_ast(origin_less, &lower, &mut ParseContext::default());
+    assert!(
+        matches!(
+            ast,
+            Some(TargetedImperativeAst::ReturnToBattlefield {
+                choice_constraint: Some(ChooseFromZoneConstraint::TotalManaValue { .. }),
+                choice_cardinality: Some(_),
+                origin: None,
+                ..
+            })
+        ),
+        "{ast:?}"
+    );
+    let clause = parse_effect_clause(origin_less, &mut ParseContext::default());
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { .. }),
+        "an unconsumed budget must not lower to a budget-free return: {:?}",
+        clause.effect
+    );
+
+    let with_origin = parse_effect_clause(
+        "Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            with_origin.effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                    comparator: Comparator::LE,
+                    value: 6
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        with_origin.effect
+    );
+    assert!(matches!(
+        with_origin.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: Lively Dirge's exact return mode has a separate count limit.
+#[test]
+fn lively_dirge_bounded_total_mana_value_return_shape() {
+    let parsed = parse_oracle_text(
+        "Spree (Choose one or more additional costs.)\n+ {1} — Search your library for a card, put it into your graveyard, then shuffle.\n+ {2} — Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Lively Dirge", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "both Spree modes must be reached"
+    );
+    let clause = &parsed.abilities[1];
+    assert!(
+        matches!(
+            clause.effect.as_ref(),
+            Effect::ChooseFromZone {
+                count: 2,
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                    comparator: Comparator::LE,
+                    value: 4
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        clause.effect
+    );
+    assert!(matches!(
+        clause.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: targeted aggregate and individual-card restrictions keep their paths.
+#[test]
+fn total_mana_value_return_targeted_and_per_card_siblings_shape() {
+    for text in [
+        "Return up to three target creature cards with total mana value 3 or less from your graveyard to the battlefield.",
+        "Return up to X target artifact and/or non-Aura enchantment cards each with mana value X or less from your graveyard to the battlefield.",
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(matches!(clause.effect, Effect::ChangeZone { origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield, .. }), "{text}: {:?}", clause.effect);
+    }
+}
+
+/// SHAPE: a dynamic untargeted budget is not claimed by the fixed-budget subset
+/// lowering; it reaches the shared aggregate-selection refusal, never a zero cap.
+#[test]
+fn total_mana_value_return_dynamic_untargeted_budget_is_honest_gap() {
+    let parsed = parse_oracle_text(
+        "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield.",
+        "Dynamic aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { name, .. }
+        if name == super::lower::UNENFORCED_AGGREGATE_RESOLUTION_SELECTION_GAP),
+        "{:?}",
+        parsed.abilities[0].effect
+    );
+}
+
+/// SHAPE: an unconsumed destination rider fails closed; a rider the shared
+/// destination grammar consumes (a fixed-count counter) keeps the subset choice.
+#[test]
+fn aggregate_return_unconsumed_rider_is_honest_gap() {
+    let gap = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield with X +1/+1 counters on them.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(gap.effect, Effect::Unimplemented { ref name, .. }
+        if name == "return_subset_unconsumed_rider"),
+        "{:?}",
+        gap.effect
+    );
+
+    let control = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield with a finality counter on it.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            control.effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue { value: 6, .. }),
+                ..
+            }
+        ),
+        "{:?}",
+        control.effect
+    );
+    assert!(
+        matches!(
+            control.sub_ability.as_ref().unwrap().effect.as_ref(),
+            Effect::ChangeZone { enter_with_counters, .. } if enter_with_counters.len() == 1
+        ),
+        "{:?}",
+        control.sub_ability
+    );
+}
+
+/// SHAPE: a recognized dynamic cardinality reaches the existing gap marker
+/// instead of becoming an ordinary return that drops the aggregate budget.
+#[test]
+fn aggregate_return_dynamic_cardinality_is_honest_gap() {
+    let parsed = parse_oracle_text(
+        "Return up to X creature cards with total mana value 6 or less from your graveyard to the battlefield.",
+        "Dynamic cardinality aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { name, .. }
+        if name == "return_subset_dynamic_cardinality"),
+        "{:?}",
+        parsed.abilities[0].effect
+    );
+}
+
+/// SHAPE: a delayed instruction must keep the descriptor's own count, too.
+#[test]
+fn delayed_aggregate_return_keeps_resolution_choice_cardinality() {
+    let parsed = parse_oracle_text(
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Delayed aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected delayed trigger: {:?}", parsed.abilities);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: 2,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue { value: 4, .. }),
+            ..
+        }
+    ));
+}
+
+/// A clause harness drives the delayed normalization branch and the actual
+/// resolution-time choice, independently of the immediate Technomancer ETB.
+#[test]
+fn delayed_aggregate_return_rejects_excess_count_then_returns_selected_cards() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ids: Vec<_> = (0..3)
+        .map(|_| {
+            scenario
+                .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+                .as_artifact_creature()
+                .with_mana_cost(ManaCost::zero())
+                .id()
+        })
+        .collect();
+    let spell = scenario.add_spell_to_hand_from_oracle(
+        P0, "Delayed return clause harness", false,
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+    ).with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { cards, count: 2, .. }
+        if ids.iter().all(|id| cards.contains(id)))
+    );
+    let prompt = runner.state().waiting_for.clone();
+    assert!(runner
+        .act(GameAction::SelectCards { cards: ids.clone() })
+        .is_err());
+    assert_eq!(runner.state().waiting_for, prompt);
+    assert!(ids
+        .iter()
+        .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+    runner
+        .act(GameAction::SelectCards {
+            cards: ids[..2].to_vec(),
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&ids[0]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[1]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+}
+
+/// SHAPE: the bare-effect compound dispatcher must not drop the choice fields.
+#[test]
+fn compound_aggregate_return_remains_an_honest_gap() {
+    let clause = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield and draw a card.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { ref name, .. }
+        if name == "return_subset_compound")
+    );
+}
 
 fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {

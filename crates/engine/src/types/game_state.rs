@@ -2836,15 +2836,54 @@ pub struct PendingAttachmentRemainder {
     pub producer: Box<ResolvedAbility>,
 }
 
-/// Private continuation authority for an interactive player-scope exile
-/// instruction. Keeping the detached tail here makes generated APNAP nodes
-/// explicit without adding runtime provenance to `ResolvedAbility`.
+/// Private continuation authority for an interactive player-scope instruction
+/// whose detached unscoped tail must wait until every generated APNAP seat leg
+/// has drained. Keeping the tail here makes the generated legs explicit without
+/// adding runtime provenance to `ResolvedAbility`. It carries two channels, each
+/// read only by the consumer that needs it:
+/// - the linked-exile batch (CR 607.2a + CR 608.2f), live when `after_scope`
+///   holds a linked-exile consumer;
+/// - each seat's pinned creation result (CR 608.2c + CR 608.2e + CR 608.2f +
+///   CR 111.1), live when `created_tokens` is `Some`: per seat, in APNAP
+///   order, every token that seat's instruction of the scoped creation action
+///   made (replacement-made tokens included, CR 614.1a), pinned at creation
+///   (CR 400.7). Their union is the referent of a tail that reads "the tokens";
+///   each entry is the "it" of that seat's co-scoped second action. The last
+///   entry is the seat in progress.
+///
+/// Wire keys are unchanged from the linked-exile-only sidecar; a sidecar
+/// serialized without `created_tokens` decodes as linked-exile-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PendingPlayerScopeLinkedExile {
+pub(crate) struct PendingPlayerScopeTail {
     pub source_id: ObjectId,
     pub after_scope: Box<ResolvedAbility>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub batch: Vec<ObjectIncarnationRef>,
+    #[serde(rename = "batch", default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_exile_batch: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_tokens: Option<Vec<SeatCreatedTokens>>,
+}
+
+/// CR 608.2e + CR 400.7: one seat's creation result inside a player-scoped
+/// token-creation action — the tokens that seat's instruction created, each
+/// pinned to the incarnation it had when created. Keyed by the instructed
+/// seat, never by a token's owner or controller: a replacement can change who
+/// controls a created token (CR 616.1b), but the token is still the product of
+/// that seat's instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeatCreatedTokens {
+    pub seat: PlayerId,
+    pub tokens: Vec<ObjectIncarnationRef>,
+}
+
+/// Execution-local handoff of a completed player-scoped token-creation
+/// clause's per-seat results to its detached tail, installed only for the
+/// duration of that tail's resolution call. `source_id` is the producing
+/// instruction's source, so a co-scoped consumer binds origin only from its
+/// own producer's results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatedTokenSeatsHandoff {
+    pub source_id: ObjectId,
+    pub seats: Vec<SeatCreatedTokens>,
 }
 
 /// One execution of a resolving root, distinct for originals and spell copies.
@@ -2890,10 +2929,15 @@ pub struct PendingContinuation {
     /// unprocessed members of a selected multi-attachment operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_remainder: Option<PendingAttachmentRemainder>,
-    /// CR 608.2f: exact linked-exile union and detached unscoped tail owned by
-    /// a generated player-scope continuation. Legacy saves default to `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+    /// CR 608.2f: the detached unscoped tail of a generated player-scope
+    /// continuation and the channels it reads (linked-exile batch, per-seat
+    /// creation results). Legacy saves default to `None`.
+    #[serde(
+        rename = "player_scope_linked_exile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) player_scope_tail: Option<PendingPlayerScopeTail>,
     /// Private queue terminator for generated player-scope continuations. The
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2941,7 +2985,7 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
         }
     }
@@ -2965,9 +3009,101 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod player_scope_tail_serde_tests {
+    use super::*;
+    use crate::types::ability::{Effect, ResolvedAbility};
+
+    fn continuation_with_tail(tail: PendingPlayerScopeTail) -> PendingContinuation {
+        let state = GameState {
+            resolving_player_scope_tail: Some(tail),
+            ..GameState::default()
+        };
+        let chain = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(7), PlayerId(0));
+        PendingContinuation::new(Box::new(chain), &state)
+    }
+
+    fn tail(created_tokens: Option<Vec<SeatCreatedTokens>>) -> PendingPlayerScopeTail {
+        PendingPlayerScopeTail {
+            source_id: ObjectId(7),
+            after_scope: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(7),
+                PlayerId(0),
+            )),
+            linked_exile_batch: vec![ObjectIncarnationRef::of(ObjectId(11), 2)],
+            created_tokens,
+        }
+    }
+
+    /// The generalized sidecar keeps the linked-exile-only wire shape: a
+    /// sidecar without a created-token channel serializes under the legacy
+    /// keys only, and that JSON decodes with the channel absent.
+    #[test]
+    fn linked_only_sidecar_keeps_legacy_wire_keys_and_decodes_without_created_channel() {
+        let pending = continuation_with_tail(tail(None));
+        let json = serde_json::to_value(&pending).expect("continuation serializes");
+        let sidecar = json
+            .get("player_scope_linked_exile")
+            .and_then(serde_json::Value::as_object)
+            .expect("sidecar rides its legacy key");
+        let mut keys: Vec<&str> = sidecar.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["after_scope", "batch", "source_id"]);
+
+        let decoded: PendingContinuation =
+            serde_json::from_value(json).expect("legacy-shaped sidecar decodes");
+        let decoded_tail = decoded.player_scope_tail.expect("sidecar decoded");
+        assert_eq!(
+            decoded_tail.linked_exile_batch,
+            vec![ObjectIncarnationRef::of(ObjectId(11), 2)]
+        );
+        assert_eq!(decoded_tail.created_tokens, None);
+    }
+
+    /// The per-seat creation channel round-trips with each seat's pins, in
+    /// order, including an empty seat (the shape a seat in progress has), and
+    /// its wire element is `{seat, tokens}`.
+    #[test]
+    fn created_token_channel_round_trips() {
+        let seats = vec![
+            SeatCreatedTokens {
+                seat: PlayerId(1),
+                tokens: vec![ObjectIncarnationRef::of(ObjectId(21), 3)],
+            },
+            SeatCreatedTokens {
+                seat: PlayerId(2),
+                tokens: Vec::new(),
+            },
+        ];
+        let pending = continuation_with_tail(tail(Some(seats.clone())));
+        let wire = serde_json::to_value(&pending).expect("continuation serializes");
+        let element = &wire["player_scope_linked_exile"]["created_tokens"][0];
+        let mut keys: Vec<&str> = element
+            .as_object()
+            .expect("a seat entry is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["seat", "tokens"]);
+        assert_eq!(element["seat"], serde_json::json!(1));
+        let decoded: PendingContinuation =
+            serde_json::from_value(wire).expect("continuation decodes");
+        assert_eq!(decoded, pending);
+        assert_eq!(
+            decoded
+                .player_scope_tail
+                .and_then(|scope| scope.created_tokens),
+            Some(seats)
+        );
     }
 }
 
@@ -23329,7 +23465,16 @@ declare_game_state! {
     /// The serialized authority lives on `PendingContinuation`; every pause
     /// re-parks it before control returns to callers.
     #[serde(skip)]
-    pub(crate) resolving_player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+    pub(crate) resolving_player_scope_tail: Option<PendingPlayerScopeTail>,
+
+    /// Execution-local handoff of a completed player-scoped token clause's
+    /// per-seat creation results to its detached tail. Installed only around
+    /// that tail's resolution call and restored on every return (including
+    /// errors), so it is `None` whenever a stack object begins resolving.
+    /// Never serialized: a pause inside the tail carries the results on the
+    /// tail's own continuation instead.
+    #[serde(skip)]
+    pub(crate) resolving_created_token_seats: Option<CreatedTokenSeatsHandoff>,
 
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
@@ -30008,7 +30153,8 @@ impl GameState {
             payment_transaction_replay: false,
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
-            resolving_player_scope_linked_exile: None,
+            resolving_player_scope_tail: None,
+            resolving_created_token_seats: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -33042,7 +33188,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         payment_transaction_replay: _,
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
-        resolving_player_scope_linked_exile: _,
+        resolving_player_scope_tail: _,
+        resolving_created_token_seats: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,

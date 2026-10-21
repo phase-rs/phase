@@ -4875,8 +4875,14 @@ fn detect_condition_if(
     }) {
         return;
     }
-    // CR 603.4: an explicit quantity comparison IS the conditional gate.
-    if evidence.any::<AbilityCondition>(|c| matches!(c, AbilityCondition::QuantityCheck { .. })) {
+    // CR 603.4: an explicit quantity comparison or arithmetic-quality predicate IS the
+    // conditional gate.
+    if evidence.any::<AbilityCondition>(|c| {
+        matches!(
+            c,
+            AbilityCondition::QuantityCheck { .. } | AbilityCondition::QuantityQuality { .. }
+        )
+    }) {
         return;
     }
     // CR 614.1a: replacement riders whose carried event/destination IS the "if X would Y"

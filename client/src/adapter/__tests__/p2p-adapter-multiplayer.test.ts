@@ -5650,7 +5650,7 @@ describe("P2P wire-protocol version gate", () => {
   // check back into the transport would surface here as the refusing half
   // never emitting.
   //
-  it.each([115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135])("refuses independent earlier wire history v%s", async (version) => {
+  it.each([115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138])("refuses independent earlier wire history v%s", async (version) => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
     await refusing.conn.simulateData(setupFrameAt(version));
@@ -5669,8 +5669,10 @@ describe("P2P wire-protocol version gate", () => {
   // other handshake fixture in the suite is useless as an instrument for a
   // bump. Reverting WIRE_PROTOCOL_VERSION itself (141 → 140) breaks both
   // halves' premise: the v140 frame now equals the reverted constant and is
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (139 → 138) breaks both
+  // halves' premise: the v138 frame now equals the reverted constant and is
   // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v137
+  // assertion ("promise resolved … instead of rejecting") — and the v139
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the

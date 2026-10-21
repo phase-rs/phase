@@ -112,6 +112,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
  *       as one flip, so first contact rejects the skew. Bumped in lockstep with
  *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
+ *  138 — game_setup and state_update carry GameState whose ability conditions
+ *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
+ *       full-game protocol 156, which also adds the optional per-seat
+ *       created_tokens channel (each seat's pinned creation result) on the
+ *       player-scope tail sidecar inside paused resolution frames.
  *  137 — game_setup and state_update carry GameState whose parked ChangeZone
  *       frame stores each remaining member with its pre-event entry
  *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves

@@ -3880,7 +3880,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
 /// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
-/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`;
+/// `pending_discard_for_cost`, `resolving_player_scope_tail`,
+/// `resolving_created_token_seats`;
 /// `return_result_frames`, `LogicalZoneChangeGroup` latches and
 /// `ResolvedCommands.zone_change_record` (cleared with `resolution_stack` /
 /// `resolved_rules_journal`), `NamedChoiceSource.context` and `OpponentGuessOwner.context`

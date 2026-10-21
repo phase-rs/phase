@@ -1316,6 +1316,10 @@ fn ability_condition(condition: &$($mut_)? AbilityCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        AbilityCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => quantity(rhs, v),
         AbilityCondition::ConditionInstead { inner: c } | AbilityCondition::Not { condition: c } => {
             ability_condition(c, v)
@@ -1338,6 +1342,10 @@ fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        TriggerCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         // CR 201.5a: an `EventTime` condition (a state trigger's head, CR 603.8,
         // or an event trigger's "while" gate, CR 508.1m) is the wrapped
         // condition read only when the trigger fires, so its granter symbols
@@ -1360,6 +1368,10 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        StaticCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         StaticCondition::IsTapped { scope } => object_scope(scope, v),
         StaticCondition::Not { condition: c } => static_condition(c, v),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {

@@ -3938,49 +3938,17 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 111.1: is this a token-creation effect? The authority is
+/// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Populate | Effect::Token { .. } | Effect::CopyTokenOf { .. }
-    )
+    effect.is_token_creator()
 }
 
-/// CR 608.2c + CR 701.40a + CR 701.58a + CR 701.62a: Does this clause put a NEW
-/// permanent onto the battlefield that a later same-chain anaphor can name?
-///
-/// A created token and a face-down entry are indistinguishable to the anaphor.
-/// Both clauses produce exactly one new permanent and declare NO target, so a
-/// following "it" / "that creature" has exactly one possible referent — the
-/// thing the clause just made. Manifest (CR 701.40a), manifest dread
-/// (CR 701.62a) and cloak (CR 701.58a) all route through the one runtime
-/// producer (`game::morph::manifest_card`) and put a 2/2 face-down creature
-/// onto the battlefield, exactly as `Effect::Token` puts a token there.
-///
-/// Keying the chain-referent flag on "token" alone left the face-down producers
-/// with no referent, so their anaphor fell through to `ParentTarget` (empty —
-/// the producer has no targets) or to the trigger source: Conductive Machete
-/// attached to nothing, Weight Room put its counters on the Room (#7531).
-///
-/// `Effect::Conjure` (digital-only, no CR entry) is the same shape again: it
-/// puts exactly one new object into a zone and declares no target, so a
-/// following same-chain "it" has exactly one possible referent — the card it
-/// just conjured. Agent of Raffine's "Conjure a duplicate ... into your hand.
-/// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
-/// (the ability's actual chosen target — "target opponent" — not the
-/// conjured card).
-///
-/// The declined "if you do" walk (`game::effects`,
-/// `declined_gate_surviving_instructions`) reads the same answer to keep a
-/// created object and its later rider together.
+/// CR 608.2c: does this clause publish the created referent a later same-chain
+/// anaphor names? The authority (and its rationale) is
+/// [`Effect::publishes_created_referent`]; this name is kept for the parser's callers.
 pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
-    is_token_creating_effect(effect)
-        || matches!(
-            effect,
-            Effect::Manifest { .. }
-                | Effect::ManifestDread
-                | Effect::Cloak { .. }
-                | Effect::Conjure { .. }
-        )
+    effect.publishes_created_referent()
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
@@ -13453,6 +13421,10 @@ fn apply_where_x_ability_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
                 apply_where_x_ability_condition(c, where_x_expression, unbound);
@@ -13478,6 +13450,10 @@ fn apply_where_x_static_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for condition in conditions {
                 apply_where_x_static_condition(condition, where_x_expression, unbound);

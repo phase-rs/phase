@@ -594,8 +594,19 @@ pub(crate) enum ContinuationAst {
     /// | each of them> enters with N additional <counter> counter(s) on it" after
     /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
     /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
-    /// producer.)
+    /// producer.) The imperative "put … counters on it" form is
+    /// [`Self::PutCountersOnLastCreated`].
     TokenEntersWithCounters {
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    /// CR 608.2c + CR 122.1: imperative "put N <type> counter(s) on it" after a
+    /// create-token clause — a separate, later instruction on the token(s) that
+    /// clause just created, not counters the token enters with. Lowers to a
+    /// `ContinuationStep` `Effect::PutCounter { target: LastCreated }` sub
+    /// directly under the `Effect::Token`: the token enters first, then
+    /// receives the counters (Zaxara, the Exemplary rulings).
+    PutCountersOnLastCreated {
         counter_type: CounterType,
         count: QuantityExpr,
     },
@@ -1308,6 +1319,11 @@ pub(crate) enum TargetedImperativeAst {
     ReturnToBattlefield {
         target: TargetFilter,
         origin: Option<Zone>,
+        /// CR 608.2d + CR 202.3: a fixed aggregate restriction on an
+        /// untargeted resolution-time subset, separate from per-card filters.
+        choice_constraint: Option<crate::types::ability::ChooseFromZoneConstraint>,
+        /// CR 608.2d: the printed subset cardinality, independent of its budget.
+        choice_cardinality: Option<MultiTargetSpec>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
         /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes

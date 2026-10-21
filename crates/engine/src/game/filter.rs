@@ -2128,12 +2128,13 @@ pub(crate) fn target_player_from_ability_or_root(
 ///
 /// SCOPE, stated rather than left implicit: this traverses every nested
 /// `TargetFilter`. It deliberately does NOT descend into the `QuantityExpr`
-/// magnitudes some `FilterProp`s carry (`Cmc { value }`, `Counters { count }`,
-/// `PtComparison { value }`). A filter reached through a quantity is a
-/// *population being counted*, not a quality this filter mentions, and it has its
-/// own authority with its own semantics —
-/// `effects::quantity_ref_counts_population_matching`, which the anaphor gates
-/// call alongside this function rather than through it.
+/// magnitudes some `FilterProp`s and `PlayerFilter`s carry (`Cmc { value }`,
+/// `Counters { count }`, `PtComparison { value }`, `ControlsCount { count }`,
+/// `PlayerAttribute { attr, value }`). A filter reached through a quantity is a
+/// *population being counted*, not a quality this filter mentions, and callers
+/// that number slots or project a prop's own threshold rely on that boundary.
+/// Its operand-closed twin, [`filter_operands_contain`], descends those
+/// operands too; the created-referent reader in `effects` reads through it.
 pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
     if leaf(filter) {
         return true;
@@ -2252,7 +2253,7 @@ pub(crate) fn filter_prop_contains(
             .is_some_and(|scope| player_filter_contains(scope, leaf)),
         // Leaves: no nested `TargetFilter`. (Props carrying only a `QuantityExpr`
         // magnitude are leaves HERE by the scope rule documented on
-        // `filter_contains` — the quantity authority classifies those.)
+        // `filter_contains` — `filter_prop_operands_contain` reads those.)
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -2370,9 +2371,12 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
         PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
+        // The excluded players are themselves a player filter, which can box
+        // a `TargetFilter` of its own (e.g. `ControlsCount { filter }`).
+        PlayerFilter::AllExcept { exclude } => player_filter_contains(exclude, leaf),
         // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
-        // `QuantityExpr` are quantities, which the scope rule on
-        // `filter_contains` assigns to the quantity authority.
+        // `QuantityExpr` and `ControlsCount.count` are quantities, which the
+        // scope rule on `filter_contains` assigns to the operand-closed twin.
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -2382,7 +2386,6 @@ pub(crate) fn player_filter_contains(
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::All
-        | PlayerFilter::AllExcept { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -2413,30 +2416,536 @@ pub(crate) fn filter_contains_filter_prop(
     filter: &TargetFilter,
     predicate: &dyn Fn(&FilterProp) -> bool,
 ) -> bool {
-    filter_contains_input(
-        filter,
-        &|prop, _, _| predicate(prop),
-        &|_, _, _, _| false,
-        &|_, _, _| false,
-        &|_, _, _| false,
-        false,
-        None,
-    )
+    filter_grammar_any(filter, &|node| match node {
+        FilterGrammarNode::Prop(prop) => predicate(prop),
+        FilterGrammarNode::Filter(_) => false,
+    })
 }
 
+/// [`filter_contains_filter_prop`] from a `QuantityExpr`: whether any
+/// `FilterProp` reachable through the quantity's counted populations and
+/// player filters is accepted by `predicate`.
 pub(crate) fn quantity_expr_contains_filter_prop(
     expr: &QuantityExpr,
     predicate: &dyn Fn(&FilterProp) -> bool,
 ) -> bool {
-    quantity_expr_contains_input(
-        expr,
-        &|prop, _, _| predicate(prop),
-        &|_, _, _, _| false,
-        &|_, _, _| false,
-        &|_, _, _| false,
-        false,
-        None,
-    )
+    quantity_expr_grammar_any(expr, &|node| match node {
+        FilterGrammarNode::Prop(prop) => predicate(prop),
+        FilterGrammarNode::Filter(_) => false,
+    })
+}
+
+/// Whether `filter`, or any `TargetFilter` reachable from it through the
+/// complete filter grammar, satisfies `leaf` — the operand-closed twin of
+/// [`filter_contains`].
+///
+/// SCOPE: unlike `filter_contains`, this also descends the `QuantityExpr`
+/// operands the grammar carries (`FilterProp::{Cmc, Counters, PtComparison}`
+/// thresholds, `PlayerFilter::ControlsCount.count`,
+/// `PlayerFilter::PlayerAttribute.{attr, value}`) and every population those
+/// quantities count (`QuantityRef::{ObjectCount, PlayerCount, …}`), because a
+/// filter reached through an operand is evaluated against the same game state
+/// as the filter that carries it. It is the read authority for predicates that
+/// ask "does evaluating this read X anywhere" (the created-referent reader);
+/// rewriting helpers and slot-numbering callers keep the structural
+/// `filter_contains`.
+pub(crate) fn filter_operands_contain(
+    filter: &TargetFilter,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    filter_grammar_any(filter, &|node| operand_leaf(node, leaf))
+}
+
+/// [`filter_operands_contain`] from a single `FilterProp`.
+pub(crate) fn filter_prop_operands_contain(
+    prop: &FilterProp,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    filter_prop_grammar_any(prop, &|node| operand_leaf(node, leaf))
+}
+
+/// [`filter_operands_contain`] from a `PlayerFilter`, including its
+/// `ControlsCount` / `PlayerAttribute` quantity operands and its `AllExcept`
+/// exclusion.
+pub(crate) fn player_filter_operands_contain(
+    filter: &PlayerFilter,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    player_filter_grammar_any(filter, &|node| operand_leaf(node, leaf))
+}
+
+/// [`filter_operands_contain`] from a `QuantityExpr`: every population any of
+/// its references counts, every player filter it counts, and every threshold
+/// nested inside those filters. An incomplete bounded `CardTypeSetSource::AnyOf`
+/// walk is reported as a possible match (the conservative dependency answer).
+pub(crate) fn quantity_expr_operands_contain(
+    expr: &QuantityExpr,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    quantity_expr_grammar_any(expr, &|node| operand_leaf(node, leaf))
+}
+
+/// [`quantity_expr_operands_contain`] for a single `QuantityRef`.
+pub(crate) fn quantity_ref_operands_contain(
+    qty: &QuantityRef,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    quantity_ref_grammar_any(qty, &|node| operand_leaf(node, leaf))
+}
+
+/// The operand-closed entries' visitor: a `TargetFilter` node is tested
+/// against `leaf`; a `FilterProp` node is only a step of the walk.
+fn operand_leaf(node: FilterGrammarNode<'_>, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
+    match node {
+        FilterGrammarNode::Filter(filter) => leaf(filter),
+        FilterGrammarNode::Prop(_) => false,
+    }
+}
+
+/// One node of the filter grammar as the grammar walkers below reach it: a
+/// `TargetFilter` at its entry, or a `FilterProp` at its entry. Private: the
+/// walkers are generic over what a caller looks for, and each public entry
+/// above names the node kind it tests.
+#[derive(Clone, Copy)]
+enum FilterGrammarNode<'a> {
+    Filter(&'a TargetFilter),
+    Prop(&'a FilterProp),
+}
+
+/// The complete target → property → player → quantity topology of the filter
+/// grammar, visiting every `TargetFilter` and `FilterProp` it reaches;
+/// `true` as soon as `visit` accepts a node. Exhaustive at every level, no
+/// wildcard arm. The `*_contains_input` family below walks the same topology
+/// while threading object-information and slot context; keep the two
+/// arm-for-arm.
+fn filter_grammar_any(
+    filter: &TargetFilter,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    if visit(FilterGrammarNode::Filter(filter)) {
+        return true;
+    }
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|inner| filter_grammar_any(inner, visit))
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_grammar_any(filter, visit)
+        }
+        TargetFilter::PlayerMatching { player } => player_filter_grammar_any(player, visit),
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| filter_prop_grammar_any(prop, visit)),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+fn filter_prop_grammar_any(
+    prop: &FilterProp,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    visit(FilterGrammarNode::Prop(prop))
+        || match prop {
+            FilterProp::CanEnchant { target } => filter_grammar_any(target, visit),
+            FilterProp::DifferentNameFrom { filter } => filter_grammar_any(filter, visit),
+            FilterProp::DistinctFrom { reference } => filter_grammar_any(reference, visit),
+            FilterProp::SharesQuality { reference, .. } => reference
+                .as_deref()
+                .is_some_and(|inner| filter_grammar_any(inner, visit)),
+            FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            FilterProp::Not { prop } => filter_prop_grammar_any(prop, visit),
+            FilterProp::AnyOf { props } => props
+                .iter()
+                .any(|inner| filter_prop_grammar_any(inner, visit)),
+            FilterProp::ControllerMatches { player } => player_filter_grammar_any(player, visit),
+            FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+                .as_ref()
+                .is_some_and(|scope| player_filter_grammar_any(scope, visit)),
+            FilterProp::Counters { count, .. }
+            | FilterProp::Cmc { value: count, .. }
+            | FilterProp::PtComparison { value: count, .. } => {
+                quantity_expr_grammar_any(count, visit)
+            }
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Player { .. },
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::DeclaredTarget { .. },
+            }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+}
+
+fn player_filter_grammar_any(
+    filter: &PlayerFilter,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match filter {
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            filter_grammar_any(filter, visit) || quantity_expr_grammar_any(count, visit)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_grammar_any(attr, visit) || quantity_expr_grammar_any(value, visit)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => filter_grammar_any(filter, visit),
+        PlayerFilter::AllExcept { exclude } => player_filter_grammar_any(exclude, visit),
+        PlayerFilter::AnyOf { filters } => {
+            filters.iter().any(|f| player_filter_grammar_any(f, visit))
+        }
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::GrantingObjectCaster => false,
+    }
+}
+
+/// Visits the filter-grammar nodes carried by dynamic quantity operands. This is
+/// part of the same filter grammar as the direct property recursion above:
+/// quantities can themselves count filtered object/player populations.
+fn quantity_expr_grammar_any(
+    expr: &QuantityExpr,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_grammar_any(qty, visit),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_grammar_any(inner, visit),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|inner| quantity_expr_grammar_any(inner, visit)),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_grammar_any(left, visit) || quantity_expr_grammar_any(right, visit)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+/// EXHAUSTIVE, wildcard-free leaf classifier for
+/// [`quantity_expr_grammar_any`]. Keep this arm-for-arm with
+/// [`rewrite_quantity_ref_filter_props`] so readers and rewriters reach the
+/// same dynamic quantity topology.
+fn quantity_ref_grammar_any(
+    qty: &QuantityRef,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => filter_grammar_any(filter, visit),
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_grammar_any(filter, visit),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_grammar_any(filter, visit)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_grammar_any(aggregate.source(), visit)
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_grammar_any(source, visit)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_grammar_any(source, visit) || filter_grammar_any(target, visit)
+        }
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                filter_grammar_any(source_filter, visit)
+            }
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => false,
+        },
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// Whether a visited grammar node is reachable through a card-type population.
+/// An exhausted bounded union walk is treated as a possible match, preserving
+/// the reader's conservative dependency contract.
+fn card_type_set_source_grammar_any(
+    source: &CardTypeSetSource,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_grammar_any(filter, visit),
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        CardTypeSetSource::AnyOf { .. } => {
+            let mut contains = false;
+            let complete = source.try_for_each_member(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    contains |= card_type_set_source_grammar_any(leaf, visit);
+                },
+            );
+            // An incomplete walk may have missed the visit below the
+            // budget boundary. This is a dependency/capability query, where
+            // the conservative answer prevents an under-reported consumer.
+            contains || !complete
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
 }
 
 type RawReferencePredicate<'a> =
@@ -3739,6 +4248,12 @@ pub(crate) fn rebind_declared_groups_in_condition(
             rebind_declared_groups_in_quantity(lhs, resolve);
             rebind_declared_groups_in_quantity(rhs, resolve);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => {
+            rebind_declared_groups_in_quantity(quantity, resolve);
+        }
         AbilityCondition::PreviousEffectAmount { rhs, .. } => {
             rebind_declared_groups_in_quantity(rhs, resolve);
         }
@@ -4606,7 +5121,7 @@ fn rewrite_player_filter_props(
     }
 }
 
-/// Mutable counterpart of [`quantity_expr_contains_filter_prop`]. Keep this
+/// Mutable counterpart of [`quantity_expr_grammar_any`]. Keep this
 /// structural recursion in lockstep with the reader so a filter property cannot
 /// be found below a dynamic threshold without also being rewritten there.
 fn rewrite_quantity_expr_filter_props(
@@ -4682,7 +5197,7 @@ fn rewrite_quantity_expr_filter_props(
 }
 
 /// EXHAUSTIVE, wildcard-free mutable twin of
-/// [`quantity_ref_contains_filter_prop`].
+/// [`quantity_ref_grammar_any`].
 fn rewrite_quantity_ref_filter_props(
     qty: &mut QuantityRef,
     rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&ResolvedAbility>),
@@ -4942,7 +5457,10 @@ fn rewrite_card_type_set_source_filter_props(
 }
 
 /// Whether `filter` references the resolution-local `last_zone_changed_ids`
-/// ledger population (bare or nested inside compound filters).
+/// ledger population (bare or nested inside compound filters). Structural: it
+/// stops at quantity operands (the scope rule on [`filter_contains`]); a reader
+/// that must also see the ledger behind an operand passes this as the leaf of
+/// [`filter_operands_contain`].
 pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
     filter_contains(filter, &|inner| {
         matches!(inner, TargetFilter::LastZoneChanged)
@@ -4964,8 +5482,10 @@ pub(crate) fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// inside compound filters).
 ///
 /// Structural twin of [`filter_contains_last_zone_changed`]: same anaphor class,
-/// same recursion set, different published ledger. Kept beside it so the two
-/// resolution-local anaphors stay discoverable as one pair.
+/// same recursion set (it stops at quantity operands), different published
+/// ledger. Kept beside it so the two resolution-local anaphors stay
+/// discoverable as one pair. The created-referent reader in `effects` passes it
+/// as the leaf of the operand-closed [`filter_operands_contain`] family.
 pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
     filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
 }
@@ -9749,20 +10269,12 @@ fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Op
     }
 }
 
-fn mana_value_matches_parity(mana_value: u32, parity: Parity) -> bool {
-    match parity {
-        Parity::Odd => !mana_value.is_multiple_of(2),
-        Parity::Even => mana_value.is_multiple_of(2),
-    }
-}
-
 fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
 ) -> bool {
-    parity_from_source(source, choice)
-        .is_some_and(|parity| mana_value_matches_parity(mana_value, parity))
+    parity_from_source(source, choice).is_some_and(|parity| parity.matches(i64::from(mana_value)))
 }
 
 fn attacking_defender_matches(
@@ -18834,6 +19346,207 @@ mod tests {
         assert!(!filter_contains_last_zone_changed(&typed(vec![
             FilterProp::Targets { filter: anaphor() },
         ])));
+    }
+
+    /// The operand-closed entries reach a `TargetFilter` at every position the
+    /// filter grammar nests one behind a quantity or player operand — the
+    /// thresholds of `Cmc` / `Counters` / `PtComparison`, `ControlsCount.count`,
+    /// `PlayerAttribute.{attr, value}`, the player filters `PlayerCount` /
+    /// `EventContextPlayerCount` count, `ManaSpentToCast`'s source filter, and a
+    /// threshold inside a counted population — while the structural
+    /// `filter_contains` family keeps its boundary at those operands (each row's
+    /// paired control). A `LastZoneChanged` sibling stays unseen by the
+    /// `LastCreated` leaf.
+    #[test]
+    fn operand_closed_entries_reach_every_nested_operand_filter() {
+        use crate::types::ability::{
+            CastManaObjectScope, CastManaSpentMetric, Comparator, PlayerRelation, PtStat,
+            PtValueScope,
+        };
+        use crate::types::counter::CounterMatch;
+        let is_last_created = |filter: &TargetFilter| matches!(filter, TargetFilter::LastCreated);
+        let count_of = |filter: TargetFilter| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        };
+        let typed =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        let thresholds = |anaphor: TargetFilter| {
+            vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: count_of(anaphor.clone()),
+                },
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: count_of(anaphor.clone()),
+                },
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: count_of(anaphor),
+                },
+            ]
+        };
+        let controls_count_of =
+            |count: QuantityExpr, filter: TargetFilter| PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter,
+                comparator: Comparator::GE,
+                count: Box::new(count),
+            };
+        let player_rows = |anaphor: TargetFilter| {
+            vec![
+                controls_count_of(count_of(anaphor.clone()), TargetFilter::Any),
+                PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::TurnsTaken),
+                    comparator: Comparator::GE,
+                    value: Box::new(count_of(anaphor.clone())),
+                },
+                PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::ObjectCount {
+                        filter: anaphor.clone(),
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(controls_count_of(count_of(anaphor), TargetFilter::Any)),
+                },
+            ]
+        };
+
+        for prop in thresholds(TargetFilter::LastCreated) {
+            assert!(
+                filter_prop_operands_contain(&prop, &is_last_created),
+                "{prop:?}: the threshold's population is reached"
+            );
+            assert!(filter_operands_contain(
+                &typed(vec![prop.clone()]),
+                &is_last_created
+            ));
+            assert!(
+                !filter_prop_contains(&prop, &is_last_created),
+                "{prop:?}: the structural walk keeps its operand boundary"
+            );
+        }
+        for prop in thresholds(TargetFilter::LastZoneChanged) {
+            assert!(!filter_prop_operands_contain(&prop, &is_last_created));
+        }
+        for player in player_rows(TargetFilter::LastCreated) {
+            assert!(
+                player_filter_operands_contain(&player, &is_last_created),
+                "{player:?}: the operand's population is reached"
+            );
+            assert!(
+                !player_filter_contains(&player, &is_last_created),
+                "{player:?}: the structural walk keeps its operand boundary"
+            );
+        }
+        for player in player_rows(TargetFilter::LastZoneChanged) {
+            assert!(!player_filter_operands_contain(&player, &is_last_created));
+        }
+
+        let quantity_rows = |anaphor: TargetFilter| {
+            vec![
+                QuantityRef::PlayerCount {
+                    filter: controls_count_of(QuantityExpr::Fixed { value: 1 }, anaphor.clone()),
+                },
+                QuantityRef::EventContextPlayerCount {
+                    filter: controls_count_of(QuantityExpr::Fixed { value: 1 }, anaphor.clone()),
+                },
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::FromSource {
+                        source_filter: anaphor.clone(),
+                    },
+                },
+                // A threshold inside the counted population's own filter.
+                QuantityRef::ObjectCount {
+                    filter: typed(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LT,
+                        value: count_of(anaphor),
+                    }]),
+                },
+            ]
+        };
+        for qty in quantity_rows(TargetFilter::LastCreated) {
+            assert!(
+                quantity_ref_operands_contain(&qty, &is_last_created),
+                "{qty:?}: the counted population is reached"
+            );
+            assert!(quantity_expr_operands_contain(
+                &QuantityExpr::Ref { qty: qty.clone() },
+                &is_last_created
+            ));
+        }
+        for qty in quantity_rows(TargetFilter::LastZoneChanged) {
+            assert!(!quantity_ref_operands_contain(&qty, &is_last_created));
+        }
+    }
+
+    /// `player_filter_contains` descends `AllExcept`'s exclusion, which can box a
+    /// `TargetFilter` of its own, like every other nesting player filter.
+    #[test]
+    fn player_filter_contains_descends_an_all_except_exclusion() {
+        let exclude = |filter: TargetFilter| PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ControlsCount {
+                relation: crate::types::ability::PlayerRelation::All,
+                filter,
+                comparator: crate::types::ability::Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }),
+        };
+        let is_last_created = |filter: &TargetFilter| matches!(filter, TargetFilter::LastCreated);
+        assert!(player_filter_contains(
+            &exclude(TargetFilter::LastCreated),
+            &is_last_created
+        ));
+        assert!(filter_contains_last_created(
+            &TargetFilter::PlayerMatching {
+                player: Box::new(exclude(TargetFilter::LastCreated)),
+            }
+        ));
+        assert!(!player_filter_contains(
+            &exclude(TargetFilter::Any),
+            &is_last_created
+        ));
+    }
+
+    /// `filter_contains_filter_prop` is a wrapper over the generalized grammar
+    /// walk: it still finds a prop below a threshold-nested population, and it
+    /// never offers a `TargetFilter` node to its prop predicate.
+    #[test]
+    fn filter_contains_filter_prop_verdicts_are_unchanged_by_the_grammar_walk() {
+        let nested_token =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::GE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::default().properties(vec![FilterProp::Token]),
+                        ),
+                    },
+                },
+            }]));
+        assert!(filter_contains_filter_prop(&nested_token, &|prop| {
+            matches!(prop, FilterProp::Token)
+        }));
+        assert!(!filter_contains_filter_prop(&nested_token, &|prop| {
+            matches!(prop, FilterProp::NonToken)
+        }));
+        // No prop anywhere: an accept-everything predicate stays false.
+        assert!(!filter_contains_filter_prop(
+            &TargetFilter::And {
+                filters: vec![TargetFilter::LastCreated, TargetFilter::Any],
+            },
+            &|_| true
+        ));
     }
 
     // CR 108.4a + CR 400.1: normalize only local nonempty all-owner-zone lists.
