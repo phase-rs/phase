@@ -11889,7 +11889,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // consolidate_die_and_coin_defs merges these into the preceding FlipCoin.
     if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(text) {
         let branch_def = {
-            let ir = parse_effect_chain_ir(effect_text, AbilityKind::Spell, ctx);
+            // CR 608.2c: a branch-local player choice indexes after the choices
+            // already made earlier in this resolution (same seam as the chunk fold).
+            let ir = parse_effect_chain_ir_after_player_choices(
+                effect_text,
+                AbilityKind::Spell,
+                ctx,
+                ctx.chosen_player_count,
+            );
             lower_effect_chain_ir(&ir)
         };
         return if is_win {

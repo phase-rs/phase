@@ -2518,7 +2518,7 @@ mod branch_context_tests {
         assert_eq!(run.source_controller, P1);
     }
 
-    /// CR 107.1c + CR 608.2c: a surviving branch root that repeats ("repeat this
+    /// CR 608.2c: a surviving branch root that repeats ("repeat this
     /// process") must keep its repeat dispatch when the branch carries the
     /// enclosing completed-empty result: it offers the repeat decision, runs
     /// another iteration when accepted, and settles when declined.

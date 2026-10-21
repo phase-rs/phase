@@ -10080,8 +10080,9 @@ fn resolution_next_needs_tracked_set(state: &GameState, producer: &ResolvedAbili
 }
 
 /// CR 608.2d + CR 115.10a: does `ability` choose, while it resolves, the
-/// object it puts counters on or whose counter kinds it reads, rather than
-/// carrying one declared with the ability?
+/// object it puts counters on, whose counter kinds it reads, or that an
+/// untargeted `TargetOnly` names, rather than carrying one declared with the
+/// ability?
 pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool {
     let needs_resolution_object_choice = match &ability.effect {
         // CR 115.10a: "no recipient chosen yet" means "no OBJECT target", not
@@ -19027,6 +19028,8 @@ fn resolve_chain_body(
                     bound.context.forwarded_result_context = Some(Box::new(empty_result));
                     // The choice is made: the re-entered node is no longer a
                     // pending resolution-time choice, so it cannot re-park.
+                    // `Stack` is the non-asking timing here; nothing reads it as
+                    // a stack-target declaration after the body re-entry.
                     bound.target_choice_timing = TargetChoiceTiming::Stack;
                     return resolve_chain_body(state, &bound, events, depth, payment_choice);
                 }
