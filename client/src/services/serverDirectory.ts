@@ -5,7 +5,8 @@
  * The type declarations below are a DELIBERATE DUPLICATE of
  * `lobby-worker/src/directory.ts`, not an oversight. `client/tsconfig.app.json`
  * is `"include": ["src"]` and `lobby-worker/` is a separate package with its own
- * tsconfig and its own ambient Cloudflare types, so there is no import path from
+ * tsconfig and its own ambient Cloudflare types, so there is no import { DIRECTORY_VERSION } from "../generated/protocol-versions";
+import path from
  * here to there and creating one would drag those types into the client build.
  * `__tests__/serverDirectory.test.ts` is what keeps the duplication honest: it
  * reads the Worker's source text at test time and compares it field-for-field
@@ -22,12 +23,10 @@ import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
 import { parseWebSocketUrl } from "./serverDetection";
 import { useMultiplayerStore, type LobbySource } from "../stores/multiplayerStore";
 
-/** Version of the ANNOUNCEMENT shape this client understands. Mirrors
- *  `DIRECTORY_VERSION` in `crates/lobby-broker/src/directory.rs`; the two are
- *  pinned together by `scripts/check-protocol-version.mjs`, which runs inside
- *  `pnpm run type-check`. A `GET /servers` body declaring any other version is
- *  ignored whole — a shape this client cannot read is not partially readable. */
-export const DIRECTORY_VERSION = 1;
+/** Registry-owned announcement version. Record changes with
+ *  `node scripts/protocol-versions.mjs bump directory --reason "description"`.
+ *  An unknown version is ignored whole; partial directory reads are unsafe. */
+export { DIRECTORY_VERSION };
 
 /** How long a completed directory read is trusted before another is issued.
  *  Sits deliberately ABOVE the Worker's own `Cache-Control: public, max-age=60`

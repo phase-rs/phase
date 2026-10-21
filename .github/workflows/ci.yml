@@ -1048,7 +1048,9 @@ jobs:
       # read the pinned client/Tauri/workflow/crate files, none of which need
       # client/node_modules.
       - name: Test
-        run: bun test scripts/card-bot
+        run: |
+          bun scripts/protocol-versions.mjs generate
+          bun test scripts/card-bot
 
   frontend:
     name: Frontend (lint, type-check, test)
