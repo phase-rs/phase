@@ -2042,6 +2042,7 @@ mod partner_family_keyword_remainder;
 mod rally_the_righteous_radiance_pump;
 mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
+mod tidehollow_sculler_exile_return;
 
 mod resolution_progress_contract;
 mod search_result_conditional_destination;

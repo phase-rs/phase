@@ -42322,7 +42322,11 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx);
+    // Nested delayed, reflexive, and continuation bodies may inherit an outer
+    // chain's tracked exile binding. Keep that context scoped to this call.
+    ctx.chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -42332,6 +42336,7 @@ fn parse_effect_chain_ir_body(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
@@ -45002,6 +45007,13 @@ fn parse_effect_chain_ir_body(
             TargetFilter::DeclaredPlayer { group } => Some(ControllerRef::DeclaredPlayer { group }),
             _ => None,
         });
+        let chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer
+            || builder.clauses().iter().any(clause_ir_is_exile_producer);
+        // Recursive chain parses below receive `ctx` rather than this freshly
+        // built per-chunk context. Publish the current chain-local binding for
+        // those nested delayed/reflexive/continuation parses; the public wrapper
+        // restores the caller's value on every return path.
+        ctx.chain_has_prior_exile_producer = chain_has_prior_exile_producer;
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -45132,10 +45144,7 @@ fn parse_effect_chain_ir_body(
             // binding. Unlike `any_prior_publishes`, this scan deliberately does
             // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
-            chain_has_prior_exile_producer: builder
-                .clauses()
-                .iter()
-                .any(clause_ir_is_exile_producer),
+            chain_has_prior_exile_producer,
             chain_prior_self_library_peek: builder
                 .clauses()
                 .iter()

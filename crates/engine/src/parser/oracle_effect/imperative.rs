@@ -2367,17 +2367,57 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             BounceSelection::Targeted
         };
-        let is_mass = is_mass || count.is_some();
-        let origin = super::infer_origin_zone(rest_lower).or_else(|| {
-            matches!(
-                target,
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(ThisWayCause::Exiled),
-                    ..
-                }
-            )
-            .then_some(crate::types::zones::Zone::Exile)
-        });
+        // CR 607.2a + CR 406.6: "return the exiled card to its owner's hand" in
+        // a printed ability linked to an earlier exile ability (Tidehollow
+        // Sculler, Mesmeric Fiend, Ashiok's Erasure) names the card exiled by the
+        // linked ability, which resolved separately. When there is no earlier
+        // same-chain exile producer, bind it durably to `ExiledBySource` so it
+        // resolves from the source's linked-exile ledger (LKI-snapshotted on
+        // leaving the battlefield, CR 603.10a) rather than a chain-local
+        // `TrackedSet(0)` sentinel. A return to the battlefield keeps its binding: that class
+        // is paired with its ETB exile by
+        // `detect_etb_exile_ltb_return`, which keys on the `TrackedSet` shape.
+        // This binding applies only to the linked hand-return wording. Other
+        // non-battlefield returns (for example a granted delayed return to a
+        // graveyard) retain their normal antecedent and zone semantics.
+        let target_text_lower = target_text.trim().to_ascii_lowercase();
+        let names_linked_exiled_card =
+            all_consuming((tag::<_, _, OracleError<'_>>("the exiled card"), space0, eof))
+                .parse(target_text_lower.as_str())
+                .is_ok();
+        let returns_to_hand = matches!(dest, Some(ref d) if d.zone == Zone::Hand);
+        let target = if returns_to_hand
+            && ctx.current_ability_exile_cost_zone.is_none()
+            && names_linked_exiled_card
+        {
+            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+        } else {
+            target
+        };
+        // `ExiledBySource` denotes the complete linked set (CR 607.3), even
+        // when the printed phrase is singular. Lower it through the existing
+        // set-wide ChangeZoneAll path so copied ETB abilities return every card.
+        let is_mass = is_mass
+            || count.is_some()
+            || (returns_to_hand && matches!(&target, TargetFilter::ExiledBySource));
+        let origin = super::infer_origin_zone(rest_lower)
+            .or_else(|| {
+                matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(ThisWayCause::Exiled),
+                        ..
+                    }
+                )
+                .then_some(crate::types::zones::Zone::Exile)
+            })
+            // CR 406.6 + CR 607.2a: a card linked as "exiled with" the source lives in
+            // exile, so the return is a `ChangeZone` out of exile — `Effect::Bounce`
+            // only moves battlefield/graveyard/stack objects.
+            .or_else(|| {
+                matches!(target, TargetFilter::ExiledBySource)
+                    .then_some(crate::types::zones::Zone::Exile)
+            });
         // CR 400.7: A returned card's target filter must be scoped to its origin
         // zone. Without this, "return target ... card from your graveyard to the
         // battlefield" enumerates legal targets on the battlefield (the default
