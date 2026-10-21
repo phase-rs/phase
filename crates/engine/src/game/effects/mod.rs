@@ -10171,7 +10171,7 @@ fn parsed_condition_reads_filter_population(
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
         | ParsedCondition::IsOpponentsTurn
-        | ParsedCondition::IsDuringUpkeep
+        | ParsedCondition::CurrentPhaseIs { .. }
         | ParsedCondition::ControlsCommander { .. } => false,
     }
 }
