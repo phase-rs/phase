@@ -20359,18 +20359,18 @@ mod handshake_tests {
             )
         };
         // Every earlier protocol version, including the bumps already on main
-        // (156, 157, 159), is refused by a v160 server.
-        for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159] {
+        // (156, 157, 159), is refused by a v161 server.
+        for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160] {
             assert_eq!(
                 classify(client),
                 HelloGateOutcome::RejectProtocol {
                     client,
-                    server: 160
+                    server: 161
                 }
             );
         }
         assert_eq!(
-            classify(160),
+            classify(161),
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "zone-choice-peer".into(),
                 build_commit: "zone-choice-build".into(),

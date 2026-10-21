@@ -215,9 +215,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 160 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
+ * 161 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
  *      each color that's not in your commander's color identity", Commander's Plate) in
- *      card data and GameState static definitions; a v159 peer cannot parse it. Wire 142
+ *      card data and GameState static definitions; a v159 peer cannot parse it. Wire 143
  *      moves with it.
  * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
  *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
@@ -972,7 +972,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 160;
+export const PROTOCOL_VERSION = 161;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
