@@ -25811,9 +25811,7 @@ impl Effect {
             // own-resolution walk in `publishes_created_referent`.
             Effect::ChooseOneOf { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::Vote { .. }
             | Effect::ExileTopCardContest { .. }
@@ -47536,19 +47534,25 @@ mod created_referent_classification_tests {
                 }],
                 modifier: None,
             },
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: Some(boxed()),
                 flipper: TargetFilter::Controller,
             },
             Effect::FlipCoins {
-                count: QuantityExpr::Fixed { value: 2 },
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
                 win_effect: Some(boxed()),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             },
-            Effect::FlipCoinUntilLose {
-                win_effect: boxed(),
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                win_effect: Some(boxed()),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
             },
             effect(json!({
                 "type": "SeparateIntoPiles",
