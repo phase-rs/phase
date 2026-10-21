@@ -2693,6 +2693,7 @@ fn filter_prop_grammar_any(
             | FilterProp::Suspected
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::Prepared
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
             | FilterProp::InTrackedSet { .. }
