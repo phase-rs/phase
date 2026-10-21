@@ -14023,6 +14023,87 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
 }
 
+/// Upgrade the pre-merge coin-flip effects (`FlipCoin`, `FlipCoins { count }` and
+/// `FlipCoinUntilLose`) to the merged `FlipCoins { flips, .. }` at the persisted-state
+/// boundary, following the `migrate_legacy_tap_effects` precedent: card data and the
+/// transport `GameStateDecode::decode` path get no alias or migration, so obsolete tags
+/// stay rejected there.
+///
+/// The migration is total and lossless, so nothing is refused: each rewrite yields exactly
+/// the shape a fresh parse of the same card produces, and the run driver resolves it as
+/// the retired variant resolved.
+///
+/// Scope: `Effect` payloads under the two field names `Effect` occupies, `effect` and
+/// `replacement_effect` (`CreateDrawReplacement` and `CreatePlaneswalkReplacement` nest an
+/// `Effect` there). Coin-flip tags elsewhere are left alone.
+///
+/// Rewrite rules:
+/// - `FlipCoin` becomes `FlipCoins` with `flips: Exactly { count: Fixed 1 }`.
+/// - `FlipCoins` without a `flips` key moves its `count` (default `Fixed 1`) into
+///   `flips: Exactly { count }`.
+/// - `FlipCoinUntilLose { win_effect }` becomes `FlipCoins` with `flips: UntilLoss`, the same
+///   `win_effect`, no `lose_effect` and no `flipper` key (the retired variant always flipped
+///   for the controller, which is the `flipper` default).
+///
+/// Idempotent: a current `FlipCoins` always carries `flips`.
+///
+/// A legacy `FlipCoins` whose count is `Fixed 1` (no writer produced one) becomes the single flip.
+fn migrate_legacy_coin_flip_effects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_coin_flip_effects(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["effect", "replacement_effect"] {
+                if let Some(effect) = object.get_mut(key) {
+                    migrate_legacy_coin_flip_effect(effect);
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_coin_flip_effects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_legacy_coin_flip_effect(effect: &mut serde_json::Value) {
+    let Some(effect) = effect.as_object_mut() else {
+        return;
+    };
+    let Some(effect_type) = effect
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let exactly =
+        |count: serde_json::Value| serde_json::json!({ "type": "Exactly", "count": count });
+    let flips = match effect_type.as_str() {
+        "FlipCoin" => exactly(serde_json::json!({ "type": "Fixed", "value": 1 })),
+        "FlipCoins" if !effect.contains_key("flips") => exactly(
+            effect
+                .remove("count")
+                .unwrap_or_else(|| serde_json::json!({ "type": "Fixed", "value": 1 })),
+        ),
+        "FlipCoinUntilLose" => {
+            effect.insert("lose_effect".to_string(), serde_json::Value::Null);
+            effect.remove("flipper");
+            serde_json::json!({ "type": "UntilLoss" })
+        }
+        _ => return,
+    };
+
+    effect.insert(
+        "type".to_string(),
+        serde_json::Value::String("FlipCoins".to_string()),
+    );
+    effect.insert("flips".to_string(), flips);
+}
+
 /// Maps the pre-Option turn-face-up continuation wire shape onto the typed
 /// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
 /// never an X announcement, while `true` plus zero was.
@@ -24836,6 +24917,7 @@ impl GameStateDecode {
         )?;
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
+        migrate_legacy_coin_flip_effects(value);
         migrate_legacy_turn_face_up_resume(value)?;
         // Protocol 36: a v2 resolution wire is still accepted, and a v2 save can
         // be paused at either dungeon prompt, so the compatibility boundary has
@@ -35645,6 +35727,148 @@ mod tests {
             persisted["unrelated"],
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_coin_flip_effects_migrate_only_effect_payloads() {
+        let single_flips =
+            serde_json::json!({ "type": "Exactly", "count": { "type": "Fixed", "value": 1 } });
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        // A single flip, with a nested counted flip in its win branch.
+                        "effect": {
+                            "type": "FlipCoin",
+                            "win_effect": {
+                                "effect": {
+                                    "type": "FlipCoins",
+                                    "count": { "type": "Fixed", "value": 3 },
+                                    "win_effect": null,
+                                    "lose_effect": null
+                                }
+                            },
+                            "lose_effect": null,
+                            "flipper": { "type": "TriggeringPlayer" }
+                        },
+                        "sub_ability": {
+                            // A counted flip with no `count` key reads as one flip.
+                            "effect": { "type": "FlipCoins", "win_effect": null }
+                        }
+                    }],
+                    "replacements": [{
+                        "execute": {
+                            "effect": {
+                                "type": "CreateDrawReplacement",
+                                "replacement_effect": {
+                                    "type": "FlipCoinUntilLose",
+                                    "win_effect": { "effect": { "type": "Draw" } }
+                                }
+                            }
+                        }
+                    }]
+                }
+            },
+            "unrelated": { "type": "FlipCoin" },
+            "unrelated_list": [{ "type": "FlipCoinUntilLose" }]
+        });
+
+        migrate_legacy_coin_flip_effects(&mut persisted);
+
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": single_flips,
+                "win_effect": {
+                    "effect": {
+                        "type": "FlipCoins",
+                        "flips": {
+                            "type": "Exactly",
+                            "count": { "type": "Fixed", "value": 3 }
+                        },
+                        "win_effect": null,
+                        "lose_effect": null
+                    }
+                },
+                "lose_effect": null,
+                "flipper": { "type": "TriggeringPlayer" }
+            }),
+            "FlipCoin becomes a single-flip FlipCoins, keeping its branches and flipper, \
+             and a nested FlipCoins moves its count into `flips`"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["sub_ability"]["effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": single_flips,
+                "win_effect": null
+            }),
+            "a FlipCoins without a count defaults to Fixed 1"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["replacements"][0]["execute"]["effect"]["replacement_effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": { "type": "UntilLoss" },
+                "win_effect": { "effect": { "type": "Draw" } },
+                "lose_effect": null
+            }),
+            "FlipCoinUntilLose under `replacement_effect` becomes UntilLoss with no flipper key"
+        );
+        assert_eq!(
+            persisted["unrelated"],
+            serde_json::json!({ "type": "FlipCoin" }),
+            "only serialized Effect payloads are migrated"
+        );
+        assert_eq!(
+            persisted["unrelated_list"],
+            serde_json::json!([{ "type": "FlipCoinUntilLose" }]),
+            "only serialized Effect payloads are migrated"
+        );
+
+        let migrated = persisted.clone();
+        migrate_legacy_coin_flip_effects(&mut persisted);
+        assert_eq!(persisted, migrated, "the migration is idempotent");
+    }
+
+    /// The committed Dina/Conqueror capture holds legacy single `FlipCoin` triggers
+    /// (Krark-style objects 191 and 383); restoring it must reach the migration.
+    #[test]
+    fn committed_dump_coin_flips_restore_as_single_runs() {
+        use std::io::Read;
+
+        let dump = &include_bytes!("../../tests/fixtures/dina_conqueror_4p.json.gz")[..];
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(dump)
+            .read_to_string(&mut json)
+            .expect("the dump inflates");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        assert!(
+            json.contains("\"FlipCoin\""),
+            "reach guard: the capture predates the merge and carries legacy FlipCoin nodes"
+        );
+        let state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("the dump deserializes through the production decoder")
+            .into_game_state()
+            .expect("the dump restores");
+
+        let single_flip_triggers = state
+            .objects
+            .values()
+            .flat_map(|object| object.base_trigger_definitions.iter())
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .filter(|execute| {
+                matches!(
+                    &*execute.effect,
+                    Effect::FlipCoins { flips, .. } if flips.is_single_flip()
+                )
+            })
+            .count();
+        assert!(
+            single_flip_triggers >= 1,
+            "legacy FlipCoin triggers restore as single-flip FlipCoins"
         );
     }
 

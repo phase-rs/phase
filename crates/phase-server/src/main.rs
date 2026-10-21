@@ -20342,15 +20342,15 @@ mod handshake_tests {
     }
 
     #[test]
-    fn bestow_payload_full_game_refuses_previous_and_accepts_current() {
+    fn total_mana_value_choice_full_game_refuses_previous_and_accepts_current() {
         // Independent literals discriminate a reverted version bump. A current
         // lobby version cannot rescue an incompatible full GameState reader.
         let classify = |protocol_version| {
             classify_hello_gate(
                 false,
                 &ClientMessage::ClientHello {
-                    client_version: "bestow-peer".into(),
-                    build_commit: "bestow-build".into(),
+                    client_version: "zone-choice-peer".into(),
+                    build_commit: "zone-choice-build".into(),
                     protocol_version,
                     lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                     wire_formats: Vec::new(),
@@ -20358,8 +20358,8 @@ mod handshake_tests {
                 hello_acceptance(ServerMode::Full),
             )
         };
-        // v157-v159 are other open PRs' reserved versions; each is refused by a
-        // v160 server.
+        // v157-v159 are earlier bumps already on main; each is refused by a v160
+        // server.
         for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159] {
             assert_eq!(
                 classify(client),
@@ -20372,8 +20372,8 @@ mod handshake_tests {
         assert_eq!(
             classify(160),
             HelloGateOutcome::Accept(ClientHelloInfo {
-                client_version: "bestow-peer".into(),
-                build_commit: "bestow-build".into(),
+                client_version: "zone-choice-peer".into(),
+                build_commit: "zone-choice-build".into(),
                 wire_format: None,
             })
         );

@@ -101,11 +101,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // loyalty-grant sibling variant.
 // v155 carries each parked ChangeZone member's pre-event entry modifications
 // (`ChangeZoneMemberEntry`, CR 603.6a + CR 614.12) in GameState.
+// v159 merges the three coin-flip effects into `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+// and reshapes the coin-flip resolution frame's kind.
+// v160 adds `ProtectionTarget::EachColor(ProtectionColorSet)` (CR 702.16i) to card data and GameState static definitions.
 // v156 adds QuantityQuality/NumberQuality (CR 107.1, CR 603.4) to GameState ability conditions,
 // and the optional per-seat created_tokens channel (each seat's pinned creation result) on
 // PendingContinuation's player-scope tail sidecar.
-// v160 adds `ProtectionTarget::EachColor(ProtectionColorSet)` (CR 702.16i) to card data and GameState static definitions.
-// v157-v159 are held by other open PRs, so this PR's pair is reserved at 160/142.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -213,8 +214,11 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +85: v156 adds `QuantityQuality` / `NumberQuality` to GameState ability conditions,
 // and the optional per-seat `created_tokens` player-scope sidecar channel (each seat's
 // pinned creation result).
+// +86: v157 adds the `ChooseFromZoneConstraint::TotalManaValue` zone-choice constraint.
+// +88: v159 merges the coin-flip effects into `Effect::FlipCoins { flips, .. }` and reshapes the
+//      coin-flip resolution frame's kind.
 // +89: v160 adds `ProtectionTarget::EachColor(ProtectionColorSet)` to card data and
-//      GameState static definitions (v157-v159 are held by other open PRs).
+//      GameState static definitions.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 89;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
@@ -326,8 +330,9 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
 // +83: wire 137 moves with full-game v155 for the pre-event ChangeZone member entries.
 // +84: wire 138 moves with full-game v156 for QuantityQuality and the per-seat created_tokens sidecar channel.
-// +88: wire 142 moves with full-game v160 for the each-color protection set (wire
-//      139-141 are held by other open PRs).
+// +85: wire 139 moves with full-game v157 for TotalManaValue zone choices.
+// +87: wire 141 moves with full-game v159 for the merged coin-flip effect.
+// +88: wire 142 moves with full-game v160 for the each-color protection set.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 88;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an

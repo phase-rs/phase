@@ -3476,8 +3476,15 @@ mod tests {
     /// v160: `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
     /// "protection from each color that's not in your commander's color
     /// identity", Commander's Plate), which card data and `GameState` static
-    /// definitions can now carry; a v156 peer cannot parse it, so it must be
+    /// definitions can now carry; a v159 peer cannot parse it, so it must be
     /// refused before it receives v160 state.
+    ///
+    /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+    /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
+    /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
+    /// it must be refused before it receives v159 state.
+    /// v157: `ChooseFromZoneConstraint::TotalManaValue` in paused zone choices
+    /// and ability state requires a versioned full-game peer.
     ///
     /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
     /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
@@ -3774,6 +3781,7 @@ mod tests {
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
     /// `protocol_version_is_160_for_each_color_protection_set` stays
+    /// `protocol_version_is_157_for_total_mana_value_zone_choices` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

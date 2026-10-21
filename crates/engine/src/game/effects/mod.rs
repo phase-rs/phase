@@ -7390,9 +7390,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -8570,7 +8568,6 @@ fn effect_fields_read_filter_population(
         }
         Effect::LoseTheGame { target } => target.as_ref().is_some_and(has_filter),
         Effect::WinTheGame { target } => target.as_ref().is_some_and(has_filter),
-        Effect::FlipCoin { flipper, .. } => has_filter(flipper),
         Effect::FlipCoins { flipper, .. } => has_filter(flipper),
         Effect::CrankContraptions { target } => has_filter(target),
         Effect::ReassembleContraption { target, .. } => has_filter(target),
@@ -8696,7 +8693,6 @@ fn effect_fields_read_filter_population(
         | Effect::CreateDrawReplacement { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -10292,13 +10288,11 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
     // Redundant-but-safe: coin/die win-loss riders gate on `EventOutcomeWon` /
     // `WhenYouDo`, which are NOT in `condition_depends_on_effect_performed`, so
     // the seed-block guard above would already skip them. Excluding the
-    // FlipCoin*/RollDie/Clash/Dig set here is defensive belt-and-suspenders — a
+    // FlipCoins/RollDie/Clash/Dig set here is defensive belt-and-suspenders — a
     // future reader should not assume those paths depend on this exclusion.
     matches!(
         effect,
-        Effect::FlipCoin { .. }
-            | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
+        Effect::FlipCoins { .. }
             | Effect::Clash
             | Effect::RollDie { .. }
             | Effect::Dig { .. }
@@ -11533,7 +11527,6 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::AddPendingETBCounters { count: amount, .. }
-        | Effect::FlipCoins { count: amount, .. }
         | Effect::Seek { count: amount, .. }
         | Effect::SetLifeTotal { amount, .. }
         | Effect::Manifest { count: amount, .. }
@@ -11555,6 +11548,8 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
         | Effect::Adapt { count: amount, .. } => out.push(amount),
+        // Only `Exactly` carries a flip-count expression; `UntilLoss` carries none.
+        Effect::FlipCoins { flips, .. } => out.extend(flips.count_expr()),
         Effect::Token {
             count,
             enter_with_counters,
@@ -12189,9 +12184,7 @@ fn resolve_legacy_effect(
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => unreachable!("native die dispatch precedes the legacy adapter"),
-        Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
-        Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
-        Effect::FlipCoinUntilLose { .. } => flip_coin::resolve_until_lose(state, ability, events),
+        Effect::FlipCoins { .. } => flip_coin::resolve(state, ability, events),
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
@@ -27000,8 +26993,8 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        ChooseOneOfKind, LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
-        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
+        ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
+        ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     #[test]
@@ -47765,7 +47758,8 @@ mod tests {
             ),
             (
                 "FlipCoin win",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: Some(payload()),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -47773,7 +47767,8 @@ mod tests {
             ),
             (
                 "FlipCoin lose",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: None,
                     lose_effect: Some(payload()),
                     flipper: TargetFilter::Controller,
@@ -47782,7 +47777,9 @@ mod tests {
             (
                 "FlipCoins win",
                 Effect::FlipCoins {
-                    count: QuantityExpr::Fixed { value: 2 },
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
                     win_effect: Some(payload()),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -47791,7 +47788,9 @@ mod tests {
             (
                 "FlipCoins lose",
                 Effect::FlipCoins {
-                    count: QuantityExpr::Fixed { value: 2 },
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
                     win_effect: None,
                     lose_effect: Some(payload()),
                     flipper: TargetFilter::Controller,
@@ -47799,8 +47798,11 @@ mod tests {
             ),
             (
                 "FlipCoinUntilLose",
-                Effect::FlipCoinUntilLose {
-                    win_effect: payload(),
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::UntilLoss,
+                    win_effect: Some(payload()),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
                 },
             ),
             (

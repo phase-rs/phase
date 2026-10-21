@@ -63,10 +63,19 @@ pub struct TournamentRequestId(pub u64);
 /// 160 — `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
 ///      "protection from each color that's not in your commander's color
 ///      identity", Commander's Plate) in card data and `GameState` static
-///      definitions; a v156 peer cannot parse it. Full-game peers and P2P move in
-///      lockstep (wire 142); no lobby carrier names it. v157-v159 are held by
-///      other open PRs.
+///      definitions; a v159 peer cannot parse it. Full-game peers and P2P move in
+///      lockstep (wire 142); no lobby carrier names it.
 ///
+/// 159 — Coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`.
+///      The `FlipCoin` and `FlipCoinUntilLose` tags are no longer written,
+///      `count` moves into `flips`, and the coin-flip resolution frame's kind
+///      becomes `Exactly`/`UntilLoss` (`RESOLUTION_STATE_WIRE_VERSION` 8). A
+///      v158 or older peer silently reads a multi-flip or until-loss run as one flip.
+///      Full-game peers and P2P move in lockstep (wire 141); no lobby carrier
+///      names it.
+/// 157 — `ChooseFromZoneConstraint::TotalManaValue` extends serialized paused
+///      zone choices and ability state. Old readers cannot decode the new tag;
+///      full-game and P2P (wire 139) refuse them before state delivery.
 /// 156 — `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
 ///      `QuantityQuality { quantity, quality }`, with new `NumberQuality`
 ///      (`{"type":"Prime"}` / `{"type":"Parity","value":"Odd"|"Even"}`), carried

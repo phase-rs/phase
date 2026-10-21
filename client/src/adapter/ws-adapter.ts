@@ -217,8 +217,18 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 160 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
  *      each color that's not in your commander's color identity", Commander's Plate) in
- *      card data and GameState static definitions; a v156 peer cannot parse it. Wire 142
- *      moves with it. v157-v159 are held by other open PRs.
+ *      card data and GameState static definitions; a v159 peer cannot parse it. Wire 142
+ *      moves with it.
+ * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
+ *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
+ *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
+ *       PROTOCOL_VERSION's own `/// 159` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v158 or older peer reads a multi-flip or
+ *       until-loss run as one flip; the exact-match version check at connect
+ *       refuses the pairing. Wire 141 moves with it.
+ * 157 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *      choices and ability state. Old native readers cannot decode the new tag.
+ *      Wire 139 moves with it.
  * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
  *      QuantityQuality { quantity, quality } with the new NumberQuality
  *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried

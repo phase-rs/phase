@@ -107,9 +107,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  142 — game_setup and state_update carry GameState whose static definitions may
- *       hold ProtectionTarget EachColor (CR 702.16i); a v138 peer cannot parse it.
- *       Bumped in lockstep with full-game protocol 160 (wire 139-141 are held by
- *       other open PRs).
+ *       hold ProtectionTarget EachColor (CR 702.16i); a v141 peer cannot parse it.
+ *       Bumped in lockstep with full-game protocol 160.
+ *  141 — game_setup and state_update carry GameState whose effects carry
+ *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
+ *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
+ *       as one flip, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
  *  138 — game_setup and state_update carry GameState whose ability conditions
  *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
  *       full-game protocol 156, which also adds the optional per-seat
