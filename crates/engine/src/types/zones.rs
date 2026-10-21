@@ -107,9 +107,9 @@ impl ExileCostSourceZone {
 /// not a producer, so a delivery path added later cannot silently start
 /// overwriting the game-lifetime `last_created_token_ids` ledger.
 ///
-/// The engine's marked call sites and the parser's admission authority
-/// (`oracle_effect::lower::publishes_chain_created_referent`) are the two halves
-/// of one contract and have to be changed together.
+/// The engine's marked call sites and the publisher classification
+/// (`Effect::publishes_created_referent`, which the parser delegates to) are the
+/// two halves of one contract and have to be changed together.
 ///
 /// [`Silent`]: ChainReferentIntent::Silent
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]

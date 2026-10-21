@@ -269,6 +269,48 @@ fn resolve_bound_attachment_operation(
         return Ok(AttachResolutionOutcome::Completed);
     }
 
+    // CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: a printed
+    // "attach … to up to one target creature …" makes the HOST optional — zero
+    // targets may be chosen. The ability still requires targets, but with none
+    // chosen it is not targeted, and it still resolves. An announced host slot is bound before this resolver runs
+    // (CR 601.2c for spells, CR 602.2b for activated abilities, CR 603.3d for
+    // triggered abilities), so arriving here with NO host binding means the
+    // controller chose none: the instruction is followed in order and does
+    // nothing (CR 608.2c). The ability itself resolved, so emit the resolution
+    // event and complete rather than surfacing a missing-operand error.
+    //
+    // Gate on an OBJECT host population. `attach_host_target()` only ever binds
+    // object hosts, so a player-host Attach (no corpus card prints one) must not
+    // be silently skipped, and a context-ref/scan host needs no announced slot —
+    // its absence stays the missing-operand error below, unchanged.
+    // CR 115.1a/c/d + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: an announced object target
+    // is HOST evidence only when it occupies the HOST slot. The ATTACHMENT
+    // operand prints "target …" on the same class ("attach target Equipment you
+    // control to up to one target creature you control", Iron Hills Stalwart;
+    // Blacksmith's Talent level 2), so that Equipment sits in `ability.targets`
+    // too. Treating ANY object target as the chosen host would therefore skip
+    // this no-op when the controller chose the Equipment and declined the host;
+    // the resolver would then fall through to `resolve_object_filter`'s
+    // battlefield scan and auto-attach to an unchosen creature. Match against
+    // the HOST filter instead — the same filter authority the resolver uses —
+    // so only a target that could BE the host counts. If the host was chosen
+    // (or its binding was lost downstream — a separate pre-existing chain
+    // defect), keep the existing resolution path rather than turning an error
+    // into a silent no-op.
+    if ability.optional_targeting
+        && ability.attach_host_target().is_none()
+        && !host_slot_announced(state, ability, target_filter)
+        && crate::game::ability_utils::attach_host_filter_needs_target_slot(target_filter)
+        && target_filter.denotes_battlefield_objects()
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id,
+            subject: None,
+        });
+        return Ok(AttachResolutionOutcome::Completed);
+    }
+
     // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
     // battlefield/LKI unless they are explicit player-chosen targets.
     // Typed/scan-based attachment filters (e.g. "Equipment attached to ~") resolve
@@ -1587,6 +1629,52 @@ fn explicit_attachment_target_chosen(
         matches!(
             target,
             TargetRef::Object(id) if matches_target_filter(state, *id, &effective, &ctx)
+        )
+    })
+}
+
+/// CR 115.1a/c/d + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d + CR 608.2c: whether an announced object
+/// target occupies the HOST slot of this Attach instruction.
+///
+/// Both roles can print "target" on one instruction ("attach target Equipment
+/// you control to up to one target creature you control"), so the ATTACHMENT
+/// object also appears in `ability.targets`. Filter membership and the resolver's attachment-slot
+/// window are the discriminators — a target that could not be the host, or that
+/// the attachment operand already consumed, cannot be host evidence — and it is the same filter the resolver itself matches host
+/// candidates against (see `resolve_attach_target`), so the two seams cannot
+/// disagree about what counts as a host.
+fn host_slot_announced(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host_filter: &TargetFilter,
+) -> bool {
+    let attachment_filter = match &ability.effect {
+        Effect::Attach { attachment, .. } => attachment,
+        _ => return false,
+    };
+    // CR 115.1a/c/d/e + CR 601.2c + CR 702.151b: the resolver consumes the
+    // attachment operand's announced slot(s) FIRST, so only the slots after that
+    // window can be host evidence. A reconfigure Equipment is itself a creature
+    // while unattached (and an animated Equipment matches "creature you
+    // control"), so an announced ATTACHMENT that also satisfies the host filter
+    // must not be read as a chosen host — otherwise the declined-host no-op is
+    // skipped and the resolver attaches to an unchosen object.
+    let mut remaining = ability.targets.iter();
+    let mut attachment_ids =
+        resolve_attachment_ids(state, ability, attachment_filter, &mut remaining);
+    if attachment_ids.is_empty() {
+        // `resolve_attachment_ids` short-circuits on bound attachment targets
+        // without advancing the iterator; exclude those ids explicitly.
+        attachment_ids = current_attachment_target_ids(state, ability);
+    }
+    let ctx = FilterContext::from_ability(ability);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, host_filter);
+    remaining.any(|target| {
+        matches!(
+            target,
+            TargetRef::Object(id)
+                if !attachment_ids.contains(id)
+                    && matches_target_filter(state, *id, &effective, &ctx)
         )
     })
 }
@@ -5613,6 +5701,85 @@ mod tests {
             state.objects.get(&equipment).unwrap().attached_to,
             None,
             "opponent-controlled matching Equipment must unattach"
+        );
+    }
+
+    /// CR 115.1a/c/d/e + CR 601.2c + CR 702.151b: the resolver consumes the
+    /// attachment operand's announced slot first. An attachment that ALSO matches
+    /// the host filter (a reconfigure Equipment is a creature while unattached;
+    /// an animated Equipment likewise) must not count as host evidence, or a
+    /// declined optional host would fall through to the battlefield scan.
+    #[test]
+    fn host_slot_announced_excludes_the_attachment_slot() {
+        let mut state = setup();
+        let equipment = spawn_equipment(&mut state, "Animated Relic", 910);
+        state
+            .objects
+            .get_mut(&equipment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let bystander = spawn_creature(&mut state, "Bystander");
+        let effect = Effect::Attach {
+            attachment: TargetFilter::Any,
+            target: TargetFilter::Any,
+            selection: AttachSelection::Targeted,
+        };
+        // Production tier (CR 601.2c): the trigger binds the chosen attachment,
+        // so `resolve_attachment_ids` short-circuits without advancing the
+        // iterator; only the bound-id exclusion keeps the Equipment out of the
+        // host evidence.
+        let mut attachment_only = ResolvedAbility::new(
+            effect.clone(),
+            vec![TargetRef::Object(equipment)],
+            equipment,
+            PlayerId(0),
+        );
+        attachment_only.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&equipment],
+        )]);
+        assert!(
+            !host_slot_announced(&state, &attachment_only, &TargetFilter::Any),
+            "the bound attachment slot is not host evidence"
+        );
+        let mut with_host = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(equipment), TargetRef::Object(bystander)],
+            equipment,
+            PlayerId(0),
+        );
+        with_host.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&equipment],
+        )]);
+        assert!(
+            host_slot_announced(&state, &with_host, &TargetFilter::Any),
+            "a target beyond the attachment window is host evidence"
+        );
+
+        // Defensive fallback: a bound attachment that no longer matches the
+        // attachment filter resolves empty, so the bound-id fallback must still
+        // exclude it from host evidence.
+        let plain = spawn_equipment(&mut state, "Plain Relic", 911);
+        let mut stale_binding = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(plain)],
+            plain,
+            PlayerId(0),
+        );
+        stale_binding.set_attach_attachment_targets(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&plain],
+        )]);
+        assert!(
+            !host_slot_announced(&state, &stale_binding, &TargetFilter::Any),
+            "a bound id that no longer matches the attachment filter is not host evidence"
         );
     }
 }

@@ -45,21 +45,15 @@ usage() {
 }
 
 # ── Constants read from the tree, never retyped ────────────────────────────
-# Same idiom as the deploy workflow's protocol-version check: grep the Rust
-# constant out of the source and fail loudly if the grep comes back empty,
-# because an empty value would silently probe `https://host` and compare
-# against nothing.
-# `|| true` on each capture is what lets the guard below run at all: under
-# `set -euo pipefail` a non-matching grep makes the ASSIGNMENT non-zero, and
-# the script would abort before reaching the `if` — failing closed, but with a
-# bare exit instead of the diagnostic.
+# Read versions from the registry collector and INFO_PATH from its Rust authority.
+# Fail before networking if either source cannot be read.
 read_constants() {
   INFO_PATH="$(grep -oE 'pub const INFO_PATH: &str = "[^"]+"' \
     "$ROOT/crates/lobby-broker/src/directory.rs" | grep -oE '"[^"]+"' | tr -d '"')" || true
-  TREE_PROTOCOL="$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
-    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')" || true
-  TREE_LOBBY_PROTOCOL="$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
-    "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')" || true
+  local versions
+  versions="$(node "$ROOT/scripts/protocol-versions.mjs" show --json)" || return 1
+  TREE_PROTOCOL="$(jq -er '.full' <<< "$versions")" || return 1
+  TREE_LOBBY_PROTOCOL="$(jq -er '.lobby' <<< "$versions")" || return 1
   if [ -z "$INFO_PATH" ] || [ -z "$TREE_PROTOCOL" ] || [ -z "$TREE_LOBBY_PROTOCOL" ]; then
     echo "error: could not read INFO_PATH / protocol constants from the tree." >&2
     exit 1

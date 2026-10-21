@@ -7,7 +7,7 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CountScope,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CoinFlipRun, CountScope,
     CounterAdjustment, DamageKindFilter, DoorLockOp, PlayerRelation,
     SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
 };
@@ -29992,7 +29992,7 @@ fn unbound_delayed_graveyard_sweep_stays_honestly_unimplemented() {
 /// that fixture for this pass.
 ///
 /// It plants one refused rider in sixteen carriers — the ability-node chain
-/// links, the two `FlipCoin` payloads, `ChooseOneOf`, a trigger, a granted
+/// links, the two `FlipCoins` payloads, `ChooseOneOf`, a trigger, a granted
 /// ability, a replacement payload, the four cost slots (CR 602.1a activation
 /// cost, CR 118.12 `unless_pay` on both an ability and a trigger, and
 /// `ReplacementMode::MayCost`) and the two decline branches — and asserts every
@@ -30054,8 +30054,9 @@ fn demote_net_reaches_every_ability_carrier() {
     chain.mode_abilities.push(refused());
     parsed.abilities.push(chain);
 
-    // 5, 6 — FlipCoin's two payloads.
-    parsed.abilities.push(holder(Effect::FlipCoin {
+    // 5, 6 — FlipCoins' two payloads.
+    parsed.abilities.push(holder(Effect::FlipCoins {
+        flips: CoinFlipRun::single(),
         win_effect: Some(Box::new(refused())),
         lose_effect: Some(Box::new(refused())),
         flipper: TargetFilter::Controller,
@@ -30095,7 +30096,8 @@ fn demote_net_reaches_every_ability_carrier() {
     // red before these four existed.
     fn refused_cost() -> crate::types::ability::AbilityCost {
         crate::types::ability::AbilityCost::EffectCost {
-            effect: Box::new(Effect::FlipCoin {
+            effect: Box::new(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(refused())),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
@@ -31481,7 +31483,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 238;
+    const EFFECT_VARIANT_PIN: usize = 236;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -31505,8 +31507,6 @@ fn render_net_effect_carrier_census() {
         "EachPlayerCopyChosen",
         "ExileResolvingSpellInsteadOfGraveyard",
         "ExileTopCardContest",
-        "FlipCoin",
-        "FlipCoinUntilLose",
         "FlipCoins",
         "GenericEffect",
         "GrantCastingPermission",
@@ -31892,7 +31892,8 @@ fn render_net_reaches_every_nested_description_carrier() {
         }));
     tags.push("exiled_spell_rider");
 
-    parsed.abilities.push(carrier(Effect::FlipCoin {
+    parsed.abilities.push(carrier(Effect::FlipCoins {
+        flips: CoinFlipRun::single(),
         win_effect: Some(Box::new(ability("flip_coin_win"))),
         lose_effect: Some(Box::new(ability("flip_coin_lose"))),
         flipper: TargetFilter::Controller,
@@ -31900,15 +31901,20 @@ fn render_net_reaches_every_nested_description_carrier() {
     tags.extend(["flip_coin_win", "flip_coin_lose"]);
 
     parsed.abilities.push(carrier(Effect::FlipCoins {
-        count: QuantityExpr::Fixed { value: 2 },
+        flips: CoinFlipRun::Exactly {
+            count: QuantityExpr::Fixed { value: 2 },
+        },
         win_effect: Some(Box::new(ability("flip_coins_win"))),
         lose_effect: Some(Box::new(ability("flip_coins_lose"))),
         flipper: TargetFilter::Controller,
     }));
     tags.extend(["flip_coins_win", "flip_coins_lose"]);
 
-    parsed.abilities.push(carrier(Effect::FlipCoinUntilLose {
-        win_effect: Box::new(ability("flip_until_lose")),
+    parsed.abilities.push(carrier(Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(Box::new(ability("flip_until_lose"))),
+        lose_effect: None,
+        flipper: TargetFilter::Controller,
     }));
     tags.push("flip_until_lose");
 

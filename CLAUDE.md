@@ -103,6 +103,12 @@ Build/test/cargo commands, cargo aliases, WASM build, card-data pipeline + jq lo
 
 AI tactical policy scoring uses the card-equivalent `PolicyVerdict` contract in `crates/phase-ai/src/policies/registry.rs`; new policies must use the band helpers rather than raw sentinel scores. AI behavior changes must run `cargo ai-gate` and refresh baselines only with the paired-seed report attached.
 
+## Protocol version changes
+
+Use the registry CLI for protocol bumps: `node scripts/protocol-versions.mjs bump game --reason "Describe the incompatible change"`. Follow [project-reference: Protocol version changes](.claude/skills/project-reference/SKILL.md#protocol-version-changes) to select affected surfaces and check compatibility. Commit the new UUID record with the implementation, preserve the baseline and existing records, and regenerate numeric mirrors instead of editing them by hand.
+
+This supersedes manual constant-bump mechanics in historical plans; assess their compatibility reasoning against the current code.
+
 ## Documentation (`docs/`)
 
 - **`.claude/skills/oracle-parser/SKILL.md`** — Oracle parser single source of truth: architecture, nom combinator mandate, parsing priority system, AST type system, all helper modules, CR annotation protocol, and contribution checklists.

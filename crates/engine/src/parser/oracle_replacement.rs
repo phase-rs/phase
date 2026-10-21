@@ -51,15 +51,16 @@ use super::oracle_util::{
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
-    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
-    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
-    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
-    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
+    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule,
+    DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryInstructionActor,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+    RoundingMode, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -277,14 +278,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "~ enters the battlefield tapped" (unconditional) ---
-    // Guard: reject text with " unless " or "if you control" — all conditional
-    // patterns must be handled above. Counter-bearing variants fall through to
-    // `parse_enters_with_counters`, which composes the tap and counter modifiers.
+    // Guard: a conditional gate word (`unless`, `if you control`, `if x`,
+    // `as long as`) means a conditional pattern above should have claimed the
+    // line; when none did, the line is declined so the router lands it as an
+    // explicit gap instead of an unconditional self replacement (CR 614.1d).
+    // Counter-bearing variants fall through to `parse_enters_with_counters`,
+    // which composes the tap and counter modifiers.
     if (nom_primitives::scan_contains(&norm_lower, "enters the battlefield tapped")
         || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
-        && !nom_primitives::scan_contains(&norm_lower, "unless")
-        && !nom_primitives::scan_contains(&norm_lower, "if you control")
-        && !nom_primitives::scan_contains(&norm_lower, "if x")
+        && nom_primitives::scan_at_word_boundaries(&norm_lower, enters_tapped_conditional_marker)
+            .is_none()
         && !has_enters_tapped_with_counter(&norm_lower)
     {
         return Some(
@@ -1484,11 +1487,13 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
             // CR 614.1a: "instead flip two coins" — double the count the
             // replacement applier sees, then ignore all but one (CR 705.1).
             Effect::FlipCoins {
-                count: QuantityExpr::Multiply {
-                    factor: 2,
-                    inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    }),
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
                 },
                 win_effect: None,
                 lose_effect: None,
@@ -5362,6 +5367,21 @@ fn compose_enters_with_keyword_grant(
     .sub_ability(inner)
 }
 
+/// CR 614.1d: a gate word the unconditional "enters tapped" fallback cannot
+/// carry. `as long as` also matches "for as long as" at its word boundary.
+fn enters_tapped_conditional_marker(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("unless"),
+            tag("if you control"),
+            tag("if x"),
+            tag("as long as"),
+        )),
+    )
+    .parse(input)
+}
+
 fn has_enters_tapped_with_counter(text: &str) -> bool {
     has_enters_tapped_phrase(text)
         && preceded(
@@ -7050,6 +7070,9 @@ fn replacement_condition_from_static(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        // No ReplacementCondition carrier for an arithmetic quality; callers
+        // must treat None as fail-closed.
+        | StaticCondition::QuantityQuality { .. }
         // Digital-only Alchemy (no CR entry): "if you have a boon" has no
         // `ReplacementCondition` carrier — fail closed like the other
         // uncarriable gates.
@@ -31120,6 +31143,46 @@ mod tests {
             lhs: QuantityExpr::Ref { qty: lhs },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value },
+        }
+    }
+
+    /// An arithmetic quality has no `ReplacementCondition` carrier: the bridge
+    /// declines it in both polarities so callers fail closed.
+    #[test]
+    fn replacement_condition_bridge_declines_quantity_quality() {
+        use crate::types::ability::NumberQuality;
+        use GatePolarity::{OnlyIf, Unless};
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        };
+        for polarity in [OnlyIf, Unless] {
+            // No `ReplacementCondition` carrier for an arithmetic quality.
+            assert_eq!(
+                replacement_condition_from_static(
+                    StaticCondition::QuantityQuality {
+                        quantity: quantity.clone(),
+                        quality: NumberQuality::Prime,
+                    },
+                    polarity
+                ),
+                None,
+                "QuantityQuality must not bridge ({polarity:?})"
+            );
+            // Paired positive: the same quantity as a comparison does bridge.
+            assert!(
+                replacement_condition_from_static(
+                    StaticCondition::QuantityComparison {
+                        lhs: quantity.clone(),
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                    polarity
+                )
+                .is_some(),
+                "QuantityComparison over the same quantity bridges ({polarity:?})"
+            );
         }
     }
 

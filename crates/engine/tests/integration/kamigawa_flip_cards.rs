@@ -15,9 +15,9 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::game_object::BackFaceData;
 use engine::game::layers::flush_layers;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::stack;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, EffectKind};
+use engine::types::ability::{AbilityDefinition, AbilityKind, CoinFlipRun, Effect, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -25,7 +25,8 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{StackEntry, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 /// Bushi Tenderfoot's verbatim Oracle text (MTGJSON `text`, face a).
@@ -591,24 +592,248 @@ fn the_flip_it_pronoun_form_flips_its_own_source_end_to_end() {
 }
 
 /// CR 705.1 vs CR 710.4: the coin-flip mechanic is untouched — "flip a coin"
-/// still lowers to `Effect::FlipCoin`, not to the new flip-permanent effect.
+/// still lowers to the single-flip `Effect::FlipCoins`, not to the new
+/// flip-permanent effect. CR 705.2: "flip a coin until you lose a flip" lowers to
+/// the until-loss run, whose per-win `win_effect` is an honest
+/// `flip_coin_until_lose_stub` gap when no "for each flip you won" clause follows.
 #[test]
 fn flip_a_coin_still_parses_to_flip_coin() {
     let definition =
         engine::parser::oracle_effect::parse_effect_chain("Flip a coin.", AbilityKind::Spell);
-    assert!(
-        matches!(*definition.effect, Effect::FlipCoin { .. }),
-        "CR 705.1: 'flip a coin' must stay a coin flip, got {:?}",
-        definition.effect
-    );
+    match &*definition.effect {
+        Effect::FlipCoins {
+            flips,
+            win_effect: None,
+            lose_effect: None,
+            ..
+        } => assert!(
+            flips.is_single_flip(),
+            "CR 705.1: 'flip a coin' must be a single flip, got {flips:?}"
+        ),
+        other => panic!("CR 705.1: 'flip a coin' must stay a coin flip, got {other:?}"),
+    }
 
     let until_lose = engine::parser::oracle_effect::parse_effect_chain(
         "Flip a coin until you lose a flip.",
         AbilityKind::Spell,
     );
-    assert!(
-        matches!(*until_lose.effect, Effect::FlipCoinUntilLose { .. }),
-        "CR 705.1: the Krark-style repeat coin flip is unaffected, got {:?}",
-        until_lose.effect
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(win),
+        lose_effect: None,
+        ..
+    } = &*until_lose.effect
+    else {
+        panic!(
+            "CR 705.1: the Krark-style repeat coin flip is unaffected, got {:?}",
+            until_lose.effect
+        );
+    };
+    match &*win.effect {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "flip_coin_until_lose_stub"),
+        other => {
+            panic!("the unconsolidated until-loss reward must stay the honest stub, got {other:?}")
+        }
+    }
+}
+
+/// Nighteyes the Desecrator — Nezumi Graverobber's alternative half (CR 710.1b).
+fn nighteyes_alternative_face() -> BackFaceData {
+    BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
+        name: "Nighteyes the Desecrator".to_string(),
+        power: Some(4),
+        toughness: Some(2),
+        loyalty: None,
+        printed_loyalty: None,
+        defense: None,
+        card_types: CardType {
+            supertypes: vec![Supertype::Legendary],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Rat".to_string(), "Wizard".to_string()],
+        },
+        mana_cost: ManaCost::default(),
+        keywords: Vec::new(),
+        abilities: Vec::new(),
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: Vec::new(),
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        layout_kind: Some(LayoutKind::Flip),
+        parse_warnings: vec![],
+    }
+}
+
+const NEZUMI_GRAVEROBBER_ORACLE: &str =
+    "{1}{B}: Exile target card from an opponent's graveyard. If no cards are in that graveyard, flip this creature.";
+
+fn black_mana_cost_1b() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    }
+}
+
+/// CR 710.4: Nezumi Graverobber's activated ability exiles a card from an opponent's
+/// graveyard and, if no cards remain in that specific graveyard, flips to Nighteyes the Desecrator.
+#[test]
+fn nezumi_graverobber_flips_when_targeted_graveyard_is_emptied() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nezumi = scenario
+        .add_creature_from_oracle(P0, "Nezumi Graverobber", 2, 1, NEZUMI_GRAVEROBBER_ORACLE)
+        .id();
+    let card_in_grave = scenario
+        .add_creature_to_graveyard(P1, "Grave Creature", 1, 1)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]),
+        ],
     );
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&nezumi).unwrap();
+        object.mana_cost = black_mana_cost_1b();
+        object.base_mana_cost = object.mana_cost.clone();
+        object.color = vec![ManaColor::Black];
+        object.base_color = object.color.clone();
+        object.back_face = Some(nighteyes_alternative_face());
+    }
+
+    assert_eq!(runner.state().objects[&nezumi].name, "Nezumi Graverobber");
+    assert!(!runner.state().objects[&nezumi].flipped);
+
+    runner
+        .activate(nezumi, 0)
+        .target_object(card_in_grave)
+        .resolve();
+
+    assert_eq!(
+        runner.state().objects[&card_in_grave].zone,
+        Zone::Exile,
+        "Target card was exiled from graveyard"
+    );
+
+    let object = &runner.state().objects[&nezumi];
+    assert!(
+        object.flipped,
+        "CR 710.4: Nezumi Graverobber flips when targeted graveyard becomes empty"
+    );
+    assert_eq!(object.name, "Nighteyes the Desecrator");
+    assert_eq!((object.power, object.toughness), (Some(4), Some(2)));
+    assert!(object.card_types.supertypes.contains(&Supertype::Legendary));
+}
+
+/// CR 710.4: Nezumi Graverobber does not flip if cards still remain in the targeted graveyard.
+#[test]
+fn nezumi_graverobber_does_not_flip_when_cards_remain_in_targeted_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nezumi = scenario
+        .add_creature_from_oracle(P0, "Nezumi Graverobber", 2, 1, NEZUMI_GRAVEROBBER_ORACLE)
+        .id();
+    let card_to_exile = scenario
+        .add_creature_to_graveyard(P1, "Grave Creature 1", 1, 1)
+        .id();
+    let card_remaining = scenario
+        .add_creature_to_graveyard(P1, "Grave Creature 2", 1, 1)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&nezumi).unwrap();
+        object.mana_cost = black_mana_cost_1b();
+        object.base_mana_cost = object.mana_cost.clone();
+        object.color = vec![ManaColor::Black];
+        object.base_color = object.color.clone();
+        object.back_face = Some(nighteyes_alternative_face());
+    }
+
+    assert_eq!(runner.state().objects[&nezumi].name, "Nezumi Graverobber");
+    assert!(!runner.state().objects[&nezumi].flipped);
+
+    runner
+        .activate(nezumi, 0)
+        .target_object(card_to_exile)
+        .resolve();
+
+    assert_eq!(
+        runner.state().objects[&card_to_exile].zone,
+        Zone::Exile,
+        "Target card was exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&card_remaining].zone,
+        Zone::Graveyard,
+        "Second card remains in graveyard"
+    );
+
+    let object = &runner.state().objects[&nezumi];
+    assert!(
+        !object.flipped,
+        "Nezumi Graverobber must not flip when cards remain in the targeted graveyard"
+    );
+    assert_eq!(object.name, "Nezumi Graverobber");
+    assert_eq!((object.power, object.toughness), (Some(2), Some(1)));
+}
+
+/// CR 108.3 + CR 404.1 + CR 710.4: "If no cards are in that graveyard" refers specifically to
+/// the owner of the targeted card's graveyard, not the active player's or any other player's graveyard.
+#[test]
+fn nezumi_graverobber_flips_even_if_another_player_has_cards_in_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nezumi = scenario
+        .add_creature_from_oracle(P0, "Nezumi Graverobber", 2, 1, NEZUMI_GRAVEROBBER_ORACLE)
+        .id();
+    let p0_card = scenario
+        .add_creature_to_graveyard(P0, "P0 Grave Creature", 1, 1)
+        .id();
+    let p1_card = scenario
+        .add_creature_to_graveyard(P1, "P1 Grave Creature", 1, 1)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&nezumi).unwrap();
+        object.mana_cost = black_mana_cost_1b();
+        object.base_mana_cost = object.mana_cost.clone();
+        object.color = vec![ManaColor::Black];
+        object.base_color = object.color.clone();
+        object.back_face = Some(nighteyes_alternative_face());
+    }
+
+    runner.activate(nezumi, 0).target_object(p1_card).resolve();
+
+    assert_eq!(runner.state().objects[&p1_card].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&p0_card].zone, Zone::Graveyard);
+
+    let object = &runner.state().objects[&nezumi];
+    assert!(
+        object.flipped,
+        "Nezumi Graverobber flips because 'that graveyard' (P1's graveyard) is empty, despite P0 having cards in graveyard"
+    );
+    assert_eq!(object.name, "Nighteyes the Desecrator");
 }

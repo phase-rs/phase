@@ -82,6 +82,7 @@ use engine::types::zones::Zone;
 use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use crate::ability_chain::AbilityWalk;
 use crate::cast_facts::collect_definition_effects;
 use crate::features::DeckFeatures;
 #[cfg(test)]
@@ -212,9 +213,16 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
         // multi-effect chains produce one representative fact entry, which
         // is enough context to find the culprit activation in traces
         // without bloating `PolicyReason` with per-arm arrays.
+        //
+        // CR 608.2c + CR 608.2h: a created-token placement (`PutCounter {
+        // LastCreated }` whose nearest preceding publisher in the same chain is a `Token`) is part of that
+        // token's creation; its count is read when the placement resolves, after
+        // the token exists, not at decision time. Both loops therefore read the
+        // walks without those placements, matching the no-redundancy reading of
+        // `Token { enter_with_counters }`.
         let mut total = 0.0;
         let mut last_fact: Option<(i64, i64)> = None;
-        for effect in ctx.effects() {
+        for effect in ctx.effects_without_created_token_placements() {
             if let Some((delta, kind_tag, extra)) = redundancy_delta(
                 ctx.state,
                 effect,
@@ -241,7 +249,9 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                     let Some(execute) = trigger.execute.as_deref() else {
                         continue;
                     };
-                    for effect in collect_definition_effects(execute) {
+                    for effect in AbilityWalk::of(execute, collect_definition_effects(execute))
+                        .without_created_token_placements()
+                    {
                         if let Some((delta, kind_tag, extra)) = redundancy_delta(
                             ctx.state,
                             effect,
@@ -545,9 +555,7 @@ fn redundancy_delta(
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -2704,6 +2712,189 @@ mod tests {
                 .iter()
                 .map(|(id, v)| (id, format!("{v:?}")))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ─── created-token placements (CR 608.2c + CR 608.2h) ────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, last_created_placement, self_etb_trigger,
+        token_effect, x_quantity,
+    };
+    use engine::types::ability::{ConjureCard, ConjureSource, QuantityRef, SubAbilityLink};
+
+    fn x_placement_chain() -> AbilityDefinition {
+        imperative_token_then_placement(
+            AbilityKind::Activated,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            x_quantity(),
+        )
+    }
+
+    fn put_object(
+        state: &mut GameState,
+        zone: Zone,
+        core_type: CoreType,
+        abilities: Vec<AbilityDefinition>,
+    ) -> (ObjectId, CardId) {
+        let card_id = CardId(state.objects.len() as u64 + 1);
+        let obj_id = create_object(state, card_id, PlayerId(0), "Maker".to_string(), zone);
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(core_type);
+        *Arc::make_mut(&mut obj.abilities) = abilities;
+        (obj_id, card_id)
+    }
+
+    fn redundancy(state: &GameState, candidate: &CandidateAction) -> (f64, Option<i64>) {
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let ctx = mk_ctx(state, &decision, candidate, &config, &ai_ctx);
+        let PolicyVerdict::Score { delta, reason } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        let kind = reason
+            .facts
+            .iter()
+            .find(|(key, _)| *key == "effect_kind")
+            .map(|(_, value)| *value);
+        (delta, kind)
+    }
+
+    /// The created token's counter count is read when the placement resolves
+    /// (CR 608.2h), not "already zero" at decision time, so it is no
+    /// zero-count redundancy: activated, self-ETB cast, cast of a permanent
+    /// whose activated ability makes the token, and the Match the Odds route
+    /// shape with an empty opposing board.
+    #[test]
+    fn created_token_placement_is_not_a_zero_count_redundancy() {
+        let mut state = GameState::new_two_player(0);
+        let (activated, _) = put_object(
+            &mut state,
+            Zone::Battlefield,
+            CoreType::Creature,
+            vec![x_placement_chain()],
+        );
+        assert_eq!(
+            redundancy(&state, &activate_candidate(activated)),
+            (0.0, None)
+        );
+
+        let mut state = GameState::new_two_player(0);
+        let (etb, etb_card) = put_object(&mut state, Zone::Hand, CoreType::Creature, Vec::new());
+        state
+            .objects
+            .get_mut(&etb)
+            .unwrap()
+            .trigger_definitions
+            .push(self_etb_trigger(imperative_token_then_placement(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                (0, 0),
+                CounterType::Plus1Plus1,
+                x_quantity(),
+            )));
+        assert_eq!(
+            redundancy(&state, &cast_candidate(etb, etb_card)),
+            (0.0, None)
+        );
+
+        let mut state = GameState::new_two_player(0);
+        let (berta, berta_card) = put_object(
+            &mut state,
+            Zone::Hand,
+            CoreType::Creature,
+            vec![x_placement_chain()],
+        );
+        assert_eq!(
+            redundancy(&state, &cast_candidate(berta, berta_card)),
+            (0.0, None)
+        );
+
+        let mut state = GameState::new_two_player(0);
+        let (odds, odds_card) = put_object(
+            &mut state,
+            Zone::Hand,
+            CoreType::Sorcery,
+            vec![imperative_token_then_placement(
+                AbilityKind::Spell,
+                SubAbilityLink::SequentialSibling,
+                (1, 1),
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::Opponent),
+                        ),
+                    },
+                },
+            )],
+        );
+        assert_eq!(
+            redundancy(&state, &cast_candidate(odds, odds_card)),
+            (0.0, None)
+        );
+    }
+
+    /// Reach guards: beside a created-token placement, an independent
+    /// zero-count placement is still charged exactly once; a zero-count
+    /// placement after a Conjure keeps today's charge.
+    #[test]
+    fn unpaired_zero_count_placements_keep_the_charge() {
+        let mut state = GameState::new_two_player(0);
+        let (both, _) = put_object(
+            &mut state,
+            Zone::Battlefield,
+            CoreType::Creature,
+            vec![effect_chain(
+                AbilityKind::Activated,
+                SubAbilityLink::ContinuationStep,
+                vec![
+                    token_effect(0, 0, vec![]),
+                    last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: x_quantity(),
+                        target: TargetFilter::SelfRef,
+                    },
+                ],
+            )],
+        );
+        assert_eq!(
+            redundancy(&state, &activate_candidate(both)),
+            (-3.0, Some(KIND_ADD_COUNTER_ZERO))
+        );
+
+        let mut state = GameState::new_two_player(0);
+        let (conjure, _) = put_object(
+            &mut state,
+            Zone::Battlefield,
+            CoreType::Artifact,
+            vec![effect_chain(
+                AbilityKind::Activated,
+                SubAbilityLink::ContinuationStep,
+                vec![
+                    Effect::Conjure {
+                        cards: vec![ConjureCard {
+                            source: ConjureSource::Named {
+                                name: "Hangarback Walker".to_string(),
+                            },
+                            count: QuantityExpr::Fixed { value: 1 },
+                        }],
+                        destination: Zone::Battlefield,
+                        tapped: false,
+                        library_position: None,
+                        library_players: None,
+                    },
+                    last_created_placement(CounterType::Plus1Plus1, x_quantity()),
+                ],
+            )],
+        );
+        assert_eq!(
+            redundancy(&state, &activate_candidate(conjure)),
+            (-3.0, Some(KIND_ADD_COUNTER_ZERO))
         );
     }
 }

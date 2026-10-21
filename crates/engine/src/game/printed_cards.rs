@@ -4407,17 +4407,34 @@ mod tests {
         };
         walk_effect(&delayed, &mut names);
 
-        let flip = Effect::FlipCoin {
-            win_effect: Some(Box::new(conjure_ability("flip_win", Zone::Hand))),
-            lose_effect: Some(Box::new(conjure_ability("flip_lose", Zone::Hand))),
-            flipper: crate::types::ability::TargetFilter::Controller,
-        };
-        walk_effect(&flip, &mut names);
-
-        let until_lose = Effect::FlipCoinUntilLose {
-            win_effect: Box::new(conjure_ability("until_lose", Zone::Hand)),
-        };
-        walk_effect(&until_lose, &mut names);
+        // `FlipCoins` carries both branches in every run mode; walk each mode's pair.
+        for (run, win, lose) in [
+            (
+                crate::types::ability::CoinFlipRun::single(),
+                "flip_win",
+                "flip_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                "flips_win",
+                "flips_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::UntilLoss,
+                "until_loss_win",
+                "until_loss_lose",
+            ),
+        ] {
+            let flips = Effect::FlipCoins {
+                flips: run,
+                win_effect: Some(Box::new(conjure_ability(win, Zone::Hand))),
+                lose_effect: Some(Box::new(conjure_ability(lose, Zone::Hand))),
+                flipper: crate::types::ability::TargetFilter::Controller,
+            };
+            walk_effect(&flips, &mut names);
+        }
 
         let contest = Effect::ExileTopCardContest {
             winner_effect: Box::new(conjure_ability("contest_winner", Zone::Hand)),
@@ -4634,7 +4651,10 @@ mod tests {
             "delayed",
             "flip_win",
             "flip_lose",
-            "until_lose",
+            "flips_win",
+            "flips_lose",
+            "until_loss_win",
+            "until_loss_lose",
             "contest_winner",
             "roll",
             "choose_one",

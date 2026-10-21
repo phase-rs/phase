@@ -51,7 +51,8 @@ pub enum ServerErrorCode {
 pub struct TournamentRequestId(pub u64);
 
 /// Wire-protocol version shared by the native server, client, and Cloudflare
-/// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
+/// lobby Worker. Use `node scripts/protocol-versions.mjs bump game --reason "description"`.
+/// The numbered entries below are history. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
 /// field with `#[serde(default)]` does not require a bump — **unless the client
 /// stops deriving a fallback for it.** That clause is about wire
@@ -59,6 +60,52 @@ pub struct TournamentRequestId(pub u64);
 /// the new field, an old server that omits it produces a silent feature loss
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
+///
+/// 159 — Coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`.
+///      The `FlipCoin` and `FlipCoinUntilLose` tags are no longer written,
+///      `count` moves into `flips`, and the coin-flip resolution frame's kind
+///      becomes `Exactly`/`UntilLoss` (`RESOLUTION_STATE_WIRE_VERSION` 8). A
+///      v158 or older peer silently reads a multi-flip or until-loss run as one flip.
+///      Full-game peers and P2P move in lockstep (wire 141); no lobby carrier
+///      names it.
+/// 157 — `ChooseFromZoneConstraint::TotalManaValue` extends serialized paused
+///      zone choices and ability state. Old readers cannot decode the new tag;
+///      full-game and P2P (wire 139) refuse them before state delivery.
+/// 156 — `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+///      `QuantityQuality { quantity, quality }`, with new `NumberQuality`
+///      (`{"type":"Prime"}` / `{"type":"Parity","value":"Odd"|"Even"}`), carried
+///      in ability definitions inside `GameState` (CR 107.1, CR 603.4). A pre-v156
+///      peer cannot parse the tag. Full-game peers and P2P move in lockstep
+///      (wire 138); no lobby carrier names it.
+///      The same bump adds the optional per-seat `created_tokens` channel (each
+///      seat's pinned creation result) to the private
+///      player-scope tail sidecar that `PendingContinuation` carries under its
+///      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+///      tokens every seat created, for a paused "each player creates … The
+///      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+///      as the linked-exile-only sidecar.
+///
+/// 155 — `PendingChangeZoneIteration` members carry their pre-event entry
+///      modifications (CR 603.6a + CR 614.12): `remaining` becomes
+///      `ChangeZoneMemberEntry` records and the raw gate fields are removed; old
+///      peers cannot parse a parked ChangeZone frame. `RESOLUTION_STATE_WIRE_VERSION`
+///      moves from 6 to 7 with it: a v154 peer refuses the version-7 resolution
+///      state. Full-game peers and P2P move in lockstep (wire 137); no lobby
+///      carrier names it.
+///
+/// 154 — `PendingCostMoveResume` gains `CounterCostRemovalPayment`, a
+///      counter-removal cost paused while a replacement choice settles its
+///      current removal (CR 616.1; the settled count is credited to the
+///      activation, CR 118.11), with its `PausedCounterCostRemoval` record
+///      (which carries its `replacement_subtree` boundary);
+///      `ManaAbilityCostCursor` gains the optional `counter_removal` record.
+///      Serialized in `GameState.pending_cost_move_resume`: a v153 peer cannot
+///      parse the new tag. The same version carries the activation-owned
+///      removed-counter count (`SpellContext.cost_removed_counter_amount`,
+///      `ManaAbilityCostCursor.cost_removed_counters`,
+///      `PendingManaAbility.cost_removed_counters`; optional, skipped when
+///      unset), which a v153 peer re-encoding state would drop. Full-game
+///      peers and P2P move in lockstep (wire 136); no lobby carrier names it.
 ///
 /// 153 — `ContinuousModification::GrantAllActivatedAbilitiesOf` gains the
 ///      optional kind selector `kind: Option<ActivatedAbilityKind>`, and the
@@ -74,6 +121,7 @@ pub struct TournamentRequestId(pub u64);
 ///      export names it), so no migration shim exists; branch-era saved states
 ///      fail loudly on the unknown variant. P2P moves in lockstep (wire 135);
 ///      lobby messages are unchanged.
+///
 /// 152 — `ShortcutDecisionSchema` gains `suggested_declaration` (the offer's
 ///      eliminating suggestion) and `leading_aims` (published slots a trigger on
 ///      the stack already targets), and `ShortcutProposal` gains `leading_aims`.
@@ -1162,7 +1210,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 153;
+pub const PROTOCOL_VERSION: u32 = crate::protocol_versions::PROTOCOL_VERSION;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1178,6 +1226,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// Wire-protocol version of the **lobby** message set ([`LobbyClientMessage`] /
 /// [`LobbyServerMessage`]), independent of [`PROTOCOL_VERSION`].
 ///
+/// Use `node scripts/protocol-versions.mjs bump lobby --reason "description"`.
 /// Bump ONLY when a lobby variant is added, removed, renamed, or has a field
 /// added or its type changed. A full-game bump must NOT move this number: no
 /// lobby variant carries `GameState` or `GameAction`, so full-game churn cannot
@@ -1466,7 +1515,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 16;
+pub const LOBBY_PROTOCOL_VERSION: u32 = crate::protocol_versions::LOBBY_PROTOCOL_VERSION;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1491,7 +1540,8 @@ pub const LOBBY_PROTOCOL_VERSION: u32 = 16;
 /// the only place the mismatch can be said out loud. The upper bound stays
 /// absent because [`ParsedFrame::UnknownTag`] is available there; the lower
 /// bound exists because on the broker → client half nothing equivalent is.
-pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 = 2;
+pub const MIN_SUPPORTED_LOBBY_PROTOCOL: u32 =
+    crate::protocol_versions::MIN_SUPPORTED_LOBBY_PROTOCOL;
 
 /// Public-lobby view of a single registered game. Populated by the server,
 /// never by clients. Field shape mirrors the pre-extraction
@@ -2370,14 +2420,16 @@ fn json_string(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The two surfaces must not share a number. `scripts/check-protocol-version.mjs`
-    /// carries the structural half of this guard — it matches
-    /// `LOBBY_PROTOCOL_VERSION` only against a bare integer literal, so
-    /// re-deriving it from `PROTOCOL_VERSION` fails the cross-language gate
-    /// rather than silently re-coupling the lobby to full-game churn.
+    /// Public exports read the registry; independent allocation is tested by its loader.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 16);
+        let versions = crate::protocol_registry::load_versions(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .unwrap();
+        assert_eq!(LOBBY_PROTOCOL_VERSION, versions.lobby);
+        assert_eq!(crate::DIRECTORY_VERSION, versions.directory);
+        assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, versions.minimum_lobby);
         // Deliberately still 2, not 12: every lobby version past 2 keeps this
         // floor's guarantee — that a version-2 client can still parse every
         // frame it already understands. Individually: 3 is additive in both
@@ -2401,10 +2453,6 @@ mod tests {
         // format name, guarded by a client floor. See the constant's own
         // changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
-        assert_ne!(
-            LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
-            "the lobby must version its own message set, not alias the full-game one"
-        );
         // A `const` block, not a runtime assert: both operands are constants, so
         // this is decidable at compile time. A floor above the current version
         // would refuse every client, and that should fail the BUILD rather than
@@ -2419,12 +2467,16 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 153);
+        let versions = crate::protocol_registry::load_versions(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .unwrap();
+        assert_eq!(PROTOCOL_VERSION, versions.full);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 152);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION.saturating_sub(1));
     }
 
     #[test]
@@ -2564,31 +2616,7 @@ mod tests {
     /// pre-emptive bump that adds nothing on this surface at all, and 12 added
     /// `draft_metadata` to the `JoinTargetInfo` reply.
     ///
-    /// This test's predecessor asserted the tournament set sat exactly ONE bump
-    /// past `FormatConfig` — a relationship that stopped being true the moment
-    /// correlation took 5. Retargeting its number alone would have left a test
-    /// whose name states a relationship it no longer checks, so the span is
-    /// what it pins now, and the name says "chain", not "surface", because
-    /// not every step in it adds wire surface. The same reasoning applies
-    /// again at 6, once more at 7 for the format label and the "automatic + N"
-    /// round option, and again at 8 for the match structure (Bo1 / Bo3): the
-    /// chain grows a step and the name grows with it, rather than the tail
-    /// constant being quietly re-pointed. Version 9 DOES add wire surface —
-    /// `RenewTournamentCredential` gains `rotation_nonce`, `#[serde(default)]`
-    /// but with no `skip_serializing_if`, so it serializes unconditionally
-    /// once present — but the field is additive on both sides (a pre-9
-    /// broker ignores it; a pre-9 client simply never sends the frame), so
-    /// it extends the chain the same way 3 through 8 did rather than forcing
-    /// a floor move. Version 10 is the first
-    /// step outside the tournament surface (requested room codes); it extends
-    /// the chain so the tail stays pinned rather than re-pointed, and the name
-    /// grows with it, by the same rule. Version 11 is the one true non-surface
-    /// step: no field, no variant, moved ahead of new `GameFormat` variants;
-    /// see that constant's own `/// 11` entry. Version 12 extends the chain by
-    /// the same rule, as does version 13 (`FormatConfig` gains the optional
-    /// `allow_experimental_dungeons` flag), version 14 (`Hosted` report gate),
-    /// and version 15 (`FormatConfig` loses that flag; the Wilderness pool is
-    /// format-derived), and version 16 (`GameFormat` gains `Dandan`).
+    /// This historical introduction chain remains valid as the current version advances.
     #[test]
     fn the_tournament_chain_spans_lobby_versions_four_through_sixteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
@@ -2617,7 +2645,7 @@ mod tests {
         const FORMAT_DERIVED_DUNGEON_POOL_LOBBY_VERSION: u32 = HOSTED_MATCH_LOBBY_VERSION + 1;
         // Adds the `Dandan` built-in format name, guarded by a client floor.
         const DANDAN_FORMAT_LOBBY_VERSION: u32 = FORMAT_DERIVED_DUNGEON_POOL_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, DANDAN_FORMAT_LOBBY_VERSION);
+        const { assert!(LOBBY_PROTOCOL_VERSION >= DANDAN_FORMAT_LOBBY_VERSION) };
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
