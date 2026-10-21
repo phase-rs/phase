@@ -927,7 +927,26 @@ fn handle_replacement_choice_inner(
                 // — the `spec` field carries the full self-describing token
                 // characteristics. Delegate to the shared helper.
                 create @ ProposedEvent::CreateToken { .. } => {
-                    if !apply_create_token_after_replacement(state, create, events) {
+                    let is_copy =
+                        matches!(create, ProposedEvent::CreateToken { copy: Some(_), .. });
+                    let completed = apply_create_token_after_replacement(state, create, events);
+                    // CR 614.1a + CR 608.2c: the created referent includes any
+                    // batch a replacement appended to this event; the window
+                    // spans the chosen replacement's application and the apply.
+                    //
+                    // Known residual: a copy event is left as is. A replacement-appended
+                    // batch is never in the CopyToken frame's created ids. On a
+                    // liminal-immediate copy the apply drains the frame and resolves the
+                    // effect's riders inside the apply, so publishing here would rewrite
+                    // the ledger after the riders read it; otherwise the frame's later
+                    // drain overwrites the ledger with the frame's ids.
+                    if !is_copy {
+                        effects::token::publish_replacement_appended_tokens(
+                            state,
+                            &events[replacement_action_event_start..],
+                        );
+                    }
+                    if !completed {
                         return Ok(state.waiting_for.clone());
                     }
                 }

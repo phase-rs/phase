@@ -31,19 +31,32 @@ expression: def
     "owner": {
       "type": "Controller"
     },
-    "enters_attacking": false,
-    "enter_with_counters": [
-      [
-        "P1P1",
-        {
-          "type": "Fixed",
-          "value": 1
-        }
-      ]
-    ]
+    "enters_attacking": false
   },
   "cost": null,
-  "sub_ability": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "PutCounter",
+      "counter_type": "P1P1",
+      "count": {
+        "type": "Fixed",
+        "value": 1
+      },
+      "target": {
+        "type": "LastCreated"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
   "duration": null,
   "description": null,
   "target_prompt": null,

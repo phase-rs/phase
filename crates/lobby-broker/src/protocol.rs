@@ -60,16 +60,30 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 156 — `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`): the
+/// 157 — `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`): the
 ///      players chosen earlier in the flipping resolution and a
 ///      completed-but-empty forwarded result, which a coin-flip branch parked at
 ///      a Krark's Thumb keep choice inherits when it resumes (CR 608.2c +
 ///      CR 609.3). Optional and skipped when empty, serialized in the
-///      coin-flip resolution frame: a v155 peer re-encoding such a frame would
+///      coin-flip resolution frame: a v156 peer re-encoding such a frame would
 ///      drop it and the branch would lose its chosen opponent. The same version
-///      moves `RESOLUTION_STATE_WIRE_VERSION` from 7 to 8: a v155 peer refuses
+///      moves `RESOLUTION_STATE_WIRE_VERSION` from 7 to 8: a v156 peer refuses
 ///      the version-8 resolution state. Full-game peers and P2P move in
-///      lockstep (wire 138); no lobby carrier names it.
+///      lockstep (wire 139); no lobby carrier names it.
+///
+/// 156 — `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+///      `QuantityQuality { quantity, quality }`, with new `NumberQuality`
+///      (`{"type":"Prime"}` / `{"type":"Parity","value":"Odd"|"Even"}`), carried
+///      in ability definitions inside `GameState` (CR 107.1, CR 603.4). A pre-v156
+///      peer cannot parse the tag. Full-game peers and P2P move in lockstep
+///      (wire 138); no lobby carrier names it.
+///      The same bump adds the optional per-seat `created_tokens` channel (each
+///      seat's pinned creation result) to the private
+///      player-scope tail sidecar that `PendingContinuation` carries under its
+///      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+///      tokens every seat created, for a paused "each player creates … The
+///      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+///      as the linked-exile-only sidecar.
 ///
 /// 155 — `PendingChangeZoneIteration` members carry their pre-event entry
 ///      modifications (CR 603.6a + CR 614.12): `remaining` becomes
@@ -107,6 +121,7 @@ pub struct TournamentRequestId(pub u64);
 ///      export names it), so no migration shim exists; branch-era saved states
 ///      fail loudly on the unknown variant. P2P moves in lockstep (wire 135);
 ///      lobby messages are unchanged.
+///
 /// 152 — `ShortcutDecisionSchema` gains `suggested_declaration` (the offer's
 ///      eliminating suggestion) and `leading_aims` (published slots a trigger on
 ///      the stack already targets), and `ShortcutProposal` gains `leading_aims`.
@@ -1195,7 +1210,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 156;
+pub const PROTOCOL_VERSION: u32 = 157;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2452,12 +2467,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 156);
+        assert_eq!(PROTOCOL_VERSION, 157);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 155);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 156);
     }
 
     #[test]

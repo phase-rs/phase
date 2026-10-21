@@ -3297,6 +3297,10 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         AbilityCondition::PreviousEffectAmount {
             rhs,
             comparator: _,
@@ -4285,6 +4289,10 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         TriggerCondition::HasMaxSpeed => Axes::NONE,
         // CR 725.1: the monarch predicate itself reads no axis; its subject
         // scope is classified per-axis by the shared `PlayerScope` classifier,
@@ -4661,6 +4669,10 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         StaticCondition::HasMaxSpeed => Axes::NONE,
         StaticCondition::SpeedGE { threshold: _ } => Axes::NONE,
         StaticCondition::And { conditions } => {

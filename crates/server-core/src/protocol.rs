@@ -3473,13 +3473,26 @@ mod tests {
         }
     }
 
-    /// v156: `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`: the
+    /// v157: `PendingCoinFlip` gains `branch_context` (`FlipBranchContext`: the
     /// players chosen earlier in the flipping resolution and a
     /// completed-but-empty forwarded result, CR 608.2c + CR 609.3), and the
-    /// persisted resolution state moves from version 7 to 8; a v155 peer
+    /// persisted resolution state moves from version 7 to 8; a v156 peer
     /// re-encoding a Krark's-Thumb-parked coin flip would drop the field and
     /// the resumed branch would lose its chosen opponent, so it must be refused
-    /// before it receives v156 state.
+    /// before it receives v157 state.
+    ///
+    /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v155
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v156 state.
+    /// The same bump adds the optional per-seat `created_tokens` channel (each
+    /// seat's pinned creation result) to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
     ///
     /// v155: `PendingChangeZoneIteration.remaining` carries each member's
     /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
@@ -3504,6 +3517,12 @@ mod tests {
     /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
     /// drops them, so it must be refused before it receives v152 state.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v150: the cast-this-way gains rider is reshaped —
+    /// `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+    /// `PendingEntersModifications` object and
+    /// `Effect::AddPendingEntersModifications` carries its `rider`; a v149 peer
+    /// cannot parse either new shape, so it must be refused before it receives
+    /// v150 state.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
     /// paused instant or sorcery still owes; a v148 peer drops the key and would
@@ -3744,8 +3763,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_156_for_coin_flip_branch_context() {
-        assert_eq!(PROTOCOL_VERSION, 156);
+    fn protocol_version_is_157_for_coin_flip_branch_context() {
+        assert_eq!(PROTOCOL_VERSION, 157);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3756,7 +3775,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_156_for_coin_flip_branch_context` stays
+    /// `protocol_version_is_157_for_coin_flip_branch_context` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
