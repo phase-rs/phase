@@ -2383,7 +2383,9 @@ pub(super) fn parse_targeted_action_ast(
                 .as_ref()
                 .is_some_and(|spec| matches!(spec.min, QuantityExpr::Fixed { value: 0 }))
         {
-            aggregate_return.map(|(_, constraint)| constraint)
+            aggregate_return
+                .as_ref()
+                .map(|(_, constraint)| constraint.clone())
         } else {
             if aggregate_return.is_some() {
                 target = parse_target_with_syntax(original_target_text, ctx).0;
