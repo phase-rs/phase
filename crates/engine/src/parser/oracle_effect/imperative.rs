@@ -4650,7 +4650,11 @@ fn try_parse_choose_object_and_player(
         index: choice_ctx.chosen_player_count,
     });
     *ctx = choice_ctx;
-    Some(ChooseImperativeAst::ObjectAndPlayer { object, player })
+    Some(ChooseImperativeAst::ObjectAndPlayer {
+        object,
+        player,
+        clause: rest.trim().to_string(),
+    })
 }
 
 /// CR 607.2d + CR 608.2c: Gate B's head-shape provenance — does this head
@@ -6414,10 +6418,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             Effect::ChooseDamageSource { source_filter }
         }
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
-        ChooseImperativeAst::ObjectAndPlayer { object, player } => Effect::unimplemented(
-            "compound_object_player_choice",
-            format!("object: {object:?}, player: {player:?}"),
-        ),
+        // A bare `Effect` cannot hold both choices, so this entry point fails
+        // closed with the printed clause; the chain lowering emits both.
+        ChooseImperativeAst::ObjectAndPlayer { clause, .. } => {
+            Effect::unimplemented("compound_object_player_choice", clause)
+        }
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
         ChooseImperativeAst::NamedChoice {
             choice_type,
@@ -15459,7 +15464,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // CR 115.10a + CR 608.2d: untargeted object and player choices resolve
         // in order. The parser marks only the object head as Resolution-timed.
         ImperativeFamilyAst::Structured(ImperativeAst::Choose(
-            ChooseImperativeAst::ObjectAndPlayer { object, player },
+            ChooseImperativeAst::ObjectAndPlayer { object, player, .. },
         )) => {
             let mut clause = parsed_clause(Effect::TargetOnly { target: object });
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(

@@ -10098,7 +10098,7 @@ pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool
         Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
-        // CR 115.10a + CR 608.2d: an untargeted "choose a creature you control"
+        // CR 115.10 + CR 115.10a + CR 608.2d: an untargeted "choose a creature you control"
         // (no literal "target") is made while the instruction resolves. Only an
         // OBJECT target counts as the made choice, as for `PutCounter` above.
         // A context reference or an attachment host ("enchanted creature") is
@@ -10122,6 +10122,50 @@ pub(crate) fn awaits_resolution_object_choice(ability: &ResolvedAbility) -> bool
     ability.target_choice_timing == TargetChoiceTiming::Resolution
         && needs_resolution_object_choice
         && ability.distribution.is_none()
+}
+
+/// CR 115.10 + CR 115.10a + CR 608.2d: the battlefield objects a resolution-time object
+/// choice ("choose a creature you control", no literal "target") may pick,
+/// narrowed by `extra`.
+///
+/// This is a PLAIN filter scan, never the targeting-legality path
+/// (`find_legal_targets` / `can_target`): a choice is not a target, so
+/// hexproof, shroud, protection and "can't be the target of" do not restrict it.
+fn resolution_choice_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    extra: impl Fn(ObjectId) -> bool,
+) -> Vec<ObjectId> {
+    let effective_filter = resolved_object_filter(state, ability, target);
+    let filter_ctx = filter::FilterContext::from_ability(ability);
+    state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx))
+        .filter(|id| extra(*id))
+        .collect()
+}
+
+/// CR 608.2d: park `continuation` (the node the pick will be bound to) and
+/// prompt `ability`'s controller to choose exactly one of `cards`.
+fn park_resolution_object_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    continuation: ResolvedAbility,
+    cards: Vec<ObjectId>,
+) -> ResolutionProgress {
+    state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
+    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+        player: ability.controller,
+        cards,
+        count: 1,
+        up_to: false,
+        constraint: None,
+        source_id: ability.source_id,
+        reciprocal_role: None,
+    };
+    ResolutionProgress::Waiting
 }
 
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
@@ -16693,12 +16737,61 @@ pub(crate) fn resolve_unpaid_unless_ability_chain(
     .map(|_| ())
 }
 
+/// What a depth-0 chain entry does with the root's `forwarded_result_context`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootForwardedResult {
+    /// A root begins a new resolution: any value on it is stale (it may have
+    /// been resumed from serialized state) and is discarded.
+    Discard,
+    /// The root continues the resolution that produced the value (a coin-flip
+    /// branch, CR 608.2c), so the value is kept for its instructions.
+    Retain,
+}
+
+/// CR 705.2 + CR 608.2c: enter a coin-flip branch as a chain root that keeps the
+/// enclosing resolution's completed-empty result (CR 609.3). It is the ordinary
+/// depth-0 entry in every other respect (per-resolution prelude, return-result
+/// frames, "repeat this process" dispatch), so a branch behaves identically
+/// whether or not it carries that result.
+pub(crate) fn resolve_flip_branch_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_root_result(
+        state,
+        ability,
+        events,
+        0,
+        None,
+        RootForwardedResult::Retain,
+    )
+}
+
 fn resolve_ability_chain_with_payment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    payment_choice: Option<AutoMayChoice>,
+) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_root_result(
+        state,
+        ability,
+        events,
+        depth,
+        payment_choice,
+        RootForwardedResult::Discard,
+    )
+}
+
+fn resolve_ability_chain_with_root_result(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
     mut payment_choice: Option<AutoMayChoice>,
+    root_result: RootForwardedResult,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: A forwarded result belongs to one resolution chain. A root
     // ability can be resumed from serialized state, so discard any stale value
@@ -16706,12 +16799,15 @@ fn resolve_ability_chain_with_payment_choice(
     // after this node's effect completes.
     let root_context_owned;
     let mut cost_removed_seed = None;
+    let discards_forwarded = root_result == RootForwardedResult::Discard
+        && ability.context.forwarded_result_context.is_some();
     let ability = if depth == 0
-        && (ability.context.forwarded_result_context.is_some()
-            || ability.context.cost_removed_counter_amount.is_some())
+        && (discards_forwarded || ability.context.cost_removed_counter_amount.is_some())
     {
         let mut owned = ability.clone();
-        owned.context.forwarded_result_context = None;
+        if discards_forwarded {
+            owned.context.forwarded_result_context = None;
+        }
         // CR 602.2b + CR 601.2h + CR 608.2h: the cost-removed count is a
         // root-only input; take it off the root so no hand-off or handler-local
         // context clone carries it into a continuation that could reseed.
@@ -18835,37 +18931,28 @@ fn resolve_chain_body(
             &ability.effect
         {
             if !target.contains_source_attachment_host() {
-                let effective_filter = resolved_object_filter(state, ability, target);
-                let filter_ctx = filter::FilterContext::from_ability(ability);
-                let legal: Vec<ObjectId> = state
-                    .battlefield_phased_in_ids()
-                    .into_iter()
-                    .filter(|id| {
-                        filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
-                    })
-                    .filter(|id| {
-                        // CR 608.2d: "a player can't choose an impossible
-                        // option" — an object with no counters offers nothing
-                        // to an ON-TARGET choice, so it is not a legal subject.
-                        // A PRINTED list carries its own options and this test
-                        // does not apply to it. No printed-list card reaches
-                        // here today: the only one parses to `SelfRef`, a
-                        // context reference, which `target_choice_timing_for_clause`
-                        // never gives `Resolution` timing. The predicate names
-                        // the domain rather than the effect so that it stays
-                        // true if one ever does.
-                        !matches!(
-                            ability.effect,
-                            Effect::ChooseCounterKind {
-                                domain: CounterKindDomain::OnTarget,
-                                ..
-                            }
-                        ) || state
-                            .objects
-                            .get(id)
-                            .is_some_and(|object| object.counters.values().any(|count| *count > 0))
-                    })
-                    .collect();
+                let legal = resolution_choice_candidates(state, ability, target, |id| {
+                    // CR 608.2d: "a player can't choose an impossible
+                    // option" — an object with no counters offers nothing
+                    // to an ON-TARGET choice, so it is not a legal subject.
+                    // A PRINTED list carries its own options and this test
+                    // does not apply to it. No printed-list card reaches
+                    // here today: the only one parses to `SelfRef`, a
+                    // context reference, which `target_choice_timing_for_clause`
+                    // never gives `Resolution` timing. The predicate names
+                    // the domain rather than the effect so that it stays
+                    // true if one ever does.
+                    !matches!(
+                        ability.effect,
+                        Effect::ChooseCounterKind {
+                            domain: CounterKindDomain::OnTarget,
+                            ..
+                        }
+                    ) || state
+                        .objects
+                        .get(&id)
+                        .is_some_and(|object| object.counters.values().any(|count| *count > 0))
+                });
                 match legal.len() {
                     0 => {}
                     1 => {
@@ -18896,27 +18983,14 @@ fn resolve_chain_body(
                         if matches!(cont.effect, Effect::PutCounter { .. }) {
                             cont.clear_targets();
                         }
-                        state.park_ability_continuation(PendingContinuation::new(
-                            Box::new(cont),
-                            state,
-                        ));
-                        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
-                            player: ability.controller,
-                            cards: legal,
-                            count: 1,
-                            up_to: false,
-                            constraint: None,
-                            source_id: ability.source_id,
-                            reciprocal_role: None,
-                        };
-                        return Ok(ResolutionProgress::Waiting);
+                        return Ok(park_resolution_object_choice(state, ability, cont, legal));
                     }
                 }
             }
         }
     }
 
-    // CR 115.10a + CR 608.2d: an untargeted `TargetOnly` ("choose a creature you
+    // CR 115.10 + CR 115.10a + CR 608.2d: an untargeted `TargetOnly` ("choose a creature you
     // control", no literal "target") is the choice itself, made at THIS
     // instruction's resolution. It shares the `PutCounter` block's plain filter
     // scan (never targeting legality, so shroud, hexproof and protection do not
@@ -18926,15 +19000,7 @@ fn resolve_chain_body(
     // ability's own source.
     if awaits_resolution_object_choice(ability) {
         if let Effect::TargetOnly { target } = &ability.effect {
-            let effective_filter = resolved_object_filter(state, ability, target);
-            let filter_ctx = filter::FilterContext::from_ability(ability);
-            let legal: Vec<ObjectId> = state
-                .battlefield_phased_in_ids()
-                .into_iter()
-                .filter(|id| {
-                    filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
-                })
-                .collect();
+            let legal = resolution_choice_candidates(state, ability, target, |_| true);
             match legal.as_slice() {
                 [] => {
                     // CR 608.2c + CR 609.3: the choice was made and named nothing.
@@ -18983,20 +19049,7 @@ fn resolve_chain_body(
                     // As for the single candidate: the pick supersedes an
                     // inherited absent-referent marker.
                     parked.context.forwarded_result_context = None;
-                    state.park_ability_continuation(PendingContinuation::new(
-                        Box::new(parked),
-                        state,
-                    ));
-                    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
-                        player: ability.controller,
-                        cards: legal,
-                        count: 1,
-                        up_to: false,
-                        constraint: None,
-                        source_id: ability.source_id,
-                        reciprocal_role: None,
-                    };
-                    return Ok(ResolutionProgress::Waiting);
+                    return Ok(park_resolution_object_choice(state, ability, parked, legal));
                 }
             }
         }
@@ -54442,7 +54495,8 @@ mod untargeted_target_only_choice_tests {
     }
 
     /// U-D1: only a Resolution-timed `TargetOnly` that has not yet been given an
-    /// object, and whose result is not already completed-empty, awaits its choice.
+    /// object awaits its choice; an inherited completed-empty marker does not
+    /// retire it.
     #[test]
     fn awaits_resolution_object_choice_for_untargeted_target_only() {
         let chooser = choose_creature_you_control(TargetChoiceTiming::Resolution);

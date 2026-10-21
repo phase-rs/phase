@@ -42240,7 +42240,20 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
-    let mut ir = parse_effect_chain_ir_body(text, kind, ctx);
+    parse_effect_chain_ir_after_player_choices(text, kind, ctx, 0)
+}
+
+/// [`parse_effect_chain_ir`] for a chain that CONTINUES an enclosing one: a
+/// player chosen in it is the `already_chosen`-th-plus-one player of the
+/// resolution, because the enclosing chain's earlier choices come first at
+/// runtime (CR 608.2c). A fresh chain passes 0.
+pub(crate) fn parse_effect_chain_ir_after_player_choices(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+    already_chosen: u8,
+) -> EffectChainIr {
+    let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen);
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -42270,6 +42283,7 @@ fn parse_effect_chain_ir_body(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
+    already_chosen_players: u8,
 ) -> EffectChainIr {
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
@@ -42462,7 +42476,7 @@ fn parse_effect_chain_ir_body(
     // choose a second player to draw" — the `ChosenPlayer { index }` index and
     // the "they"/"that player controls" anaphor scope both depend on choices
     // made in earlier chunks. Seeded into each `chunk_ctx` and read back after.
-    let mut chain_chosen_player_count: u8 = 0;
+    let mut chain_chosen_player_count: u8 = already_chosen_players;
     let mut chain_chosen_player_scope: Option<ControllerRef> = None;
     // CR 608.2c: Chain-spanning committed `ChoiceType` from a "secretly choose a
     // [value]" producer, carried to a following "an opponent guesses which
@@ -43662,11 +43676,25 @@ fn parse_effect_chain_ir_body(
                 // CR 608.2c: this fold precedes chunk_ctx's chosen-player
                 // seeding. Carry the enclosing choice into the nested parse,
                 // restoring the caller's scope when that one parse returns.
+                //
+                // The count travels with the scope: a player chosen inside the
+                // branch is appended after the enclosing choices at runtime, so
+                // its `ChosenPlayer` index must start after them.
                 let ir = match chain_chosen_player_scope.as_ref() {
                     Some(scope) => ctx.with_player_scope(scope.clone(), |ctx| {
-                        parse_effect_chain_ir(effect_text, kind, ctx)
+                        parse_effect_chain_ir_after_player_choices(
+                            effect_text,
+                            kind,
+                            ctx,
+                            chain_chosen_player_count,
+                        )
                     }),
-                    None => parse_effect_chain_ir(effect_text, kind, ctx),
+                    None => parse_effect_chain_ir_after_player_choices(
+                        effect_text,
+                        kind,
+                        ctx,
+                        chain_chosen_player_count,
+                    ),
                 };
                 lower_effect_chain_ir(&ir)
             };

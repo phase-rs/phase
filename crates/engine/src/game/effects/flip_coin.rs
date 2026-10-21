@@ -15,8 +15,6 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::{FlipBranchContext, PendingCoinFlip, PendingCoinFlipKind};
 
-use super::resolve_ability_chain;
-
 /// CR 705.1 + CR 614.1a: Outcome of routing a single logical coin flip through
 /// the replacement pipeline.
 enum CoinFlipOutcome {
@@ -135,6 +133,19 @@ fn run_flip_branch(
                 targets.to_vec(),
                 chain_root_targets.to_vec(),
             );
+        // CR 608.2d + CR 115.10: the flip's object targets reach the branch root
+        // only where an ordinary sub-ability would inherit its parent's
+        // (`can_inherit_parent_targets`). A root that owns an independent
+        // choice ("choose a creature you control and an opponent") makes its
+        // own pick; handing it an object chosen before the flip would answer
+        // that choice with the wrong object.
+        if !targets.is_empty() {
+            let mut probe = sub.clone();
+            probe.clear_targets();
+            if !super::can_inherit_parent_targets(&probe) {
+                sub.clear_targets();
+            }
+        }
         // CR 608.2c: "that opponent" in the branch names the player chosen
         // earlier in this resolution.
         if !branch_context.chosen_players.is_empty() {
@@ -150,29 +161,27 @@ fn run_flip_branch(
                 .forwarded_result_context
                 .as_deref()
                 .is_some_and(|context| context.targets.is_empty());
-        if !named_nothing {
-            resolve_ability_chain(state, &sub, events, 0)?;
-            return Ok(());
+        if named_nothing {
+            let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
+                return Ok(());
+            };
+            sub = pruned;
+            // CR 608.2c + CR 609.3: the surviving instructions are still part of
+            // the resolution that found nothing, so they keep that fact: a
+            // nested flip inside this branch captures it
+            // (`FlipBranchContext::from_ability`) and prunes ITS dependent
+            // branch the same way, instead of falling back to the ability's own
+            // source. The pruning above only reaches this branch's own node
+            // chain, not the payloads of a nested coin effect.
+            sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
         }
-        let Some(mut pruned) = super::without_missing_forward_result_dependencies(&sub) else {
-            return Ok(());
-        };
-        // CR 608.2c + CR 609.3: the surviving instructions are still part of the
-        // resolution that found nothing, so they keep that fact: a nested flip
-        // inside this branch captures it (`FlipBranchContext::from_ability`) and
-        // prunes ITS dependent branch the same way, instead of falling back to
-        // the ability's own source. The pruning above only reaches this branch's
-        // own node chain, not the payloads of a nested coin effect.
-        //
-        // The branch is therefore entered at the chain body, not the chain entry
-        // (`resolve_ability_chain` at depth 0), because the entry discards a
-        // root's forwarded-result context as stale resumed-root state and would
-        // erase exactly this marker. The enclosing resolution's per-resolution
-        // prelude has already run; re-running it for a branch is the latent
-        // defect FU-2, which this path does not repeat. Children receive the
-        // marker through the ordinary parent-to-child context hand-off.
-        pruned.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
-        super::resolve_chain_body(state, &pruned, events, 0, None)?;
+        // The one branch entry, with or without that fact. It keeps the root's
+        // forwarded result (the ordinary chain entry would discard it as stale
+        // resumed-root state) and is otherwise the ordinary depth-0 entry, so a
+        // branch root that repeats ("repeat this process") behaves the same
+        // either way. Children receive the fact through the parent-to-child
+        // context hand-off.
+        super::resolve_flip_branch_chain(state, &sub, events)?;
     }
     Ok(())
 }
@@ -2507,5 +2516,127 @@ mod branch_context_tests {
         assert_eq!(run.flip_results, vec![false, false]);
         assert!(controller_changed(&run.events));
         assert_eq!(run.source_controller, P1);
+    }
+
+    /// CR 107.1c + CR 608.2c: a surviving branch root that repeats ("repeat this
+    /// process") must keep its repeat dispatch when the branch carries the
+    /// enclosing completed-empty result: it offers the repeat decision, runs
+    /// another iteration when accepted, and settles when declined.
+    #[test]
+    fn repeatable_root_of_an_empty_result_branch_offers_the_repeat_decision() {
+        use crate::types::ability::RepeatContinuation;
+        use crate::types::actions::GameAction;
+
+        let (mut state, creature, source) = game_losing_the_flip();
+        let mut handoff = give_to(TargetFilter::SpecificPlayer { id: P1 });
+        let mut repeatable = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        repeatable.sub_link = SubAbilityLink::SequentialSibling;
+        repeatable.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        handoff.sub_ability = Some(Box::new(repeatable));
+        let mut ability = flip_ability(handoff, Vec::new(), source);
+        ability.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&state, &[]),
+        ));
+        let life_before = state.players[0].life;
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(lost_flip(&events), "reach: the lost branch ran");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "the repeatable root must offer the repeat decision, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.players[0].life, life_before + 3);
+
+        crate::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        assert_eq!(
+            state.players[0].life,
+            life_before + 6,
+            "another iteration ran"
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "declining settles the loop, got {:?}",
+            state.waiting_for
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.players[0].life, life_before + 6);
+        assert_eq!(state.objects[&source].controller, P0);
+        assert_eq!(state.objects[&creature].controller, P0);
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    /// CR 608.2d + CR 115.10: an object the flipping resolution selected BEFORE
+    /// the flip must not answer an independent choice that begins the branch
+    /// ("choose a creature you control ..."): the root makes its own pick, and
+    /// "that creature" names that pick, not the earlier object.
+    #[test]
+    fn branch_root_chooser_is_not_answered_by_the_flips_earlier_object() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        let artifact = scenario.add_artifact_from_oracle(P0, "Trinket", "").id();
+        let bear = scenario.add_creature(P0, "Bear A", 2, 2).id();
+        let other_bear = scenario.add_creature(P0, "Bear B", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[false]));
+
+        let mut chooser = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        );
+        chooser.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        chooser.sub_ability = Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 })));
+        let ability = flip_ability(chooser, vec![TargetRef::Object(artifact)], artifact);
+
+        let mut events = Vec::new();
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+
+        assert!(lost_flip(&events), "reach: the lost branch ran");
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "the branch root must prompt for its own pick, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(
+            cards.into_iter().collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([bear, other_bear])
+        );
+        runner
+            .act(GameAction::SelectCards { cards: vec![bear] })
+            .unwrap();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&bear].controller, P1);
+        assert_eq!(runner.state().objects[&artifact].controller, P0);
+        assert_eq!(runner.state().objects[&other_bear].controller, P0);
     }
 }

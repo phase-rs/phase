@@ -465,3 +465,83 @@ fn until_lose_branch_reads_chosen_player_after_repeated_krark_prompts() {
     // REVERT: flip_coin.rs UntilLose loop/frame, resume or finish context threading.
     multi_flip(true, true);
 }
+
+const BRANCH_CHOICE: &str =
+    "Choose a player. Flip a coin. If you lose the flip, choose a player to draw a card.";
+
+/// CR 608.2c: a player chosen INSIDE the lost branch is appended after the player
+/// chosen before the flip, so its `ChosenPlayer` index continues the count. The
+/// two answers differ (P0, then P2) and the card goes to the SECOND answer, inline
+/// and after a Krark's Thumb keep choice.
+/// REVERT: oracle_effect/mod.rs `parse_effect_chain_ir_after_player_choices` call
+/// in the coin-branch fold (the branch's draw reads index 0 and draws for P0).
+fn branch_local_player_choice(thumb: bool) {
+    use engine::game::zones::create_object;
+    use engine::types::identifiers::CardId;
+
+    let mut game = Game::new(BRANCH_CHOICE, thumb);
+    for (offset, player) in [P0, P1, P2].into_iter().enumerate() {
+        create_object(
+            game.runner.state_mut(),
+            CardId(900 + offset as u64),
+            player,
+            "Library card".to_string(),
+            Zone::Library,
+        );
+    }
+    let hand =
+        |game: &Game, player: PlayerId| game.runner.state().players[player.0 as usize].hand.len();
+    let (p0_before, p2_before) = (hand(&game, P0), hand(&game, P2));
+
+    let card_id = game.runner.state().objects[&game.spell].card_id;
+    game.act(GameAction::CastSpell {
+        object_id: game.spell,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    for _ in 0..12 {
+        if !matches!(game.runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !game.runner.state().stack.is_empty(),
+            "reach the first choice"
+        );
+        game.act(GameAction::PassPriority);
+    }
+
+    // The flip happens when the first answer resumes it: pin the Outcome stream
+    // for a LOST flip first (a mixed pair under Krark's Thumb).
+    game.pin(if thumb { &[false, true] } else { &[false] });
+    game.choose_player(ChoiceType::player(), &["0", "1", "2"], P0);
+    if thumb {
+        game.keep(false, PendingCoinFlipKind::Single, &[P0]);
+    }
+    game.choose_player(ChoiceType::player(), &["0", "1", "2"], P2);
+    for _ in 0..12 {
+        if game.runner.state().stack.is_empty() {
+            break;
+        }
+        game.act(GameAction::PassPriority);
+    }
+
+    assert!(game
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CoinFlipped { won: false, .. })));
+    assert_eq!(hand(&game, P2), p2_before + 1, "the second answer draws");
+    assert_eq!(hand(&game, P0), p0_before, "the first answer does not");
+    assert!(game.runner.state().stack.is_empty());
+    assert!(game.runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn branch_local_player_choice_follows_the_enclosing_choice_inline() {
+    branch_local_player_choice(false);
+}
+
+#[test]
+fn branch_local_player_choice_follows_the_enclosing_choice_after_krark() {
+    branch_local_player_choice(true);
+}

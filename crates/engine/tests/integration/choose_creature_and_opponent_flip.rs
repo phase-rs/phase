@@ -135,6 +135,10 @@ impl Gamble {
     }
 
     fn choose_shroud(&mut self) {
+        self.choose(self.shroud.unwrap());
+    }
+
+    fn choose(&mut self, pick: ObjectId) {
         let WaitingFor::ChooseFromZoneChoice {
             player,
             cards,
@@ -159,9 +163,7 @@ impl Gamble {
             offered,
             HashSet::from([self.plain.unwrap(), self.shroud.unwrap()])
         );
-        self.act(GameAction::SelectCards {
-            cards: vec![self.shroud.unwrap()],
-        });
+        self.act(GameAction::SelectCards { cards: vec![pick] });
         self.assert_opponents();
     }
 
@@ -310,6 +312,10 @@ fn s1_2_opponent_choice_offers_exactly_the_two_other_players() {
     game.cast_to_creature_choice();
     game.choose_shroud();
     game.assert_opponents();
+    // The opponent prompt gates the rest of the spell: until it is answered the
+    // coin has not been flipped and nothing has changed hands.
+    assert!(game.flips().is_empty());
+    game.assert_creatures(P1);
     game.answer_opponent(P2, false, false);
     game.assert_creatures(P2);
 }
@@ -476,12 +482,17 @@ fn s1_9_zero_creatures_krark_keep_lost_does_not_steal_the_sorcery() {
 #[test]
 fn s1_10_the_unchosen_creature_is_not_forwarded() {
     // Discriminates D's TargetOnly is_partition arm: reverting it forwards the
-    // complement (Bear A) instead of the selected Shroud Bear. Transfer is reach.
+    // complement to the handoff instead of the selected creature. The plain
+    // creature is picked here (s1_1 and s1_3 pick Shroud Bear), so the
+    // complement is the shroud one; the transfer is the reach guard.
     let mut game = setup(true, None);
     game.cast_to_creature_choice();
-    game.choose_shroud();
+    let plain = game.plain.unwrap();
+    let shroud = game.shroud.unwrap();
+    game.choose(plain);
     game.answer_opponent(P2, false, false);
-    game.assert_creatures(P2);
+    assert_eq!(game.runner.state().objects[&plain].controller, P2);
+    assert_eq!(game.runner.state().objects[&shroud].controller, P1);
 }
 
 #[test]

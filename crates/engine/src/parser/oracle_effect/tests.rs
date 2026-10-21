@@ -76550,6 +76550,7 @@ fn compound_choice_c1_creature_and_opponent_ast() {
         Some(ChooseImperativeAst::ObjectAndPlayer {
             object: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             player: ChoiceType::opponent(),
+            clause: "a creature you control and an opponent".to_string(),
         })
     );
     let mut ctx = ParseContext {
@@ -76582,6 +76583,7 @@ fn compound_choice_c2_artifact_and_player_ast() {
                 TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
             ),
             player: ChoiceType::player(),
+            clause: "an artifact you control and a player".to_string(),
         })
     );
 }
@@ -76624,13 +76626,21 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
     assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
     // A bare Effect cannot represent both instructions. The chain succeeds in
     // U-C4; this lower-level entry point must fail closed rather than lose one.
-    assert!(matches!(
+    let Effect::Unimplemented { name, description } =
         super::imperative::lower_choose_ast(ChooseImperativeAst::ObjectAndPlayer {
             object: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             player: ChoiceType::opponent(),
-        }),
-        Effect::Unimplemented { .. }
-    ));
+            clause: "a creature you control and an opponent".to_string(),
+        })
+    else {
+        panic!("expected the fail-closed marker");
+    };
+    assert_eq!(name, "compound_object_player_choice");
+    assert_eq!(
+        description.as_deref(),
+        Some("a creature you control and an opponent"),
+        "the marker carries the printed clause, not Debug-formatted AST"
+    );
 }
 
 /// Keep the coin-branch representation in one helper for the FlipCoins rebase.
@@ -76799,6 +76809,43 @@ fn compound_choice_c9_coin_branch_after_two_choices_reads_index_one() {
     );
     assert_attachment_chain_has_no_unimplemented(root);
     assert_attachment_chain_has_no_unimplemented(give);
+}
+
+/// SHAPE D: CR 608.2c, a player chosen INSIDE a coin branch is appended after the
+/// players chosen earlier in the resolution, so the branch's own "that player"
+/// reads index 1, not a restarted branch-local index 0. The same branch with no
+/// earlier choice still reads index 0 (reach guard for the counter, not a
+/// constant).
+#[test]
+fn compound_choice_d_branch_local_choice_follows_the_enclosing_choices() {
+    fn branch_draw_index(text: &str) -> (Option<u8>, bool) {
+        let head = parse_effect_chain(text, AbilityKind::Spell);
+        let flip = std::iter::successors(Some(&head), |node| node.sub_ability.as_deref())
+            .find(|node| matches!(node.effect.as_ref(), Effect::FlipCoin { .. }))
+            .expect("a flip instruction");
+        let branch = flip_lose_branch(flip);
+        let nodes: Vec<&AbilityDefinition> =
+            std::iter::successors(Some(branch), |node| node.sub_ability.as_deref()).collect();
+        let has_choose = nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Choose { .. }));
+        let index = nodes.iter().find_map(|node| match node.effect.as_ref() {
+            Effect::Draw { target, .. } => target.chosen_player_index(),
+            _ => None,
+        });
+        (index, has_choose)
+    }
+
+    let (after_one_choice, has_choose) = branch_draw_index(
+        "Choose a player. Flip a coin. If you lose the flip, choose a player to draw a card.",
+    );
+    assert!(has_choose, "reach: the branch makes its own player choice");
+    assert_eq!(after_one_choice, Some(1));
+
+    let (alone, has_choose) =
+        branch_draw_index("Flip a coin. If you lose the flip, choose a player to draw a card.");
+    assert!(has_choose, "reach: the branch makes its own player choice");
+    assert_eq!(alone, Some(0));
 }
 
 /// SHAPE U-C5: CR 608.2c, a player choice nested in the compound clause counts

@@ -1784,6 +1784,9 @@ pub(crate) enum ChooseImperativeAst {
     ObjectAndPlayer {
         object: TargetFilter,
         player: crate::types::ability::ChoiceType,
+        /// The printed object-and-player clause, kept so the bare-effect
+        /// fail-closed marker carries Oracle text like its siblings.
+        clause: String,
     },
 }
 
