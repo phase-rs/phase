@@ -5,8 +5,7 @@
  * The type declarations below are a DELIBERATE DUPLICATE of
  * `lobby-worker/src/directory.ts`, not an oversight. `client/tsconfig.app.json`
  * is `"include": ["src"]` and `lobby-worker/` is a separate package with its own
- * tsconfig and its own ambient Cloudflare types, so there is no import { DIRECTORY_VERSION } from "../generated/protocol-versions";
-import path from
+ * tsconfig and its own ambient Cloudflare types, so there is no import path from
  * here to there and creating one would drag those types into the client build.
  * `__tests__/serverDirectory.test.ts` is what keeps the duplication honest: it
  * reads the Worker's source text at test time and compares it field-for-field
@@ -20,6 +19,7 @@ import path from
 
 import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
+import { DIRECTORY_VERSION } from "../generated/protocol-versions";
 import { parseWebSocketUrl } from "./serverDetection";
 import { useMultiplayerStore, type LobbySource } from "../stores/multiplayerStore";
 

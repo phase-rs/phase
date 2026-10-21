@@ -76,8 +76,9 @@ fn is_record_name(name: &str) -> bool {
 }
 
 pub(crate) fn load_versions(root: &Path) -> Result<Versions, Box<dyn std::error::Error>> {
-    let mut versions: Versions =
+    let baseline: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("protocol/baseline.json"))?)?;
+    let mut versions: Versions = serde_json::from_value(serde_json::Value::Object(baseline))?;
     if versions.minimum_lobby > versions.lobby {
         return Err("minimumLobby must not exceed lobby".into());
     }
@@ -97,7 +98,9 @@ pub(crate) fn load_versions(root: &Path) -> Result<Versions, Box<dyn std::error:
         if !is_record_name(name) {
             return Err(format!("{name}: expected a lowercase UUID v4 .json filename").into());
         }
-        let change: Change = serde_json::from_slice(&fs::read(entry.path())?)?;
+        let record: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&fs::read(entry.path())?)?;
+        let change: Change = serde_json::from_value(serde_json::Value::Object(record))?;
         if reason_is_blank(&change.reason)
             || change.surfaces.is_empty()
             || change.surfaces.windows(2).any(|pair| pair[0] >= pair[1])
@@ -202,6 +205,30 @@ mod tests {
         );
         fs::remove_file(fixture.0.join("protocol/changes").join(SECOND)).unwrap();
         assert_eq!(load_versions(&fixture.0).unwrap().full, 11);
+    }
+
+    #[test]
+    fn registry_requires_object_baseline() {
+        let fixture = Registry::new();
+        let expected = load_versions(&fixture.0).unwrap();
+        fixture.baseline("[10,20,3,4,5,2]");
+        assert!(load_versions(&fixture.0).is_err());
+        fixture.baseline(
+            r#"{"full":10,"wire":20,"lobby":3,"draft":4,"directory":5,"minimumLobby":2}"#,
+        );
+        assert_eq!(load_versions(&fixture.0).unwrap(), expected);
+    }
+
+    #[test]
+    fn registry_requires_object_record() {
+        let fixture = Registry::new();
+        fixture.record(FIRST, r#"{"surfaces":["full"],"reason":"shape"}"#);
+        let expected = load_versions(&fixture.0).unwrap();
+        assert_eq!(expected.full, 11);
+        fixture.record(FIRST, r#"[["full"],"shape"]"#);
+        assert!(load_versions(&fixture.0).is_err());
+        fixture.record(FIRST, r#"{"surfaces":["full"],"reason":"shape"}"#);
+        assert_eq!(load_versions(&fixture.0).unwrap(), expected);
     }
 
     #[test]
