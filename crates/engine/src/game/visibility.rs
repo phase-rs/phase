@@ -294,6 +294,18 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
                 branch.clear_embedded_return_result_processes();
             }
         }
+        WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    enters_with_modifications,
+                    ..
+                },
+            ..
+        } => {
+            for modification in &mut enters_with_modifications.modifications {
+                modification.clear_embedded_return_result_processes();
+            }
+        }
         WaitingFor::UnlessPayment { cost, .. } => cost.clear_embedded_return_result_processes(),
         WaitingFor::UnlessPaymentChooseCost {
             costs,
@@ -3090,9 +3102,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     face_policy: face_policy.clone(),
                     zones: zones.clone(),
                     graveyard_replacement: graveyard_replacement.clone(),
-                    // CR 608.2c: the gains-modifications rider is public (the
-                    // resolving grant is public, CR 601.2 + CR 400.2) — pass it
-                    // through unredacted, exactly like the destination rider.
+                    // The rider remains public; the final typed redaction pass
+                    // clears private runtime ownership inside its nested bodies.
                     enters_with_modifications: enters_with_modifications.clone(),
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
@@ -3453,6 +3464,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // above (`PayCost`, `CostTypeChoice`, ...), which re-clone the authoritative prompt and
     // would otherwise restore an unredacted ability.
     redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
+    redact_instruction_result_owner(&mut filtered.waiting_for);
     redact_paused_ability_payment(&mut filtered, &hidden_zone_change_ids);
 
     // This is the single display-identity authority sent to every client. The
@@ -4557,61 +4569,46 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
 /// members' mana values zeroed.
 fn redact_raw_result_trigger(definition: &mut crate::types::ability::TriggerDefinition) {
-    let _ = crate::types::ability_visit::effects_mut::visit_trigger(definition, &mut |effect| {
-        effect.clear_raw_return_result_processes();
-        std::ops::ControlFlow::Continue(())
-    });
-    let _ = crate::types::ability_visit::nodes_mut::visit_trigger(
-        definition,
-        &mut crate::types::ability::clear_registered_result_processes,
-    );
+    definition.clear_embedded_return_result_processes();
 }
 
 fn redact_raw_result_static(definition: &mut crate::types::ability::StaticDefinition) {
-    let _ = crate::types::ability_visit::effects_mut::visit_static(definition, &mut |effect| {
-        effect.clear_raw_return_result_processes();
-        std::ops::ControlFlow::Continue(())
-    });
-    let _ = crate::types::ability_visit::nodes_mut::visit_static(
-        definition,
-        &mut crate::types::ability::clear_registered_result_processes,
-    );
+    definition.clear_embedded_return_result_processes();
 }
 
 fn redact_raw_result_replacement(definition: &mut crate::types::ability::ReplacementDefinition) {
-    let _ =
-        crate::types::ability_visit::effects_mut::visit_replacement(definition, &mut |effect| {
-            effect.clear_raw_return_result_processes();
-            std::ops::ControlFlow::Continue(())
-        });
-    let _ = crate::types::ability_visit::nodes_mut::visit_replacement(
-        definition,
-        &mut crate::types::ability::clear_registered_result_processes,
-    );
-    if let Some(body) = &mut definition.runtime_execute {
-        body.clear_return_result_process_recursive();
-    }
+    definition.clear_embedded_return_result_processes();
 }
 
 fn redact_raw_result_copiable(values: &mut crate::types::ability::CopiableValues) {
-    let _ =
-        crate::types::ability_visit::effects_mut::visit_copiable_values(values, &mut |effect| {
-            effect.clear_raw_return_result_processes();
-            std::ops::ControlFlow::Continue(())
-        });
-    let _ = crate::types::ability_visit::nodes_mut::visit_copiable_values(
-        values,
-        &mut crate::types::ability::clear_registered_result_processes,
-    );
-    for replacement in Arc::make_mut(&mut values.replacement_definitions) {
-        redact_raw_result_replacement(replacement);
-    }
+    values.clear_embedded_return_result_processes();
 }
 
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
-    // Canonical templates can themselves contain Epic's raw runtime snapshot.
-    // Apply the same typed effect walk before exposing their public card data.
+    // Canonical templates and retained continuous grants can contain raw snapshots.
+    // Clear only the projected typed payload; authoritative saves retain their stamps.
+    for effect in &mut state.transient_continuous_effects {
+        for modification in &mut effect.modifications {
+            modification.clear_embedded_return_result_processes();
+        }
+    }
     for (_, object) in state.objects.iter_mut() {
+        for keyword in object
+            .keywords
+            .iter_mut()
+            .chain(&mut object.base_keywords)
+            .chain(&mut object.cast_spell_keywords)
+        {
+            keyword.clear_embedded_return_result_processes();
+        }
+        if let Some(cost) = &mut object.additional_cost {
+            cost.clear_embedded_return_result_processes();
+        }
+        for option in &mut object.casting_options {
+            if let Some(cost) = &mut option.cost {
+                cost.clear_embedded_return_result_processes();
+            }
+        }
         for modification in &mut object.perpetual_mods {
             modification.clear_embedded_return_result_processes();
         }
@@ -4646,23 +4643,46 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
             redact_raw_result_replacement(definition);
         }
         if let Some(face) = &mut object.back_face {
-            for definition in &mut face.abilities {
+            face.clear_embedded_return_result_processes();
+        }
+        if let Some(faces) = &mut object.specialize_faces {
+            for face in faces.values_mut() {
+                face.clear_embedded_return_result_processes();
+            }
+        }
+        if let Some(face) = &mut object.copied_prepare_face {
+            Arc::make_mut(face).clear_embedded_return_result_processes();
+        }
+        if let Some(cleave) = &mut object.cleave_form {
+            for definition in Arc::make_mut(&mut cleave.abilities)
+                .iter_mut()
+                .chain(Arc::make_mut(&mut cleave.base_abilities).iter_mut())
+            {
                 definition.clear_embedded_return_result_processes();
             }
-            for index in 0..face.trigger_definitions.len() {
-                if let Some(definition) = face.trigger_definitions.get_mut(index) {
-                    redact_raw_result_trigger(definition);
+            for index in 0..cleave.triggers.len() {
+                if let Some(entry) = cleave.triggers.get_mut(index) {
+                    redact_raw_result_trigger(&mut entry.definition);
                 }
             }
-            for index in 0..face.static_definitions.len() {
-                if let Some(definition) = face.static_definitions.get_mut(index) {
+            for definition in Arc::make_mut(&mut cleave.base_triggers) {
+                redact_raw_result_trigger(definition);
+            }
+            for index in 0..cleave.statics.len() {
+                if let Some(definition) = cleave.statics.get_mut(index) {
                     redact_raw_result_static(definition);
                 }
             }
-            for index in 0..face.replacement_definitions.len() {
-                if let Some(definition) = face.replacement_definitions.get_mut(index) {
+            for definition in Arc::make_mut(&mut cleave.base_statics) {
+                redact_raw_result_static(definition);
+            }
+            for index in 0..cleave.replacements.len() {
+                if let Some(definition) = cleave.replacements.get_mut(index) {
                     redact_raw_result_replacement(definition);
                 }
+            }
+            for definition in Arc::make_mut(&mut cleave.base_replacements) {
+                redact_raw_result_replacement(definition);
             }
         }
         if let Some(cleave) = &mut object.cleave_variant {

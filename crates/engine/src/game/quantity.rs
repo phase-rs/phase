@@ -5479,7 +5479,9 @@ fn resolve_ref(
                 }
             }
         }
-        QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller, ctx),
+        QuantityRef::PlayerCount { filter } => {
+            resolve_player_count_with_ability(state, filter, controller, ctx, ability)
+        }
         // CR 120.1 + CR 603.2c + CR 608.2c: "for each opponent dealt damage"
         // on a batched damage trigger counts DISTINCT damaged players carried by
         // the resolving trigger event batch. This intentionally does not read
@@ -10188,6 +10190,16 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     ctx: QuantityContext,
 ) -> i32 {
+    resolve_player_count_with_ability(state, filter, controller, ctx, None)
+}
+
+fn resolve_player_count_with_ability(
+    state: &GameState,
+    filter: &PlayerFilter,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    ability: Option<&ResolvedAbility>,
+) -> i32 {
     let source_id = ctx.source;
     // CR 104.3: the generic player loop below excludes eliminated players
     // (outside its life-history filters), so count them on a dedicated path.
@@ -10437,12 +10449,22 @@ pub(crate) fn resolve_player_count(
                             ) && {
                                 let mut candidate_ctx = ctx.clone();
                                 candidate_ctx.scoped_player = Some(p.id);
-                                let threshold = resolve_quantity_with_ctx(
-                                    state,
-                                    value,
-                                    controller,
-                                    candidate_ctx,
-                                );
+                                // Keep the actual executable when this count is
+                                // evaluated by a bound scalar/filter reader.
+                                // Source-only callers retain their original context.
+                                let threshold = match ability {
+                                    Some(ability) => {
+                                        let mut candidate = ability.clone();
+                                        candidate.scoped_player = Some(p.id);
+                                        resolve_quantity_with_targets(state, value, &candidate)
+                                    }
+                                    None => resolve_quantity_with_ctx(
+                                        state,
+                                        value,
+                                        controller,
+                                        candidate_ctx,
+                                    ),
+                                };
                                 crate::game::effects::candidate_player_scalar_with_state(
                                     state, p, controller, attr,
                                 )

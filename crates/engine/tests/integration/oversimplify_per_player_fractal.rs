@@ -11773,3 +11773,838 @@ fn departure_source_only_object_predicate_refuses_before_root_and_ordinary_filte
         }
     }
 }
+
+#[test]
+fn departure_five_contextual_source_only_thresholds_refuse_before_the_complete_root() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::game_state::WaitingFor;
+    for owner in 0..9 {
+        for recursive in [false, true] {
+            for mode in 0..3 {
+                for empty in [false, true] {
+                    let mut scenario = GameScenario::new();
+                    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+                    let retained = scenario
+                        .add_artifact(P0, "Supplemental player predicate witness")
+                        .id();
+                    let victims = if empty {
+                        vec![]
+                    } else {
+                        vec![
+                            scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+                            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                        ]
+                    };
+                    let Effect::GainLife { mut amount, .. } =
+                        *departure_gain_definition(7, P0).effect
+                    else {
+                        unreachable!()
+                    };
+                    if mode == 1 {
+                        let QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeAggregate { source, .. },
+                        } = &mut amount
+                        else {
+                            unreachable!()
+                        };
+                        *source = ZoneChangeRecordSource::ThisTurn;
+                    } else if mode == 2 {
+                        amount = QuantityExpr::Fixed { value: 3 };
+                    }
+                    if recursive {
+                        amount = QuantityExpr::Sum {
+                            exprs: vec![
+                                QuantityExpr::Fixed { value: 0 },
+                                QuantityExpr::Offset {
+                                    inner: Box::new(amount),
+                                    offset: 0,
+                                },
+                            ],
+                        };
+                    }
+                    let mut filter = PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Controller,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(amount.clone()),
+                    };
+                    if recursive {
+                        filter = PlayerFilter::AnyOf {
+                            filters: vec![PlayerFilter::AllExcept {
+                                exclude: Box::new(PlayerFilter::AllExcept {
+                                    exclude: Box::new(filter),
+                                }),
+                            }],
+                        };
+                    }
+                    let effect = match owner {
+                        0 | 4 => Effect::GainLife {
+                            player: TargetFilter::Controller,
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        1 => Effect::StartYourEngines {
+                            player_scope: filter.clone(),
+                        },
+                        2 => Effect::DamageEachPlayer {
+                            player_filter: filter.clone(),
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        3 => Effect::DamageAll {
+                            target: TargetFilter::None,
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player_filter: Some(filter.clone()),
+                            damage_source: None,
+                        },
+                        5 => Effect::GainLife {
+                            player: TargetFilter::Controller,
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextPlayerCount {
+                                    filter: filter.clone(),
+                                },
+                            },
+                        },
+                        6 | 7 => Effect::GainLife {
+                            player: TargetFilter::Controller,
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::PlayerCount {
+                                    filter: if owner == 6 {
+                                        PlayerFilter::AnyOf {
+                                            filters: vec![filter.clone()],
+                                        }
+                                    } else {
+                                        PlayerFilter::AllExcept {
+                                            exclude: Box::new(PlayerFilter::AllExcept {
+                                                exclude: Box::new(filter.clone()),
+                                            }),
+                                        }
+                                    },
+                                },
+                            },
+                        },
+                        8 => Effect::GainLife {
+                            player: TargetFilter::Controller,
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::And {
+                                        filters: vec![
+                                            TargetFilter::SpecificObject { id: retained },
+                                            TargetFilter::Typed({
+                                                let mut typed = TypedFilter::default();
+                                                typed.properties.push(
+                                                    FilterProp::ControllerMatches {
+                                                        player: Box::new(filter.clone()),
+                                                    },
+                                                );
+                                                typed
+                                            }),
+                                        ],
+                                    },
+                                },
+                            },
+                        },
+                        _ => unreachable!(),
+                    };
+                    let mut body = AbilityDefinition::new(AbilityKind::Spell, effect);
+                    if owner == 0 {
+                        body.player_scope = Some(filter);
+                    }
+                    if owner == 4 {
+                        let mut condition = AbilityCondition::PreviousEffectAmount {
+                            comparator: Comparator::GT,
+                            rhs: QuantityExpr::Offset {
+                                inner: Box::new(amount),
+                                offset: -100,
+                            },
+                            channel: DamageChannel::Total,
+                        };
+                        if recursive {
+                            condition = AbilityCondition::And {
+                                conditions: vec![AbilityCondition::Or {
+                                    conditions: vec![AbilityCondition::Not {
+                                        condition: Box::new(AbilityCondition::Not {
+                                            condition: Box::new(condition),
+                                        }),
+                                    }],
+                                }],
+                            };
+                        }
+                        body.condition = Some(condition);
+                    }
+                    let mut root = departure_exile_definition(7);
+                    let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                        unreachable!()
+                    };
+                    *target = TargetFilter::Or {
+                        filters: victims
+                            .iter()
+                            .map(|id| TargetFilter::SpecificObject { id: *id })
+                            .collect(),
+                    };
+                    root.sub_ability = Some(Box::new(body));
+                    let spell = scenario
+                        .add_spell_to_hand(P0, "Supplemental contextual threshold", false)
+                        .with_ability_definition(root.clone())
+                        .id();
+                    let mut runner = scenario.build();
+                    if mode == 0 {
+                        let mut state = runner.state().clone();
+                        let before = serde_json::to_value(&state).unwrap();
+                        let mut events = vec![];
+                        let error = resolve_ability_chain(
+                            &mut state,
+                            &build_resolved_from_def(&root, spell, P0),
+                            &mut events,
+                        )
+                        .unwrap_err();
+                        assert!(
+                            format!("{error:?}").contains("executable context"),
+                            "owner {owner}, recursive {recursive}: {error:?}"
+                        );
+                        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                        assert!(events.is_empty());
+                    }
+                    runner.cast(spell).resolve();
+                    for victim in &victims {
+                        assert_eq!(
+                            runner.state().objects[victim].zone,
+                            if mode == 0 {
+                                Zone::Battlefield
+                            } else {
+                                Zone::Exile
+                            }
+                        );
+                    }
+                    if mode == 0 {
+                        assert_eq!(runner.state().next_return_result_process_id, 1);
+                    } else if owner == 1 {
+                        assert_eq!(runner.state().players[0].speed, Some(1));
+                    }
+                    // No batched damage trigger exists in this spell fixture; EventContextPlayerCount's ordinary no-event value remains zero.
+                    let gain = if mode == 0 || owner == 1 || owner == 5 {
+                        0
+                    } else if owner == 2 || owner == 3 {
+                        -1
+                    } else {
+                        1
+                    };
+                    departure_assert_program_complete(&runner, spell, gain, 0);
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_bound_player_attribute_filters_and_player_counts_still_read_the_actual_process() {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::mana::ManaCost;
+    for empty in [false, true] {
+        for count in [false, true] {
+            let (runner, spell, subjects) =
+                departure_public_program_runner(false, empty, 2, |scenario| {
+                    let retained = scenario
+                        .add_artifact(P0, "Supplemental bound player threshold")
+                        .with_mana_cost(ManaCost::generic(1))
+                        .id();
+                    let Effect::GainLife { amount, .. } = *departure_gain_definition(7, P0).effect
+                    else {
+                        unreachable!()
+                    };
+                    let filter = PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Controller,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        }),
+                        comparator: Comparator::EQ,
+                        value: Box::new(QuantityExpr::Sum {
+                            exprs: vec![QuantityExpr::Fixed { value: 20 }, amount],
+                        }),
+                    };
+                    let quantity = QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCount { filter },
+                    };
+                    let body = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: if count {
+                            quantity
+                        } else {
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::And {
+                                        filters: vec![
+                                            TargetFilter::SpecificObject { id: retained },
+                                            TargetFilter::Typed({
+                                                let mut typed = TypedFilter::default();
+                                                typed.properties.push(FilterProp::Cmc {
+                                                    comparator: Comparator::EQ,
+                                                    value: quantity,
+                                                });
+                                                typed
+                                            }),
+                                        ],
+                                    },
+                                },
+                            }
+                        },
+                    };
+                    (
+                        AbilityDefinition::new(AbilityKind::Spell, body),
+                        vec![retained],
+                    )
+                });
+            departure_assert_program_complete(&runner, spell, if empty { 1 } else { 0 }, 0);
+            assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Battlefield);
+        }
+    }
+}
+
+#[test]
+fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_runs_its_own_later_process(
+) {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::*;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{ReturnResultProcessId, WaitingFor};
+    use engine::types::replacements::ReplacementEvent;
+    for imported in [false, true] {
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+            let victims = if empty {
+                vec![]
+            } else {
+                vec![
+                    scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
+                    scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+                ]
+            };
+            let runtime_source = scenario
+                .add_artifact(P0, "Supplemental independent runtime source")
+                .id();
+            let body = if imported {
+                departure_gain_definition(7, P0)
+            } else {
+                departure_selected_local_body(true, false)
+            };
+            let mut runtime = build_resolved_from_def(&body, runtime_source, P0);
+            runtime.return_result_process = Some(ReturnResultProcessId(901));
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+            replacement.shield_kind = ShieldKind::Prevention {
+                amount: PreventionAmount::All,
+            };
+            replacement.runtime_execute = Some(Box::new(runtime));
+            let mut root = departure_exile_definition(7);
+            let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
+                unreachable!()
+            };
+            *target = TargetFilter::Or {
+                filters: victims
+                    .iter()
+                    .map(|id| TargetFilter::SpecificObject { id: *id })
+                    .collect(),
+            };
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(replacement),
+                    target: TargetFilter::None,
+                },
+            )));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Supplemental raw runtime installer", false)
+                .with_ability_definition(root.clone())
+                .id();
+            let damage = scenario
+                .add_spell_to_hand(P0, "Supplemental matching later damage", false)
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                        damage_source: None,
+                        excess: None,
+                    },
+                ))
+                .id();
+            let mut runner = scenario.build();
+            if imported {
+                let mut state = runner.state().clone();
+                let before = serde_json::to_value(&state).unwrap();
+                let mut events = vec![];
+                let error = resolve_ability_chain(
+                    &mut state,
+                    &build_resolved_from_def(&root, spell, P0),
+                    &mut events,
+                )
+                .unwrap_err();
+                assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+                assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                assert!(events.is_empty());
+            }
+            runner.cast(spell).resolve();
+            departure_assert_program_complete(&runner, spell, 0, 0);
+            for victim in &victims {
+                assert_eq!(
+                    runner.state().objects[victim].zone,
+                    if imported {
+                        Zone::Battlefield
+                    } else {
+                        Zone::Exile
+                    }
+                );
+            }
+            if imported {
+                assert!(runner.state().pending_damage_replacements.is_empty());
+                assert_eq!(runner.state().next_return_result_process_id, 1);
+                continue;
+            }
+            let installed = runner.state().pending_damage_replacements.last().unwrap();
+            assert!(
+                installed.runtime_execute.is_some(),
+                "actual AddTargetReplacement installation retained the complete independent body"
+            );
+            let saved = serde_json::to_value(runner.state()).unwrap();
+            *runner.state_mut() = serde_json::from_value(saved).unwrap();
+            let next_process = runner.state().next_return_result_process_id;
+            runner.cast(damage).resolve();
+            let WaitingFor::ChooseOneOfBranch {
+                player,
+                branches,
+                expected_return_result_process,
+                return_result_occurrence,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("an actual matching damage event executes the installed runtime body");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(branches.len(), 2);
+            let process = expected_return_result_process.unwrap();
+            assert_ne!(process, ReturnResultProcessId(901));
+            assert!(process.0 >= next_process);
+            assert_eq!(
+                runner.state().return_result_frames[&return_result_occurrence.unwrap()].process,
+                Some(process)
+            );
+            let saved = serde_json::to_value(runner.state()).unwrap();
+            *runner.state_mut() = serde_json::from_value(saved).unwrap();
+            departure_assert_private_result_views(runner.state());
+            runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+            departure_assert_program_complete(&runner, spell, 3, 0);
+            assert_eq!(runner.state().objects[&damage].zone, Zone::Graveyard);
+        }
+    }
+}
+
+fn departure_retained_epic_definition(mode: u8) -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::*;
+    let AbilityCost::EffectCost { effect } = departure_independent_epic_cost(mode) else {
+        unreachable!()
+    };
+    AbilityDefinition::new(AbilityKind::Activated, *effect)
+}
+
+fn departure_retained_epic_values(mode: u8) -> engine::types::ability::CopiableValues {
+    use engine::types::ability::*;
+    use std::sync::Arc;
+    CopiableValues {
+        name: "Supplemental public copied template".into(),
+        mana_cost: Default::default(),
+        color: vec![],
+        card_types: Default::default(),
+        power: None,
+        toughness: None,
+        loyalty: None,
+        printed_loyalty: None,
+        keywords: vec![],
+        abilities: Arc::new(vec![departure_retained_epic_definition(mode)]),
+        trigger_definitions: Arc::new(vec![]),
+        trigger_printed_origins: Arc::new(vec![]),
+        replacement_definitions: Arc::new(vec![]),
+        static_definitions: Arc::new(vec![]),
+        room_halves: None,
+        prepare_face: None,
+        name_origin: Default::default(),
+    }
+}
+
+#[test]
+fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms_before_copying() {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
+    for arm in 0..5 {
+        for mode in [0, 2] {
+            let (mut runner, spell, subjects) =
+                departure_public_program_runner(false, false, 2, |scenario| {
+                    let recipient = scenario
+                        .add_artifact(P0, "Supplemental continuous recipient")
+                        .id();
+                    let definition = departure_retained_epic_definition(mode);
+                    let modification = match arm {
+                        0 => ContinuousModification::GrantAbility {
+                            definition: Box::new(definition),
+                        },
+                        1 => ContinuousModification::GrantTrigger {
+                            trigger: Box::new(
+                                TriggerDefinition::new(TriggerMode::SpellCast).execute(definition),
+                            ),
+                        },
+                        2 => {
+                            let mut replacement =
+                                ReplacementDefinition::new(ReplacementEvent::DamageDone);
+                            replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
+                                &definition,
+                                recipient,
+                                P0,
+                            )));
+                            ContinuousModification::GrantReplacement {
+                                replacement: Box::new(replacement),
+                            }
+                        }
+                        3 => ContinuousModification::GrantStaticAbility {
+                            definition: Box::new(
+                                StaticDefinition::new(StaticMode::Continuous)
+                                    .affected(TargetFilter::SelfRef)
+                                    .modifications(vec![ContinuousModification::GrantAbility {
+                                        definition: Box::new(definition),
+                                    }]),
+                            ),
+                        },
+                        4 => ContinuousModification::CopyValues {
+                            values: Box::new(departure_retained_epic_values(mode)),
+                            display_source: Default::default(),
+                            printed_ref: None,
+                            token_image_ref: None,
+                            token_art: None,
+                        },
+                        _ => unreachable!(),
+                    };
+                    let body = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GenericEffect {
+                            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                                .affected(TargetFilter::SpecificObject { id: recipient })
+                                .modifications(vec![modification])],
+                            duration: Some(Duration::UntilEndOfTurn),
+                            target: None,
+                            end_cost: None,
+                        },
+                    );
+                    (body, vec![recipient])
+                });
+            departure_assert_program_complete(&runner, spell, 0, 0);
+            assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().transient_continuous_effects.len(),
+                1,
+                "actual GenericEffect installed its retained payload"
+            );
+            let authoritative = serde_json::to_value(runner.state()).unwrap();
+            let retained = &authoritative["transient_continuous_effects"];
+            assert!(retained
+                .to_string()
+                .contains("\"return_result_process\":901"));
+            *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+            departure_assert_private_result_views(runner.state());
+            for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+                let projected = match viewer {
+                    Some(seat) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), seat)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                let plain = serde_json::to_value(&projected).unwrap();
+                let wire =
+                    serde_json::to_value(ClientGameStateRef::wrap(runner.state(), viewer)).unwrap();
+                for public in [&plain, &wire["state"]] {
+                    let tce = &public["transient_continuous_effects"];
+                    assert_eq!(tce.as_array().unwrap().len(), 1);
+                    for field in [
+                        "id",
+                        "source_id",
+                        "controller",
+                        "timestamp",
+                        "duration",
+                        "affected",
+                        "affected_recipient",
+                    ] {
+                        assert_eq!(
+                            tce[0][field], retained[0][field],
+                            "public continuous-effect spine: {field}"
+                        );
+                    }
+                    assert_eq!(
+                        tce[0]["modifications"][0]["type"],
+                        retained[0]["modifications"][0]["type"]
+                    );
+                    assert_eq!(tce.to_string().matches("EpicCopy").count(), retained.to_string().matches("EpicCopy").count(), "redaction preserves the executable template rather than dropping the public rider");
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(runner.state()).unwrap(),
+                authoritative,
+                "all projections leave authoritative P901 intact before any copy execution"
+            );
+        }
+    }
+}
+
+fn departure_runtime_replacement_epic_cost() -> engine::types::ability::AbilityCost {
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::replacements::ReplacementEvent;
+    let definition = departure_retained_epic_definition(0);
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+    replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
+        &definition,
+        ObjectId(0),
+        P0,
+    )));
+    AbilityCost::EffectCost {
+        effect: Box::new(Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
+        }),
+    }
+}
+
+#[test]
+fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_runtime_epic() {
+    use engine::game::game_object::CleaveFormState;
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::keywords::*;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
+    use std::sync::Arc;
+    for additional in 0..4 {
+        let (mut runner, spell, subjects) =
+            departure_public_program_runner(false, false, 2, |scenario| {
+                (
+                    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                    vec![scenario
+                        .add_artifact(P0, "Supplemental retained public object")
+                        .id()],
+                )
+            });
+        departure_assert_program_complete(&runner, spell, 0, 0);
+        let cost = departure_runtime_replacement_epic_cost();
+        let keywords = vec![
+            Keyword::CumulativeUpkeep(cost.clone()),
+            Keyword::Escalate(cost.clone()),
+            Keyword::Bestow(BestowCost::NonMana(cost.clone())),
+            Keyword::Embalm(EmbalmCost::NonMana(cost.clone())),
+            Keyword::Eternalize(EternalizeCost::NonMana(cost.clone())),
+            Keyword::Cycling(CyclingCost::NonMana(cost.clone())),
+            Keyword::Flashback(FlashbackCost::NonMana(cost.clone())),
+            Keyword::Escape(EscapeCost::NonMana(cost.clone())),
+            Keyword::Evoke(EvokeCost::NonMana(cost.clone())),
+            Keyword::Blitz(BlitzCost::NonMana(cost.clone())),
+            Keyword::Buyback(BuybackCost::NonMana(cost.clone())),
+            Keyword::Echo(EchoCost::NonMana(cost.clone())),
+        ];
+        let additional_cost = match additional {
+            0 => AdditionalCost::Optional {
+                cost: cost.clone(),
+                repeatability: AdditionalCostRepeatability::Once,
+            },
+            1 => AdditionalCost::Kicker {
+                costs: vec![cost.clone(), cost.clone()],
+                repeatability: AdditionalCostRepeatability::Once,
+            },
+            2 => AdditionalCost::Choice(cost.clone(), cost.clone()),
+            3 => AdditionalCost::Required(cost.clone()),
+            _ => unreachable!(),
+        };
+        let definition = departure_retained_epic_definition(0);
+        let trigger = TriggerDefinition::new(TriggerMode::SpellCast).execute(definition.clone());
+        let static_definition = StaticDefinition::new(StaticMode::Continuous).modifications(vec![
+            ContinuousModification::GrantAbility {
+                definition: Box::new(definition.clone()),
+            },
+        ]);
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
+            &definition,
+            subjects[0],
+            P0,
+        )));
+        // Supplemental typed retained faces/costs on a real public object after
+        // a paid producer's retirement; no natural face-switch/payment claim.
+        let object = runner.state_mut().objects.get_mut(&subjects[0]).unwrap();
+        object.keywords = keywords.clone();
+        object.base_keywords = keywords.clone();
+        object.cast_spell_keywords = keywords.clone();
+        object.additional_cost = Some(additional_cost.clone());
+        object.casting_options = vec![SpellCastingOption::alternative_cost(cost.clone())];
+        object.abilities = Arc::new(vec![definition.clone()]);
+        object.base_abilities = object.abilities.clone();
+        object.push_printed_trigger(trigger.clone());
+        object.static_definitions.push(static_definition.clone());
+        object.base_static_definitions = Arc::new(vec![static_definition.clone()]);
+        object.replacement_definitions.push(replacement.clone());
+        object.base_replacement_definitions = Arc::new(vec![replacement.clone()]);
+        object
+            .perpetual_mods
+            .push(PerpetualModification::GrantAbility {
+                modifications: vec![PerpetualGrantModification::AddKeyword {
+                    keyword: keywords[0].clone(),
+                }],
+            });
+        let mut face = engine::game::printed_cards::snapshot_object_face(object);
+        face.name = "Supplemental public stored face".into();
+        face.keywords = keywords.clone();
+        face.additional_cost = Some(additional_cost);
+        face.casting_options = vec![SpellCastingOption::alternative_cost(cost)];
+        object.back_face = Some(face.clone());
+        object.specialize_faces = Some(
+            [(engine::types::mana::ManaColor::Green, face.clone())]
+                .into_iter()
+                .collect(),
+        );
+        let mut prepare_face = face.clone();
+        prepare_face.layout_kind = Some(engine::types::card::LayoutKind::Prepare);
+        object.copied_prepare_face = Some(Arc::new(prepare_face.clone()));
+        object.cleave_form = Some(CleaveFormState {
+            abilities: object.abilities.clone(),
+            triggers: object.trigger_definitions.clone(),
+            statics: object.static_definitions.clone(),
+            replacements: object.replacement_definitions.clone(),
+            base_abilities: object.base_abilities.clone(),
+            base_triggers: object.base_trigger_definitions.clone(),
+            base_trigger_printed_origins: object.base_trigger_printed_origins.clone(),
+            trigger_base_set_instance: object.trigger_base_set_instance,
+            next_trigger_base_set_instance: object.next_trigger_base_set_instance,
+            base_statics: object.base_static_definitions.clone(),
+            base_replacements: object.base_replacement_definitions.clone(),
+        });
+        let mut values = departure_retained_epic_values(0);
+        values.prepare_face = Some(Arc::new(prepare_face));
+        values.keywords = keywords;
+        runner
+            .state_mut()
+            .lki_copiable_values
+            .insert(subjects[0], values.clone());
+        let incarnation = runner.state().objects[&subjects[0]].incarnation;
+        runner
+            .state_mut()
+            .lki_copiable_values_by_incarnation
+            .entry(subjects[0])
+            .or_default()
+            .insert(incarnation, values);
+        let authoritative = serde_json::to_value(runner.state()).unwrap();
+        assert!(authoritative
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+        departure_assert_private_result_views(runner.state());
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projected = match viewer {
+                Some(seat) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), seat)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            let public = &projected.objects[&subjects[0]];
+            assert_eq!(public.name, runner.state().objects[&subjects[0]].name);
+            assert_eq!(public.keywords.len(), 12);
+            assert_eq!(public.base_keywords.len(), 12);
+            assert_eq!(public.cast_spell_keywords.len(), 12);
+            assert!(public.additional_cost.is_some());
+            assert_eq!(public.casting_options.len(), 1);
+            assert_eq!(
+                public.back_face.as_ref().unwrap().name,
+                "Supplemental public stored face"
+            );
+            assert_eq!(public.specialize_faces.as_ref().unwrap().len(), 1);
+            assert!(public.cleave_form.is_some());
+            assert!(public.copied_prepare_face.is_some());
+            assert!(projected.lki_copiable_values[&subjects[0]]
+                .prepare_face
+                .is_some());
+        }
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+    }
+}
+
+#[test]
+fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_epic_authority() {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::scenario::P0;
+    use engine::types::ability::*;
+    use engine::types::game_state::{CastOfferKind, WaitingFor};
+    let (mut runner, spell, _) = departure_public_program_runner(false, false, 2, |_| {
+        (
+            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+            vec![],
+        )
+    });
+    departure_assert_program_complete(&runner, spell, 0, 0);
+    // Supplemental typed public permission custody; this does not claim that
+    // a new Oracle source naturally emitted this rider.
+    runner.state_mut().waiting_for = WaitingFor::CastOffer {
+        player: P0,
+        kind: CastOfferKind::FreeCastWindow {
+            candidates: vec![spell],
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(6),
+            face_policy: ResolutionCastFacePolicy::new(TargetFilter::Any, spell, P0, None),
+            zones: vec![Zone::Graveyard],
+            graveyard_replacement: None,
+            member_pool: vec![spell],
+            enters_with_modifications: PendingEntersModifications {
+                modifications: vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(departure_retained_epic_definition(0)),
+                }],
+                cast_filter: None,
+            },
+        },
+    };
+    let authoritative = serde_json::to_value(runner.state()).unwrap();
+    assert!(authoritative
+        .to_string()
+        .contains("\"return_result_process\":901"));
+    *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
+    departure_assert_private_result_views(runner.state());
+    for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(runner.state(), viewer)).unwrap();
+        let WaitingFor::CastOffer {
+            player,
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    enters_with_modifications,
+                    remaining_casts,
+                    remaining_mv_budget,
+                    ..
+                },
+        } = match viewer {
+            Some(seat) => engine::game::visibility::filter_state_for_viewer(runner.state(), seat),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        }
+        .waiting_for
+        else {
+            panic!("public permission remains available");
+        };
+        assert_eq!(player, P0);
+        assert_eq!(remaining_casts, Some(2));
+        assert_eq!(remaining_mv_budget, Some(6));
+        assert_eq!(enters_with_modifications.modifications.len(), 1);
+        assert!(wire.to_string().contains("EpicCopy"));
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
+}

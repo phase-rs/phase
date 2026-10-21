@@ -10896,7 +10896,7 @@ PlayerFilter::ControlsCount { filter, count, .. } => {
     if $ordinary { filter.$nested(f); count.$expr(f); }
     else { filter.$all_nested(f); count.$all_expr(f); }
 },
-PlayerFilter::PlayerAttribute { attr, value, .. } => { if $ordinary { f(attr); } attr.$nested(f); value.$expr(f); },
+PlayerFilter::PlayerAttribute { attr, value, .. } => { if $ordinary { f(attr); } attr.$nested(f); if $ordinary { value.$expr(f); } else { value.$all_expr(f); } },
 PlayerFilter::AnyOf { filters, .. } => { for value in filters { value.$nested(f); } },
 PlayerFilter::TrackedSetPossessor { filter, .. } => { filter.$nested(f); },
 PlayerFilter::Controller |
@@ -10952,7 +10952,18 @@ QuantityRef::StartingLifeTotal { player, .. } => { player.$nested(f); },
 QuantityRef::ObjectCount { filter, .. } => { filter.$nested(f); },
 QuantityRef::ObjectCountDistinct { filter, .. } => { filter.$nested(f); },
 QuantityRef::ObjectCountBySharedQuality { filter, .. } => { filter.$nested(f); },
-QuantityRef::PlayerCount { filter, .. } => { filter.$nested(f); },
+QuantityRef::PlayerCount { filter, .. } => {
+    if !$ordinary {
+        match filter {
+            // The direct count carries its actual executable into this value.
+            // Its nested predicates still keep their own source-only disposition.
+            PlayerFilter::PlayerAttribute { attr, value, .. } => { attr.$nested(f); value.$expr(f); },
+            // These wrappers delegate to the source-only player matcher.
+            PlayerFilter::AnyOf { .. } | PlayerFilter::AllExcept { .. } => { filter.$all_nested(f); },
+            _ => { filter.$nested(f); },
+        }
+    } else { filter.$nested(f); }
+},
 QuantityRef::CountersOnObjects { filter, .. } => { filter.$nested(f); },
 QuantityRef::TargetObjectManaValue { filter, .. } => { filter.$nested(f); },
 QuantityRef::PropertyAggregate(aggregate) => { aggregate.$source().$nested(f); },
@@ -10965,7 +10976,7 @@ QuantityRef::FilteredTrackedSetSize { filter, .. } => { filter.$nested(f); },
 QuantityRef::LifeLostThisTurn { player, .. } => { player.$nested(f); },
 QuantityRef::PartySize { player, .. } => { player.$nested(f); },
 QuantityRef::Speed { player, .. } => { player.$nested(f); },
-QuantityRef::EventContextPlayerCount { filter, .. } => { filter.$nested(f); },
+QuantityRef::EventContextPlayerCount { filter, .. } => { if $ordinary { filter.$nested(f); } else { filter.$all_nested(f); } },
 QuantityRef::SpellsCastThisTurn { filter, .. } => { for value in filter { value.$nested(f); } },
 QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. } => { for value in filter { value.$nested(f); } },
 QuantityRef::EnteredThisTurn { filter, .. } => { filter.$nested(f); },
@@ -11111,8 +11122,9 @@ TargetFilter::AllPlayers => {}
 }
 define_quantity_dependency_walk!([]; for_each_nested_quantity_ref; for_each_ref; source; true; for_each_nested_quantity_ref; for_each_ref);
 define_quantity_dependency_walk!([mut]; for_each_nested_quantity_ref_mut; each_ref_mut; source_mut; true; for_each_nested_quantity_ref_mut; each_ref_mut);
-// The same topology selects only quantities evaluated inside ControlsCount's
-// source-only predicate. Other bound quantity/filter readers are untouched.
+// The same topology selects source-only nested player predicates. Event-context
+// player counts and wrapped PlayerCount delegate to source-only matching; a direct
+// PlayerCount attribute threshold carries its existing owning executable.
 define_quantity_dependency_walk!([]; for_each_source_only_player_quantity_ref; for_each_source_only_player_quantity_ref; source; false; for_each_nested_quantity_ref; for_each_ref);
 
 impl QuantityExpr {
@@ -11548,6 +11560,10 @@ impl AbilityCost {
             effect.clear_raw_return_result_processes();
             ControlFlow::Continue(())
         });
+        let _ = crate::types::ability_visit::nodes_mut::visit_cost(
+            self,
+            &mut clear_registered_result_processes,
+        );
     }
 }
 
@@ -11833,7 +11849,9 @@ impl PerpetualModification {
                         );
                         *mode = definition.mode;
                     }
-                    PerpetualGrantModification::AddKeyword { .. } => {}
+                    PerpetualGrantModification::AddKeyword { keyword } => {
+                        keyword.clear_embedded_return_result_processes();
+                    }
                 }
             }
         }
@@ -11856,12 +11874,183 @@ impl AbilityDefinition {
 pub(crate) fn clear_registered_result_processes(
     node: crate::types::ability_visit::DefinitionNodeMut<'_>,
 ) -> ControlFlow<()> {
-    if let crate::types::ability_visit::DefinitionNodeMut::Replacement(definition) = node {
-        if let Some(body) = &mut definition.runtime_execute {
-            body.clear_return_result_process_recursive();
+    use crate::types::ability_visit::DefinitionNodeMut;
+    match node {
+        DefinitionNodeMut::Replacement(definition) => {
+            if let Some(body) = &mut definition.runtime_execute {
+                body.clear_return_result_process_recursive();
+            }
         }
+        DefinitionNodeMut::Static(definition) => {
+            for modification in &mut definition.modifications {
+                modification.clear_retained_leaf_return_result_processes();
+            }
+        }
+        DefinitionNodeMut::Ability(_) | DefinitionNodeMut::Trigger(_) => {}
     }
     ControlFlow::Continue(())
+}
+
+impl ContinuousModification {
+    // These typed leaves are intentionally outside the printed ability visitor.
+    fn clear_retained_leaf_return_result_processes(&mut self) {
+        match self {
+            Self::AddKeyword { keyword } => keyword.clear_embedded_return_result_processes(),
+            Self::CopyValues { values, .. } => values.clear_stored_return_result_processes(),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ =
+            crate::types::ability_visit::effects_mut::visit_continuous_mod(self, &mut |effect| {
+                effect.clear_raw_return_result_processes();
+                ControlFlow::Continue(())
+            });
+        let _ = crate::types::ability_visit::nodes_mut::visit_continuous_mod(
+            self,
+            &mut clear_registered_result_processes,
+        );
+        self.clear_retained_leaf_return_result_processes();
+    }
+}
+
+impl Keyword {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        use crate::types::keywords::*;
+        match self {
+            Keyword::CumulativeUpkeep(cost)
+            | Keyword::Escalate(cost)
+            | Keyword::Bestow(BestowCost::NonMana(cost))
+            | Keyword::Embalm(EmbalmCost::NonMana(cost))
+            | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+            | Keyword::Cycling(CyclingCost::NonMana(cost))
+            | Keyword::Flashback(FlashbackCost::NonMana(cost))
+            | Keyword::Escape(EscapeCost::NonMana(cost))
+            | Keyword::Evoke(EvokeCost::NonMana(cost))
+            | Keyword::Blitz(BlitzCost::NonMana(cost))
+            | Keyword::Buyback(BuybackCost::NonMana(cost))
+            | Keyword::Echo(EchoCost::NonMana(cost)) => {
+                cost.clear_embedded_return_result_processes()
+            }
+            _ => {}
+        }
+    }
+}
+
+impl AdditionalCost {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        match self {
+            Self::Optional { cost, .. } | Self::Required(cost) => {
+                cost.clear_embedded_return_result_processes()
+            }
+            Self::Kicker { costs, .. } => {
+                for cost in costs {
+                    cost.clear_embedded_return_result_processes();
+                }
+            }
+            Self::Choice(first, second) => {
+                first.clear_embedded_return_result_processes();
+                second.clear_embedded_return_result_processes();
+            }
+        }
+    }
+}
+
+impl TriggerDefinition {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_trigger(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+        let _ = crate::types::ability_visit::nodes_mut::visit_trigger(
+            self,
+            &mut clear_registered_result_processes,
+        );
+    }
+}
+
+impl StaticDefinition {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_static(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+        let _ = crate::types::ability_visit::nodes_mut::visit_static(
+            self,
+            &mut clear_registered_result_processes,
+        );
+    }
+}
+
+impl ReplacementDefinition {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ = crate::types::ability_visit::effects_mut::visit_replacement(self, &mut |effect| {
+            effect.clear_raw_return_result_processes();
+            ControlFlow::Continue(())
+        });
+        let _ = crate::types::ability_visit::nodes_mut::visit_replacement(
+            self,
+            &mut clear_registered_result_processes,
+        );
+    }
+}
+
+impl BackFaceData {
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        for definition in &mut self.abilities {
+            definition.clear_embedded_return_result_processes();
+        }
+        for index in 0..self.trigger_definitions.len() {
+            if let Some(definition) = self.trigger_definitions.get_mut(index) {
+                definition.clear_embedded_return_result_processes();
+            }
+        }
+        for index in 0..self.static_definitions.len() {
+            if let Some(definition) = self.static_definitions.get_mut(index) {
+                definition.clear_embedded_return_result_processes();
+            }
+        }
+        for index in 0..self.replacement_definitions.len() {
+            if let Some(definition) = self.replacement_definitions.get_mut(index) {
+                definition.clear_embedded_return_result_processes();
+            }
+        }
+        for keyword in &mut self.keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+        if let Some(cost) = &mut self.additional_cost {
+            cost.clear_embedded_return_result_processes();
+        }
+        for option in &mut self.casting_options {
+            if let Some(cost) = &mut option.cost {
+                cost.clear_embedded_return_result_processes();
+            }
+        }
+    }
+}
+
+impl CopiableValues {
+    fn clear_stored_return_result_processes(&mut self) {
+        for keyword in &mut self.keywords {
+            keyword.clear_embedded_return_result_processes();
+        }
+        if let Some(face) = &mut self.prepare_face {
+            Arc::make_mut(face).clear_embedded_return_result_processes();
+        }
+    }
+    pub(crate) fn clear_embedded_return_result_processes(&mut self) {
+        let _ =
+            crate::types::ability_visit::effects_mut::visit_copiable_values(self, &mut |effect| {
+                effect.clear_raw_return_result_processes();
+                ControlFlow::Continue(())
+            });
+        let _ = crate::types::ability_visit::nodes_mut::visit_copiable_values(
+            self,
+            &mut clear_registered_result_processes,
+        );
+        self.clear_stored_return_result_processes();
+    }
 }
 
 impl<'a> ResultScopeNode<'a> {
@@ -11953,7 +12142,7 @@ impl<'a> ResultScopeNode<'a> {
             repeat.for_each_source_only_player_quantity_ref(f);
         }
         for player in [chooser, optional].into_iter().flatten() {
-            player.for_each_source_only_player_quantity_ref(f);
+            player.for_each_nested_quantity_ref(f);
         }
         if let Some(payment) = payment {
             payment.payer.for_each_source_only_player_quantity_ref(f);
@@ -12613,6 +12802,11 @@ fn validate_persistent_result_definition_node(
                     validate_persistent_result_token_spec(spec)?;
                 }
             }
+            // This raw runtime body is absent from the printed-definition visitor.
+            // It executes later as an independent invocation, never as a caller import.
+            if let Some(body) = &definition.runtime_execute {
+                classify_instruction_result_invocation(body, InstructionResultEntry::Independent)?;
+            }
             Ok(())
         }
     }
@@ -12831,7 +13025,10 @@ pub(crate) fn validate_source_only_result_player_counts(
     filter: &PlayerFilter,
 ) -> Result<(), EffectError> {
     let mut error = None;
-    filter.for_each_source_only_player_quantity_ref(&mut |reference| {
+    // This selector itself runs without an executable. Use the complete typed
+    // expression walk here; ordinary bound PlayerCount/filter readers use the
+    // separate nested source-only walk and keep their supported attributes.
+    filter.for_each_nested_quantity_ref(&mut |reference| {
         if reference.instruction_result_id().is_some() {
             error.get_or_insert_with(|| {
                 EffectError::InvalidParam(
@@ -12985,6 +13182,7 @@ impl AbilityCondition {
     fn for_each_source_only_object_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
         match self {
             Self::TriggeringSpellTargetsFilter { filter } => filter.for_each_nested_quantity_ref(f),
+            Self::PreviousEffectAmount { rhs, .. } => rhs.for_each_ref(f),
             Self::ConditionInstead { inner, .. } => {
                 inner.for_each_source_only_object_quantity_ref(f)
             }
@@ -40417,13 +40615,7 @@ impl ResolvedAbility {
         self.return_result_process = None;
         self.effect.clear_embedded_return_result_processes();
         if let Some(payment) = &mut self.unless_pay {
-            let _ = crate::types::ability_visit::effects_mut::visit_cost(
-                &mut payment.cost,
-                &mut |effect| {
-                    effect.clear_raw_return_result_processes();
-                    ControlFlow::Continue(())
-                },
-            );
+            payment.cost.clear_embedded_return_result_processes();
         }
         if let Some(sub) = &mut self.sub_ability {
             sub.clear_return_result_process_recursive();
@@ -50761,6 +50953,217 @@ mod departure_persistent_boundary_tests {
         assert!(
             validate_instruction_result_definition(&root).is_err(),
             "a matching outer integer never authorizes an isolated independently granted reader"
+        );
+    }
+}
+
+#[cfg(test)]
+mod departure_raw_runtime_replacement_tests {
+    use super::*;
+    use crate::types::game_state::ReturnResultProcessId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
+
+    fn read(id: u32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate {
+                        source: ZoneChangeRecordSource::InstructionResult {
+                            result: ReturnResultId(id),
+                        },
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Exile),
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                    },
+                },
+            },
+        )
+    }
+    fn producer(id: u32, body: AbilityDefinition) -> AbilityDefinition {
+        let effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll","origin":"Battlefield","destination":"Exile"})).unwrap();
+        let mut definition = AbilityDefinition::new(AbilityKind::Spell, effect);
+        definition.declares_return_result = Some(ReturnResultId(id));
+        definition.sub_ability = Some(Box::new(body));
+        definition
+    }
+    fn replacement(body: AbilityDefinition) -> ReplacementDefinition {
+        let mut runtime =
+            crate::game::ability_utils::build_resolved_from_def(&body, ObjectId(1), PlayerId(0));
+        runtime.return_result_process = Some(ReturnResultProcessId(901));
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        replacement.runtime_execute = Some(Box::new(runtime));
+        replacement
+    }
+    fn copied(replacement: ReplacementDefinition) -> CopiableValues {
+        CopiableValues {
+            name: "Supplemental copied replacement".into(),
+            mana_cost: Default::default(),
+            color: vec![],
+            card_types: Default::default(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            keywords: vec![],
+            abilities: Arc::new(vec![]),
+            trigger_definitions: Arc::new(vec![]),
+            trigger_printed_origins: Arc::new(vec![]),
+            replacement_definitions: Arc::new(vec![replacement]),
+            static_definitions: Arc::new(vec![]),
+            room_halves: None,
+            prepare_face: None,
+            name_origin: Default::default(),
+        }
+    }
+
+    #[test]
+    fn departure_runtime_replacement_raw_slot_validates_independently_under_registered_cost_grant_and_copy_wrappers(
+    ) {
+        for body_mode in 0..3 {
+            let body = match body_mode {
+                0 => read(7),
+                1 => producer(11, read(11)),
+                2 => producer(7, read(7)),
+                _ => unreachable!(),
+            };
+            let replacement = replacement(body);
+            let direct = Effect::AddTargetReplacement {
+                replacement: Box::new(replacement.clone()),
+                target: TargetFilter::None,
+            };
+            let grant = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .modifications(vec![ContinuousModification::GrantReplacement {
+                        replacement: Box::new(replacement.clone()),
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            };
+            let copy = Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .modifications(vec![ContinuousModification::CopyValues {
+                        values: Box::new(copied(replacement)),
+                        display_source: Default::default(),
+                        printed_ref: None,
+                        token_image_ref: None,
+                        token_art: None,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            };
+            let registered = Effect::CreateBoon {
+                recipient: TargetFilter::Controller,
+                trigger: Box::new(
+                    TriggerDefinition::new(TriggerMode::SpellCast)
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, direct.clone())),
+                ),
+            };
+            for mut effect in [direct, grant, copy, registered] {
+                let before = effect.clone();
+                let mut shared = vec![];
+                effect.for_each_selected_import_quantity_ref(&mut |reference| {
+                    shared.push(reference.clone())
+                });
+                effect.for_each_selected_import_quantity_ref_mut(&mut |reference| {
+                    shared.push(reference.clone())
+                });
+                assert!(
+                    shared.is_empty(),
+                    "the printed visitor and caller import domain exclude raw later bodies"
+                );
+                assert_eq!(effect, before);
+                let root = producer(
+                    7,
+                    AbilityDefinition::new(AbilityKind::Spell, effect.clone()),
+                );
+                assert_eq!(validate_instruction_result_definition(&root).is_ok(), body_mode != 0, "raw runtime classification is independent of a colliding enclosing R7 or stale P901");
+                let cost = AbilityCost::Composite {
+                    costs: vec![AbilityCost::OneOf {
+                        costs: vec![AbilityCost::PerCounter {
+                            counter: CounterType::Generic("age".into()),
+                            target: TargetFilter::SelfRef,
+                            base: Box::new(AbilityCost::EffectCost {
+                                effect: Box::new(effect),
+                            }),
+                        }],
+                    }],
+                };
+                assert_eq!(validate_result_cost_payloads(&cost).is_ok(), body_mode != 0);
+                assert_eq!(
+                    validate_persistent_result_cost(&cost).is_ok(),
+                    body_mode != 0
+                );
+                let mut cost_owner = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                cost_owner.cost = Some(cost);
+                assert_eq!(
+                    validate_instruction_result_definition(&producer(7, cost_owner)).is_ok(),
+                    body_mode != 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn departure_both_cost_only_clearers_reach_runtime_replacement_epic_without_dropping_the_body()
+    {
+        let mut snapshot = crate::game::ability_utils::build_resolved_from_def(
+            &producer(11, read(11)),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        snapshot.return_result_process = Some(ReturnResultProcessId(901));
+        let mut runtime = ResolvedAbility::new(
+            Effect::EpicCopy {
+                spell: Box::new(snapshot),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        runtime.description = Some("Supplemental public runtime cost body".into());
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        replacement.runtime_execute = Some(Box::new(runtime));
+        let cost = AbilityCost::Composite {
+            costs: vec![AbilityCost::EffectCost {
+                effect: Box::new(Effect::AddTargetReplacement {
+                    replacement: Box::new(replacement),
+                    target: TargetFilter::None,
+                }),
+            }],
+        };
+        let original = serde_json::to_value(&cost).unwrap();
+        assert!(original
+            .to_string()
+            .contains("\"return_result_process\":901"));
+        let mut cleared = cost.clone();
+        cleared.clear_embedded_return_result_processes();
+        let public = serde_json::to_value(&cleared).unwrap();
+        assert!(!public.to_string().contains("return_result_process"));
+        assert!(public
+            .to_string()
+            .contains("Supplemental public runtime cost body"));
+        assert!(public.to_string().contains("EpicCopy"));
+        let mut resolved = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        resolved.unless_pay = Some(UnlessPayModifier {
+            cost: cost.clone(),
+            payer: TargetFilter::Controller,
+        });
+        resolved.clear_return_result_process_recursive();
+        assert_eq!(
+            serde_json::to_value(&resolved.unless_pay.as_ref().unwrap().cost).unwrap(),
+            public
+        );
+        assert_eq!(
+            serde_json::to_value(&cost).unwrap(),
+            original,
+            "typed redaction leaves authoritative snapshots intact"
         );
     }
 }
