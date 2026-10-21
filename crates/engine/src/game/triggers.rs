@@ -12243,6 +12243,10 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_binding_diverges(lhs) || quantity_expr_binding_diverges(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_binding_diverges(quantity),
         AbilityCondition::Not { condition } => gate_binding_diverges_at_fire_time(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(gate_binding_diverges_at_fire_time)
@@ -16195,6 +16199,19 @@ fn evaluate_trigger_condition_with_source(
             );
             comparator.evaluate(lhs, rhs)
         }
+        TriggerCondition::QuantityQuality { quantity, quality } => {
+            // CR 603.4: checked when the trigger event occurs and again on resolution.
+            // Resolved exactly as `QuantityComparison`'s operands, against the
+            // explicit `trigger_event` at detection time.
+            let value = crate::game::quantity::resolve_quantity_for_trigger_check(
+                state,
+                quantity,
+                controller,
+                source_context,
+                trigger_event,
+            );
+            quality.matches(i64::from(value))
+        }
         TriggerCondition::HasMaxSpeed => has_max_speed(state, controller),
         // CR 122.1: "if you put a counter on a permanent this turn"
         TriggerCondition::CounterAddedThisTurn => state
@@ -17693,12 +17710,12 @@ pub mod tests {
         ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
         DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
         EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
-        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-        QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -35394,6 +35411,318 @@ pub mod tests {
             1,
             "Command-zone beginning-of-upkeep trigger must fire while its source is in the command zone"
         );
+    }
+
+    /// "You control a prime number of lands" as a trigger-side arithmetic quality.
+    fn lands_you_control_quality(quality: NumberQuality) -> TriggerCondition {
+        TriggerCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TypedFilter::land().controller(ControllerRef::You).into(),
+                },
+            },
+            quality,
+        }
+    }
+
+    fn add_battlefield_lands(state: &mut GameState, owner: PlayerId, count: usize) {
+        for i in 0..count {
+            let id = create_object(
+                state,
+                CardId(0x0A000 + u64::try_from(i).unwrap()),
+                owner,
+                format!("Test Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+    }
+
+    /// Fires a P0 "at the beginning of your end step, if <condition>" trigger
+    /// with the given land counts and returns the resulting stack length.
+    fn end_step_quality_trigger_stack_len(
+        condition: TriggerCondition,
+        p0_lands: usize,
+        p1_lands: usize,
+    ) -> usize {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F00),
+            PlayerId(0),
+            "Quality Gate Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::End)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .condition(condition),
+            );
+        }
+        add_battlefield_lands(&mut state, PlayerId(0), p0_lands);
+        add_battlefield_lands(&mut state, PlayerId(1), p1_lands);
+        process_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        state.stack.len()
+    }
+
+    #[test]
+    fn quantity_quality_intervening_if_gates_end_step_trigger() {
+        // CR 603.4: the intervening-if is checked when the end step begins.
+        let prime = || lands_you_control_quality(NumberQuality::Prime);
+        for lands in [2, 3, 5, 37] {
+            assert_eq!(
+                end_step_quality_trigger_stack_len(prime(), lands, 0),
+                1,
+                "{lands} lands is prime: the trigger must fire"
+            );
+        }
+        for lands in [0, 1, 4, 9] {
+            assert_eq!(
+                end_step_quality_trigger_stack_len(prime(), lands, 0),
+                0,
+                "{lands} lands is not prime: the trigger must not fire"
+            );
+        }
+
+        let odd = || lands_you_control_quality(NumberQuality::Parity(Parity::Odd));
+        assert_eq!(end_step_quality_trigger_stack_len(odd(), 3, 0), 1);
+        assert_eq!(end_step_quality_trigger_stack_len(odd(), 4, 0), 0);
+
+        // Multi-authority: "you control" is the trigger controller's count. P0
+        // with 4 lands plus P1 with 1 is a combined (prime) 5, yet P0's 4 is not
+        // prime, so the trigger must not fire. Paired positive: P0 alone with 5.
+        assert_eq!(end_step_quality_trigger_stack_len(prime(), 4, 1), 0);
+        assert_eq!(end_step_quality_trigger_stack_len(prime(), 5, 0), 1);
+    }
+
+    /// The one intervening-if trigger `oracle` parses to (verbatim Oracle text),
+    /// asserting its condition reads `qref` through a `QuantityComparison`.
+    fn parsed_quantity_gated_trigger(
+        name: &str,
+        oracle: &str,
+        keywords: &[&str],
+        qref: &QuantityRef,
+    ) -> TriggerDefinition {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            name,
+            &keywords,
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .into_iter()
+            .find(|trigger| trigger.condition.is_some())
+            .unwrap_or_else(|| panic!("{name} parses an intervening-if trigger"));
+        assert!(
+            matches!(
+                &trigger.condition,
+                Some(TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty },
+                    ..
+                }) if qty == qref
+            ),
+            "{name}: {:?}",
+            trigger.condition
+        );
+        trigger
+    }
+
+    /// Gatstaf Shepherd's parsed upkeep trigger on a P0 creature, after a turn
+    /// in which `spells_cast` spells were cast; returns the stack length after
+    /// the next upkeep begins.
+    fn gatstaf_shepherd_upkeep_stack_len(spells_cast: u8) -> usize {
+        let trigger = parsed_quantity_gated_trigger(
+            "Gatstaf Shepherd",
+            "At the beginning of each upkeep, if no spells were cast last turn, transform this creature.",
+            &["Intimidate", "Transform"],
+            &QuantityRef::SpellsCastLastTurn,
+        );
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F10),
+            PlayerId(0),
+            "Gatstaf Shepherd".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+        state.spells_cast_this_turn = spells_cast;
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+        // Reach: the production turn-boundary snapshot ran.
+        assert_eq!(state.spells_cast_last_turn, Some(spells_cast));
+        state.phase = Phase::Upkeep;
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+        state.stack.len()
+    }
+
+    /// R1. CR 603.4 + CR 601.2i: "if no spells were cast last turn" reads the
+    /// table-wide count of spells cast during the previous turn, snapshotted by
+    /// `turns::start_next_turn`. Runtime evidence for coverage classifying
+    /// `QuantityRef::SpellsCastLastTurn` as `Handled`.
+    /// REVERT-PROBE: resolve the ref as a constant 0 → the n = 1 case fires.
+    #[test]
+    fn spells_cast_last_turn_gates_parsed_werewolf_upkeep_trigger() {
+        assert_eq!(
+            gatstaf_shepherd_upkeep_stack_len(0),
+            1,
+            "no spells were cast last turn: the trigger must fire"
+        );
+        for spells_cast in [1, 2] {
+            assert_eq!(
+                gatstaf_shepherd_upkeep_stack_len(spells_cast),
+                0,
+                "{spells_cast} spell(s) were cast last turn: the trigger must not fire"
+            );
+        }
+    }
+
+    /// Child of the Volcano's parsed end-step trigger on a P0 creature; `dies`
+    /// optionally moves a P0 creature (token or card) from the battlefield to
+    /// the graveyard first. Returns (descended flag, stack length).
+    fn child_of_the_volcano_end_step(dies: Option<bool>) -> (bool, usize) {
+        let trigger = parsed_quantity_gated_trigger(
+            "Child of the Volcano",
+            "Trample\nAt the beginning of your end step, if you descended this turn, put a +1/+1 counter on this creature. (You descended if a permanent card was put into your graveyard from anywhere.)",
+            &["Trample"],
+            &QuantityRef::DescendedThisTurn,
+        );
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F20),
+            PlayerId(0),
+            "Child of the Volcano".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+        if let Some(is_token) = dies {
+            let victim = create_object(
+                &mut state,
+                CardId(0x09F21),
+                PlayerId(0),
+                "Descend Fodder".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&victim).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.is_token = is_token;
+            }
+            let mut events = Vec::new();
+            move_to_zone(&mut state, victim, Zone::Graveyard, &mut events);
+        }
+        let descended = state.players[0].descended_this_turn;
+        process_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        (descended, state.stack.len())
+    }
+
+    /// R2. CR 700.11: "descended this turn" means a permanent card was put into
+    /// the player's graveyard from anywhere this turn; tokens are not cards.
+    /// Runtime evidence for coverage classifying `QuantityRef::DescendedThisTurn`
+    /// as `Handled`.
+    /// REVERT-PROBE: resolve the ref as a constant → case (a) or (b) flips.
+    #[test]
+    fn descended_this_turn_gates_parsed_end_step_trigger() {
+        // (a) A creature card went to P0's graveyard: P0 descended.
+        assert_eq!(child_of_the_volcano_end_step(Some(false)), (true, 1));
+        // (b) Nothing went to the graveyard.
+        assert_eq!(child_of_the_volcano_end_step(None), (false, 0));
+        // (c) A creature token is not a card (CR 700.11).
+        assert_eq!(child_of_the_volcano_end_step(Some(true)), (false, 0));
+    }
+
+    /// Exercises `stack::bind_triggered_resolution_scope` with a constructed
+    /// scope: the bind function re-evaluates a `QuantityQuality` condition
+    /// against the live board. The production coverage of a stacked trigger's
+    /// resolution recheck is
+    /// `tests/integration/zimone_all_questioning.rs::resolution_recheck_and_live_count`.
+    #[test]
+    fn bind_triggered_resolution_scope_rechecks_quantity_quality() {
+        // CR 603.4 + Zimone ruling: "It won't resolve if you don't control a
+        // prime number of lands as it resolves." The generic resolution recheck
+        // re-evaluates the predicate against the live board.
+        fn recheck(state: &mut GameState, condition: &TriggerCondition) -> bool {
+            crate::game::stack::bind_triggered_resolution_scope(
+                state,
+                Some(crate::game::stack::TriggeredResolutionScope {
+                    condition: Some(condition),
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_definition: None,
+                    trigger_event: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }),
+                None,
+            )
+        }
+        let prime = lands_you_control_quality(NumberQuality::Prime);
+        let not_prime = TriggerCondition::Not {
+            condition: Box::new(prime.clone()),
+        };
+
+        let mut state = setup();
+        add_battlefield_lands(&mut state, PlayerId(0), 3);
+        assert!(recheck(&mut state, &prime), "3 lands: still prime");
+        assert!(!recheck(&mut state, &not_prime));
+
+        // The same board gains a fourth land between trigger and resolution.
+        let fourth = create_object(
+            &mut state,
+            CardId(0x0AF00),
+            PlayerId(0),
+            "Fourth Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fourth)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert!(
+            !recheck(&mut state, &prime),
+            "a fourth land makes the count non-prime: the ability does not resolve"
+        );
+        assert!(recheck(&mut state, &not_prime));
     }
 
     #[test]

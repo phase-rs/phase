@@ -594,8 +594,19 @@ pub(crate) enum ContinuationAst {
     /// | each of them> enters with N additional <counter> counter(s) on it" after
     /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
     /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
-    /// producer.)
+    /// producer.) The imperative "put … counters on it" form is
+    /// [`Self::PutCountersOnLastCreated`].
     TokenEntersWithCounters {
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    /// CR 608.2c + CR 122.1: imperative "put N <type> counter(s) on it" after a
+    /// create-token clause — a separate, later instruction on the token(s) that
+    /// clause just created, not counters the token enters with. Lowers to a
+    /// `ContinuationStep` `Effect::PutCounter { target: LastCreated }` sub
+    /// directly under the `Effect::Token`: the token enters first, then
+    /// receives the counters (Zaxara, the Exemplary rulings).
+    PutCountersOnLastCreated {
         counter_type: CounterType,
         count: QuantityExpr,
     },
@@ -1020,17 +1031,14 @@ pub(crate) enum ImperativeFamilyAst {
         sides: u8,
         modifier: Option<crate::types::ability::DieRollModifier>,
     },
-    /// CR 705: Flip a coin.
-    FlipCoin,
-    /// CR 705: Flip N coins. `count` is the number of flips; consolidation
-    /// passes may attach `win_effect`/`lose_effect` from a following sentence
-    /// (e.g., "for each heads …"). Emitted for "flip N coins" / "flip X coins"
-    /// where N > 1.
+    /// CR 705.1 + CR 705.2: Flip coins. `flips` carries the run: "flip a coin" is
+    /// `Exactly { Fixed 1 }`, "flip N coins" / "flip X coins" (N > 1) is `Exactly { count }`,
+    /// and "flip a coin until you lose a flip" is `UntilLoss`. Consolidation passes may
+    /// attach `win_effect`/`lose_effect` from a following sentence (e.g., "for each
+    /// heads …").
     FlipCoins {
-        count: crate::types::ability::QuantityExpr,
+        flips: crate::types::ability::CoinFlipRun,
     },
-    /// CR 705: Flip a coin until you lose a flip.
-    FlipCoinUntilLose,
     /// CR 506.4: Remove a creature from combat.
     RemoveFromCombat(TargetFilter),
     Shuffle(ShuffleImperativeAst),
@@ -1311,6 +1319,11 @@ pub(crate) enum TargetedImperativeAst {
     ReturnToBattlefield {
         target: TargetFilter,
         origin: Option<Zone>,
+        /// CR 608.2d + CR 202.3: a fixed aggregate restriction on an
+        /// untargeted resolution-time subset, separate from per-card filters.
+        choice_constraint: Option<crate::types::ability::ChooseFromZoneConstraint>,
+        /// CR 608.2d: the printed subset cardinality, independent of its budget.
+        choice_cardinality: Option<MultiTargetSpec>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
         /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
@@ -3137,9 +3150,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }

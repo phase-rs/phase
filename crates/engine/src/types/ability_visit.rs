@@ -181,8 +181,8 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
 /// **KNOWN GAP — inline branch carriers are NOT descended on the cost axis.**
 /// `visit_effect_scoped` descends nested `AbilityDefinition`s under
 /// `Vote.per_choice_effect` / `VoteSubject.outcome_template`,
-/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoin` / `FlipCoins`,
-/// `FlipCoinUntilLose`, `ExileTopCardContest.winner_effect`, `RollDie.results`, and
+/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoins` (win and lose),
+/// `ExileTopCardContest.winner_effect`, `RollDie.results`, and
 /// `ChooseOneOf.branches` (all via
 /// `visit_nested_ability_def_scoped`); this walk does not. A cost sitting on one
 /// of those nested defs — e.g. `ChooseOneOf { branches: [AbilityDefinition {
@@ -725,12 +725,7 @@ where
                 visit_trigger_scoped(trigger, scope, visit)?
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -741,9 +736,6 @@ where
             if let Some(sub) = lose_effect {
                 visit_nested_ability_def_scoped(sub, scope, visit)?;
             }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            visit_nested_ability_def_scoped(win_effect, scope, visit)?
         }
         Effect::RollDie { results, .. } => {
             for branch in results {
@@ -1324,6 +1316,10 @@ fn ability_condition(condition: &$($mut_)? AbilityCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        AbilityCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => quantity(rhs, v),
         AbilityCondition::ConditionInstead { inner: c } | AbilityCondition::Not { condition: c } => {
             ability_condition(c, v)
@@ -1346,6 +1342,10 @@ fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        TriggerCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         // CR 201.5a: an `EventTime` condition (a state trigger's head, CR 603.8,
         // or an event trigger's "while" gate, CR 508.1m) is the wrapped
         // condition read only when the trigger fires, so its granter symbols
@@ -1368,6 +1368,10 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        StaticCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         StaticCondition::IsTapped { scope } => object_scope(scope, v),
         StaticCondition::Not { condition: c } => static_condition(c, v),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {

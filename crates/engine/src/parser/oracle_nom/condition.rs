@@ -31,10 +31,10 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
     CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr,
-    QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition, TargetFilter,
-    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality,
+    ObjectProperty, ObjectScope, Parity, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
+    StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -440,6 +440,8 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
 /// the parent `alt`'s remaining tuple headroom free.
 fn parse_control_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        // CR 107.1 + CR 603.4: MUST precede every production below that reads the type phrase with the infallible parse_type_phrase_folding (compound/named/you-control-a): those accept "a prime number of lands" as an empty-filter presence with an unconsumed tail, and alt stops at the first Ok.
+        parse_control_count_quality,
         // CR 201.2: Named-control clauses MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
@@ -5182,6 +5184,46 @@ fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
     .parse(input)
 }
 
+/// CR 107.1: the arithmetic-quality axis of a count ("prime" / "even" / "odd").
+/// No CR rule defines primality or parity; they are the integers' own properties.
+pub(crate) fn parse_number_quality(input: &str) -> OracleResult<'_, NumberQuality> {
+    alt((
+        value(NumberQuality::Prime, tag("prime")),
+        value(NumberQuality::Parity(Parity::Even), tag("even")),
+        value(NumberQuality::Parity(Parity::Odd), tag("odd")),
+    ))
+    .parse(input)
+}
+
+/// CR 107.1 + CR 603.4: "<you control | your opponents control | defending player controls>
+/// a/an <prime|even|odd> number of <type phrase>" → `QuantityQuality` over the controlled
+/// object count. The type-phrase reader is infallible, so a phrase that consumes nothing is refused.
+fn parse_control_count_quality(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (ctrl, (), quality, _)) = (
+        parse_control_scope_prefix,
+        parse_article,
+        parse_number_quality,
+        tag(" number of "),
+    )
+        .parse(input)?;
+    let (type_rest, filter) = parse_type_phrase_nonempty(rest)?;
+    // Structural guard: `parse_type_phrase_folding` never fails, so an
+    // unrecognized phrase comes back with nothing consumed.
+    if type_rest.len() == rest.len() {
+        return Err(oracle_err(rest));
+    }
+    let filter = inject_controller(filter, ctrl);
+    Ok((
+        type_rest,
+        StaticCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            },
+            quality,
+        },
+    ))
+}
+
 /// Canonical combinator: "you control / your opponents control / defending
 /// player controls N or more [type]" → QuantityComparison.
 ///
@@ -7688,7 +7730,8 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
             make_quantity_comparison(QuantityRef::SpellsCastLastTurn, Comparator::EQ, 0),
             tag("no spells were cast last turn"),
         ),
-        // "two or more spells were cast last turn" / "a player cast two or more spells last turn"
+        // "two or more spells were cast last turn" (table-wide only; the
+        // per-player "a player cast N or more spells last turn" is declined)
         parse_spells_cast_last_turn,
         parse_you_cast_both_spell_kinds_this_turn,
         // CR 702.185c: "a spell was warped this turn" — any player cast a spell
@@ -9246,20 +9289,21 @@ fn strip_spell_history_noun(type_text: &str) -> &str {
     type_text
 }
 
-/// Parse "two or more spells were cast last turn" / "a player cast two or more spells last turn".
+/// CR 603.4: "two or more spells were cast last turn" — the table-wide count
+/// of spells cast during the previous turn (`QuantityRef::SpellsCastLastTurn`).
+///
+/// The per-player wording "a player cast two or more spells last turn" is
+/// deliberately NOT recognized here: it is true only when a single player cast
+/// that many spells, which a table-wide total cannot express (two players
+/// casting one spell each would wrongly satisfy it). Declining leaves that
+/// guard unparsed, so the trigger fails closed as an `unparsed_condition` gap
+/// instead of lowering to the wrong count.
 fn parse_spells_cast_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    // "two or more spells were cast last turn"
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("two or more spells were cast last turn").parse(input)
-    {
-        return Ok((rest, make_quantity_ge(QuantityRef::SpellsCastLastTurn, 2)));
-    }
-    // "a player cast two or more spells last turn"
-    let (rest, _) = tag("a player cast ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
-    let rest = rest.trim_start();
-    let (rest, _) = tag("or more spells last turn").parse(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::SpellsCastLastTurn, n)))
+    value(
+        make_quantity_ge(QuantityRef::SpellsCastLastTurn, 2),
+        tag("two or more spells were cast last turn"),
+    )
+    .parse(input)
 }
 
 /// Parse "you [put/ve put] [a counter/one or more counters] on a
@@ -26087,6 +26131,179 @@ mod tests {
         assert_eq!(parse_it_is("it's"), Ok(("", "it's")));
         assert_eq!(parse_it_is("it\u{2019}s"), Ok(("", "it\u{2019}s")));
         assert_eq!(parse_it_is("it is"), Ok(("", "it is")));
+    }
+
+    /// `ObjectCount` over `<type>` controlled by `ctrl` on the battlefield.
+    fn controlled_count(type_filter: TypeFilter, ctrl: ControllerRef) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(type_filter)
+                        .controller(ctrl)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }]),
+                ),
+            },
+        }
+    }
+
+    fn quality(quantity: QuantityExpr, quality: NumberQuality) -> StaticCondition {
+        StaticCondition::QuantityQuality { quantity, quality }
+    }
+
+    /// CR 107.1 + CR 603.4: the quality axis (prime / even / odd), the article
+    /// axis (a / an) and the controller axis compose into one production.
+    #[test]
+    fn control_count_quality_parses_every_quality_and_controller() {
+        let cases = [
+            (
+                "you control a prime number of lands",
+                quality(
+                    controlled_count(TypeFilter::Land, ControllerRef::You),
+                    NumberQuality::Prime,
+                ),
+            ),
+            (
+                "you control an even number of creatures",
+                quality(
+                    controlled_count(TypeFilter::Creature, ControllerRef::You),
+                    NumberQuality::Parity(Parity::Even),
+                ),
+            ),
+            (
+                "you control an odd number of artifacts",
+                quality(
+                    controlled_count(TypeFilter::Artifact, ControllerRef::You),
+                    NumberQuality::Parity(Parity::Odd),
+                ),
+            ),
+            (
+                "your opponents control an even number of creatures",
+                quality(
+                    controlled_count(TypeFilter::Creature, ControllerRef::Opponent),
+                    NumberQuality::Parity(Parity::Even),
+                ),
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(parse_inner_condition(text), Ok(("", expected)), "{text:?}");
+        }
+        // Malformed heads never produce a fully consumed quality gate.
+        for text in [
+            "you control a number of lands",
+            "you control prime number of lands",
+            "you control a prime lands",
+            "you control a prime number of",
+        ] {
+            assert!(
+                !matches!(
+                    parse_inner_condition(text),
+                    Ok(("", StaticCondition::QuantityQuality { .. }))
+                ),
+                "{text:?}"
+            );
+            assert!(parse_control_count_quality(text).is_err(), "{text:?}");
+        }
+    }
+
+    /// The type phrase stops at the effect boundary and hands the rest back.
+    #[test]
+    fn control_count_quality_returns_the_effect_remainder() {
+        assert_eq!(
+            parse_inner_condition("you control a prime number of lands, draw a card"),
+            Ok((
+                ", draw a card",
+                quality(
+                    controlled_count(TypeFilter::Land, ControllerRef::You),
+                    NumberQuality::Prime,
+                ),
+            ))
+        );
+    }
+
+    /// CR 603.4 + CR 608.2i: Zimone's intervening-if is the look-back entry
+    /// tally AND the prime land count, through the existing `And` connective.
+    #[test]
+    fn control_count_quality_conjoins_with_the_entered_this_turn_tally() {
+        let entered = StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::BattlefieldEntriesThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: TargetFilter::Typed(TypedFilter::land()),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        // Reach-guard: the left conjunct alone.
+        assert_eq!(
+            parse_inner_condition("a land entered the battlefield under your control this turn"),
+            Ok(("", entered.clone()))
+        );
+        let (rest, condition) = parse_inner_condition(
+            "a land entered the battlefield under your control this turn and you control a prime number of lands, create primo, the indivisible, a legendary 0/0 green and blue fractal creature token, then put that many +1/+1 counters on it.",
+        )
+        .unwrap();
+        assert_eq!(
+            rest,
+            ", create primo, the indivisible, a legendary 0/0 green and blue fractal creature token, then put that many +1/+1 counters on it."
+        );
+        assert_eq!(
+            condition,
+            StaticCondition::And {
+                conditions: vec![
+                    entered,
+                    quality(
+                        controlled_count(TypeFilter::Land, ControllerRef::You),
+                        NumberQuality::Prime,
+                    ),
+                ],
+            }
+        );
+    }
+
+    /// The negated form is not built: it must not parse as a silent
+    /// `Not(IsPresent)` that drops the quality.
+    #[test]
+    fn negated_control_count_quality_stays_a_gap() {
+        // Reach-guard: `parse_you_dont_control_a` is reached for a plain article.
+        assert_eq!(
+            parse_inner_condition("you don't control a land"),
+            Ok((
+                "",
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(
+                            TypedFilter::land()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::InZone {
+                                    zone: Zone::Battlefield,
+                                }]),
+                        )),
+                    }),
+                },
+            ))
+        );
+        assert!(!matches!(
+            parse_inner_condition("you don't control a prime number of lands"),
+            Ok(("", _))
+        ));
+    }
+
+    /// Static reach: "as long as" routes through the same production.
+    #[test]
+    fn control_count_quality_reaches_static_conditions() {
+        assert_eq!(
+            parse_condition("as long as you control an odd number of lands"),
+            Ok((
+                "",
+                quality(
+                    controlled_count(TypeFilter::Land, ControllerRef::You),
+                    NumberQuality::Parity(Parity::Odd),
+                ),
+            ))
+        );
     }
 }
 

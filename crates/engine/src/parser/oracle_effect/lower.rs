@@ -38,12 +38,12 @@ use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, E
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
-    CastPermissionConstraint, CastingPermission, CombatHistoryScope, Comparator, ConjureSource,
-    ContinuousModification, ControllerRef, CountBinding, DamageChannel, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider, FilterProp,
-    GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
-    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
+    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
+    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
+    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
+    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
@@ -3176,9 +3176,7 @@ impl ReflexiveGateParent {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -3940,49 +3938,17 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 111.1: is this a token-creation effect? The authority is
+/// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Populate | Effect::Token { .. } | Effect::CopyTokenOf { .. }
-    )
+    effect.is_token_creator()
 }
 
-/// CR 608.2c + CR 701.40a + CR 701.58a + CR 701.62a: Does this clause put a NEW
-/// permanent onto the battlefield that a later same-chain anaphor can name?
-///
-/// A created token and a face-down entry are indistinguishable to the anaphor.
-/// Both clauses produce exactly one new permanent and declare NO target, so a
-/// following "it" / "that creature" has exactly one possible referent — the
-/// thing the clause just made. Manifest (CR 701.40a), manifest dread
-/// (CR 701.62a) and cloak (CR 701.58a) all route through the one runtime
-/// producer (`game::morph::manifest_card`) and put a 2/2 face-down creature
-/// onto the battlefield, exactly as `Effect::Token` puts a token there.
-///
-/// Keying the chain-referent flag on "token" alone left the face-down producers
-/// with no referent, so their anaphor fell through to `ParentTarget` (empty —
-/// the producer has no targets) or to the trigger source: Conductive Machete
-/// attached to nothing, Weight Room put its counters on the Room (#7531).
-///
-/// `Effect::Conjure` (digital-only, no CR entry) is the same shape again: it
-/// puts exactly one new object into a zone and declares no target, so a
-/// following same-chain "it" has exactly one possible referent — the card it
-/// just conjured. Agent of Raffine's "Conjure a duplicate ... into your hand.
-/// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
-/// (the ability's actual chosen target — "target opponent" — not the
-/// conjured card).
-///
-/// The declined "if you do" walk (`game::effects`,
-/// `declined_gate_surviving_instructions`) reads the same answer to keep a
-/// created object and its later rider together.
+/// CR 608.2c: does this clause publish the created referent a later same-chain
+/// anaphor names? The authority (and its rationale) is
+/// [`Effect::publishes_created_referent`]; this name is kept for the parser's callers.
 pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
-    is_token_creating_effect(effect)
-        || matches!(
-            effect,
-            Effect::Manifest { .. }
-                | Effect::ManifestDread
-                | Effect::Cloak { .. }
-                | Effect::Conjure { .. }
-        )
+    effect.publishes_created_referent()
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
@@ -4887,7 +4853,8 @@ fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> 
                 damage_source_filter,
                 Some(TargetFilter::ChosenDamageSource { .. })
             ),
-            Effect::FlipCoin {
+            // Branch recursion is mode-agnostic (single, N and until-loss runs).
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -4929,7 +4896,8 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
         {
             *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
-        Effect::FlipCoin {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -5231,7 +5199,7 @@ pub(super) fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut Ab
 /// True when a def is a rider clause bound to the just-created tokens
 /// (`TargetFilter::LastCreated`) — e.g. the "Those tokens gain haste" grant and
 /// the "Exile them at the beginning of the next end step" delayed cleanup that
-/// follow a token-creating `FlipCoinUntilLose` win clause (Mirror March #5966).
+/// follow a token-creating until-loss `FlipCoins` win clause (Mirror March #5966).
 /// Used as the absorb predicate that folds these into the per-win `win_effect`.
 fn def_is_last_created_rider(def: &AbilityDefinition) -> bool {
     effect_targets_last_created(&def.effect)
@@ -5277,11 +5245,17 @@ fn effect_targets_last_created(effect: &Effect) -> bool {
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
-/// branches into their parent `FlipCoin` effect.
+/// branches into their parent `FlipCoins` effect.
 ///
-/// Pattern: a bare `FlipCoin { win: None, lose: None }` followed by one or more
-/// `FlipCoin { win: Some(..), lose: None }` / `FlipCoin { win: None, lose: Some(..) }`
-/// defs produced by the "if you win/lose the flip" intercept in `parse_effect_clause`.
+/// Pattern: a bare single-flip `FlipCoins { win: None, lose: None }` followed by one or
+/// more single-flip `FlipCoins { win: Some(..), lose: None }` / `FlipCoins { win: None,
+/// lose: Some(..) }` defs produced by the "if you win/lose the flip" intercept in
+/// `parse_effect_clause`.
+///
+/// The three run shapes keep their pre-merge consolidation membership through the
+/// head's `flips`: a single flip absorbs only branch-only single-flip stubs, an
+/// `Exactly` multi-flip run absorbs its following clause as the per-heads branch, and
+/// `UntilLoss` absorbs its per-win clause chain.
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
@@ -5289,31 +5263,36 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
         // the `flipper` (which player flips); the following branch-only flips are
         // stubs with the default `Controller` flipper, so preserve the bare flip's
         // flipper rather than the stubs'.
-        if let Effect::FlipCoin {
-            win_effect: None,
-            lose_effect: None,
-            flipper,
-        } = &*defs[i].effect
-        {
-            let flipper = flipper.clone();
+        let bare_single_flipper = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips,
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if flips.is_single_flip() => Some(flipper.clone()),
+            _ => None,
+        };
+        if let Some(flipper) = bare_single_flipper {
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
             while j < defs.len() && (win.is_none() || lose.is_none()) {
                 match &*defs[j].effect {
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: Some(w),
                         lose_effect: None,
                         ..
-                    } if win.is_none() => {
+                    } if flips.is_single_flip() && win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
                     }
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: None,
                         lose_effect: Some(l),
                         ..
-                    } if lose.is_none() => {
+                    } if flips.is_single_flip() && lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
                     }
@@ -5321,7 +5300,8 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 }
             }
             if win.is_some() || lose.is_some() {
-                *defs[i].effect = Effect::FlipCoin {
+                *defs[i].effect = Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: win,
                     lose_effect: lose,
                     flipper,
@@ -5330,50 +5310,60 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             }
         }
 
-        // CR 705.2 + CR 608.2c: Consolidate FlipCoinUntilLose with its per-win
+        // CR 705.2 + CR 608.2c: Consolidate an until-loss run with its per-win
         // clause chain. Absorb the win head (e.g. the token-creating copy clause)
         // PLUS any trailing rider clauses that reference the just-created tokens
         // (`LastCreated`) — "Those tokens gain haste", "Exile them …", already
         // rebound to `LastCreated` by the earlier `resolve_populated_token_anaphors`
         // pass — into ONE win_effect chain. They must live INSIDE win_effect
-        // because `finish_until_lose` runs win_effect once per win and each
+        // because `complete_run` runs win_effect once per win and each
         // `CopyTokenOf` overwrites `state.last_created_token_ids`; left as post-loop
         // siblings they would grant haste to / exile only the final win's token
         // (Mirror March #5966). Riders that do NOT reference `LastCreated` stay
         // top-level siblings — the predicate is the reach guard against
         // over-absorbing an unrelated following clause.
-        if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
+        if matches!(
+            &*defs[i].effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                ..
+            }
+        ) && i + 1 < defs.len()
+        {
             let mut head = defs.remove(i + 1);
             absorb_last_created_riders(defs, i, &mut head);
-            *defs[i].effect = Effect::FlipCoinUntilLose {
-                win_effect: Box::new(head),
-            };
+            if let Effect::FlipCoins { win_effect, .. } = &mut *defs[i].effect {
+                *win_effect = Some(Box::new(head));
+            }
         }
 
-        // CR 705: Consolidate FlipCoins with its following effect clause — the
+        // CR 705: Consolidate a multi-flip run with its following effect clause — the
         // "for each heads …" / "skips their next X turns where X is the number of
-        // coins that came up heads" sentence. Like FlipCoinUntilLose, trailing
+        // coins that came up heads" sentence. Like the until-loss run, trailing
         // `LastCreated` riders must join the per-head chain, rather than apply
-        // only to the final token created by the loop.
-        if let Effect::FlipCoins {
-            win_effect: None,
-            lose_effect: None,
-            count,
-            flipper,
-        } = &*defs[i].effect
-        {
-            if i + 1 < defs.len() {
-                let count = count.clone();
-                let flipper = flipper.clone();
-                let mut next = defs.remove(i + 1);
-                absorb_last_created_riders(defs, i, &mut next);
-                *defs[i].effect = Effect::FlipCoins {
-                    count,
-                    win_effect: Some(Box::new(next)),
-                    lose_effect: None,
-                    flipper,
-                };
+        // only to the final token created by the loop. A single flip ("Flip a coin.
+        // Draw a card.") must NOT absorb its following clause: that clause is a
+        // sibling instruction, not a per-heads branch.
+        let multi_flip_head = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips: flips @ CoinFlipRun::Exactly { .. },
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if !flips.is_single_flip() && i + 1 < defs.len() => {
+                Some((flips.clone(), flipper.clone()))
             }
+            _ => None,
+        };
+        if let Some((flips, flipper)) = multi_flip_head {
+            let mut next = defs.remove(i + 1);
+            absorb_last_created_riders(defs, i, &mut next);
+            *defs[i].effect = Effect::FlipCoins {
+                flips,
+                win_effect: Some(Box::new(next)),
+                lose_effect: None,
+                flipper,
+            };
         }
 
         i += 1;
@@ -5588,8 +5578,8 @@ mod difference_binding_tests {
 /// whether it leads (`"for each flip you won, create …"` — Mirror March) or
 /// trails (`"put a +1/+1 counter on ~ for each flip you won"` — Crazed
 /// Firecat). Unlike `strip_for_each_prefix`, this carries NO iteration count:
-/// `FlipCoinUntilLose`/`FlipCoins` already run their `win_effect` once per win
-/// (`finish_until_lose`), so lifting the count into a `repeat_for` loop (or a
+/// `FlipCoins` already runs its `win_effect` once per win
+/// (`complete_run` for an until-loss run), so lifting the count into a `repeat_for` loop (or a
 /// counter-count multiplier) would double-apply it. Dropping the quantifier
 /// lets the bare imperative reach its own combinator. The `"flip(s) you won"`
 /// noun is not a countable `parse_for_each_clause` clause, so neither
@@ -12187,7 +12177,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::Discard { count: amount, .. }
         | Effect::EachSourceDealsDamage { amount, .. }
         | Effect::Endure { amount, .. }
-        | Effect::FlipCoins { count: amount, .. }
         | Effect::GainEnergy { amount, .. }
         | Effect::GivePlayerCounter { count: amount, .. }
         | Effect::GrantExtraLoyaltyActivations { amount, .. }
@@ -12210,6 +12199,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
             if rebind_magnitude_target_anaphor {
                 rebind_cost_paid_object_pt_to_target(amount);
+            }
+        }
+        // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
+        // `UntilLoss` run has no count to bind.
+        Effect::FlipCoins { flips, .. } => {
+            if let Some(amount) = flips.count_expr_mut() {
+                bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+                if rebind_magnitude_target_anaphor {
+                    rebind_cost_paid_object_pt_to_target(amount);
+                }
             }
         }
         // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
@@ -13422,6 +13421,10 @@ fn apply_where_x_ability_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
                 apply_where_x_ability_condition(c, where_x_expression, unbound);
@@ -13447,6 +13450,10 @@ fn apply_where_x_static_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for condition in conditions {
                 apply_where_x_static_condition(condition, where_x_expression, unbound);

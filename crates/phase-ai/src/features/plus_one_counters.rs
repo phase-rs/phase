@@ -14,6 +14,11 @@
 //!   `crates/engine/src/types/keywords.rs:358-361`. CR 122.6a: ETB-with-counters keyword.
 //! - `Effect::Token { enter_with_counters: Vec<(CounterType, QuantityExpr)>, .. }` at
 //!   `ability.rs:2167`. CR 122.6a: tokens that enter with counters.
+//! - Created-token placement: `Effect::PutCounter { target: TargetFilter::LastCreated, .. }`
+//!   whose nearest preceding created-referent publisher in the same unconditional chain is an `Effect::Token`
+//!   (`ability_chain::created_token_placement_source`). CR 122.6 + CR 122.6a: a
+//!   token given counters by the ability that creates it is a token with
+//!   counters, in either representation, not a generator onto existing creatures.
 //! - `ReplacementDefinition { event: ReplacementEvent::AddCounter,
 //!   quantity_modification: Some(QuantityModification::{Double | Plus | Minus}), .. }`
 //!   at `ability.rs:4818-4874`. CR 614.1a: replacement effects that modify counter
@@ -44,7 +49,7 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 
-use crate::ability_chain::collect_chain_effects;
+use crate::ability_chain::{collect_chain_effects, created_token_placement_source, AbilityWalk};
 use crate::features::commitment;
 
 /// Commitment floor below which the tactical policy opts out.
@@ -199,10 +204,39 @@ fn compute_commitment(
 /// where `counter_type == CounterType::Plus1Plus1`. Checks the ability's full effect chain via
 /// `collect_chain_effects`. Excludes loyalty counters, -1/-1 counters, lore
 /// counters, etc. CR 122.1a.
+///
+/// CR 122.6 + CR 122.6a: a created-token placement (counters put on the token
+/// this same chain just created) is part of that token's creation, so it is
+/// excluded here and classified by [`ability_creates_token_with_plus_one_counters`].
 pub(crate) fn ability_places_plus_one_counter(ability: &AbilityDefinition) -> bool {
-    collect_chain_effects(ability)
+    AbilityWalk::unconditional(ability)
+        .without_created_token_placements()
         .iter()
         .any(effect_places_plus_one_counter)
+}
+
+/// True if this ability creates a token that gets +1/+1 counters, either as it
+/// enters (`Token { enter_with_counters }`) or from a created-token placement
+/// later in the same unconditional chain whose nearest preceding publisher is that `Token` (`Token` → `PutCounter { LastCreated }`).
+/// CR 122.6 + CR 122.6a: both are "counters put on" the created token.
+pub(crate) fn ability_creates_token_with_plus_one_counters(ability: &AbilityDefinition) -> bool {
+    let chain = collect_chain_effects(ability);
+    chain
+        .iter()
+        .enumerate()
+        .any(|(index, effect)| match effect {
+            Effect::Token {
+                enter_with_counters,
+                ..
+            } => enter_with_counters
+                .iter()
+                .any(|(counter_type, _)| counter_type == &CounterType::Plus1Plus1),
+            Effect::PutCounter { counter_type, .. } => {
+                counter_type == &CounterType::Plus1Plus1
+                    && created_token_placement_source(&chain, index).is_some()
+            }
+            _ => false,
+        })
 }
 
 /// True if this ability contains a Proliferate effect. CR 701.34.
@@ -213,8 +247,8 @@ pub(crate) fn ability_proliferates(ability: &AbilityDefinition) -> bool {
 }
 
 /// True if this face enters the battlefield with +1/+1 counters via the
-/// `EtbCounter` keyword or is a token that enters with +1/+1 counters.
-/// CR 122.6a.
+/// `EtbCounter` keyword, or has an ability that creates a token with +1/+1
+/// counters ([`ability_creates_token_with_plus_one_counters`]). CR 122.6a.
 pub(crate) fn face_etb_with_plus_one_counters(face: &engine::types::card::CardFace) -> bool {
     // Keyword::EtbCounter shape.
     if face
@@ -224,13 +258,10 @@ pub(crate) fn face_etb_with_plus_one_counters(face: &engine::types::card::CardFa
     {
         return true;
     }
-    // Token that enters with +1/+1 counters (Effect::Token enter_with_counters).
-    face.abilities.iter().any(|a| {
-        collect_chain_effects(a).iter().any(|e| {
-            matches!(e, Effect::Token { enter_with_counters, .. }
-                if enter_with_counters.iter().any(|(ct, _)| ct == &CounterType::Plus1Plus1))
-        })
-    })
+    // Token that gets +1/+1 counters from the ability creating it.
+    face.abilities
+        .iter()
+        .any(ability_creates_token_with_plus_one_counters)
 }
 
 /// True if this face has a replacement effect that modifies the quantity of
@@ -581,6 +612,98 @@ mod tests {
             },
         ));
         assert!(face_etb_with_plus_one_counters(&face));
+    }
+
+    // ─── Created-token placement (CR 122.6 + CR 122.6a) ─────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, last_created_placement, token_effect,
+        x_quantity,
+    };
+    use engine::types::ability::SubAbilityLink;
+
+    fn token_face(name: &str, ability: AbilityDefinition) -> CardFace {
+        let mut face = make_face(name);
+        face.abilities.push(ability);
+        face
+    }
+
+    /// A token given +1/+1 counters by the ability creating it is a
+    /// token-with-counters source, not a generator onto existing creatures, in
+    /// the imperative shape exactly as in the declarative one.
+    #[test]
+    fn created_token_placement_classifies_as_token_with_counters() {
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let face = token_face(
+                "Fractal Maker",
+                imperative_token_then_placement(
+                    AbilityKind::Activated,
+                    link,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            );
+            assert!(!ability_places_plus_one_counter(&face.abilities[0]));
+            assert!(ability_creates_token_with_plus_one_counters(
+                &face.abilities[0]
+            ));
+            assert!(face_etb_with_plus_one_counters(&face));
+
+            let feature = detect(&[deck_entry(face, 3)]);
+            assert_eq!(feature.generator_count, 0, "{link:?}");
+            assert_eq!(feature.etb_with_counters_count, 3, "{link:?}");
+        }
+    }
+
+    /// An independent +1/+1 placement keeps the ability a generator, beside its
+    /// created-token placement.
+    #[test]
+    fn independent_placement_keeps_the_generator_bucket() {
+        let face = token_face(
+            "Fractal and Grow",
+            effect_chain(
+                AbilityKind::Activated,
+                SubAbilityLink::ContinuationStep,
+                vec![
+                    token_effect(0, 0, vec![]),
+                    last_created_placement(
+                        CounterType::Plus1Plus1,
+                        QuantityExpr::Fixed { value: 1 },
+                    ),
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ],
+            ),
+        );
+        let feature = detect(&[deck_entry(face, 2)]);
+        assert_eq!(feature.generator_count, 2);
+        assert_eq!(feature.etb_with_counters_count, 2);
+    }
+
+    /// The +1/+1 disambiguator still holds: a -1/-1 created-token placement is
+    /// neither a generator nor a token with +1/+1 counters.
+    #[test]
+    fn minus_counter_created_token_placement_is_neither_bucket() {
+        let face = token_face(
+            "Withered Fractal",
+            imperative_token_then_placement(
+                AbilityKind::Activated,
+                SubAbilityLink::ContinuationStep,
+                (2, 2),
+                CounterType::Minus1Minus1,
+                QuantityExpr::Fixed { value: 1 },
+            ),
+        );
+        let feature = detect(&[deck_entry(face, 1)]);
+        assert_eq!(feature.generator_count, 0);
+        assert_eq!(feature.etb_with_counters_count, 0);
     }
 
     // ─── Scope guard tests ───────────────────────────────────────────────────

@@ -36,7 +36,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::player::PlayerId;
 
-use crate::ability_chain::collect_chain_effects;
+use crate::ability_chain::AbilityWalk;
 use crate::cast_facts::collect_definition_effects;
 use crate::features::DeckFeatures;
 
@@ -112,38 +112,48 @@ fn mana_cost_has_x(cost: &ManaCost) -> bool {
 /// yield `&Effect`s. Object-level X detection stays independent via
 /// `spell_object_references_x`, so X-counter-ETB creatures are gated even when
 /// their X reference is a replacement rather than a flat effect.
+///
+/// The payoff is kept as one walk per definition, in the order the flat list
+/// used to concatenate them, so the created-token pairing (CR 608.2c) is read
+/// against each definition's own chain and never across definitions.
 fn payoff_effects_and_x_ref<'a>(
     ctx: &PolicyContext<'a>,
     object_id: ObjectId,
     ability: &'a AbilityDefinition,
     is_spell: bool,
-) -> (Vec<&'a Effect>, bool) {
+) -> (Vec<AbilityWalk<'a>>, bool) {
     if !is_spell {
-        return (collect_chain_effects(ability), false);
+        return (vec![AbilityWalk::unconditional(ability)], false);
     }
 
-    let effects = match ctx.cast_facts() {
+    let walks = match ctx.cast_facts() {
         Some(facts) => {
-            let mut effects: Vec<&Effect> = Vec::new();
-            for def in facts.primary_effects {
-                effects.extend(collect_definition_effects(def));
-            }
-            for trigger in facts.immediate_etb_triggers {
-                if let Some(exec) = trigger.execute.as_deref() {
-                    effects.extend(collect_definition_effects(exec));
-                }
-            }
-            for replacement in facts.immediate_replacements {
-                if let Some(exec) = replacement.execute.as_deref() {
-                    effects.extend(collect_definition_effects(exec));
-                }
-            }
-            effects
+            let definition_walk =
+                |def: &'a AbilityDefinition| AbilityWalk::of(def, collect_definition_effects(def));
+            facts
+                .primary_effects
+                .into_iter()
+                .map(definition_walk)
+                .chain(
+                    facts
+                        .immediate_etb_triggers
+                        .into_iter()
+                        .filter_map(|trigger| trigger.execute.as_deref())
+                        .map(definition_walk),
+                )
+                .chain(
+                    facts
+                        .immediate_replacements
+                        .into_iter()
+                        .filter_map(|replacement| replacement.execute.as_deref())
+                        .map(definition_walk),
+                )
+                .collect()
         }
-        None => collect_chain_effects(ability),
+        None => vec![AbilityWalk::unconditional(ability)],
     };
     let object_level_x = x_reference::spell_object_references_x(ctx.state, object_id);
-    (effects, object_level_x)
+    (walks, object_level_x)
 }
 
 /// The reviewer's unified predicate, made chain-aware (v3 CORRECTION 1): the
@@ -157,31 +167,45 @@ fn payoff_effects_and_x_ref<'a>(
 /// lost this way" after "each opponent loses X life"). A non-X residual resets
 /// `prev_was_x`, so `LoseLife{X}, GainLife{Fixed 5}, Draw{PreviousEffectAmount}`
 /// does NOT treat the draw as X-scaled (the 5 came from the fixed gain).
+///
+/// CR 107.3 + CR 608.2c: both per-effect tests go through
+/// `x_reference::effect_matches_in_walk`, so a `Token` whose created-token
+/// placement is X-scaled is X-scaled itself, exactly as a
+/// `Token { enter_with_counters: X }` is. The walks are visited in order and
+/// the carry state crosses walk boundaries as the flat list did.
 fn no_op_at_x_zero(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
-    effects: &[&Effect],
+    walks: &[AbilityWalk<'_>],
     object_level_x: bool,
 ) -> bool {
     let mut references_any_x = object_level_x;
     let mut prev_was_x = object_level_x;
     let mut residual_effects = Vec::new();
-    for effect in effects {
-        if x_reference::effect_references_x(effect) {
-            references_any_x = true;
-            prev_was_x = true;
-            continue;
+    for walk in walks {
+        for effect in walk.effects() {
+            if x_reference::effect_matches_in_walk(walk, effect, x_reference::effect_references_x) {
+                references_any_x = true;
+                prev_was_x = true;
+                continue;
+            }
+            if prev_was_x
+                && x_reference::effect_matches_in_walk(
+                    walk,
+                    effect,
+                    x_reference::effect_references_previous_amount,
+                )
+            {
+                // Chain-relative to an X-scaled predecessor → also 0 at X=0.
+                references_any_x = true;
+                prev_was_x = true;
+                continue;
+            }
+            residual_effects.push(*effect);
+            prev_was_x = false;
         }
-        if prev_was_x && x_reference::effect_references_previous_amount(effect) {
-            // Chain-relative to an X-scaled predecessor → also 0 at X=0.
-            references_any_x = true;
-            prev_was_x = true;
-            continue;
-        }
-        residual_effects.push(*effect);
-        prev_was_x = false;
     }
     references_any_x
         && residual_effects_at_x_zero(state, ai_player, source_id, ability, &residual_effects)
@@ -494,13 +518,13 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
             .get(&object_id)
             .is_none_or(|object| object.modal.is_none())
     {
-        let (effects, object_level_x) = payoff_effects_and_x_ref(ctx, object_id, ability, is_spell);
+        let (walks, object_level_x) = payoff_effects_and_x_ref(ctx, object_id, ability, is_spell);
         if !no_op_at_x_zero(
             state,
             ctx.ai_player,
             object_id,
             ability,
-            &effects,
+            &walks,
             object_level_x,
         ) {
             return None;
@@ -1552,5 +1576,157 @@ mod tests {
             .push(StaticDefinition::continuous());
 
         assert_not_reject(&verdict_for_cast(&state, object, card));
+    }
+
+    // --- created-token placement: X sized by the placement (CR 107.3) ------
+
+    use crate::policies::tests::created_token_placement_parity::{
+        declarative_token_with_counters, effect_chain, imperative_token_then_placement,
+        last_created_placement, token_effect,
+    };
+    use engine::types::ability::SubAbilityLink;
+
+    fn with_x_cost(mut ability: AbilityDefinition) -> AbilityDefinition {
+        ability.cost = Some(x_only_cost());
+        ability
+    }
+
+    fn imperative_x_token(kind: AbilityKind) -> AbilityDefinition {
+        imperative_token_then_placement(
+            kind,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            x_expr(),
+        )
+    }
+
+    fn fractal_summoning_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::X,
+                ManaCostShard::GreenBlue,
+                ManaCostShard::GreenBlue,
+            ],
+            generic: 0,
+        }
+    }
+
+    /// A 0/0 token with X counters at X = 0 dies to CR 704.5f, so with max X = 0
+    /// the activation is a no-op, in the imperative shape as in the declarative.
+    #[test]
+    fn created_token_with_x_placement_max_x_zero_rejected() {
+        let mut state = base_state();
+        let source = activated_source(
+            &mut state,
+            "Berta",
+            with_x_cost(imperative_x_token(AbilityKind::Activated)),
+        );
+        assert_reject(&verdict_for_activate(&state, source), "x_cast_zero_no_op");
+
+        // Reach guard: one mana makes X = 1 affordable.
+        add_pool(&mut state, AI, 1);
+        assert_not_reject(&verdict_for_activate(&state, source));
+
+        // BASE pin: the declarative twin rejects the same way.
+        let mut state = base_state();
+        let source = activated_source(
+            &mut state,
+            "Berta",
+            with_x_cost(declarative_token_with_counters(
+                AbilityKind::Activated,
+                (0, 0),
+                CounterType::Plus1Plus1,
+                x_expr(),
+            )),
+        );
+        assert_reject(&verdict_for_activate(&state, source), "x_cast_zero_no_op");
+    }
+
+    /// The spell form, through the populated `CastFacts` production builds.
+    #[test]
+    fn created_token_with_x_placement_spell_max_x_zero_rejected() {
+        let mut state = base_state();
+        let (obj, card) = spell_source(
+            &mut state,
+            "Fractal Summoning",
+            imperative_x_token(AbilityKind::Spell),
+            fractal_summoning_cost(),
+        );
+        assert_reject(
+            &verdict_for_cast_with_facts(&state, obj, card),
+            "x_cast_zero_no_op",
+        );
+    }
+
+    /// Parity of the chain-relative carry: `LoseLife { X }` then a token sized
+    /// by `PreviousEffectAmount` reads the same in both representations.
+    #[test]
+    fn previous_amount_sized_token_matches_its_declarative_twin() {
+        let previous = || QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: engine::types::ability::DamageChannel::Total,
+                aggregate: engine::types::ability::AggregateFunction::Sum,
+            },
+        };
+        let lose_life = || Effect::LoseLife {
+            amount: x_expr(),
+            target: None,
+        };
+        let imperative = effect_chain(
+            AbilityKind::Activated,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                lose_life(),
+                token_effect(0, 0, vec![]),
+                last_created_placement(CounterType::Plus1Plus1, previous()),
+            ],
+        );
+        let declarative = effect_chain(
+            AbilityKind::Activated,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                lose_life(),
+                token_effect(0, 0, vec![(CounterType::Plus1Plus1, previous())]),
+            ],
+        );
+        for ability in [imperative, declarative] {
+            let mut state = base_state();
+            let source = activated_source(&mut state, "Drain Maker", with_x_cost(ability));
+            assert_reject(&verdict_for_activate(&state, source), "x_cast_zero_no_op");
+        }
+    }
+
+    /// Hostiles: an X placement on an existing creature does not size the
+    /// `Token` (which stays an unmodeled residual), and an X placement in the
+    /// "otherwise" leg of a root `Token` never resolves after it (CR 608.2c).
+    #[test]
+    fn unpaired_x_placements_do_not_size_the_token() {
+        let typed = with_x_cost(effect_chain(
+            AbilityKind::Activated,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                token_effect(0, 0, vec![]),
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: x_expr(),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ],
+        ));
+        let mut otherwise = with_x_cost(AbilityDefinition::new(
+            AbilityKind::Activated,
+            token_effect(0, 0, vec![]),
+        ));
+        otherwise.condition = Some(AbilityCondition::IsYourTurn);
+        otherwise.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            last_created_placement(CounterType::Plus1Plus1, x_expr()),
+        )));
+        for ability in [typed, otherwise] {
+            let mut state = base_state();
+            let source = activated_source(&mut state, "Hostile", ability);
+            assert_not_reject(&verdict_for_activate(&state, source));
+        }
     }
 }
