@@ -159,6 +159,99 @@ pub(crate) fn capture_attachment_snapshot(
         .collect()
 }
 
+/// CR 608.2h + CR 400.7: Capture departure facts before numeric reset or
+/// incarnation change. The live cleanup and resolved-command replay share this
+/// authority. Live delivery can call both; the first exact-epoch snapshot wins.
+fn capture_zone_exit_lki(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+    attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
+) {
+    if from == to
+        || !matches!(
+            from,
+            Zone::Battlefield | Zone::Graveyard | Zone::Exile | Zone::Stack
+        )
+    {
+        return;
+    }
+    let Some(occurrence) = state
+        .objects
+        .get(&object_id)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return;
+    };
+    if state
+        .lki_by_incarnation
+        .get(&object_id)
+        .is_some_and(|history| history.contains_key(&occurrence.incarnation))
+    {
+        return;
+    }
+    let lki_copiable_values =
+        crate::game::layers::compute_current_copiable_values(state, object_id);
+    if let Some(obj) = state.objects.get(&object_id) {
+        let incarnation = obj.incarnation;
+        let lki = crate::types::game_state::LKISnapshot {
+            name: obj.name.clone(),
+            token_image_ref: obj.token_image_ref.clone(),
+            power: obj.power,
+            toughness: obj.toughness,
+            // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
+            // base-scope P/T look-back filters read the base, not current.
+            base_power: obj.layer_base_power.or(obj.base_power),
+            base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
+            // CR 202.3d + CR 709.4b: capture the current effective mana value.
+            // A split card off the stack uses its combined halves; a stack
+            // object retains the selected spell's mana value.
+            mana_value: obj.effective_mana_value(),
+            controller: obj.controller,
+            owner: obj.owner,
+            // CR 400.7: Capture core types for "if it was a creature" patterns.
+            card_types: obj.card_types.core_types.clone(),
+            subtypes: obj.card_types.subtypes.clone(),
+            supertypes: obj.card_types.supertypes.clone(),
+            keywords: obj.keywords.clone(),
+            colors: obj.effective_colors(),
+            chosen_attributes: obj.chosen_attributes.clone(),
+            // CR 400.7: Capture counters for "if it had counters on it" patterns.
+            counters: obj.counters.clone(),
+            // CR 110.5 + CR 110.5d: Capture tap status AT zone exit. Once the
+            // object leaves the battlefield it is neither tapped nor untapped,
+            // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
+            // this captured value instead of the live (now-absent) object.
+            tapped: obj.tapped,
+            // CR 701.60b: Capture suspected status at zone exit for
+            // "was suspected" look-back riders.
+            is_suspected: obj.is_suspected,
+            // CR 608.2h: The attachment set as it stood BEFORE the departure
+            // sever (CR 701.3d) cleared it, so a source-referential intervening-if
+            // re-checked at resolution ("if this creature is enchanted" — Dreampod
+            // Druid) reads last known information once its source has left the
+            // battlefield.
+            // Supplied by the caller: the sever already ran by the time we get here.
+            attachments,
+        };
+        state.lki_cache.insert(object_id, lki.clone());
+        state
+            .lki_by_incarnation
+            .entry(object_id)
+            .or_default()
+            .insert(incarnation, lki);
+    }
+    if let Some(values) = lki_copiable_values {
+        state
+            .lki_copiable_values_by_incarnation
+            .entry(object_id)
+            .or_default()
+            .insert(occurrence.incarnation, values.clone());
+        state.lki_copiable_values.insert(object_id, values);
+    }
+}
+
 /// CR 400.7: Snapshot LKI and apply all cleanup side effects when an object
 /// leaves its current zone. Shared by `move_to_zone` and `move_to_library_at_index`.
 ///
@@ -234,83 +327,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         .activated_abilities_this_game
         .retain(|(id, _), _| *id != object_id);
 
-    // CR 400.7: Snapshot LKI before a zone change out of any zone whose
-    // characteristics are not recomputed on demand. Power/toughness reflect
-    // layer modifications on battlefield (Layer 7); from exile they will be
-    // None (no layer computation), which is correct.
-    //
-    // CR 608.2h + CR 109.4: `Zone::Stack` is included because the CR 109.4
-    // reset below erases `obj.controller` on the way out, and a look-back
-    // effect that needs the at-exit controller of a stack object has nowhere
-    // else to read it. Render Silent ("Counter target spell. Its controller
-    // can't cast spells this turn") is the measured consumer:
-    // `ability_utils::parent_target_controller` already prefers this snapshot
-    // for any off-battlefield object and only falls through to `obj.controller`
-    // when there is none, so widening the capture is the whole fix — no
-    // consumer changes. The stack seed (`layers.rs`) owns a stack object's
-    // controller on the way IN; this owns the record of it on the way OUT.
-    if from == Zone::Battlefield || from == Zone::Exile || from == Zone::Stack {
-        let lki_copiable_values =
-            crate::game::layers::compute_current_copiable_values(state, object_id);
-        if let Some(obj) = state.objects.get(&object_id) {
-            let incarnation = obj.incarnation;
-            let lki = crate::types::game_state::LKISnapshot {
-                name: obj.name.clone(),
-                token_image_ref: obj.token_image_ref.clone(),
-                power: obj.power,
-                toughness: obj.toughness,
-                // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
-                // base-scope P/T look-back filters read the base, not current.
-                base_power: obj.layer_base_power.or(obj.base_power),
-                base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
-                // CR 202.3d + CR 709.4b: this LKI is captured on leaving the
-                // battlefield or exile (off the stack), so a split card records
-                // its combined mana value and colors (no-op for single-face and
-                // battlefield Rooms, which gate out).
-                mana_value: obj.effective_mana_value(),
-                controller: obj.controller,
-                owner: obj.owner,
-                // CR 400.7: Capture core types for "if it was a creature" patterns.
-                card_types: obj.card_types.core_types.clone(),
-                subtypes: obj.card_types.subtypes.clone(),
-                supertypes: obj.card_types.supertypes.clone(),
-                keywords: obj.keywords.clone(),
-                colors: obj.effective_colors(),
-                chosen_attributes: obj.chosen_attributes.clone(),
-                // CR 400.7: Capture counters for "if it had counters on it" patterns.
-                counters: obj.counters.clone(),
-                // CR 110.5 + CR 110.5d: Capture tap status AT zone exit. Once the
-                // object leaves the battlefield it is neither tapped nor untapped,
-                // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
-                // this captured value instead of the live (now-absent) object.
-                tapped: obj.tapped,
-                // CR 701.60b: Capture suspected status at zone exit for
-                // "was suspected" look-back riders.
-                is_suspected: obj.is_suspected,
-                // CR 608.2h: The attachment set as it stood BEFORE the departure
-                // sever (CR 701.3d) cleared it, so a source-referential intervening-if
-                // re-checked at resolution ("if this creature is enchanted" — Dreampod
-                // Druid) reads last known information once its source has left the
-                // battlefield.
-                // Supplied by the caller: the sever already ran by the time we get here.
-                attachments,
-            };
-            state.lki_cache.insert(object_id, lki.clone());
-            state
-                .lki_by_incarnation
-                .entry(object_id)
-                .or_default()
-                .insert(incarnation, lki);
-        }
-        if let Some(values) = lki_copiable_values {
-            state
-                .lki_copiable_values_by_incarnation
-                .entry(object_id)
-                .or_default()
-                .insert(occurrence.incarnation, values.clone());
-            state.lki_copiable_values.insert(object_id, values);
-        }
-    }
+    capture_zone_exit_lki(state, object_id, from, to, attachments);
 
     // CR 122.2 + CR 113.6b: Decide counter persistence using the still-current
     // from-zone object state, BEFORE taking the mutable borrow below (the helper
@@ -650,6 +667,13 @@ pub(crate) fn apply_zone_exit_cleanup(
         // CR 701.54e: A player's Ring-bearer designation applies only while
         // that permanent remains on the battlefield under that player's control.
         super::effects::ring::clear_ring_bearer_if_object(state, object_id);
+    }
+
+    if from != to && from != Zone::Battlefield {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.sync_missing_base_characteristics();
+            object.reset_numeric_characteristics_to_base();
+        }
     }
 
     prune_object_bound_effects_on_exit(state, object_id, from, to);
@@ -1219,6 +1243,33 @@ pub fn apply_resolved_zone_change(
             command.cause,
         );
     }
+    let numeric_source_before = state
+        .objects
+        .get(&command.object.object_id)
+        .is_some_and(crate::game::layers::object_has_own_numeric_cda);
+    let numeric_zone_dependency = crate::game::layers::static_layer_dependency_for_zone_transition(
+        state,
+        command.from,
+        command.to,
+    );
+    let attachments = state
+        .objects
+        .get(&command.object.object_id)
+        .map(|object| capture_attachment_snapshot(state, object))
+        .unwrap_or_default();
+    capture_zone_exit_lki(
+        state,
+        command.object.object_id,
+        command.from,
+        command.to,
+        attachments,
+    );
+    if command.from != command.to && command.from != Zone::Battlefield {
+        if let Some(object) = state.objects.get_mut(&command.object.object_id) {
+            object.sync_missing_base_characteristics();
+            object.reset_numeric_characteristics_to_base();
+        }
+    }
     // CR 701.3d: the command carries no attachment
     // payload, so replay re-runs the same severing authority the live
     // transition used. Idempotent, so the live path's earlier call is not
@@ -1298,6 +1349,21 @@ pub fn apply_resolved_zone_change(
                 found: turn_zone_change_index,
             },
         );
+    }
+    if command.from != command.to
+        && (numeric_source_before
+            || numeric_zone_dependency
+            || state
+                .objects
+                .get(&command.object.object_id)
+                .is_some_and(crate::game::layers::object_has_own_numeric_cda)
+            || crate::game::layers::static_layer_dependency_for_zone_transition(
+                state,
+                command.from,
+                command.to,
+            ))
+    {
+        crate::game::layers::mark_layers_full(state);
     }
     Ok(())
 }
@@ -1515,7 +1581,11 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // condition, or dynamic quantity. Query before the move and repeat below
     // after the object reaches its destination, before any trigger collection.
     let static_dependency_before =
-        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to)
+            || state
+                .objects
+                .get(&object_id)
+                .is_some_and(crate::game::layers::object_has_own_numeric_cda);
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -1688,7 +1758,11 @@ pub(crate) fn move_to_zone_with_entry_flags(
     }
 
     let static_dependency_after =
-        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to)
+            || state
+                .objects
+                .get(&object_id)
+                .is_some_and(crate::game::layers::object_has_own_numeric_cda);
 
     // pod-lab loop-3 Q5: a plain Battlefield entry that doesn't originate
     // from Hand or Exile, and isn't itself the source of a live
@@ -6619,5 +6693,102 @@ mod hand_entry_rebind_tests {
             wire["ZoneChange"].get("rebound_from").is_some(),
             "reach: a rebound command carries the key"
         );
+    }
+}
+
+#[cfg(test)]
+mod numeric_cda_departure_tests {
+    use super::*;
+    use crate::game::layers::{flush_layers, mark_layers_full};
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn graveyard_numeric_departure_live_cleanup_and_replay_keep_the_first_exact_snapshot() {
+        let mut scenario = GameScenario::new();
+        scenario.with_graveyard(P0, &["A"]);
+        scenario.with_graveyard(P1, &["B", "C"]);
+        let id = scenario.add_creature_to_graveyard(P0, "Lord of Extinction", 0, 0)
+            .from_oracle_text("Lord of Extinction's power and toughness are each equal to the number of cards in all graveyards.").id();
+        let mut runner = scenario.build();
+        mark_layers_full(runner.state_mut());
+        flush_layers(runner.state_mut());
+        let epoch = runner.state().objects[&id].incarnation;
+        assert_eq!(runner.state().objects[&id].power, Some(4));
+        let mut live = runner.state().clone();
+        let mut replayed = live.clone();
+        let record =
+            live.objects[&id].snapshot_for_zone_change(id, Some(Zone::Graveyard), Zone::Exile);
+        apply_zone_exit_cleanup(&mut live, id, Zone::Graveyard, Zone::Exile, vec![]);
+        assert_eq!(live.objects[&id].power, Some(0));
+        assert_eq!(live.lki_by_incarnation[&id][&epoch].power, Some(4));
+        let command = resolve_and_apply_zone_change(
+            &mut live,
+            id,
+            Zone::Graveyard,
+            Zone::Exile,
+            P0,
+            None,
+            record,
+        )
+        .unwrap();
+        // The resolved applier must not overwrite live cleanup's 4 with reset0.
+        assert_eq!(live.lki_by_incarnation[&id][&epoch].power, Some(4));
+        apply_resolved_zone_change(&mut replayed, &command).unwrap();
+        for state in [&mut live, &mut replayed] {
+            assert_eq!(state.lki_by_incarnation[&id][&epoch].power, Some(4));
+            assert_eq!(state.objects[&id].power, Some(0));
+            assert!(state.layers_dirty.is_dirty());
+            flush_layers(state);
+            assert_eq!(state.objects[&id].power, Some(3));
+            assert_eq!(state.objects[&id].layer_base_power, Some(3));
+            assert_eq!(state.objects[&id].base_power, Some(0));
+            assert_eq!(state.objects[&id].incarnation, epoch + 1);
+        }
+    }
+
+    #[test]
+    fn same_zone_reorder_does_not_capture_or_reset_the_numeric_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Numeric reorder fixture".into(),
+            Zone::Graveyard,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.power = Some(4);
+        object.base_power = Some(0);
+        object.base_characteristics_initialized = true;
+        let epoch = object.incarnation;
+        let record = object.snapshot_for_zone_change(id, Some(Zone::Graveyard), Zone::Graveyard);
+        let command = resolve_and_apply_zone_change(
+            &mut state,
+            id,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            P0,
+            None,
+            record,
+        )
+        .unwrap();
+        assert_eq!(command.resulting_incarnation, epoch);
+        assert_eq!(state.objects[&id].power, Some(4));
+        assert!(!state.lki_by_incarnation.contains_key(&id));
+        let record =
+            state.objects[&id].snapshot_for_zone_change(id, Some(Zone::Graveyard), Zone::Exile);
+        resolve_and_apply_zone_change(
+            &mut state,
+            id,
+            Zone::Graveyard,
+            Zone::Exile,
+            P0,
+            None,
+            record,
+        )
+        .unwrap();
+        assert_eq!(state.lki_by_incarnation[&id][&epoch].power, Some(4));
+        assert_eq!(state.objects[&id].power, Some(0));
+        assert_eq!(state.objects[&id].incarnation, epoch + 1);
     }
 }

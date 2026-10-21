@@ -2189,13 +2189,11 @@ fn transmute_same_mana_value_filter() -> TargetFilter {
 /// Put a number of +1/+1 counters equal to this card's power on target creature. Activate
 /// only as a sorcery."
 ///
-/// Power snapshot timing (CR 208.3 + CR 400.7): At resolution the source has already
-/// been exiled as a cost; CR 702.97a specifies "the power of the card you exiled",
-/// which is read from the exile-zone object via `QuantityRef::Power { scope: crate::types::ability::ObjectScope::Source }` (with LKI
-/// fallback if the object is somehow gone). Non-battlefield zones do not run layer
-/// computation, so the read value equals the card's printed power — the correct
-/// target for "this card's power" in the graveyard reminder text. No new quantity
-/// ref is needed; `SelfPower` is already the right abstraction.
+/// CR 608.2h + CR 702.97a: announcement captures the source incarnation before
+/// paying the self-exile cost. `Power { scope: ObjectScope::Source }` therefore
+/// reads that graveyard incarnation's versioned last known information at
+/// resolution, including its numeric CDA. The new exile object's current power
+/// may differ; it does not replace the pre-cost source.
 pub fn synthesize_scavenge(face: &mut CardFace) {
     let scavenge_abilities: Vec<AbilityDefinition> = face
         .keywords

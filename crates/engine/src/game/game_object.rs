@@ -3529,6 +3529,16 @@ impl GameObject {
         }
     }
 
+    /// CR 613.4a + CR 613.4b: Restore only the four numeric layer carriers. Initialization
+    /// belongs to `sync_missing_base_characteristics`, never to this reset:
+    /// a previously derived value must not become the printed baseline.
+    pub(crate) fn reset_numeric_characteristics_to_base(&mut self) {
+        self.power = self.base_power;
+        self.toughness = self.base_toughness;
+        self.layer_base_power = self.base_power;
+        self.layer_base_toughness = self.base_toughness;
+    }
+
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
     /// printed baseline. Mirrors the per-object reset in `evaluate_layers` Step 1
     /// (layers.rs) but runs at zone-exit time so off-battlefield objects — e.g. a
@@ -3537,10 +3547,7 @@ impl GameObject {
     pub fn revert_layered_characteristics_to_base(&mut self) {
         self.sync_missing_base_characteristics();
         self.name = self.base_name.clone();
-        self.power = self.base_power;
-        self.toughness = self.base_toughness;
-        self.layer_base_power = self.base_power;
-        self.layer_base_toughness = self.base_toughness;
+        self.reset_numeric_characteristics_to_base();
         self.loyalty = self.base_loyalty;
         self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
@@ -5886,5 +5893,50 @@ mod casting_name_set_tests {
             ..Default::default()
         });
         assert_eq!(object.effective_names(), vec!["écho"]);
+    }
+}
+
+#[cfg(test)]
+mod numeric_reset_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::{game_state::GameState, identifiers::CardId};
+
+    #[test]
+    fn numeric_reset_writes_exactly_four_axes_and_never_recaptures_initialized_base() {
+        for (power, toughness) in [(None, Some(0)), (Some(2), Some(3))] {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Independent identity".into(),
+                Zone::Exile,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.base_power = power;
+            object.base_toughness = toughness;
+            object.base_characteristics_initialized = true;
+            object.power = Some(5);
+            object.toughness = Some(7);
+            object.layer_base_power = Some(4);
+            object.layer_base_toughness = Some(6);
+            let mut expected = object.clone();
+            expected.power = power;
+            expected.toughness = toughness;
+            expected.layer_base_power = power;
+            expected.layer_base_toughness = toughness;
+            object.sync_missing_base_characteristics();
+            object.reset_numeric_characteristics_to_base();
+            assert_eq!(
+                serde_json::to_value(&*object).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            object.reset_numeric_characteristics_to_base();
+            assert_eq!(
+                serde_json::to_value(&*object).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
     }
 }

@@ -29097,6 +29097,16 @@ pub(crate) fn record_activation_announcement(
 ) {
     // CR 602.2b + CR 601.2c: from its announcement, an ability declares only the
     // targets chosen for it.
+    // CR 602.2a + CR 400.7: bind the source before paying costs, which may
+    // exile or sacrifice it. Stack placement preserves this earlier epoch.
+    if ability.source_incarnation.is_none() {
+        ability.set_source_incarnation_recursive(
+            state
+                .objects
+                .get(&source_id)
+                .map(|source| source.incarnation),
+        );
+    }
     ability.start_target_record_recursive();
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
@@ -29157,6 +29167,16 @@ fn capture_settled_targets(state: &GameState, player: PlayerId, pending: &mut Pe
     let Some(ability_index) = pending.activation_ability_index else {
         return;
     };
+    // Pre-payment compatibility for a pending activation saved before source
+    // capture was part of announcement. Never refresh an already selected epoch.
+    if pending.ability.source_incarnation.is_none() {
+        pending.ability.set_source_incarnation_recursive(
+            state
+                .objects
+                .get(&pending.object_id)
+                .map(|source| source.incarnation),
+        );
+    }
     let Some(fresh) = capture_activation_record(
         state,
         player,
@@ -35724,5 +35744,85 @@ mod selected_cast_intent_tests {
         );
         assert_eq!(record.mana_value, 6);
         assert_eq!(record.cast_variant, CastingVariant::Fuse);
+    }
+}
+
+#[cfg(test)]
+mod numeric_source_announcement_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+
+    #[test]
+    fn activation_announcement_and_legacy_settlement_capture_before_costs_recursively() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_to_graveyard(P0, "Source fixture", 4, 4)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&id).unwrap().incarnation = 7;
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], id, P0);
+        root.sub_ability = Some(Box::new(root.clone()));
+        root.else_ability = Some(Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, P0)));
+        record_activation_announcement(runner.state(), P0, id, 0, &mut root);
+        assert_eq!(root.source_incarnation, Some(7));
+        assert_eq!(
+            root.sub_ability.as_ref().unwrap().source_incarnation,
+            Some(7)
+        );
+        assert_eq!(
+            root.else_ability.as_ref().unwrap().source_incarnation,
+            Some(7)
+        );
+        // Existing PendingCast carriers preserve the same resolved value for
+        // direct/no-target, target-first and X/mana-payment detours.
+        for cost in [
+            ManaCost::NoCost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X],
+            },
+        ] {
+            let mut pending = PendingCast::for_activation(id, root.clone(), cost, 0, None);
+            let saved = serde_json::to_string(&pending).unwrap();
+            pending = serde_json::from_str(&saved).unwrap();
+            runner.state_mut().objects.get_mut(&id).unwrap().incarnation = 8;
+            capture_settled_targets(runner.state(), P0, &mut pending);
+            assert_eq!(pending.ability.source_incarnation, Some(7));
+            assert_eq!(
+                pending
+                    .ability
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .source_incarnation,
+                Some(7)
+            );
+            assert_eq!(
+                pending
+                    .ability
+                    .else_ability
+                    .as_ref()
+                    .unwrap()
+                    .source_incarnation,
+                Some(7)
+            );
+        }
+        let mut legacy = root;
+        legacy.set_source_incarnation_recursive(None);
+        let mut pending = PendingCast::for_activation(id, legacy, ManaCost::NoCost, 0, None);
+        capture_settled_targets(runner.state(), P0, &mut pending);
+        assert_eq!(pending.ability.source_incarnation, Some(8));
+        assert_eq!(
+            pending
+                .ability
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .source_incarnation,
+            Some(8)
+        );
+        let mut selected = pending.ability;
+        record_activation_announcement(runner.state(), P0, id, 0, &mut selected);
+        assert_eq!(selected.source_incarnation, Some(8));
     }
 }

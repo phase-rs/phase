@@ -8784,35 +8784,34 @@ where
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
     match scope {
-        // CR 608.2h: a source's P/T is read from the zone the ability EXPECTS it
-        // in. The expected zone differs by how the ability reached the stack:
-        //
-        //   * A triggered leaves-the-battlefield / dies ability (Nested
-        //     Shambler's "this creature's power") looks back at the battlefield
-        //     (CR 603.10a). The source has since moved to the graveyard and its
-        //     live layer-7 P/T was reverted to base by
-        //     `revert_layered_characteristics_to_base`, so prefer the buffed
-        //     battlefield LKI snapshot.
-        //   * An activated ability that functions from the graveyard or exile
-        //     (e.g. Scavenge's "this card's power", read while the card is in the
-        //     graveyard) expects the source in its CURRENT zone. Reading a stale
-        //     same-step battlefield LKI snapshot — left over from the card dying
-        //     earlier this step (`zones.rs` inserts it on leaving the
-        //     battlefield; it persists until step transition) — would wrongly
-        //     report the buffed battlefield P/T instead of the live graveyard
-        //     card's P/T. Read the live source in its current zone, falling back
-        //     to LKI only if the object has left the game entirely.
-        //
-        // `trigger_source` is set exactly for triggered abilities (whose
-        // source can change zones between firing and resolution) and `None` for
-        // activated abilities and casts, so it distinguishes the battlefield
-        // look-back case from the current-zone case. A bare `resolve_quantity`
-        // call with no ability (statics, whose source is on the battlefield, and
-        // direct unit reads) defaults to the look-back read.
+        // CR 608.2h + CR 400.7: full trigger provenance is authoritative.
+        // A captured activated source reads its exact pre-cost incarnation,
+        // current while it remains there and versioned LKI after departure.
+        // Legacy unstamped abilities retain their explicit current-zone
+        // fallback; bare queries retain the separate battlefield look-back API.
         ObjectScope::Source => {
             if ctx.trigger_source.is_some() {
                 return source_lki_for_context(state, &ctx)
                     .and_then(|lki| lki_extract(&lki))
+                    .unwrap_or(0);
+            }
+            // CR 608.2h + CR 400.7: an activated source is the pre-cost
+            // incarnation. Read it live while current, otherwise its exact
+            // departure facts; a newer same-id exile object is not that source.
+            if let Some(ability) = ability.filter(|ability| {
+                ability.trigger_source.is_none() && ability.source_incarnation.is_some()
+            }) {
+                return ability
+                    .source_ref(state)
+                    .and_then(|source| {
+                        read_specific_object(
+                            state,
+                            source,
+                            Some(ability),
+                            &obj_extract,
+                            &lki_extract,
+                        )
+                    })
                     .unwrap_or(0);
             }
             let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
@@ -27032,5 +27031,143 @@ mod departure_source_boundary_tests {
         let canonical = serde_json::to_value(loaded).unwrap();
         assert_eq!(canonical["qty"]["type"], "ZoneChangeAggregate");
         assert_eq!(canonical["qty"]["source"]["kind"], "ThisTurn");
+    }
+}
+
+#[cfg(test)]
+mod captured_numeric_source_tests {
+    use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn captured_source_numeric_reads_live_exact_epoch_then_versioned_departure() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Numeric source fixture".into(),
+            Zone::Graveyard,
+        );
+        let object = state.objects.get_mut(&source).unwrap();
+        object.base_power = Some(0);
+        object.base_toughness = Some(0);
+        object.base_characteristics_initialized = true;
+        object.power = Some(4);
+        object.toughness = Some(5);
+        object.layer_base_power = Some(4);
+        object.layer_base_toughness = Some(5);
+        object.intensity = 2;
+        let epoch = object.incarnation;
+        let mut stale = object.snapshot_public_characteristics();
+        stale.power = Some(7);
+        stale.toughness = Some(8);
+        state.lki_cache.insert(source, stale);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+        ability.set_source_incarnation_recursive(Some(epoch));
+        let expressions = [
+            QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+            QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+            QuantityRef::BasePower {
+                scope: ObjectScope::Source,
+            },
+            QuantityRef::Intensity {
+                scope: ObjectScope::Source,
+            },
+        ];
+        for (reference, value) in expressions.iter().zip([4, 5, 4, 2]) {
+            assert_eq!(
+                resolve_quantity_with_targets(
+                    &state,
+                    &QuantityExpr::Ref {
+                        qty: reference.clone()
+                    },
+                    &ability
+                ),
+                value
+            );
+        }
+        move_to_zone(&mut state, source, Zone::Exile, &mut vec![]);
+        let object = state.objects.get_mut(&source).unwrap();
+        object.power = Some(3);
+        object.toughness = Some(6);
+        object.layer_base_power = Some(3);
+        object.intensity = 99;
+        for (reference, value) in expressions.iter().zip([4, 5, 4, 0]) {
+            assert_eq!(
+                resolve_quantity_with_targets(
+                    &state,
+                    &QuantityExpr::Ref {
+                        qty: reference.clone()
+                    },
+                    &ability
+                ),
+                value
+            );
+        }
+        // Full trigger provenance remains first even beside a conflicting
+        // activated-source stamp, and does not borrow the newer object.
+        let mut trigger = ability.clone();
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        trigger.set_trigger_source_recursive(context);
+        trigger.set_source_incarnation_recursive(Some(epoch));
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: expressions[0].clone()
+                },
+                &trigger
+            ),
+            3
+        );
+        let saved = serde_json::to_string(&ability).unwrap();
+        let restored: ResolvedAbility = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.source_incarnation, Some(epoch));
+        let power = QuantityExpr::Ref {
+            qty: expressions[0].clone(),
+        };
+        assert_eq!(resolve_quantity_with_targets(&state, &power, &restored), 4);
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Independent numeric source".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&second).unwrap().power = Some(9);
+        let mut second_ability = ResolvedAbility::new(Effect::NoOp, vec![], second, PlayerId(1));
+        second_ability.set_source_incarnation_recursive(Some(state.objects[&second].incarnation));
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &second_ability),
+            9
+        );
+        assert_eq!(resolve_quantity_with_targets(&state, &power, &restored), 4);
+        // Exact history missing must not fall back to the later cache slot.
+        state
+            .lki_by_incarnation
+            .get_mut(&source)
+            .unwrap()
+            .remove(&epoch);
+        assert_eq!(resolve_quantity_with_targets(&state, &power, &restored), 0);
+        ability.set_source_incarnation_recursive(None);
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &ability),
+            3,
+            "explicit legacy current-zone API"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &power, PlayerId(0), source),
+            4,
+            "bare battlefield look-back API remains separate"
+        );
     }
 }

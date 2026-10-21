@@ -210,6 +210,72 @@ fn effect_candidate_ids(
     candidates
 }
 
+fn is_numeric_pt_setter(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::SetPower { .. }
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+    )
+}
+
+fn is_own_numeric_cda_definition(definition: &StaticDefinition) -> bool {
+    definition.mode == StaticMode::Continuous
+        && definition.characteristic_defining
+        && matches!(definition.affected, Some(TargetFilter::SelfRef))
+        && definition.modifications.iter().any(is_numeric_pt_setter)
+}
+
+pub(crate) fn object_has_own_numeric_cda(source: &crate::game::game_object::GameObject) -> bool {
+    source.static_definitions.iter_all().any(|definition| {
+        is_own_numeric_cda_definition(definition)
+            && crate::game::functioning_abilities::static_functions_in_zone(source, definition)
+    })
+}
+
+/// Keep numeric CDA provenance separate from ordinary self-affecting statics
+/// and from resolution-created effects that happen to use the same setter.
+fn is_own_numeric_cda_effect(state: &GameState, effect: &ActiveContinuousEffect) -> bool {
+    effect.transient_id.is_none()
+        && effect.characteristic_defining
+        && matches!(effect.affected_filter, TargetFilter::SelfRef)
+        && is_numeric_pt_setter(&effect.modification)
+        && effect.def_index.is_some_and(|index| {
+            state.objects.get(&effect.source_id).is_some_and(|source| {
+                source
+                    .static_definitions
+                    .as_slice()
+                    .get(index)
+                    .is_some_and(|definition| {
+                        is_own_numeric_cda_definition(definition)
+                            && definition.modifications.get(effect.mod_index)
+                                == Some(&effect.modification)
+                    })
+            })
+        })
+}
+
+/// CR 604.3 + CR 613.4a: an own P/T CDA reaches its source in every represented
+/// zone. Membership still comes from the ordinary zone authority, including
+/// phased-in battlefield objects and resolving stack objects.
+fn continuous_effect_candidate_ids(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    zone_cache: &mut LayerZoneObjectCache,
+) -> Vec<ObjectId> {
+    if is_own_numeric_cda_effect(state, effect) {
+        return state
+            .objects
+            .get(&effect.source_id)
+            .filter(|source| zone_cache.zone_contains(state, source.zone, source.id))
+            .map_or_else(Vec::new, |source| vec![source.id]);
+    }
+    effect_candidate_ids(state, &effect.affected_filter, effect.source_id, zone_cache)
+}
+
 struct PreparedIncrementalFlush {
     recipient_ids: BTreeSet<ObjectId>,
     active_effects: Vec<ActiveContinuousEffect>,
@@ -1595,6 +1661,14 @@ pub(crate) fn active_effect_condition_controller(
     state: &GameState,
     effect: &ActiveContinuousEffect,
 ) -> PlayerId {
+    // CR 109.4 + CR 109.5: a card off the battlefield and stack has no
+    // controller; its own numeric CDA reads its owner instead.
+    if is_own_numeric_cda_effect(state, effect) {
+        return state
+            .objects
+            .get(&effect.source_id)
+            .map_or(effect.controller, |source| source.controller_or_owner());
+    }
     condition_controller(
         state,
         effect.transient_id,
@@ -2914,12 +2988,7 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // CR 707.9b: restore the persistent base origin (materialized exception
     // names); a Layer-1 copy application overwrites it within the pass.
     obj.layer1_name_origin = obj.base_name_origin;
-    obj.power = obj.base_power;
-    obj.toughness = obj.base_toughness;
-    // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
-    // later 7b setters update this carrier while 7c leaves it unchanged.
-    obj.layer_base_power = obj.base_power;
-    obj.layer_base_toughness = obj.base_toughness;
+    obj.reset_numeric_characteristics_to_base();
     obj.loyalty = obj.base_loyalty;
     obj.card_types = obj.base_card_types.clone();
     obj.mana_cost = obj.base_mana_cost.clone();
@@ -3109,6 +3178,20 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // CR 613.2b: collect face-down permanents to re-apply their CR 708.2 profile
     // after Layer 1a.
     let mut face_down_ids: Vec<ObjectId> = Vec::new();
+    // CR 604.3 + CR 613.4a: remote numeric materialization owns its matching
+    // reset, including former recipients whose CDA has disappeared. Only a
+    // full pass resets these objects; a restricted incremental pass must not.
+    let remote_ids: Vec<_> = state
+        .objects
+        .iter()
+        .filter_map(|(&id, object)| (object.zone != Zone::Battlefield).then_some(id))
+        .collect();
+    for id in remote_ids {
+        if let Some(object) = state.objects.get_mut(&id) {
+            object.sync_missing_base_characteristics();
+            object.reset_numeric_characteristics_to_base();
+        }
+    }
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             reset_recipient_to_base(obj);
@@ -3123,10 +3206,8 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
     // "Each [filter] card in your hand has [keyword]") grant keywords to hand
     // objects. Reset those hand objects' keywords to their base set each layers
     // pass so hand-zone grants don't accumulate across evaluations. Scoped
-    // narrowly to `keywords` because A6 only supports keyword grants to hand
-    // objects; other characteristics (P/T, types, abilities) are not granted to
-    // hand objects by any currently-supported static. Extend this reset set
-    // before landing a static that modifies them.
+    // narrowly to `keywords`: numeric CDAs use the numeric-only reset above,
+    // while remote type changes use their separate recipient authority.
     let hand_ids: Vec<ObjectId> = state
         .players
         .iter()
@@ -5574,7 +5655,14 @@ fn population_probe_blinded_by_entrant_characteristic_change(
         if !modification_characteristic_writes(&e.modification).intersects(reads_e_can_move) {
             return false;
         }
-        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        let ctx = FilterContext::from_source_with_controller(
+            e.source_id,
+            if is_own_numeric_cda_effect(state, e) {
+                active_effect_condition_controller(state, e)
+            } else {
+                e.controller
+            },
+        );
         entered_ids
             .iter()
             .any(|id| matches_target_filter(state, *id, &e.affected_filter, &ctx))
@@ -5778,7 +5866,14 @@ fn active_effects_force_incremental_escalation(
             return false;
         }
         let magnitude = continuous_modification_dynamic_quantity(&e.modification);
-        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        let ctx = FilterContext::from_source_with_controller(
+            e.source_id,
+            if is_own_numeric_cda_effect(state, e) {
+                active_effect_condition_controller(state, e)
+            } else {
+                e.controller
+            },
+        );
         entered_ids.iter().any(|id| {
             let Some(entered) = state.objects.get(id) else {
                 return false;
@@ -7442,13 +7537,23 @@ fn active_continuous_effects_from_static_definitions(
             // abilities they donate before this effect applies.
             let effect = ActiveContinuousEffect {
                 source_id,
-                controller,
+                controller: if is_own_numeric_cda_definition(def)
+                    && is_numeric_pt_setter(modification)
+                {
+                    source_obj.map_or(controller, |source| source.controller_or_owner())
+                } else {
+                    controller
+                },
                 def_index: Some(def_idx),
                 transient_id: None,
                 trigger_producer_origin,
                 expanded_trigger_provider: None,
                 mod_index,
-                layer: modification.layer(),
+                layer: if is_own_numeric_cda_definition(def) && is_numeric_pt_setter(modification) {
+                    Layer::CharDef
+                } else {
+                    modification.layer()
+                },
                 timestamp,
                 modification: modification.clone(),
                 affected_filter: affected_filter.clone(),
@@ -9421,12 +9526,7 @@ impl ReferencedGrantSelectionCache {
                 _ => unreachable!("reach is only requested for referenced grants"),
             };
             let candidate_ids = self.writer_candidates[writer_index].get_or_insert_with(|| {
-                effect_candidate_ids(
-                    state,
-                    &writer.affected_filter,
-                    writer.source_id,
-                    &mut self.zones,
-                )
+                continuous_effect_candidate_ids(state, writer, &mut self.zones)
             });
             let controllers = self
                 .controllers
@@ -10643,8 +10743,7 @@ fn apply_continuous_effect_filtered(
     let affected_ids: &[ObjectId] = if let Some(retained) = retained_affected_ids {
         retained
     } else {
-        let scan_ids =
-            effect_candidate_ids(state, &effect.affected_filter, effect.source_id, zone_cache);
+        let scan_ids = continuous_effect_candidate_ids(state, effect, zone_cache);
         // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
         // or ability reads "you"/"your" as that spell or ability's controller,
         // not as whoever controls the source object at the moment of some later
@@ -10969,11 +11068,15 @@ fn apply_continuous_effect_filtered(
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
     let dynamic_pt_expr = continuous_modification_dynamic_quantity(&effect.modification);
-    let effect_controller = state
-        .objects
-        .get(&effect.source_id)
-        .map(|o| o.controller)
-        .unwrap_or(PlayerId(0));
+    let effect_controller = if is_own_numeric_cda_effect(state, effect) {
+        active_effect_condition_controller(state, effect)
+    } else {
+        state
+            .objects
+            .get(&effect.source_id)
+            .map(|o| o.controller)
+            .unwrap_or(PlayerId(0))
+    };
     let dynamic_uses_recipient =
         dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
     // CR 201.5a: the effect's static names its granter when it was granted.
@@ -33235,5 +33338,303 @@ mod object_sweep_sharing_tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(active(&state), 0);
+    }
+}
+
+#[cfg(test)]
+mod numeric_cda_all_zone_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::zones::{add_to_zone, create_object, remove_from_zone};
+    use crate::types::identifiers::CardId;
+
+    fn numeric_definition(modifications: Vec<ContinuousModification>) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .cda()
+            .modifications(modifications)
+    }
+
+    #[test]
+    fn numeric_cda_candidates_require_current_definition_and_real_zone_membership() {
+        for zone in [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Command,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(&mut state, CardId(1), P0, "Numeric fixture".into(), zone);
+            let definition =
+                numeric_definition(vec![ContinuousModification::SetPower { value: 4 }]);
+            let object = state.objects.get_mut(&id).unwrap();
+            object.static_definitions = vec![definition.clone()].into();
+            object.base_static_definitions = Arc::new(vec![definition]);
+            let effect =
+                active_continuous_effects_from_static_source(&state, &state.objects[&id]).remove(0);
+            assert_eq!(effect.layer, Layer::CharDef);
+            assert_eq!(
+                continuous_effect_candidate_ids(
+                    &state,
+                    &effect,
+                    &mut LayerZoneObjectCache::default()
+                ),
+                vec![id]
+            );
+            // A forged flag/index or an ordinary setter gets only the ordinary
+            // filter universe, never the numeric CDA exception.
+            {
+                let mut ordinary = effect.clone();
+                ordinary.characteristic_defining = false;
+                assert_eq!(
+                    continuous_effect_candidate_ids(
+                        &state,
+                        &ordinary,
+                        &mut LayerZoneObjectCache::default()
+                    ),
+                    effect_candidate_ids(
+                        &state,
+                        &ordinary.affected_filter,
+                        id,
+                        &mut LayerZoneObjectCache::default()
+                    )
+                );
+                ordinary.characteristic_defining = true;
+                ordinary.def_index = None;
+                assert_eq!(
+                    continuous_effect_candidate_ids(
+                        &state,
+                        &ordinary,
+                        &mut LayerZoneObjectCache::default()
+                    ),
+                    effect_candidate_ids(
+                        &state,
+                        &ordinary.affected_filter,
+                        id,
+                        &mut LayerZoneObjectCache::default()
+                    )
+                );
+                ordinary.def_index = effect.def_index;
+                ordinary.affected_filter = TargetFilter::SpecificObject { id };
+                assert_eq!(
+                    continuous_effect_candidate_ids(
+                        &state,
+                        &ordinary,
+                        &mut LayerZoneObjectCache::default()
+                    ),
+                    effect_candidate_ids(
+                        &state,
+                        &ordinary.affected_filter,
+                        id,
+                        &mut LayerZoneObjectCache::default()
+                    )
+                );
+            }
+            remove_from_zone(&mut state, id, zone, P0);
+            assert!(continuous_effect_candidate_ids(
+                &state,
+                &effect,
+                &mut LayerZoneObjectCache::default()
+            )
+            .is_empty());
+            add_to_zone(&mut state, id, zone, P0);
+            assert_eq!(
+                continuous_effect_candidate_ids(
+                    &state,
+                    &effect,
+                    &mut LayerZoneObjectCache::default()
+                ),
+                vec![id]
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_cda_numeric_reset_is_idempotent_and_clears_former_derivation() {
+        for (modification, expected) in [
+            (
+                ContinuousModification::SetPower { value: 5 },
+                (Some(5), Some(3)),
+            ),
+            (
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+                (Some(5), Some(3)),
+            ),
+            (
+                ContinuousModification::SetDynamicPower {
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+                (Some(5), Some(3)),
+            ),
+            (
+                ContinuousModification::SetToughness { value: 5 },
+                (Some(2), Some(5)),
+            ),
+            (
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+                (Some(2), Some(5)),
+            ),
+            (
+                ContinuousModification::SetDynamicToughness {
+                    value: QuantityExpr::Fixed { value: 5 },
+                },
+                (Some(2), Some(5)),
+            ),
+        ] {
+            let mut scenario = GameScenario::new();
+            let id = scenario
+                .add_creature_to_exile(P0, "Initialized baseline", 2, 3)
+                .flying()
+                .with_color(vec![crate::types::mana::ManaColor::Blue])
+                .id();
+            let mut runner = scenario.build();
+            let definition = numeric_definition(vec![modification]);
+            let object = runner.state_mut().objects.get_mut(&id).unwrap();
+            object.static_definitions = vec![definition.clone()].into();
+            object.base_static_definitions = Arc::new(vec![definition]);
+            object.sync_missing_base_characteristics();
+            evaluate_layers(runner.state_mut());
+            assert_eq!(
+                (
+                    runner.state().objects[&id].power,
+                    runner.state().objects[&id].toughness
+                ),
+                expected
+            );
+            assert_eq!(
+                (
+                    runner.state().objects[&id].layer_base_power,
+                    runner.state().objects[&id].layer_base_toughness
+                ),
+                expected
+            );
+            evaluate_layers(runner.state_mut());
+            assert_eq!(runner.state().objects[&id].base_power, Some(2));
+            assert_eq!(
+                (
+                    runner.state().objects[&id].power,
+                    runner.state().objects[&id].toughness
+                ),
+                expected
+            );
+            let object = runner.state_mut().objects.get_mut(&id).unwrap();
+            object.static_definitions.clear();
+            object.base_static_definitions = Arc::new(vec![]);
+            let preserved = (
+                object.name.clone(),
+                object.card_types.clone(),
+                object.color.clone(),
+                object.keywords.clone(),
+                object.controller,
+                object.abilities.clone(),
+            );
+            evaluate_layers(runner.state_mut());
+            let object = &runner.state().objects[&id];
+            assert_eq!(
+                (
+                    object.power,
+                    object.toughness,
+                    object.layer_base_power,
+                    object.layer_base_toughness
+                ),
+                (Some(2), Some(3), Some(2), Some(3))
+            );
+            assert_eq!(
+                (
+                    object.name.clone(),
+                    object.card_types.clone(),
+                    object.color.clone(),
+                    object.keywords.clone(),
+                    object.controller,
+                    object.abilities.clone()
+                ),
+                preserved
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_cda_remote_you_uses_owner_while_ordinary_effects_keep_their_controller() {
+        let mut scenario = GameScenario::new();
+        scenario.with_cards_in_hand(P0, &["A", "B"]);
+        scenario.with_cards_in_hand(P1, &["C", "D", "E", "F", "G"]);
+        let id = scenario
+            .add_creature_to_exile(P0, "Maro", 0, 0)
+            .from_oracle_text(
+                "Maro's power and toughness are each equal to the number of cards in your hand.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // This off-zone storage field is deliberately stale. Rules controller
+        // is absent there, so it cannot supply the CDA's You.
+        runner.state_mut().objects.get_mut(&id).unwrap().controller = P1;
+        evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&id].power, Some(2));
+        let mut effect = active_continuous_effects_from_static_source(
+            runner.state(),
+            &runner.state().objects[&id],
+        )
+        .remove(0);
+        assert_eq!(effect.controller, P0);
+        assert_eq!(
+            active_effect_condition_controller(runner.state(), &effect),
+            P0
+        );
+        effect.transient_id = Some(1);
+        effect.controller = P1;
+        assert_eq!(
+            active_effect_condition_controller(runner.state(), &effect),
+            P1
+        );
+    }
+
+    #[test]
+    fn numeric_fixed_cda_precedes_ordinary_setter_additives_and_counters() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Numeric layer fixture", 2, 3)
+            .with_plus_counters(1)
+            .id();
+        let setter = scenario
+            .add_artifact_from_oracle(P0, "Ordinary setter fixture", "")
+            .id();
+        let mut runner = scenario.build();
+        let definition = numeric_definition(vec![ContinuousModification::SetPower { value: 5 }]);
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.timestamp = 99;
+        object.static_definitions = vec![definition.clone()].into();
+        object.base_static_definitions = Arc::new(vec![definition]);
+        let ordinary = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id })
+            .modifications(vec![
+                ContinuousModification::SetPower { value: 6 },
+                ContinuousModification::AddPower { value: 2 },
+            ]);
+        let object = runner.state_mut().objects.get_mut(&setter).unwrap();
+        object.timestamp = 1;
+        object.static_definitions = vec![ordinary.clone()].into();
+        object.base_static_definitions = Arc::new(vec![ordinary]);
+        evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&id].power, Some(9));
+        assert_eq!(runner.state().objects[&id].layer_base_power, Some(6));
+        assert_eq!(runner.state().objects[&id].base_power, Some(2));
+        let base = QuantityExpr::Ref {
+            qty: QuantityRef::BasePower {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            crate::game::quantity::resolve_quantity(runner.state(), &base, P0, id),
+            6
+        );
+        evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&id].power, Some(9));
     }
 }

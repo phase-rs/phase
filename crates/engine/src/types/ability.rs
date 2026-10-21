@@ -40095,7 +40095,9 @@ pub struct ResolvedAbility {
     /// resolving spell ability. Spell copies that were not cast carry `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
-    /// CR 400.7: Exact source incarnation captured for self-transform guards.
+    /// CR 400.7 + CR 602.2a: Exact source incarnation captured at activation
+    /// announcement, before costs can move it, and retained by self-transform
+    /// guards and numeric Source reads.
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
     /// delayed self-transform abilities that do not carry trigger provenance.
@@ -41688,8 +41690,8 @@ impl ResolvedAbility {
     }
 
     /// CR 400.7: Propagate the source's captured incarnation to this ability
-    /// and every continuation branch. Used by self-transform guards that are
-    /// intentionally distinct from full triggered-source provenance.
+    /// and every continuation branch. Activated abilities bind it before costs;
+    /// full triggered-source provenance remains a separate, stronger authority.
     pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.source_incarnation = incarnation;
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -41907,7 +41909,9 @@ impl ResolvedAbility {
     }
 
     /// CR 113.7 + CR 400.7: the ability's source as the object it was when the ability was
-    /// created; a spell, which captures no incarnation, is its current stack object.
+    /// announced, before activation costs; a spell, which captures no
+    /// incarnation, is its current stack object. Triggered-source fact readers
+    /// consult the full `trigger_source` context first.
     pub fn source_ref(
         &self,
         state: &crate::types::game_state::GameState,
