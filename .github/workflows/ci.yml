@@ -300,7 +300,9 @@ jobs:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Archive downloads can consume over 10 minutes before tests begin.
+    # Keep a bounded job with time for each shard to finish its tests.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
