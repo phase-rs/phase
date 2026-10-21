@@ -61153,7 +61153,9 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
         player: PlayerScope::Target
     }));
     assert!(reads(&QuantityRef::LifeTotal {
-        player: PlayerScope::ParentObjectTargetController
+        player: PlayerScope::ParentObjectTarget {
+            possession: crate::types::ability::PossessionAxis::Controller
+        }
     }));
     assert!(!reads(&QuantityRef::HandSize {
         player: PlayerScope::Controller

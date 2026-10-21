@@ -575,7 +575,7 @@ fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
 }
@@ -609,7 +609,7 @@ fn permission_scope_selects(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer => false,
     }
 }
@@ -1441,6 +1441,13 @@ pub(crate) struct ConditionContext {
     /// "You"/"your" in that ability mean this player, so the whose-turn leaves
     /// (`DuringYourTurn`, `DuringOpponentsTurn`) and `IsPresent` read it in
     /// preference to the source object's controller. `None` everywhere else.
+    /// The CR 614.12 entry pin (`pin_entry_population_conditions`) binds it to
+    /// the carrier's "you": the source's scratch controller for a printed or
+    /// copied static, each recipient's scratch controller for a granted static's
+    /// condition, and the effect's controller for a transient (CR 109.5).
+    /// For a transient whose source has since changed controllers this
+    /// deliberately differs from the live pass, whose `IsPresent` reads the
+    /// source's current controller through `FilterContext::from_source`.
     pub ability_holder: Option<PlayerId>,
 }
 
@@ -1490,7 +1497,7 @@ impl ConditionContext {
             | PlayerScope::Target
             | PlayerScope::Opponent { .. }
             | PlayerScope::AllPlayers { .. }
-            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
@@ -1580,7 +1587,7 @@ fn designation_player(
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
-        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => None,
@@ -1635,6 +1642,432 @@ fn condition_controller(
     }
 }
 
+/// The single constructor for a pinned condition leaf: `StaticCondition::None`
+/// (evaluated true) for a true pin, `Not { None }` for a false one. Scratch-local
+/// constant truth, written only into a CR 614.12 projection's scratch state by
+/// [`pin_entry_population_conditions`]; never serialized or observed outside the
+/// projection, so no dedicated variant exists for it.
+fn pinned_static_condition(truth: bool) -> StaticCondition {
+    if truth {
+        StaticCondition::None
+    } else {
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::None),
+        }
+    }
+}
+
+/// The pinned form of one condition leaf whose truth differs per grant
+/// recipient: constant false when no recipient holds it, constant true when
+/// every recipient does, otherwise "the source is one of `holding`". Scratch-local
+/// like [`pinned_static_condition`]: a granted static's synthesized children use
+/// their recipient as source, so `SourceMatchesFilter` reads each recipient's own
+/// pinned truth.
+fn pinned_recipient_condition(holding: Vec<ObjectId>, recipient_count: usize) -> StaticCondition {
+    match holding.len() {
+        0 => pinned_static_condition(false),
+        held if held == recipient_count => pinned_static_condition(true),
+        _ => StaticCondition::SourceMatchesFilter {
+            filter: TargetFilter::Or {
+                filters: holding
+                    .into_iter()
+                    .map(|id| TargetFilter::SpecificObject { id })
+                    .collect(),
+            },
+        },
+    }
+}
+
+/// Rewrite every leaf of `condition` that `pin_leaf` pins (`Some(rewrite)`) into
+/// its pinned form, recursing through `And` / `Or` / `Not`. Copy-on-write:
+/// `None` when no leaf pinned, so the caller leaves the original untouched.
+fn pin_population_leaves(
+    condition: &StaticCondition,
+    pin_leaf: &impl Fn(&StaticCondition) -> Option<StaticCondition>,
+) -> Option<StaticCondition> {
+    match condition {
+        StaticCondition::And { conditions } => pin_population_children(conditions, pin_leaf)
+            .map(|conditions| StaticCondition::And { conditions }),
+        StaticCondition::Or { conditions } => pin_population_children(conditions, pin_leaf)
+            .map(|conditions| StaticCondition::Or { conditions }),
+        StaticCondition::Not { condition } => {
+            pin_population_leaves(condition, pin_leaf).map(|condition| StaticCondition::Not {
+                condition: Box::new(condition),
+            })
+        }
+        leaf => pin_leaf(leaf),
+    }
+}
+
+/// [`pin_population_leaves`] over a combinator's operands: `None` when no
+/// operand pinned, otherwise every operand with the pinned ones rewritten.
+fn pin_population_children(
+    conditions: &[StaticCondition],
+    pin_leaf: &impl Fn(&StaticCondition) -> Option<StaticCondition>,
+) -> Option<Vec<StaticCondition>> {
+    let rewritten: Vec<Option<StaticCondition>> = conditions
+        .iter()
+        .map(|condition| pin_population_leaves(condition, pin_leaf))
+        .collect();
+    if rewritten.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(
+        conditions
+            .iter()
+            .zip(rewritten)
+            .map(|(original, pinned)| pinned.unwrap_or_else(|| original.clone()))
+            .collect(),
+    )
+}
+
+/// CR 109.5: whose "you" a pinned condition reads. A carrier's statics read a
+/// fixed player (its scratch controller, or a transient's controller); a granted
+/// static's "you" is the controller of each object it is on, so one grant body
+/// reads a different "you" per recipient.
+#[derive(Clone, Copy)]
+enum PinnedHolder {
+    Carrier {
+        controller: PlayerId,
+        source_id: ObjectId,
+    },
+    EachRecipient,
+}
+
+/// The inputs of one CR 614.12 entry pin: the pre-entry state the pinned truth
+/// is read on, the entrant's origin zone, and every object a granted static can
+/// land on in the scratch pass, with its scratch controller. Every grant
+/// expansion candidate is a battlefield object (`expand_granted_static_effects`
+/// callers and `append_late_granted_static_effects` all draw from
+/// `state.battlefield`); a layer-6 install onto an off-battlefield object only
+/// contributes on a later layer pass, which a CR 614.12 projection's single
+/// flush never runs.
+struct EntryPopulationPin<'a> {
+    pre_entry: &'a GameState,
+    origin: Option<Zone>,
+    grant_recipients: Vec<(ObjectId, PlayerId)>,
+}
+
+impl EntryPopulationPin<'_> {
+    /// The pinned rewrite of `condition` under `holder`'s "you", or `None` when
+    /// no leaf pins.
+    fn condition(
+        &self,
+        condition: &StaticCondition,
+        holder: PinnedHolder,
+    ) -> Option<StaticCondition> {
+        match holder {
+            PinnedHolder::Carrier {
+                controller,
+                source_id,
+            } => pin_population_leaves(condition, &|leaf: &StaticCondition| {
+                pinned_leaf_truth(self.pre_entry, leaf, self.origin, controller, source_id)
+                    .map(pinned_static_condition)
+            }),
+            // CR 614.12 + CR 109.5: a granted static's leaf is read on the
+            // pre-entry population with each recipient's own controller as
+            // "you", and the per-recipient answers are encoded in the leaf.
+            PinnedHolder::EachRecipient => {
+                pin_population_leaves(condition, &|leaf: &StaticCondition| {
+                    leaf_pins(leaf, self.origin).then(|| {
+                        let holding = self
+                            .grant_recipients
+                            .iter()
+                            .filter(|&&(recipient, controller)| {
+                                evaluate_condition_with_context(
+                                    self.pre_entry,
+                                    leaf,
+                                    controller,
+                                    recipient,
+                                    ConditionContext::ability_holder(controller),
+                                )
+                            })
+                            .map(|&(recipient, _)| recipient)
+                            .collect();
+                        pinned_recipient_condition(holding, self.grant_recipients.len())
+                    })
+                })
+            }
+        }
+    }
+
+    /// The pinned rewrite of one static definition: its own condition under
+    /// `holder`, plus every granted static body it carries. Copy-on-write:
+    /// `None` when nothing pins.
+    fn definition(&self, def: &StaticDefinition, holder: PinnedHolder) -> Option<StaticDefinition> {
+        let condition = def
+            .condition
+            .as_ref()
+            .and_then(|condition| self.condition(condition, holder));
+        let modifications = self.grants(&def.modifications);
+        if condition.is_none() && modifications.is_none() {
+            return None;
+        }
+        let mut pinned = def.clone();
+        if let Some(condition) = condition {
+            pinned.condition = Some(condition);
+        }
+        if let Some(modifications) = modifications {
+            pinned.modifications = modifications;
+        }
+        Some(pinned)
+    }
+
+    /// The pinned rewrite of one modification when it grants a static, at any
+    /// nesting depth, with each recipient's "you"; `None` otherwise.
+    fn grant(&self, modification: &ContinuousModification) -> Option<ContinuousModification> {
+        match modification {
+            ContinuousModification::GrantStaticAbility { definition } => self
+                .definition(definition, PinnedHolder::EachRecipient)
+                .map(|definition| ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(definition),
+                }),
+            // `StaticDefinition::walk_self_and_granted` (types/ability.rs) is the
+            // authority for which modifications nest a granted `StaticDefinition`:
+            // only `GrantStaticAbility`. A layer-1 `CopyValues` payload is pinned
+            // by its transient carrier, which binds the copy recipient.
+            _ => None,
+        }
+    }
+
+    /// [`Self::grant`] over a modification list: `None` when no grant pinned,
+    /// otherwise every modification with the pinned grants rewritten.
+    fn grants(
+        &self,
+        modifications: &[ContinuousModification],
+    ) -> Option<Vec<ContinuousModification>> {
+        let rewritten: Vec<Option<ContinuousModification>> = modifications
+            .iter()
+            .map(|modification| self.grant(modification))
+            .collect();
+        if rewritten.iter().all(Option::is_none) {
+            return None;
+        }
+        Some(
+            modifications
+                .iter()
+                .zip(rewritten)
+                .map(|(original, pinned)| pinned.unwrap_or_else(|| original.clone()))
+                .collect(),
+        )
+    }
+
+    /// The definition rewrites for one static definition list, as
+    /// `(index, rewritten definition)`; empty when nothing pins. Every carrier
+    /// computes its rewrites here and writes them only when the list is
+    /// non-empty, so an untouched list keeps its shared `Arc`.
+    fn definitions(
+        &self,
+        defs: &[StaticDefinition],
+        holder: PinnedHolder,
+    ) -> Vec<(usize, StaticDefinition)> {
+        defs.iter()
+            .enumerate()
+            .filter_map(|(index, def)| self.definition(def, holder).map(|def| (index, def)))
+            .collect()
+    }
+}
+
+/// Write `rewrites` (from [`EntryPopulationPin::definitions`]) into `defs`.
+fn write_pinned_definitions(
+    defs: &mut [StaticDefinition],
+    rewrites: Vec<(usize, StaticDefinition)>,
+) {
+    for (index, rewritten) in rewrites {
+        if let Some(def) = defs.get_mut(index) {
+            *def = rewritten;
+        }
+    }
+}
+
+/// CR 614.12 + CR 700.5: whether one condition leaf pins. A leaf pins when it
+/// counts the battlefield population, or reads membership of the entrant's
+/// origin zone, and does not read the recipient (a recipient-relative leaf is
+/// answered per recipient by the scratch pass itself).
+fn leaf_pins(leaf: &StaticCondition, origin: Option<Zone>) -> bool {
+    !condition_uses_recipient_context(leaf)
+        && (static_condition_uses_object_population(leaf)
+            || origin.is_some_and(|zone| static_condition_reads_zone_membership(leaf, zone)))
+}
+
+/// CR 614.12 + CR 700.5: the pinned truth of one condition leaf, or `None`
+/// when the leaf does not pin ([`leaf_pins`]). Its truth is read on `pre_entry`
+/// with `controller` as "you" (CR 109.5).
+fn pinned_leaf_truth(
+    pre_entry: &GameState,
+    leaf: &StaticCondition,
+    origin: Option<Zone>,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> Option<bool> {
+    leaf_pins(leaf, origin).then(|| {
+        evaluate_condition_with_context(
+            pre_entry,
+            leaf,
+            controller,
+            source_id,
+            ConditionContext::ability_holder(controller),
+        )
+    })
+}
+
+/// CR 614.12 + CR 700.5 + CR 109.5 + CR 613.1a + CR 707.2: pin the
+/// population-reading condition leaves of everything a CR 614.12 projection's
+/// scratch layer pass can apply to their truth in `pre_entry`, the state before
+/// the entry event. CR 614.12 checks the permanent as it would exist on the
+/// battlefield, with its own statics and the continuous effects that already
+/// exist, but the population those conditions count is the one replacement
+/// effects are considered against: before the entrant is on the battlefield
+/// (Heliod, Sun-Crowned ruling 2020-01-24: "the mana symbols in its mana cost
+/// won't be counted"). With `origin`, leaves reading membership of the zone the
+/// entrant leaves pin too.
+///
+/// Carriers, each with the "you" the scratch pass would use for it:
+/// - the static definitions of every object in `scratch.objects`, in both
+///   `base_static_definitions` (what the battlefield reseed copies) and
+///   `static_definitions` (what effect generation reads, including for
+///   command-zone and other off-battlefield sources), with the object's scratch
+///   controller (for the entrant, the controller it enters under, CR 110.2a);
+/// - the static definitions latched in a transient's layer-1
+///   `ContinuousModification::CopyValues` payload, with the copy recipient as
+///   source and its scratch controller as "you": layer 1 installs the payload
+///   as the recipient's statics (CR 707.2 + CR 613.1a); a payload with no single
+///   bound recipient is left unpinned;
+/// - every transient's own condition, with the effect's controller (CR 109.5);
+/// - every `GrantStaticAbility` body any of these carry, at any depth, with each
+///   recipient's scratch controller as "you" (CR 109.5: the controller of the
+///   object the granted static is on), encoded per recipient because one grant
+///   fans out over recipients with different controllers. Pinned before the
+///   flush because the gather runs after the `evaluate_layers` Step 1 controller reset
+///   and before layer 2 (CR 613.1b), so an expansion-time pin would read the
+///   base controller.
+///
+/// Reads `pre_entry` as-is: it relies on resolution having flushed layers before
+/// each sub-ability, so `pre_entry`'s derived characteristics are current.
+/// Only `scratch` is written; every write is copy-on-write and made only when a
+/// leaf pins.
+pub(crate) fn pin_entry_population_conditions(
+    scratch: &mut GameState,
+    pre_entry: &GameState,
+    origin: Option<Zone>,
+) {
+    type Rewrites = Vec<(usize, StaticDefinition)>;
+
+    let pin = EntryPopulationPin {
+        pre_entry,
+        origin,
+        grant_recipients: scratch
+            .battlefield
+            .iter()
+            .filter_map(|&id| scratch.objects.get(&id).map(|obj| (id, obj.controller)))
+            .collect(),
+    };
+
+    let object_rewrites: Vec<(ObjectId, Rewrites, Rewrites)> = scratch
+        .objects
+        .iter()
+        .filter_map(|(&id, obj)| {
+            let holder = PinnedHolder::Carrier {
+                controller: obj.controller,
+                source_id: id,
+            };
+            let base = pin.definitions(&obj.base_static_definitions, holder);
+            let live = pin.definitions(obj.static_definitions.as_slice(), holder);
+            (!base.is_empty() || !live.is_empty()).then_some((id, base, live))
+        })
+        .collect();
+    for (id, base, live) in object_rewrites {
+        let Some(obj) = scratch.objects.get_mut(&id) else {
+            continue;
+        };
+        if !base.is_empty() {
+            write_pinned_definitions(
+                Arc::make_mut(&mut obj.base_static_definitions).as_mut_slice(),
+                base,
+            );
+        }
+        for (index, rewritten) in live {
+            if let Some(def) = obj.static_definitions.get_mut(index) {
+                *def = rewritten;
+            }
+        }
+    }
+
+    let mut condition_rewrites: Vec<(usize, StaticCondition)> = Vec::new();
+    let mut modification_rewrites: Vec<(usize, usize, ContinuousModification)> = Vec::new();
+    for (tce_index, tce) in scratch.transient_continuous_effects.iter().enumerate() {
+        if let Some(condition) = tce.condition.as_ref().and_then(|condition| {
+            pin.condition(
+                condition,
+                PinnedHolder::Carrier {
+                    controller: tce.controller,
+                    source_id: tce.source_id,
+                },
+            )
+        }) {
+            condition_rewrites.push((tce_index, condition));
+        }
+        let copy_recipient = tce
+            .affected_recipient
+            .map(|recipient| recipient.object_id)
+            .or(match &tce.affected {
+                TargetFilter::SpecificObject { id } => Some(*id),
+                _ => None,
+            })
+            .and_then(|recipient| {
+                scratch
+                    .objects
+                    .get(&recipient)
+                    .map(|obj| (recipient, obj.controller))
+            });
+        for (modification_index, modification) in tce.modifications.iter().enumerate() {
+            let rewritten = match modification {
+                ContinuousModification::CopyValues { values, .. } => {
+                    copy_recipient.and_then(|(recipient, controller)| {
+                        let rewrites = pin.definitions(
+                            &values.static_definitions,
+                            PinnedHolder::Carrier {
+                                controller,
+                                source_id: recipient,
+                            },
+                        );
+                        if rewrites.is_empty() {
+                            return None;
+                        }
+                        let mut modification = modification.clone();
+                        if let ContinuousModification::CopyValues { values, .. } = &mut modification
+                        {
+                            write_pinned_definitions(
+                                Arc::make_mut(&mut values.static_definitions).as_mut_slice(),
+                                rewrites,
+                            );
+                        }
+                        Some(modification)
+                    })
+                }
+                other => pin.grant(other),
+            };
+            if let Some(rewritten) = rewritten {
+                modification_rewrites.push((tce_index, modification_index, rewritten));
+            }
+        }
+    }
+    for (tce_index, condition) in condition_rewrites {
+        if let Some(tce) = scratch.transient_continuous_effects.get_mut(tce_index) {
+            tce.condition = Some(condition);
+        }
+    }
+    for (tce_index, modification_index, rewritten) in modification_rewrites {
+        if let Some(modification) = scratch
+            .transient_continuous_effects
+            .get_mut(tce_index)
+            .and_then(|tce| tce.modifications.get_mut(modification_index))
+        {
+            *modification = rewritten;
+        }
+    }
+}
+
 fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
     match condition {
         StaticCondition::IsPresent {
@@ -1644,6 +2077,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_uses_recipient(lhs) || quantity_expr_uses_recipient(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_uses_recipient(quantity),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().any(condition_uses_recipient_context)
         }
@@ -1720,6 +2157,10 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
             crate::game::quantity::quantity_expr_uses_object_count(lhs)
                 || crate::game::quantity::quantity_expr_uses_object_count(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => crate::game::quantity::quantity_expr_uses_object_count(quantity),
         // Devotion is a sum of mana symbols across permanents you control — pure
         // board composition.
         StaticCondition::DevotionGE { .. } => true,
@@ -1850,6 +2291,11 @@ fn static_condition_characteristic_reads_at(
             quantity_expr_characteristic_reads_at(lhs, depth)
                 .union(quantity_expr_characteristic_reads_at(rhs, depth))
         }
+        // Arithmetic-quality gate: only its single quantity is read.
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_characteristic_reads_at(quantity, depth),
         // CR 700.5: devotion sums mana symbols in the mana costs of the
         // permanents the source's controller controls.
         StaticCondition::DevotionGE { .. } => {
@@ -1993,6 +2439,10 @@ fn entered_object_perturbs_static_condition(
             entered_perturbs_static_quantity(state, entered_id, ctx, lhs)
                 || entered_perturbs_static_quantity(state, entered_id, ctx, rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => entered_perturbs_static_quantity(state, entered_id, ctx, quantity),
         // CR 700.5: devotion gate flips only if the entered object's mana cost
         // contributes a symbol for one of the gate colors (mirrors the Devotion
         // magnitude leaf). LOW-1: controller-blind.
@@ -2212,6 +2662,19 @@ fn evaluate_condition_inner(
                 )
             };
             comparator.evaluate(resolve(lhs), resolve(rhs))
+        }
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            // CR 611.3a: evaluated at any given moment, never locked in.
+            let value = crate::game::quantity::resolve_quantity_with_ctx(
+                state,
+                quantity,
+                controller,
+                QuantityContext {
+                    recipient: context.recipient,
+                    ..QuantityContext::new(source_id)
+                },
+            );
+            quality.matches(i64::from(value))
         }
         StaticCondition::HasMaxSpeed => has_max_speed(state, controller),
         StaticCondition::SpeedGE { threshold } => effective_speed(state, controller) >= *threshold,
@@ -3773,6 +4236,10 @@ fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zon
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_zone(lhs, zone) || quantity_expr_reads_zone(rhs, zone)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_zone(quantity, zone),
         StaticCondition::Not { condition } => {
             static_condition_reads_zone_membership(condition, zone)
         }
@@ -4689,6 +5156,10 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_life(lhs) || quantity_expr_reads_life(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_reads_life(quantity),
         // Nested-filter condition surfaces (doc-comment conventions are not
         // type-enforced, so all are routed).
         StaticCondition::DefendingPlayerControls { filter }
@@ -7573,7 +8044,9 @@ fn expand_granted_static_effects(
         };
         // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
         // recipient's controller. Keep its condition until application, after
-        // preceding layers have established that controller.
+        // preceding layers have established that controller. In a CR 614.12
+        // projection scratch the condition arrives already pinned per recipient
+        // by `pin_entry_population_conditions`.
         let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
             if continuous_gather_skips(modification) {
@@ -12570,6 +13043,383 @@ mod tests {
         assert!(!eval(&state, &StaticCondition::DuringOpponentsTurn, holder));
     }
 
+    /// CR 614.12 + CR 700.5 + CR 109.5 + CR 613.1a + CR 707.2: the entry pin
+    /// rewrites population- and origin-zone-reading leaves of every carrier in the
+    /// scratch to their truth in the pre-entry state, with each carrier's "you",
+    /// and leaves everything else (and every untouched `Arc`) alone. The scratch
+    /// differs from the pre-entry state (P0 gains a creature and white devotion),
+    /// so a pin read off the scratch would give the other answer.
+    ///
+    /// REVERT: drop the pin's `GrantStaticAbility` arm
+    /// (`EntryPopulationPin::grants`) and (i)/(j) fail on every P0 recipient
+    /// (the unpinned inner sees "Scratch Bear"); pin the granted inner with the
+    /// host's or transient's controller (P1) and they fail on every P0 recipient;
+    /// key each recipient's "you" on its owner and they fail on the stolen
+    /// recipient.
+    #[test]
+    fn pin_entry_population_conditions_cases() {
+        fn object(state: &mut GameState, owner: PlayerId, name: &str, zone: Zone) -> ObjectId {
+            create_object(state, CardId(0), owner, name.to_string(), zone)
+        }
+        fn carry(state: &mut GameState, id: ObjectId, defs: Vec<StaticDefinition>) {
+            let obj = state.objects.get_mut(&id).unwrap();
+            for def in &defs {
+                obj.static_definitions.push(def.clone());
+            }
+            obj.base_static_definitions = Arc::new(defs);
+        }
+        fn pinned(truth: bool) -> StaticCondition {
+            pinned_static_condition(truth)
+        }
+        let you_control_a_creature = || StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+        };
+        let continuous = |condition: StaticCondition| {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(condition)
+        };
+        let graveyard_size_at_least_one = StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+
+        let mut pre_entry = setup();
+        // P0: devotion to white 2, no creature, one graveyard card. P1: a creature.
+        let anchor = object(&mut pre_entry, P0, "WW Anchor", Zone::Battlefield);
+        pre_entry.objects.get_mut(&anchor).unwrap().mana_cost = ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White; 2],
+        };
+        make_creature(&mut pre_entry, "P1 Bear", 2, 2, P1);
+
+        // (a) Not(DevotionGE) on a battlefield static.
+        let a = object(&mut pre_entry, P0, "Devotion Carrier", Zone::Battlefield);
+        carry(
+            &mut pre_entry,
+            a,
+            vec![continuous(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DevotionGE {
+                    colors: vec![ManaColor::White],
+                    threshold: 5,
+                }),
+            })],
+        );
+        // (b) And[DuringYourTurn, IsPresent]: only the IsPresent child pins.
+        let b = object(&mut pre_entry, P0, "Compound Carrier", Zone::Battlefield);
+        carry(
+            &mut pre_entry,
+            b,
+            vec![continuous(StaticCondition::And {
+                conditions: vec![StaticCondition::DuringYourTurn, you_control_a_creature()],
+            })],
+        );
+        // (c) a recipient-context leaf and a non-population leaf stay untouched.
+        let c = object(&mut pre_entry, P0, "Untouched Carrier", Zone::Battlefield);
+        carry(
+            &mut pre_entry,
+            c,
+            vec![
+                continuous(StaticCondition::RecipientMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                }),
+                continuous(StaticCondition::SourceIsTapped),
+            ],
+        );
+        // (d) a graveyard-count leaf (not an object census).
+        let d = object(
+            &mut pre_entry,
+            P0,
+            "Graveyard Count Carrier",
+            Zone::Battlefield,
+        );
+        carry(
+            &mut pre_entry,
+            d,
+            vec![continuous(graveyard_size_at_least_one.clone())],
+        );
+        // (f) a command-zone emblem carrier.
+        let emblem = object(&mut pre_entry, P0, "Emblem", Zone::Command);
+        pre_entry.objects.get_mut(&emblem).unwrap().is_emblem = true;
+        carry(
+            &mut pre_entry,
+            emblem,
+            vec![continuous(you_control_a_creature())],
+        );
+        // (g) a graveyard carrier whose static functions there.
+        let graveyard_carrier = object(&mut pre_entry, P0, "Graveyard Carrier", Zone::Graveyard);
+        let mut graveyard_static = continuous(you_control_a_creature());
+        graveyard_static.active_zones = vec![Zone::Graveyard];
+        carry(&mut pre_entry, graveyard_carrier, vec![graveyard_static]);
+        // (e) a transient whose controller (P1) differs from its source's (P0).
+        let transient_condition = pre_entry
+            .add_transient_continuous_effect(
+                a,
+                P1,
+                Duration::Permanent,
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddPower { value: 1 }],
+                Some(you_control_a_creature()),
+            )
+            .expect("the transient begins");
+        // (h) a P1-controlled layer-1 copy effect whose recipient P0 controls.
+        let donor = object(&mut pre_entry, P1, "Donor", Zone::Battlefield);
+        carry(
+            &mut pre_entry,
+            donor,
+            vec![continuous(you_control_a_creature())],
+        );
+        let copier = object(&mut pre_entry, P0, "Copier", Zone::Battlefield);
+        let values =
+            crate::game::printed_cards::intrinsic_copiable_values(&pre_entry.objects[&donor]);
+        let transient_copy = pre_entry
+            .add_transient_continuous_effect(
+                donor,
+                P1,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: copier },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the copy effect begins");
+        // (i)-(k) granted statics: "you" in a granted static is the controller of
+        // each object it is on (CR 109.5), so the inner condition pins per
+        // recipient. Hosts and the transient are P1's; recipients of both
+        // controllers exist, and one recipient P0 owns is controlled by P1.
+        let grant = |inner: StaticDefinition| {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Any)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(inner),
+                }])
+        };
+        // (i) an object carrier (P1) of a population-conditioned grant.
+        let grant_host = object(&mut pre_entry, P1, "Grant Host", Zone::Battlefield);
+        carry(
+            &mut pre_entry,
+            grant_host,
+            vec![grant(continuous(you_control_a_creature()))],
+        );
+        // (j) a transient (P1) granting the same inner.
+        let transient_grant = pre_entry
+            .add_transient_continuous_effect(
+                a,
+                P1,
+                Duration::Permanent,
+                TargetFilter::Any,
+                vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(continuous(you_control_a_creature())),
+                }],
+                None,
+            )
+            .expect("the transient grant begins");
+        // (k) grants whose inner leaves do not pin stay untouched.
+        let untouched_grant_host = object(
+            &mut pre_entry,
+            P1,
+            "Untouched Grant Host",
+            Zone::Battlefield,
+        );
+        carry(
+            &mut pre_entry,
+            untouched_grant_host,
+            vec![
+                grant(continuous(StaticCondition::SourceIsTapped)),
+                grant(continuous(StaticCondition::RecipientMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                })),
+            ],
+        );
+        // A stolen recipient: P0 owns it, P1 controls it.
+        let stolen = object(&mut pre_entry, P0, "Stolen Recipient", Zone::Battlefield);
+        pre_entry.objects.get_mut(&stolen).unwrap().controller = P1;
+
+        let scratch_of = |pre_entry: &GameState| {
+            let mut scratch = pre_entry.clone();
+            make_creature(&mut scratch, "Scratch Bear", 2, 2, P0);
+            let extra = object(&mut scratch, P0, "Scratch WWWW", Zone::Battlefield);
+            scratch.objects.get_mut(&extra).unwrap().mana_cost = ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White; 4],
+            };
+            scratch
+        };
+        let mut scratch = scratch_of(&pre_entry);
+        pin_entry_population_conditions(&mut scratch, &pre_entry, Some(Zone::Graveyard));
+
+        let conditions = |state: &GameState, id: ObjectId| {
+            let obj = &state.objects[&id];
+            (
+                obj.base_static_definitions
+                    .iter()
+                    .map(|def| def.condition.clone())
+                    .collect::<Vec<_>>(),
+                obj.static_definitions
+                    .iter_all()
+                    .map(|def| def.condition.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let both =
+            |condition: StaticCondition| (vec![Some(condition.clone())], vec![Some(condition)]);
+
+        // (a) P0's pre-entry devotion is 2: the leaf pins false in both fields.
+        assert_eq!(
+            conditions(&scratch, a),
+            both(StaticCondition::Not {
+                condition: Box::new(pinned(false)),
+            })
+        );
+        // (b) only the population child pins (P0 controlled no creature).
+        assert_eq!(
+            conditions(&scratch, b),
+            both(StaticCondition::And {
+                conditions: vec![StaticCondition::DuringYourTurn, pinned(false)],
+            })
+        );
+        // (c) untouched, and neither list was copied.
+        assert_eq!(conditions(&scratch, c), conditions(&pre_entry, c));
+        assert!(Arc::ptr_eq(
+            &scratch.objects[&c].base_static_definitions,
+            &pre_entry.objects[&c].base_static_definitions
+        ));
+        assert!(Arc::ptr_eq(
+            &scratch.objects[&c].static_definitions.0,
+            &pre_entry.objects[&c].static_definitions.0
+        ));
+        // (d) origin = graveyard: P0's pre-entry graveyard holds one card.
+        assert_eq!(conditions(&scratch, d), both(pinned(true)));
+        // (f) the emblem's condition pins in both fields.
+        assert_eq!(conditions(&scratch, emblem), both(pinned(false)));
+        // (g) the graveyard carrier's live statics pin.
+        assert_eq!(
+            conditions(&scratch, graveyard_carrier).1,
+            vec![Some(pinned(false))]
+        );
+        // (e) the transient's condition pins with its own controller, P1.
+        let transient = |state: &GameState, id: u64| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|tce| tce.id == id)
+                .cloned()
+                .expect("transient present")
+        };
+        assert_eq!(
+            transient(&scratch, transient_condition).condition,
+            Some(pinned(true))
+        );
+        // (h) the copy payload's static pins with the recipient's controller (P0, no
+        // creature before entry), not the copy effect's (P1); the effect's own
+        // absent condition stays absent.
+        let copy = transient(&scratch, transient_copy);
+        assert_eq!(copy.condition, None);
+        match copy.modifications.as_slice() {
+            [ContinuousModification::CopyValues { values, .. }] => assert_eq!(
+                values
+                    .static_definitions
+                    .iter()
+                    .map(|def| def.condition.clone())
+                    .collect::<Vec<_>>(),
+                vec![Some(pinned(false))]
+            ),
+            other => panic!("premise: one CopyValues modification, got {other:?}"),
+        }
+
+        // (i)/(j) each recipient reads its own scratch controller's pre-entry
+        // truth (P1 had a creature, P0 had none), whatever the host's or the
+        // transient's controller and whatever the recipient's owner. Read off the
+        // scratch unpinned, every P0 recipient would see "Scratch Bear".
+        let granted_inner = |modifications: &[ContinuousModification]| match modifications {
+            [ContinuousModification::GrantStaticAbility { definition }] => definition
+                .condition
+                .clone()
+                .expect("the inner keeps a condition"),
+            other => panic!("premise: one GrantStaticAbility modification, got {other:?}"),
+        };
+        let recipients: Vec<ObjectId> = scratch.battlefield.iter().copied().collect();
+        assert!(
+            recipients
+                .iter()
+                .any(|id| scratch.objects[id].controller == P0)
+                && recipients
+                    .iter()
+                    .any(|id| scratch.objects[id].controller == P1),
+            "reach: recipients of both controllers"
+        );
+        assert_eq!(
+            (
+                scratch.objects[&stolen].owner,
+                scratch.objects[&stolen].controller
+            ),
+            (P0, P1),
+            "reach: the stolen recipient's owner and controller differ"
+        );
+        let assert_per_recipient = |label: &str, pinned_inner: &StaticCondition| {
+            for &recipient in &recipients {
+                let controller = scratch.objects[&recipient].controller;
+                assert_eq!(
+                    evaluate_condition(&scratch, pinned_inner, controller, recipient),
+                    controller == P1,
+                    "{label}: recipient {recipient:?} controlled by {controller:?}"
+                );
+            }
+        };
+        let host = &scratch.objects[&grant_host];
+        assert_eq!(host.base_static_definitions[0].condition, None);
+        assert_per_recipient(
+            "(i) base",
+            &granted_inner(&host.base_static_definitions[0].modifications),
+        );
+        let live_host_static = host
+            .static_definitions
+            .iter_all()
+            .next()
+            .expect("the host's live static");
+        assert_eq!(live_host_static.condition, None);
+        assert_per_recipient("(i) live", &granted_inner(&live_host_static.modifications));
+        let transient_grant = transient(&scratch, transient_grant);
+        assert_eq!(transient_grant.condition, None);
+        assert_per_recipient("(j)", &granted_inner(&transient_grant.modifications));
+        // (k) untouched, and neither list was copied.
+        assert_eq!(
+            scratch.objects[&untouched_grant_host].base_static_definitions,
+            pre_entry.objects[&untouched_grant_host].base_static_definitions
+        );
+        assert!(Arc::ptr_eq(
+            &scratch.objects[&untouched_grant_host].base_static_definitions,
+            &pre_entry.objects[&untouched_grant_host].base_static_definitions
+        ));
+        assert!(Arc::ptr_eq(
+            &scratch.objects[&untouched_grant_host].static_definitions.0,
+            &pre_entry.objects[&untouched_grant_host]
+                .static_definitions
+                .0
+        ));
+
+        // (d) origin = hand: the graveyard-count leaf does not pin.
+        let mut scratch = scratch_of(&pre_entry);
+        pin_entry_population_conditions(&mut scratch, &pre_entry, Some(Zone::Hand));
+        assert_eq!(conditions(&scratch, d), both(graveyard_size_at_least_one));
+        assert!(Arc::ptr_eq(
+            &scratch.objects[&d].base_static_definitions,
+            &pre_entry.objects[&d].base_static_definitions
+        ));
+    }
+
     #[test]
     fn set_card_types_prunes_subtypes_not_matching_new_core_types() {
         let mut state = setup();
@@ -14248,6 +15098,75 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    #[test]
+    fn quantity_quality_static_condition_evaluates_live() {
+        use crate::types::ability::{NumberQuality, Parity};
+        // CR 611.3a: the gate is re-read at any given moment. The source is a
+        // non-creature, so it never counts itself among "creatures you control".
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(0x0B000),
+            PlayerId(0),
+            "Quality Static Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        let creatures_you_control = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .into(),
+            },
+        };
+        let gate = |quality| StaticCondition::QuantityQuality {
+            quantity: creatures_you_control.clone(),
+            quality,
+        };
+        let even = gate(NumberQuality::Parity(Parity::Even));
+        let prime = gate(NumberQuality::Prime);
+        let not_even = StaticCondition::Not {
+            condition: Box::new(even.clone()),
+        };
+        let add_creature = |state: &mut GameState, i: u64| {
+            let id = create_object(
+                state,
+                CardId(0x0B100 + i),
+                PlayerId(0),
+                format!("Creature {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        };
+
+        assert!(
+            evaluate_condition(&state, &even, PlayerId(0), source),
+            "zero creatures: zero is even"
+        );
+        add_creature(&mut state, 1);
+        assert!(!evaluate_condition(&state, &even, PlayerId(0), source));
+        assert!(!evaluate_condition(&state, &prime, PlayerId(0), source));
+        assert!(
+            evaluate_condition(&state, &not_even, PlayerId(0), source),
+            "structural negation of an odd count"
+        );
+        add_creature(&mut state, 2);
+        assert!(evaluate_condition(&state, &even, PlayerId(0), source));
+        assert!(evaluate_condition(&state, &prime, PlayerId(0), source));
     }
 
     fn six_unspent_mana_condition() -> StaticCondition {

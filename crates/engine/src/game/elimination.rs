@@ -968,7 +968,9 @@ fn abandon_pending_zone_change_member_for_player_left(
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
             .expect("pending change-zone iteration owns a coherent logical group");
-        pending.remaining.retain(|id| *id != identity.object_id);
+        pending
+            .remaining
+            .retain(|member| member.object_id != identity.object_id);
         if pending
             .paused_current
             .as_ref()
@@ -2152,24 +2154,29 @@ mod tests {
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
-            remaining,
+            remaining: remaining
+                .into_iter()
+                .map(
+                    |object_id| crate::types::game_state::ChangeZoneMemberEntry {
+                        object_id,
+                        enter_with_counters: Vec::new(),
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                    },
+                )
+                .collect(),
             source_id,
             controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,
-            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_under_player: None,
-            enters_attacking: false,
-            enter_with_counters: Vec::new(),
-            conditional_enter_with_counters: Vec::new(),
             duration: None,
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
-            enters_modified_if: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2449,7 +2456,14 @@ mod tests {
             .and_then(|frame| frame.pending.as_ref())
             .expect("living controller keeps the change-zone family");
         assert!(iteration.paused_current.is_none());
-        assert_eq!(iteration.remaining, vec![surviving]);
+        assert_eq!(
+            iteration
+                .remaining
+                .iter()
+                .map(|member| member.object_id)
+                .collect::<Vec<_>>(),
+            vec![surviving]
+        );
         assert!(state.pending_replacement.is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 

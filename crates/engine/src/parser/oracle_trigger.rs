@@ -547,6 +547,10 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
             rewrite_variable_x_to_cost_x_paid(lhs);
             rewrite_variable_x_to_cost_x_paid(rhs);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rewrite_variable_x_to_cost_x_paid(quantity),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => {
             rewrite_variable_x_to_cost_x_paid(rhs);
         }
@@ -647,6 +651,10 @@ fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinit
             AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
                 lhs.contains_x() || rhs.contains_x()
             }
+            AbilityCondition::QuantityQuality {
+                quantity,
+                quality: _,
+            } => quantity.contains_x(),
             AbilityCondition::PreviousEffectAmount { rhs, .. } => rhs.contains_x(),
             AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
                 conditions.iter().any(condition_has_bare_x)
@@ -2094,8 +2102,18 @@ fn lower_trigger_effect_chain(
     // without a `multi_target` spec still permit choosing zero targets.
     // Do not stamp this onto non-target head clauses in chains like
     // "draw a card. Attach any number of target Equipment ..."
+    // CR 115.6 + CR 601.2c: an `Attach` clause owns its HOST quantifier through
+    // the clause-level host capture (`imp::UtilityImperativeAst::Attach::
+    // host_target`), not through a trigger-body scan. The old stamp let any
+    // later "up to one target" in the same trigger body mark a mandatory Attach
+    // host optional (Hunter's Bow, Novel Nunchaku), so the resolver's declined-
+    // host no-op made an illegal decline look legal.
     if modifiers.has_up_to
         && ability.multi_target.is_none()
+        && !matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Attach { .. }
+        )
         && ability
             .effect
             .target_filter()
@@ -2404,25 +2422,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // not the spell that caused a SpellCast trigger.
     rebind_source_counter_condition_recipient(&mut def);
 
-    // CR 603.4 + CR 603.10a + CR 608.2h: a positive past-tense counter
-    // intervening-if ("if it had one or more counters on it") measures the
-    // triggering object as it last existed, and the body's immediate count
-    // anaphor ("put that number of +1/+1 counters", "draws that many cards")
-    // is that measured quantity. Bind the `EventContextAmount` placeholder to
-    // the same event-source counter read the condition checks (LKI on a
-    // battlefield departure, per CR 122.2 the live counters are gone). Only a
-    // positive gate establishes an antecedent: "if it had no counters on it"
-    // measured nothing, so a `Not` gate never binds.
-    if let Some(gate_qty) = def
-        .condition
-        .as_ref()
-        .and_then(positive_had_counter_gate_qty)
-    {
-        if let Some(execute) = def.execute.as_deref_mut() {
-            rebind_event_context_amount_counts_in_ability(execute, &gate_qty);
-        }
-    }
-
     // CR 601.2h + CR 400.7d: On a spell-cast-family trigger, an intervening-if
     // anaphor "mana spent to cast it"/"...this spell" denotes the *triggering
     // spell*, not the ability's source permanent. The bare anaphor parses to
@@ -2454,6 +2453,29 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if attack_intervening_if_anaphor_is_defending_player(&def) {
         if let Some(cond) = def.condition.as_mut() {
             rebind_attack_anaphor_to_defending_player(cond);
+        }
+    }
+
+    // CR 603.4 + CR 603.10a + CR 107.1 + CR 608.2h: a positive intervening-if
+    // gate measures a nameable count, and the body's immediate count anaphor
+    // ("put that number of +1/+1 counters", "draws that many cards") is that
+    // measured quantity. Two gate shapes bind it:
+    // - a past-tense counter gate ("if it had one or more counters on it")
+    //   measures the triggering object as it last existed — the same
+    //   event-source counter read the condition checks (LKI on a battlefield
+    //   departure, per CR 122.2 the live counters are gone);
+    // - an arithmetic-quality gate ("if you control a prime number of lands")
+    //   measures the quantity reference the condition evaluates.
+    // Bind the `EventContextAmount` placeholder to that quantity. Only a
+    // positive gate establishes an antecedent: "if it had no counters on it"
+    // measured nothing, so a `Not` gate never binds.
+    // Placed after every rewrite that can reach the condition's quantity (the
+    // spell-cast scope remap and the attack "that player" rebind above), so the
+    // bound quantity is the finished condition's own quantity, never a
+    // pre-remap copy of it.
+    if let Some(gate_qty) = def.condition.as_ref().and_then(positive_count_gate_qty) {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rebind_event_context_amount_counts_in_ability(execute, &gate_qty);
         }
     }
 
@@ -3127,23 +3149,44 @@ fn condition_contains_source_counter(condition: &TriggerCondition) -> bool {
     }
 }
 
-/// CR 603.4 + CR 603.10a + CR 608.2h: the counter read a positive past-tense
-/// `HadCounters` intervening-if establishes as the antecedent of the body's
-/// count anaphor — `CountersOn { scope: EventSource, counter_type }`, the same
-/// event-source (LKI on a battlefield departure) counter set the condition
-/// itself checks. `counter_type: None` sums every kind.
-fn positive_had_counter_gate_qty(condition: &TriggerCondition) -> Option<QuantityRef> {
+/// CR 603.4 + CR 608.2h: the quantity a positive intervening-if gate measured — the
+/// antecedent of the body's count anaphor ("that many", "that number of").
+/// - CR 603.10a: a past-tense `HadCounters` gate reads the event source's counters
+///   (`CountersOn { EventSource, .. }`, LKI on a departure).
+/// - CR 107.1: a `QuantityQuality` gate over a quantity reference ("you control a prime
+///   number of lands") names that reference — the same expression the condition evaluates.
+///
+/// `And` binds only when every gate agrees; non-gate conjuncts don't take part. `Not`, `Or`
+/// and `EventTime` never bind: none establishes which number held. Assumption (no printed
+/// card): on an event trigger that also carries an event amount, a positive gate still binds
+/// the anaphor, as `HadCounters` does. That includes a "that much" placeholder, which lowers
+/// to the same `EventContextAmount`.
+fn positive_count_gate_qty(condition: &TriggerCondition) -> Option<QuantityRef> {
     match condition {
         TriggerCondition::HadCounters { counter_type } => Some(QuantityRef::CountersOn {
             scope: ObjectScope::EventSource,
             counter_type: counter_type.clone(),
         }),
+        TriggerCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref { qty },
+            quality: _,
+        } => Some(qty.clone()),
+        TriggerCondition::QuantityQuality { .. } => None,
         TriggerCondition::And { conditions } => {
-            let mut gates = conditions.iter().filter_map(positive_had_counter_gate_qty);
+            let mut gates = conditions.iter().filter_map(positive_count_gate_qty);
             let first = gates.next()?;
             gates.all(|gate| gate == first).then_some(first)
         }
         TriggerCondition::Not { .. } | TriggerCondition::Or { .. } => None,
+        // CR 603.4 + CR 603.8: an `EventTime` condition is the trigger event itself (an
+        // attack-while gate, an event count qualifier, a state trigger's condition), read
+        // when the event occurs and never rechecked; CR 603.4's recheck applies only to an
+        // intervening "if". It is not a positive resolution-recheck count gate, so it names
+        // no antecedent for the body's count anaphor — binding one would read the count at
+        // resolution, not the count the event measured. Deliberately no descent.
+        // Coverage's `extract_trigger_condition_features` does descend here; it asks a
+        // different question (whether the quantity resolves at all).
+        TriggerCondition::EventTime { .. } => None,
         _ => None,
     }
 }
@@ -6121,6 +6164,10 @@ fn remap_self_cast_scope_to_triggering_spell(cond: &mut TriggerCondition) {
             remap_self_cast_scope_in_quantity(lhs);
             remap_self_cast_scope_in_quantity(rhs);
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => remap_self_cast_scope_in_quantity(quantity),
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions
                 .iter_mut()
@@ -6270,6 +6317,10 @@ fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
             rebind_attack_anaphor_in_quantity(lhs);
             rebind_attack_anaphor_in_quantity(rhs);
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rebind_attack_anaphor_in_quantity(quantity),
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions
                 .iter_mut()
@@ -6354,6 +6405,16 @@ pub(crate) fn static_condition_to_trigger_condition(
             comparator: *comparator,
             rhs: substitute_another_in_expr(rhs),
         }),
+        // CR 603.4: same "other" → other-than-triggering-object substitution as
+        // QuantityComparison.
+        // `Not` over this variant goes through the generic `inner =>` negation
+        // arm below: a quality cannot be negated in place.
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            Some(TriggerCondition::QuantityQuality {
+                quantity: substitute_another_in_expr(quantity),
+                quality: *quality,
+            })
+        }
 
         // CR 702.178a: Speed condition.
         StaticCondition::HasMaxSpeed => Some(TriggerCondition::HasMaxSpeed),
@@ -24573,5 +24634,55 @@ mod structural_marker_tests {
         ] {
             assert!(parse(declined).is_none(), "{declined:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod number_quality_bridge_tests {
+    use super::{static_condition_to_trigger_condition, substitute_another_in_expr};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, NumberQuality, QuantityExpr, QuantityRef, StaticCondition,
+        TriggerCondition, TypedFilter,
+    };
+
+    /// CR 603.4: the static→trigger bridge maps `QuantityQuality` 1:1, with the
+    /// same "other" → other-than-triggering-object substitution as
+    /// `QuantityComparison`, and negation rides the generic `Not` arm.
+    #[test]
+    fn static_quantity_quality_bridges_to_trigger_condition() {
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::land()
+                    .properties(vec![FilterProp::Another])
+                    .controller(ControllerRef::You)
+                    .into(),
+            },
+        };
+        let substituted = substitute_another_in_expr(&quantity);
+        assert_ne!(
+            substituted, quantity,
+            "the substitution must be observable for this fixture"
+        );
+        let affirmative = StaticCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let expected = TriggerCondition::QuantityQuality {
+            quantity: substituted,
+            quality: NumberQuality::Prime,
+        };
+        assert_eq!(
+            static_condition_to_trigger_condition(&affirmative),
+            Some(expected.clone())
+        );
+        let negated = StaticCondition::Not {
+            condition: Box::new(affirmative),
+        };
+        assert_eq!(
+            static_condition_to_trigger_condition(&negated),
+            Some(TriggerCondition::Not {
+                condition: Box::new(expected),
+            })
+        );
     }
 }

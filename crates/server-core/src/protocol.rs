@@ -3473,12 +3473,31 @@ mod tests {
         }
     }
 
-    /// v158: `FilterProp` gains `Prepared` (CR 722.3a), serialized in the trigger
-    /// conditions (and ability/filter definitions) of `GameState`, and the
-    /// announcement source epoch is carried on `ResolvedAbility` and
-    /// `PendingManaAbility` (CR 400.7 + CR 602.2a + CR 605.3b); a v157 or
-    /// older peer cannot deserialize the new tagged variant. P2P moves in
-    /// lockstep (wire 140); lobby messages unchanged.
+    /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+    /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
+    /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
+    /// it must be refused before it receives v159 state.
+    /// v157: `ChooseFromZoneConstraint::TotalManaValue` in paused zone choices
+    /// and ability state requires a versioned full-game peer.
+    ///
+    /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v155
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v156 state.
+    /// The same bump adds the optional per-seat `created_tokens` channel (each
+    /// seat's pinned creation result) to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
+    ///
+    /// v155: `PendingChangeZoneIteration.remaining` carries each member's
+    /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
+    /// CR 614.12) and drops the raw gate fields, and the persisted resolution
+    /// state moves from version 6 to 7; a v154 peer cannot parse a parked
+    /// ChangeZone frame, so it must be refused before it receives v155 state.
     ///
     /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
     /// counter-removal cost paused on a CR 616.1 replacement choice, whose
@@ -3497,6 +3516,12 @@ mod tests {
     /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
     /// drops them, so it must be refused before it receives v152 state.
     /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v150: the cast-this-way gains rider is reshaped —
+    /// `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+    /// `PendingEntersModifications` object and
+    /// `Effect::AddPendingEntersModifications` carries its `rider`; a v149 peer
+    /// cannot parse either new shape, so it must be refused before it receives
+    /// v150 state.
     /// v149: `GameState::deferred_spell_delivery` is gone and
     /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
     /// paused instant or sorcery still owes; a v148 peer drops the key and would
@@ -3732,15 +3757,9 @@ mod tests {
     /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
     /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
-    /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
-    /// <n>)` under a function named for `<n-1>` is green, so
-    /// `check-protocol-version.mjs` requires the current numeral in this name
-    /// and refuses the superseded one.
-    /// The v158 bump adds the `FilterProp::Prepared` tag (CR 722.3a) to the
-    /// serialized trigger-condition carrier.
     #[test]
-    fn protocol_version_is_158_for_prepared_designation() {
-        assert_eq!(PROTOCOL_VERSION, 158);
+    fn protocol_version_is_owned_by_broker() {
+        assert_eq!(PROTOCOL_VERSION, lobby_broker::PROTOCOL_VERSION);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3751,7 +3770,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_158_for_prepared_designation` stays
+    /// `protocol_version_is_owned_by_broker` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

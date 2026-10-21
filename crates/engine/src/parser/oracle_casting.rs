@@ -592,6 +592,31 @@ pub(crate) fn extract_spend_only_on_x_prefix(line: &str) -> Option<(&str, Castin
     Some((rest.trim(), restriction))
 }
 
+/// CR 601.3: the "Cast this spell only …" casting-restriction frame, printed bare or
+/// behind an ability word ("Hellbent — Cast this spell only …"). Returns the lowercased
+/// text after the frame, or `None` when the line is not in this frame.
+fn cast_this_spell_only_tail(trimmed: &str) -> Option<String> {
+    fn frame(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        tag("cast this spell only ").parse(input)
+    }
+    let lower = trimmed.to_lowercase();
+    let effective = if frame(&lower).is_ok() {
+        lower
+    } else {
+        super::oracle_modal::strip_ability_word(trimmed)?.to_lowercase()
+    };
+    let (rest, _) = frame(&effective).ok()?;
+    Some(rest.to_string())
+}
+
+/// CR 601.3: whether `text` is printed in the "Cast this spell only …" restriction frame,
+/// whether or not `parse_casting_restriction_line` can represent its condition. A line in
+/// this frame is a restriction on casting the spell, never a spell-resolution instruction,
+/// so a rejected one must end as an honest gap rather than reach the effect parser.
+pub(crate) fn is_cast_this_spell_only_line(text: &str) -> bool {
+    cast_this_spell_only_tail(text.trim().trim_end_matches('.')).is_some()
+}
+
 /// CR 601.3: Parse "Cast this spell only [condition]" into typed restrictions.
 /// Handles ability word prefixes (e.g., "Tragic Backstory — Cast this spell only if...").
 pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>> {
@@ -616,19 +641,8 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
             return Some(vec![restriction]);
         }
     }
-    let effective = if tag::<_, _, OracleError<'_>>("cast this spell only ")
-        .parse(trimmed_lower.as_str())
-        .is_ok()
-    {
-        trimmed.to_lowercase()
-    } else {
-        super::oracle_modal::strip_ability_word(trimmed)?.to_lowercase()
-    };
-    let rest = match tag::<_, _, OracleError<'_>>("cast this spell only ").parse(effective.as_str())
-    {
-        Ok((r, _)) => r,
-        Err(_) => return None,
-    };
+    let effective = cast_this_spell_only_tail(trimmed)?;
+    let rest = effective.as_str();
     let mut restrictions = scan_timing_restrictions(rest);
 
     // Extract condition clauses: "if ...", "only if ...", or "... and only if ..."
@@ -1010,7 +1024,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
-        Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerScope,
+        Comparator, ControllerRef, CountScope, Effect, FilterProp, ParsedCondition, PlayerScope,
         QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
     };
     use crate::types::keywords::Keyword;
@@ -1094,6 +1108,101 @@ Trample";
                 },
             ]
         );
+    }
+
+    /// CR 601.3: the restriction frame is recognized bare and behind an ability word,
+    /// independent of whether its condition can be represented.
+    #[test]
+    fn cast_this_spell_only_frame_is_recognized_with_and_without_ability_word() {
+        for line in [
+            "Cast this spell only if you control fewer creatures than each opponent.",
+            "Cast this spell only during your end step.",
+            "Hellbent — Cast this spell only if you have no cards in hand.",
+        ] {
+            assert!(is_cast_this_spell_only_line(line), "{line:?}");
+        }
+        for line in [
+            "You may cast this spell as though it had flash.",
+            "Cast this spell.",
+            "Create three 1/1 white Soldier creature tokens.",
+        ] {
+            assert!(!is_cast_this_spell_only_line(line), "{line:?}");
+        }
+    }
+
+    /// CR 601.3: Even the Odds (verbatim). Its "Cast this spell only if …" condition is
+    /// not representable as a restriction, so the line must be an honest coverage gap —
+    /// never a conditional self-recast (`CastFromZone`) that drops the restriction —
+    /// while the spell's own instruction still parses on its own.
+    #[test]
+    fn unrepresentable_cast_only_condition_is_a_gap_not_a_self_recast() {
+        let text = "Cast this spell only if you control fewer creatures than each opponent.\nCreate three 1/1 white Soldier creature tokens.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Even the Odds",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let mut effects = Vec::new();
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+                effects.push(effect.clone());
+                std::ops::ControlFlow::Continue(())
+            });
+        }
+        // Reach-guard: the resolution instruction is still parsed.
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Token { .. })),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CastFromZone { .. })),
+            "{effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Unimplemented { name, .. } if name == "casting_restriction"
+            )),
+            "{effects:?}"
+        );
+        assert!(parsed.casting_restrictions.is_empty());
+        let face = crate::types::card::CardFace {
+            name: "Even the Odds".to_string(),
+            oracle_text: Some(text.to_string()),
+            abilities: parsed.abilities,
+            ..Default::default()
+        };
+        assert!(!crate::game::coverage::card_face_gaps(&face).is_empty());
+    }
+
+    /// Reach-guard for the gap above: a representable restriction still lands as a
+    /// casting restriction with no gap.
+    #[test]
+    fn representable_cast_only_restriction_still_parses_as_restriction() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Cast this spell only during your end step.\nDraw a card.",
+            "Test End Step Draw",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.casting_restrictions,
+            vec![CastingRestriction::DuringYourEndStep]
+        );
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+                assert!(
+                    !matches!(effect, Effect::Unimplemented { .. }),
+                    "{effect:?}"
+                );
+                std::ops::ControlFlow::Continue(())
+            });
+        }
     }
 
     #[test]

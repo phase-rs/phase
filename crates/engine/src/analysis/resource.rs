@@ -8076,6 +8076,7 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
+    s.battlefield_entry_observations.clear();
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -14572,6 +14573,31 @@ mod tests {
             "an ability that neither gates nor reads the count keeps the existing \
              pumped-history projection"
         );
+    }
+
+    /// U4 — the battlefield-entry observation table is keyed by the `zone_changes_this_turn`
+    /// index space, so the loop projection clears it with the ledger.
+    #[test]
+    fn project_out_resources_clears_battlefield_entry_observations() {
+        let mut state = GameState::new_two_player(7);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.battlefield_entry_observations.is_empty());
     }
 
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;

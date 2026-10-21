@@ -1887,6 +1887,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             record
         })
         .collect();
+    // Engine-internal trigger-collection authority with no client consumer; a face-down
+    // entrant's projection carries its card_id/printed_ref, which other players may not see
+    // (CR 708.5).
+    filtered.battlefield_entry_observations.clear();
     redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
@@ -3876,7 +3880,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
 /// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
-/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`;
+/// `pending_discard_for_cost`, `resolving_player_scope_tail`,
+/// `resolving_created_token_seats`;
 /// `return_result_frames`, `LogicalZoneChangeGroup` latches and
 /// `ResolvedCommands.zone_change_record` (cleared with `resolution_stack` /
 /// `resolved_rules_journal`), `NamedChoiceSource.context` and `OpponentGuessOwner.context`
@@ -4909,6 +4914,35 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
+    /// entrant's projection carries its card identity), so every viewer projection strips it.
+    #[test]
+    fn viewer_projections_strip_battlefield_entry_observations() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            assert!(
+                filter_state_for_scope(&state, viewer)
+                    .battlefield_entry_observations
+                    .is_empty(),
+                "viewer {viewer:?} must not receive the observation table"
+            );
+        }
+    }
 
     /// CR 400.2 + CR 400.7: a permanent that returns to its owner's hand leaves id-keyed LKI
     /// behind. The opponent's projection must not name it, in any table, while the owner's

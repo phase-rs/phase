@@ -649,9 +649,15 @@ pub(crate) fn resolve_with_host_override(
             .unwrap_or_default(),
     };
 
+    let window_start = events.len();
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if !apply_create_token_after_replacement(state, event, events) {
+            let completed = apply_create_token_after_replacement(state, event, events);
+            // CR 614.1a + CR 608.2c: the created referent includes any batch a
+            // replacement appended to this event. Published before a pause too:
+            // the counter-pause resume continues from this ledger.
+            publish_replacement_appended_tokens(state, &events[window_start..]);
+            if !completed {
                 return Ok(());
             }
         }
@@ -2441,6 +2447,46 @@ pub(crate) fn record_last_created_copy_batch_token(state: &mut GameState, object
     }
 }
 
+/// CR 614.1a + CR 608.2c + CR 400.7: the tokens a replacement appended to one
+/// CreateToken event ("those tokens plus …": Chatterfang, Xorn; Academy
+/// Manufactor's "one of each") inside `window`, the event's span, that `own`
+/// (the ids the event's own batch already published) lacks, in event order.
+/// Membership is the window, as in `created_token_union_from_events`, so only
+/// tokens still on the battlefield count (CR 400.7).
+pub(crate) fn replacement_appended_token_ids(
+    state: &GameState,
+    window: &[GameEvent],
+    own: &[ObjectId],
+) -> Vec<ObjectId> {
+    super::created_token_union_from_events(state, window)
+        .into_iter()
+        .map(|pin| pin.object_id)
+        .filter(|id| !own.contains(id))
+        .collect()
+}
+
+/// CR 614.1a + CR 608.2c + CR 111.1: publish one CreateToken event's whole created
+/// referent — its own batch, then [`replacement_appended_token_ids`] — into
+/// `last_created_token_ids`. A replacement's appended batch is applied inside the
+/// replacement pipeline before the event's own batch, and each apply assigns the
+/// ledger, so without this the event's own batch overwrites it. Chatterfang's
+/// ruling: anything else the creating effect specifies ("that token gains haste",
+/// "exile that token") applies to the original tokens and the appended ones alike.
+/// The own batch stays first, so a singular "it" reader keeps the instruction's own
+/// token. A bulk republish, assigned like the apply's own tail.
+pub(crate) fn publish_replacement_appended_tokens(state: &mut GameState, window: &[GameEvent]) {
+    let appended = replacement_appended_token_ids(state, window, &state.last_created_token_ids);
+    if appended.is_empty() {
+        return;
+    }
+    state.last_created_token_ids = state
+        .last_created_token_ids
+        .iter()
+        .copied()
+        .chain(appended)
+        .collect();
+}
+
 /// CR 400.7 + CR 608.2i + CR 614.12a: realize a postponed token battlefield entry — record it
 /// through `record_zone_change` and emit its entry pair — at the first instant the object IS the
 /// thing that entered. Record and emit are ONE indivisible operation over ONE owned value, so no
@@ -2694,6 +2740,10 @@ fn condition_invariant_for_token(
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_is_invariant(lhs) && quantity_is_invariant(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_is_invariant(quantity),
         _ => false,
     }
 }

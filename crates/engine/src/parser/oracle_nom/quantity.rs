@@ -7639,10 +7639,14 @@ mod tests {
         assert_eq!(
             player_property_quantity(
                 PlayerProperty::Speed,
-                PlayerScope::ParentObjectTargetController
+                PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller
+                }
             ),
             QuantityRef::Speed {
-                player: PlayerScope::ParentObjectTargetController
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller
+                }
             }
         );
     }
