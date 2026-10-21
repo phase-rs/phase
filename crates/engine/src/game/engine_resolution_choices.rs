@@ -33,10 +33,7 @@ use super::{
     zone_pipeline,
 };
 
-/// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
-/// an instruction's announced targets. Result-dependent instructions bind the
-/// settled selection, including clearing a previous result on an empty choice.
-/// CR 700.2 + CR 608.2c: does the parked zone-choice continuation `chain` treat
+/// CR 608.2c: does the parked zone-choice continuation `chain` treat
 /// the objects NOT picked as "the rest" for its next instruction (a
 /// `ChooseFromZone` partition)?
 ///
@@ -53,6 +50,9 @@ fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
         && chain.target_choice_timing == TargetChoiceTiming::Resolution)
 }
 
+/// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
+/// an instruction's announced targets. Result-dependent instructions bind the
+/// settled selection, including clearing a previous result on an empty choice.
 fn bind_dig_continuation_targets(chain: &mut ResolvedAbility, selected: &[ObjectId]) {
     if !node_has_stack_target_declaration(chain) {
         chain.set_unpinned_targets(selected.iter().copied().map(TargetRef::Object).collect());
@@ -14790,7 +14790,7 @@ mod tests {
         );
     }
 
-    /// CR 700.2 + CR 115.10a: only a parked UNTARGETED (Resolution-timed)
+    /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)
     /// `TargetOnly` chooser, and the counter-placement continuations, decline the
     /// unchosen-complement forward; a Stack-timed `TargetOnly` wrapper after a
     /// `ChooseFromZone` and an ordinary partition head keep it.
