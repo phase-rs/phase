@@ -11801,7 +11801,7 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
     if let Some(cost) = parse_mana_and_life_payment(rest_orig) {
         return Some(cost);
     }
-    // CR 118.8 + CR 119.4: `pay <amount> life` — literal count, X variable,
+    // CR 118.1 + CR 119.4: `pay <amount> life` — literal count, X variable,
     // or dynamic reference (`pay life equal to its power`). Dispatched with
     // nom combinators over the post-"pay " remainder.
     if let Some(amount) = parse_pay_life_amount(rest) {
@@ -11904,7 +11904,7 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
             }
         }
     }
-    // "pay {2}{B}" → AbilityCost::Mana (CR 117.1)
+    // "pay {2}{B}" → AbilityCost::Mana (CR 118.3a)
     if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
         return Some(AbilityCost::Mana { cost: mana_cost });
     }
