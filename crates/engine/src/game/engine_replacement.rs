@@ -2058,7 +2058,7 @@ pub(crate) fn resume_parked_entry_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 614.12a + CR 707.9: a copy-surfaced payment parks a synthetic
+    // CR 614.12a + CR 707.2: a copy-surfaced payment parks a synthetic
     // battlefield-to-battlefield proposal — there is no delivery to resume.
     if state
         .pending_replacement
@@ -2081,7 +2081,7 @@ pub(crate) fn resume_parked_entry_payment(
     handle_replacement_choice(state, 0, events)
 }
 
-/// CR 614.12a + CR 707.9: complete a copy-surfaced entry payment (Clone
+/// CR 614.12a + CR 707.2: complete a copy-surfaced entry payment (Clone
 /// entering as Minion of the Wastes). The parked proposal is synthetic — the
 /// object already entered — so the latch folds straight onto the live object
 /// and the synthetic dies here (no mark: nothing re-scans it). Latch-before-
@@ -2937,7 +2937,7 @@ fn finish_copy_target_choice_entry(
             return Ok(Some(waiting_for));
         }
     }
-    // CR 614.12a + CR 707.9: surface a copied as-enters life payment (Clone
+    // CR 614.12a + CR 707.2: surface a copied as-enters life payment (Clone
     // entering as Minion of the Wastes) before replaying the entry — the
     // payment sibling of the choice surface above. No card carries both a
     // copied choice and a copied payment, so ordering between the two surfaces

@@ -8,7 +8,7 @@ use nom::combinator::{
     all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::error::ParseError;
-use nom::multi::{many_till, separated_list0};
+use nom::multi::{many1, many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -11774,9 +11774,7 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
     }
     // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy.
     // The sigil count doubles as the presence gate (identical to the former
-    // `contains` check); the trailing-sigil strip is bytewise (`{e}` is ASCII,
-    // so every slice boundary is safe) to keep string-method dispatch out of
-    // the parser.
+    // `contains` check).
     let energy_sigils = rest.matches("{e}").count();
     if energy_sigils > 0 {
         let energy_count = energy_sigils as u32;
@@ -11789,14 +11787,19 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
                 },
             });
         }
-        // "pay N {e}" / "pay eight {e}" — number prefix + {e} suffix
-        if rest.as_bytes().ends_with(b"{e}") {
-            let mut prefix = rest;
-            while prefix.as_bytes().ends_with(b"{e}") {
-                prefix = &prefix[..prefix.len() - "{e}".len()];
-            }
-            let prefix = prefix.trim();
-            if let Ok((_, n)) = nom_primitives::parse_number.parse(prefix) {
+        // "pay N {e}" / "pay eight {e}" — `parse_number` halts before the
+        // sigils; the trailing run is one-or-more `{e}` through end of input
+        // (PATTERNS.md §3: upstream combinator halts, trailing clause consumed
+        // after it). Residues with content between the number and the final
+        // sigil run decline here and fall through below.
+        if let Ok((after_number, n)) = nom_primitives::parse_number.parse(rest) {
+            if terminated(
+                preceded(space0, many1(tag::<_, _, OracleError<'_>>("{e}"))),
+                eof,
+            )
+            .parse(after_number)
+            .is_ok()
+            {
                 return Some(AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: n as i32 },
                 });

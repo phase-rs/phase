@@ -9577,7 +9577,7 @@ pub(super) fn current_self_enter_replacement_choice(
         .cloned()
 }
 
-/// CR 614.12a + CR 707.9: surface a copied as-enters life payment (Clone
+/// CR 614.12a + CR 707.2 + CR 614.1c: surface a copied as-enters life payment (Clone
 /// entering as Minion of the Wastes) after the copy resolves. The payment
 /// sibling of `current_self_enter_replacement_choice`: the interactive copy
 /// choice resolves post-move, so the acquired payment never passes through
@@ -9639,7 +9639,7 @@ pub(crate) fn surface_copied_entry_payment(
     Some(state.waiting_for.clone())
 }
 
-/// CR 614.12a + CR 707.9: whether the parked entry payment is a copy-surface
+/// CR 614.12a + CR 707.2: whether the parked entry payment is a copy-surface
 /// park (synthetic battlefield-to-battlefield proposal — the object already
 /// entered). A genuine pre-entry proposal always arrives from a
 /// non-battlefield zone, so the from/to signature is unambiguous.
@@ -10946,9 +10946,14 @@ fn candidate_materiality(
     // the answer rides `enter_with_choices` exactly like an as-enters `Choose`
     // (see the `Choose` arm below), so it is ordering-immaterial against
     // same-carrier/different-field co-candidates (EnterTapped, counters) and
-    // auto-resolves without a degenerate ordering prompt. Every co-candidate
-    // that COULD interact (controller override above, copy/redirect below)
-    // forces materiality via its own `Unconditional` arm.
+    // auto-resolves without a degenerate ordering prompt. A co-candidate whose
+    // APPLICABILITY the payment can flip (a life-reading condition — the
+    // payment changes life the moment it applies, CR 616.1f re-scan) is a
+    // set-level question answered by `as_enters_choice_changes_applicability`,
+    // which the shared authorities consult before this per-candidate walk
+    // (mirroring the `Choose` arm's arrangement). Controller overrides and
+    // copy/redirects force materiality via their own `Unconditional` arms
+    // above and below.
     if as_enters_payment_shape(repl_def) {
         return CandidateMateriality::Disjoint;
     }
@@ -11816,7 +11821,33 @@ fn as_enters_choice_changes_applicability(
     }
     let is_choice =
         |rid: &ReplacementId| as_enters_choice_for_entry(state, proposed, *rid).is_some();
-    if !candidates.iter().any(is_choice) {
+    // CR 614.12a + CR 616.1e/616.1f: a pre-entry life payment changes the
+    // payer's life total the moment it applies, and the pipeline re-scans
+    // applicability after every application — so a competitor whose condition
+    // reads life applies or not depending on the order, and the affected
+    // player must choose it. The payment is the life-half analogue of the
+    // choice half below. Only CONDITIONS qualify: the payment writes no
+    // entrant characteristic pre-delivery (the latch rides the proposal) and
+    // payment-only entrants take no staged projection
+    // (`object_has_pre_entry_choice` is Choose-shaped, and the projection
+    // allowlist excludes the latch-reading CDA), so a `valid_card` filter
+    // cannot flip on a payment the way it can on a choice.
+    let is_payment =
+        |rid: &ReplacementId| as_enters_payment_for_entry(state, proposed, *rid).is_some();
+    let has_choice = candidates.iter().any(is_choice);
+    let has_payment = candidates.iter().any(is_payment);
+    if !has_choice && !has_payment {
+        return false;
+    }
+    if has_payment
+        && candidates.iter().filter(|rid| !is_payment(rid)).any(|rid| {
+            // Virtual candidates carry no definition to prove independence from.
+            replacement_definition_for_id(state, *rid).is_none_or(|def| def.condition.is_some())
+        })
+    {
+        return true;
+    }
+    if !has_choice {
         return false;
     }
     let Some(entrant) = state.entering_or_live_object(*object_id) else {

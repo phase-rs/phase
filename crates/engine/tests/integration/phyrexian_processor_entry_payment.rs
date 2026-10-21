@@ -6,10 +6,11 @@
 
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{
-    AbilityDefinition, ChosenAttribute, Effect, QuantityExpr, QuantityModification,
-    ReplacementDefinition, ReplacementMode, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr, QuantityModification,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{PayableResource, PendingReplacement, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -35,6 +36,8 @@ const FLICKER_ORACLE: &str =
 const GLORIOUS_ANTHEM_ORACLE: &str = "Creatures you control get +1/+1.";
 const PLATINUM_EMPERION_ORACLE: &str =
     "Your life total can't change. (You can't gain or lose life. You can't pay any amount of life except 0.)";
+const VIZIER_ORACLE: &str = "You may have this creature enter as a copy of any creature on the battlefield, except if this creature was embalmed, the token has no mana cost, it's white, and it's a Zombie in addition to its other types.\nEmbalm {3}{U}{U}";
+const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
 
 fn add_mana_for(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usize) {
     let idx = runner
@@ -437,6 +440,140 @@ fn clone_copying_minion_pays_on_the_copy() {
     assert_eq!(chosen_number_of(&runner, minion), Some(3));
     let minion_obj = runner.state().objects.get(&minion).unwrap();
     assert_eq!((minion_obj.power, minion_obj.toughness), (Some(3), Some(3)));
+}
+
+/// V2c (liminal): an Embalm Vizier token copying Minion of the Wastes routes
+/// the copied payment through the LIMINAL copy-token path
+/// (`finish_copy_target_choice_entry` with a non-empty post-action carry) —
+/// and the entry still completes exactly once: token on the battlefield as a
+/// 3/3 Minion with its own latch, Warden observing exactly one entry, the
+/// original untouched.
+#[test]
+fn embalm_token_copying_minion_completes_exactly_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN_ORACLE);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let vizier = scenario
+        .add_creature_to_graveyard(P0, "Vizier of Many Faces", 0, 0)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Blue], 3))
+        .from_oracle_text_with_keywords(&["Embalm"], VIZIER_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 6);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Minion enters first as the copy target.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 16, "20 - 5 + 1 Warden");
+
+    // Embalm the Vizier.
+    let embalm_index = runner.state().objects[&vizier]
+        .abilities
+        .iter()
+        .position(|ability| matches!(&*ability.effect, Effect::CopyTokenOf { .. }))
+        .expect("the synthesized Embalm ability is on the graveyard Vizier");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: vizier,
+            ability_index: embalm_index,
+        })
+        .expect("activate Embalm");
+
+    // Drive: accept the copy, choose Minion, answer the copied payment.
+    let mut token_id = None;
+    let mut answered_payment = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept the copy");
+            }
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                valid_targets,
+                ..
+            } => {
+                assert!(
+                    valid_targets.contains(&minion),
+                    "Minion must be a legal copy target"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(minion)),
+                    })
+                    .expect("choose Minion");
+                token_id = Some(source_id);
+            }
+            WaitingFor::PayAmountChoice { .. } => {
+                let waiting = runner.state().waiting_for.clone();
+                assert_pay_prompt(
+                    &waiting,
+                    P0,
+                    0,
+                    16,
+                    token_id.expect("copy choice precedes the payment"),
+                );
+                runner
+                    .act(GameAction::SubmitPayAmount { amount: 3 })
+                    .expect("answer the copied payment");
+                answered_payment = true;
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                if answered_payment && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                continue;
+            }
+            other => panic!("unexpected prompt while driving Embalm: {other:?}"),
+        }
+    }
+    assert!(token_id.is_some(), "the copy-target prompt was required");
+    assert!(answered_payment, "the copied payment prompt was required");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary + token pins + exactly-once observation.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.life(P0),
+        14,
+        "16 - 3 + 1 Warden (token entry observed exactly once)"
+    );
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 1, "the Embalm token entered");
+    let token = runner.state().objects.get(&tokens[0]).unwrap();
+    assert_eq!(token.name, "Minion of the Wastes");
+    assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
+    assert_eq!(chosen_number_of(&runner, tokens[0]), Some(3));
+    let orig = runner.state().objects.get(&minion).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(5), Some(5)),
+        "original untouched"
+    );
 }
 
 /// V2c (ordering): a payment plus a simultaneous MATERIAL co-candidate offers
@@ -1296,6 +1433,143 @@ fn nameless_cap_zero_auto_commits() {
         Zone::Graveyard,
         "0/0 enters, then dies to SBA"
     );
+}
+
+/// Stage a life-conditioned counter co-candidate on the entering Processor
+/// (CR 614.12: the entering object is scanned): "enters with a +1/+1 counter
+/// unless a player has 18 or less life" — a Disjoint `PutCounter` append
+/// carrying `UnlessPlayerLifeAtMost`. No printed card pairs one with an entry
+/// payment; the rig proves the set-level gate, not a corpus line.
+fn stage_conditioned_counter(runner: &mut GameRunner, proc: ObjectId) {
+    let mut rig = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Battlefield)
+        .description("test: counter unless life at most 18".to_string());
+    rig.condition = Some(ReplacementCondition::UnlessPlayerLifeAtMost { amount: 18 });
+    // APPEND: the parsed entry payment must stay onboard beside the rig.
+    let obj = runner.state_mut().objects.get_mut(&proc).unwrap();
+    assert_eq!(
+        obj.replacement_definitions.len(),
+        1,
+        "the parsed entry payment is staged"
+    );
+    obj.replacement_definitions.push(rig);
+}
+
+/// CR 616.1e/616.1f: the payment applies first, the re-scan sees 15 life, and
+/// the conditioned counter is skipped (15 <= 18 suppresses it). The load-bearing
+/// direction: without the set-level gate the pair auto-resolves and the FIRST
+/// prompt would be the payment, not the asserted ordering prompt.
+#[test]
+fn payment_first_skips_life_conditioned_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proc = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Phyrexian Processor", PROCESSOR_ORACLE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 4);
+    stage_conditioned_counter(&mut runner, proc);
+
+    // Gate positive: at 20 life both apply, so the order is the player's.
+    let outcome = runner.cast(proc).resolve();
+    let pay_index = match outcome.final_waiting_for() {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            assert_eq!(candidates.len(), 2, "payment + counter order materially");
+            candidates
+                .iter()
+                .position(|c| !c.description.contains("18"))
+                .expect("payment candidate present")
+        }
+        other => panic!("expected an ordering prompt, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index: pay_index })
+        .expect("order the payment first");
+    assert_pay_prompt(&runner.state().waiting_for.clone(), P0, 0, 20, proc);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("answer the entry payment");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.life(P0), 15);
+    assert_eq!(chosen_number_of(&runner, proc), Some(5));
+    let obj = runner.state().objects.get(&proc).unwrap();
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        !obj.counters.contains_key(&CounterType::Plus1Plus1),
+        "counter skipped after the flip, got {:?}",
+        obj.counters
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "entry completed, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 616.1e/616.1f, other order: the counter applies at 20 life (condition
+/// holds), then the payment parks and answers — both apply.
+#[test]
+fn counter_first_applies_then_payment_parks() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proc = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Phyrexian Processor", PROCESSOR_ORACLE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 4);
+    stage_conditioned_counter(&mut runner, proc);
+
+    let outcome = runner.cast(proc).resolve();
+    let counter_index = match outcome.final_waiting_for() {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            assert_eq!(candidates.len(), 2, "payment + counter order materially");
+            candidates
+                .iter()
+                .position(|c| c.description.contains("18"))
+                .expect("counter candidate present")
+        }
+        other => panic!("expected an ordering prompt, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: counter_index,
+        })
+        .expect("order the counter first");
+    // The counter applied silently; the payment parks next.
+    assert_pay_prompt(&runner.state().waiting_for.clone(), P0, 0, 20, proc);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("answer the entry payment");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.life(P0), 15);
+    assert_eq!(chosen_number_of(&runner, proc), Some(5));
+    let obj = runner.state().objects.get(&proc).unwrap();
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(
+        obj.counters.get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "counter applied before the flip"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "entry completed, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
 }
 
 /// V7: under a CantLoseLife lock (Platinum Emperion) the entry auto-commits
