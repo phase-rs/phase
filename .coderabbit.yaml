@@ -53,7 +53,12 @@ reviews:
         not style nits. Do NOT duplicate CI: `cargo fmt`, `clippy -D warnings`,
         `pnpm lint`, and `pnpm type-check` already run — never comment on
         formatting, whitespace, line length, or clippy-caught lints. Only surface
-        MEDIUM or higher severity. A latent bug behind a guard or unreached branch
+        MEDIUM or higher severity. A concrete mandatory-architecture violation is
+        at least MEDIUM even when current outputs are correct: cite the violated
+        rule and the existing authority or typed alternative that fits. Do not
+        invent a runtime bug to justify it; a merely different implementation
+        preference without that evidence is not a finding.
+        A latent bug behind a guard or unreached branch
         is still a finding — rate it by what happens when the form is reached or the
         guard is removed, not by today's reachability. Check edge cases when relevant:
         empty inputs (0 mana, 0 targets, empty filter), multi-target/modal/repeat-for
@@ -113,12 +118,16 @@ reviews:
       instructions: >-
         Nom 8.0 combinators on the first pass — no exceptions. Findings: any new
         `.contains`/`.starts_with`/`.ends_with`/`.find`/`.split_once` used for parsing
-        DISPATCH in non-test parser code (TextPair dual-string ops and test code are
-        exempt), and especially verbatim full-string Oracle equality
+        DISPATCH in non-test parser code (TextPair dual-string ops, justified
+        non-dispatch structural operations, and test code are exempt), and especially verbatim full-string Oracle equality
         (`if lower == "..."`) — the single most prohibited pattern in the codebase,
         which the CI combinator gate does NOT catch, so flag every occurrence. Compose
         `alt()` per axis; never enumerate the cartesian product as separate
-        `tag("full string")` arms. `parse_inner_condition` (oracle_nom/condition.rs)
+        `tag("full string")` arms. For multi-position phrases, use the shared
+        `scan_at_word_boundaries` family in oracle_nom/primitives.rs rather than
+        copying caller-local `.find(' ')` loops. Structural cursor movement inside
+        that shared primitive is not parsing dispatch.
+        `parse_inner_condition` (oracle_nom/condition.rs)
         is the single authority for game-state conditions — trigger and static parsers
         must delegate, never re-implement recognition. For every new arm, verify the
         plural / possessive / "an opponent's" / "your" / "their" / "non-X" / "another"

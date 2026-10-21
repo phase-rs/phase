@@ -19,10 +19,10 @@ use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
     CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit, FinalizePrePaymentChecks,
-    GameState, ManaAbilityCostParent, ManaAbilityResume, PayCostKind, PendingCast,
-    PendingCostMoveCompletion, PendingCostMoveResume, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    GameState, ManaAbilityCostParent, ManaAbilityResume, PausedCounterCostRemoval, PayCostKind,
+    PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -943,12 +943,56 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.controller != player {
-        return None;
-    }
+    let casting_permission_index = match state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)
+    {
+        Some(pending) => pending.casting_permission_index,
+        None => super::casting::selected_object_cast_permission_index(state, obj, player, None),
+    };
+    payable_spell_alternative_cost_details_at_index(
+        state,
+        player,
+        object_id,
+        casting_permission_index,
+    )
+}
+
+pub(super) fn payable_spell_alternative_cost_details_at_index(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<PayableSpellAlternativeCost> {
+    let obj = state.objects.get(&object_id)?;
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
+    // CR 118.9 + CR 601.2b: a spell's own printed alternative cost (Fireblast,
+    // Force of Will) is not a hand-only offer — it applies to any cast that
+    // would otherwise pay the printed mana cost. An impulse-class play
+    // permission (Experimental Synthesizer, Wrenn's Resolve) authorizes exactly
+    // that cast. CR 118.9a keeps the offer away from a cast whose authority
+    // already substitutes the mana cost (see
+    // `exile_cast_pays_printed_mana_cost`).
+    //
+    // CR 601.2a + CR 112.2: the player casting the spell becomes its controller,
+    // and CR 118.9 gives the alternative cost to the spell's controller. For an
+    // impulse cast that player is the GRANTEE, who need not own the card
+    // (Stolen Strategy exiles an opponent's card) — so this route is keyed on
+    // the grant, not on the exiled card's `obj.controller` (its owner, CR 108.4a).
+    let impulse_exile_cast = origin_zone == Zone::Exile
+        && super::casting::exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            player,
+            casting_permission_index,
+        );
+    let own_card = obj.controller == player;
+    if !own_card && !impulse_exile_cast {
+        return None;
+    }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -964,7 +1008,8 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // is not a CR-mandated precedence; honoring full controller choice across a
     // self-option and one or more grants needs a multi-alternative choice
     // surface and is a known limitation tracked for follow-up.
-    let self_option = (origin_zone == Zone::Hand)
+    let self_option_reaches_cast = (own_card && origin_zone == Zone::Hand) || impulse_exile_cast;
+    let self_option = self_option_reaches_cast
         .then(|| obj.casting_options.iter())
         .into_iter()
         .flatten()
@@ -998,6 +1043,10 @@ pub(crate) fn payable_spell_alternative_cost_details(
         });
     if self_option.is_some() {
         return self_option;
+    }
+    // The permanent-granted route below keeps its controller gate unchanged.
+    if !own_card {
+        return None;
     }
 
     // CR 118.9 + CR 113.6e + CR 601.2f: a SELF-granted alternative cost -- a
@@ -2682,10 +2731,70 @@ fn park_cost_payment_triggers_if_paused(
     );
 }
 
+/// CR 603.10a: What an in-flight multi-object cost move carries across a
+/// replacement-choice pause, so the group that left together is stamped once at
+/// terminal completion. Mirrors the pair `PendingCostMoveResume::SacrificeForCost`
+/// carries. Both fields live in `PendingCostMoveResume::Cast` while paused.
+#[derive(Debug, Default)]
+struct CostMoveLedger {
+    /// Cost events emitted in earlier actions of this one logical payment,
+    /// withheld from trigger collection until the group is stamped.
+    deferred_cost_events: Vec<GameEvent>,
+    /// Per-turn LKI record identities of the battlefield departures so far.
+    departure_record_indices: Vec<usize>,
+}
+
+/// CR 603.10a: Whether the selected objects can still leave the battlefield
+/// together in this payment: at least two have left already or still stand on
+/// the battlefield. A single object, or a move from another zone, never forms a
+/// simultaneous-departure group, so its triggers need no withholding.
+fn cost_move_group_may_form(
+    state: &GameState,
+    chosen: &[ObjectId],
+    departure_record_indices: &[usize],
+) -> bool {
+    let on_battlefield = chosen
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        })
+        .count();
+    on_battlefield + departure_record_indices.len() >= 2
+}
+
+/// CR 603.10a: The selected objects that left the battlefield in `events`, each
+/// once, in departure order. Read from the departures themselves so a resumed
+/// call, whose events are split across actions (the earlier fragments live in
+/// the ledger), recomputes the same group.
+fn selected_battlefield_departures<'a>(
+    chosen: &[ObjectId],
+    events: impl Iterator<Item = &'a GameEvent>,
+) -> Vec<ObjectId> {
+    let mut group = Vec::new();
+    for event in events {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        } = event
+        {
+            if chosen.contains(object_id) && !group.contains(object_id) {
+                group.push(*object_id);
+            }
+        }
+    }
+    group
+}
+
 /// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
 /// cost moves. A move that parks for a replacement choice leaves the typed `Cast` root
-/// holding `pending` and `completion`, parks the span's already-raised cost triggers,
-/// and returns the live prompt; `None` means every move settled.
+/// holding `pending`, `completion` and the departure `ledger`, parks the span's
+/// already-raised cost triggers (or withholds them in the ledger while a
+/// simultaneous-departure group can still form), and returns the live prompt; `None`
+/// means every move settled.
 #[allow(clippy::too_many_arguments)]
 fn move_cost_objects(
     state: &mut GameState,
@@ -2696,6 +2805,7 @@ fn move_cost_objects(
     destination: Zone,
     completion: &PendingCostMoveCompletion,
     cost_event_start: usize,
+    ledger: &mut CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
@@ -2711,6 +2821,21 @@ fn move_cost_objects(
         match zone_pipeline::move_object(state, request, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsChoice(choice_player) => {
+                // CR 603.10a: the departures so far, and (while a group can still
+                // form) their events, travel with the root so terminal completion
+                // stamps the whole group and collects its triggers once.
+                record_sacrifice_cost_departure_records(
+                    &mut ledger.departure_record_indices,
+                    &events[cost_event_start..],
+                    chosen,
+                );
+                let withhold =
+                    cost_move_group_may_form(state, chosen, &ledger.departure_record_indices);
+                if withhold {
+                    ledger
+                        .deferred_cost_events
+                        .extend_from_slice(&events[cost_event_start..]);
+                }
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                     player,
                     pending: Some(Box::new(pending.clone())),
@@ -2718,6 +2843,8 @@ fn move_cost_objects(
                     paused_at_index: index,
                     destination,
                     completion: completion.clone(),
+                    deferred_cost_events: std::mem::take(&mut ledger.deferred_cost_events),
+                    departure_record_indices: std::mem::take(&mut ledger.departure_record_indices),
                 });
                 // A delivered move can surface its own post-effect prompt; only a live
                 // CR 616.1 ordering choice is synthesized here.
@@ -2725,13 +2852,15 @@ fn move_cost_objects(
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 }
                 let waiting_for = state.waiting_for.clone();
-                park_cost_payment_triggers_if_paused(
-                    state,
-                    events,
-                    cost_event_start,
-                    events.len(),
-                    &waiting_for,
-                );
+                if !withhold {
+                    park_cost_payment_triggers_if_paused(
+                        state,
+                        events,
+                        cost_event_start,
+                        events.len(),
+                        &waiting_for,
+                    );
+                }
                 return Some(waiting_for);
             }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -2753,6 +2882,7 @@ fn finish_cost_object_moves(
     completion: PendingCostMoveCompletion,
     cost_event_start: usize,
     park_events_after_completion: bool,
+    mut ledger: CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(waiting_for) = move_cost_objects(
@@ -2764,9 +2894,55 @@ fn finish_cost_object_moves(
         destination,
         &completion,
         cost_event_start,
+        &mut ledger,
         events,
     ) {
         return Ok(waiting_for);
+    }
+
+    // CR 603.10a: permanents moved together to pay one cost component leave
+    // the battlefield simultaneously; stamp them so a co-departing
+    // leaves-the-battlefield observer sees each (mirrors the stamp in
+    // `finish_sacrifice_for_cost`). The group is read from the departures
+    // themselves: this seam also moves hand/graveyard cards (pitch, Collect
+    // Evidence, craft's graveyard materials), which are never part of it, and a
+    // call resumed after a replacement-choice pause recomputes the whole group
+    // from the ledger it carried.
+    let CostMoveLedger {
+        mut deferred_cost_events,
+        mut departure_record_indices,
+    } = ledger;
+    record_sacrifice_cost_departure_records(
+        &mut departure_record_indices,
+        &events[cost_event_start..],
+        &chosen,
+    );
+    let group = selected_battlefield_departures(
+        &chosen,
+        deferred_cost_events
+            .iter()
+            .chain(events[cost_event_start..].iter()),
+    );
+    crate::game::zones::mark_simultaneous_departures(&mut deferred_cost_events, &group);
+    crate::game::zones::mark_simultaneous_departures(&mut events[cost_event_start..], &group);
+    crate::game::zones::mark_simultaneous_departure_records(
+        state,
+        &departure_record_indices,
+        &group,
+    );
+    let mut pending = pending;
+    if !deferred_cost_events.is_empty() {
+        // CR 603.2 + CR 603.3b: earlier action fragments of this payment were
+        // withheld from trigger collection; collect the fully stamped group once,
+        // together with this action's fragment.
+        settle_sacrifice_for_cost_events(
+            state,
+            Some(&mut pending),
+            deferred_cost_events,
+            events,
+            cost_event_start,
+            events.len(),
+        );
     }
 
     // CR 400.7j + CR 400.7 + CR 608.2k + CR 608.2h: Every cost object move above is now
@@ -2796,7 +2972,6 @@ fn finish_cost_object_moves(
     // Placed after the loop so it is correct regardless of how many zones the
     // move traversed or whether a replacement effect redirected it; the
     // `NeedsChoice` arm above returns early and re-enters here on resume.
-    let mut pending = pending;
     pending.ability.settle_cost_paid_provenance_recursive(
         state,
         &chosen,
@@ -2941,7 +3116,7 @@ fn finish_cost_object_moves(
 fn finish_selected_return_to_hand_after_automatic(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     selected: Vec<ObjectId>,
     automatic_remaining: Option<AbilityCost>,
     cost_event_start: usize,
@@ -2964,15 +3139,15 @@ fn finish_selected_return_to_hand_after_automatic(
             pending.object_id,
             &cost,
             Some(ability_index),
+            &mut pending.ability.context.cost_removed_counter_amount,
             events,
         )? {
             super::casting::PaymentOutcome::Paid => {}
             super::casting::PaymentOutcome::Paused { remaining_cost } => {
-                let Some(PendingCostMoveResume::Cast {
-                    pending: slot @ None,
-                    completion,
-                    ..
-                }) = state.pending_cost_move_resume.as_mut()
+                let Some((slot, completion)) = state
+                    .pending_cost_move_resume
+                    .as_mut()
+                    .and_then(PendingCostMoveResume::unattached_activation_slot_mut)
                 else {
                     return Err(EngineError::InvalidAction(
                         "automatic return-cost suffix paused without a cost-move continuation"
@@ -3002,14 +3177,15 @@ fn finish_selected_return_to_hand_after_automatic(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         park_events_after_completion,
+        CostMoveLedger::default(),
         events,
     )
 }
 
 /// CR 601.2h + CR 602.2b: An activation that paused while paying a self-move
-/// cost keeps its continuation with the typed cost-move resume, rather than in
-/// `GameState::pending_cast`. Returns the payload unchanged for every other
-/// kind of pause.
+/// cost or a counter-removal cost keeps its continuation with the typed
+/// cost-move resume, rather than in `GameState::pending_cast`. Returns the
+/// payload unchanged for every other kind of pause.
 pub(crate) fn attach_pending_cast_to_cost_move(
     state: &mut GameState,
     pending: Box<PendingCast>,
@@ -3022,10 +3198,10 @@ pub(crate) fn attach_pending_cast_to_cost_move(
         *slot = Some(pending);
         return None;
     }
-    let Some(PendingCostMoveResume::Cast {
-        pending: slot @ None,
-        ..
-    }) = state.pending_cost_move_resume.as_mut()
+    let Some((slot, _)) = state
+        .pending_cost_move_resume
+        .as_mut()
+        .and_then(PendingCostMoveResume::unattached_activation_slot_mut)
     else {
         return Some(pending);
     };
@@ -3066,6 +3242,8 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index,
             destination,
             completion,
+            deferred_cost_events,
+            departure_record_indices,
         }) = state.pending_cost_move_resume.take()
         else {
             unreachable!("matched a cast cost-move continuation")
@@ -3085,6 +3263,10 @@ pub(crate) fn resume_interrupted_cost_payment(
             completion,
             replacement_action_cost_event_start.unwrap_or(events.len()),
             true,
+            CostMoveLedger {
+                deferred_cost_events,
+                departure_record_indices,
+            },
             events,
         );
     }
@@ -3575,6 +3757,7 @@ fn pay_delve_at_commit(
         Zone::Exile,
         &completion,
         events.len(),
+        &mut CostMoveLedger::default(),
         events,
     ))
 }
@@ -4630,6 +4813,17 @@ pub(crate) fn handle_return_to_hand_for_cost(
             chosen.len()
         )));
     }
+    // CR 118.3 + CR 601.2h: a cost of N permanents is not paid by returning one
+    // permanent N times.
+    if chosen
+        .iter()
+        .enumerate()
+        .any(|(index, id)| chosen[index + 1..].contains(id))
+    {
+        return Err(EngineError::InvalidAction(
+            "Cannot return the same permanent more than once for a cost".to_string(),
+        ));
+    }
     for id in chosen {
         if !legal_permanents.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -4660,15 +4854,15 @@ pub(crate) fn handle_return_to_hand_for_cost(
                     pending.object_id,
                     &cost,
                     Some(ability_index),
+                    &mut pending.ability.context.cost_removed_counter_amount,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
                     super::casting::PaymentOutcome::Paused { remaining_cost } => {
-                        let Some(PendingCostMoveResume::Cast {
-                            pending: slot @ None,
-                            completion,
-                            ..
-                        }) = state.pending_cost_move_resume.as_mut()
+                        let Some((slot, completion)) = state
+                            .pending_cost_move_resume
+                            .as_mut()
+                            .and_then(PendingCostMoveResume::unattached_activation_slot_mut)
                         else {
                             return Err(EngineError::InvalidAction(
                                 "automatic return-cost leg paused without a cost-move continuation"
@@ -4690,15 +4884,9 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
-    // CR 603.10a co-departed sibling (confirmed-excluded, mirrors the Ward
-    // GAP comment): permanents returned to hand as a cost leave the battlefield
-    // together, so a co-departing leaves-the-battlefield observer among them
-    // would under-observe — the same gap `handle_sacrifice_for_cost` closes with
-    // a `mark_simultaneous_departures` stamp. Not stamped here because
-    // return-to-hand-as-cost is effectively always a single permanent (Daze,
-    // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
-    // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
-    // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
+    // CR 603.10a: permanents returned as one cost leave together;
+    // `finish_cost_object_moves` stamps the group across any replacement-choice
+    // pause via `CostMoveLedger`.
     // A self-return component is paid by `pay_ability_cost` above. Moving
     // that source a second time would emit a spurious Hand -> Hand event.
     let to_return: Vec<_> = chosen
@@ -4722,6 +4910,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -4732,7 +4921,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
 pub(crate) fn handle_remove_counter_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    mut pending: PendingCast,
+    pending: PendingCast,
     count: u32,
     counter_type: crate::types::counter::CounterMatch,
     selection: CounterCostSelection,
@@ -4778,7 +4967,9 @@ pub(crate) fn handle_remove_counter_for_cost(
         ));
     }
 
+    // CR 118.3 + CR 601.2h: plan the whole removal before any counter moves.
     let mut remaining = count;
+    let mut removals = Vec::new();
     for &object_id in chosen {
         if remaining == 0 {
             break;
@@ -4798,13 +4989,11 @@ pub(crate) fn handle_remove_counter_for_cost(
             .unwrap_or(0);
         let to_remove = removable.min(remaining);
         if to_remove > 0 {
-            super::effects::counters::remove_counter_with_replacement(
-                state,
+            removals.push(PendingCounterRemoval {
                 object_id,
-                concrete_counter,
-                to_remove,
-                events,
-            );
+                counter_type: concrete_counter,
+                count: to_remove,
+            });
             remaining -= to_remove;
         }
     }
@@ -4813,50 +5002,7 @@ pub(crate) fn handle_remove_counter_for_cost(
             "No removable counter".to_string(),
         ));
     }
-
-    if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
-        pending
-            .ability
-            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
-                obj.1,
-                obj.1.snapshot_for_mana_spent(),
-            ));
-    }
-
-    pending.mark_activation_cost_committed();
-
-    if let Some(ability_index) = pending.activation_ability_index {
-        if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: Counter selection is already committed, so
-            // pay the automatic residual through the outcome-aware authority.
-            // If a self-move pauses, the typed continuation resumes this pending
-            // activation only after the selected counter was paid exactly once.
-            match super::casting::pay_ability_cost_for_activation(
-                state,
-                player,
-                pending.object_id,
-                &cost,
-                Some(ability_index),
-                events,
-            )? {
-                super::casting::PaymentOutcome::Paid => {}
-                super::casting::PaymentOutcome::Paused { remaining_cost } => {
-                    pending.activation_cost = remaining_cost;
-                    if let Some(pending) =
-                        attach_pending_cast_to_cost_move(state, Box::new(pending))
-                    {
-                        state.pending_cast = Some(pending);
-                    }
-                    return Ok(state.waiting_for.clone());
-                }
-                super::casting::PaymentOutcome::Failed { reason } => {
-                    return Err(EngineError::ActionNotAllowed(reason.reason));
-                }
-            }
-        }
-    }
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    pay_selected_counter_cost(state, player, pending, removals, paid_object, events)
 }
 
 /// CR 118.3 + CR 122.1 + CR 601.2b: Complete "remove N counters from among"
@@ -4865,7 +5011,7 @@ pub(crate) fn handle_remove_counter_for_cost(
 pub(crate) fn handle_remove_counter_distribution_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    mut pending: PendingCast,
+    pending: PendingCast,
     count: u32,
     counter_type: crate::types::counter::CounterMatch,
     selection: CounterCostSelection,
@@ -4970,51 +5116,103 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
     super::effects::counters::validate_counter_selection(&available_by_type, &per_type)
         .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
-    for choice in distribution {
-        let removable = state
-            .objects
-            .get(&choice.object_id)
-            .and_then(|obj| obj.counters.get(&choice.counter_type))
-            .copied()
-            .unwrap_or(0);
-        if removable < choice.count {
-            return Err(EngineError::InvalidAction(
-                "Counter distribution exceeds removable counters".to_string(),
-            ));
-        }
-        super::effects::counters::remove_counter_with_replacement(
-            state,
-            choice.object_id,
-            choice.counter_type.clone(),
-            choice.count,
-            events,
-        );
-    }
+    // CR 118.3 + CR 601.2h: every choice is validated above against the
+    // counters present, and each names a distinct (object, counter type), so
+    // the distribution is the removal plan.
+    let removals = distribution
+        .iter()
+        .map(|choice| PendingCounterRemoval {
+            object_id: choice.object_id,
+            counter_type: choice.counter_type.clone(),
+            count: choice.count,
+        })
+        .collect();
+    let paid_object = distribution.first().map(|choice| choice.object_id);
+    pay_selected_counter_cost(state, player, pending, removals, paid_object, events)
+}
 
-    if let Some(choice) = distribution.first() {
-        if let Some(obj) = state.objects.get(&choice.object_id) {
-            pending
-                .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
-                    obj,
-                    obj.snapshot_for_mana_spent(),
-                ));
+/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: pay a selected counter cost's
+/// planned removals for both selection handlers. An activation's effect reads
+/// the count actually removed, credited to its own ledger (CR 602.2b); a
+/// spell's additional counter cost has no activation and keeps no count. A
+/// removal that waits on a replacement choice parks the payment in a
+/// [`PendingCostMoveResume::CounterCostRemovalPayment`] root, which settles it
+/// and pays the rest before anything later.
+fn pay_selected_counter_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    removals: Vec<PendingCounterRemoval>,
+    paid_object: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let ledger = pending
+        .activation_ability_index
+        .is_some()
+        .then_some(&mut pending.ability.context.cost_removed_counter_amount);
+    match super::costs::pay_counter_cost_removals(state, removals, ledger, events) {
+        super::costs::CounterCostRemovalProgress::Complete => {}
+        super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
+            pending.mark_activation_cost_committed();
+            state.pending_cost_move_resume =
+                Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                    player,
+                    pending: Some(Box::new(pending)),
+                    removal: Box::new(removal),
+                    cost_paid_object: paid_object,
+                    completion: PendingCostMoveCompletion::FinishPending,
+                });
+            return Ok(state.waiting_for.clone());
         }
     }
-
+    stamp_counter_cost_paid_object(state, &mut pending, paid_object);
     pending.mark_activation_cost_committed();
+    finish_counter_cost_payment(state, player, pending, events)
+}
 
+/// Stamp the object a selected counter cost removed counters from as this
+/// payment's cost-paid object, captured once the removal is paid.
+fn stamp_counter_cost_paid_object(
+    state: &GameState,
+    pending: &mut PendingCast,
+    paid_object: Option<ObjectId>,
+) {
+    if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id)) {
+        pending
+            .ability
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
+    }
+}
+
+/// CR 601.2f + CR 601.2h + CR 602.2b: the counter-cost tail shared by the
+/// selected handlers and the deferred-removal resume: pay the automatic
+/// residual, then finish the cast or activation.
+fn finish_counter_cost_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    super::casting::require_locked_activation_cost(
+        pending.activation_cost_snapshot.as_deref(),
+        super::casting::ActivationCostGuardSite::CounterCostTail,
+    )?;
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: The assigned counter payment is complete
-            // before an automatic residual can pause on a self-move replacement,
-            // so its typed continuation cannot replay the selected distribution.
+            // CR 601.2h + CR 602.2b: The counter payment is complete before an
+            // automatic residual can pause on a cost replacement (a self-move or
+            // a counter removal), so the typed continuation resumes this pending
+            // activation without replaying the counters already removed.
             match super::casting::pay_ability_cost_for_activation(
                 state,
                 player,
                 pending.object_id,
                 &cost,
                 Some(ability_index),
+                &mut pending.ability.context.cost_removed_counter_amount,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -5035,6 +5233,88 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 118.11 + CR 616.1 + CR 602.2b: Resume a counter-removal cost after the
+/// replacement choice that paused it. The paused removal is settled by
+/// measurement and credited to the activation's own count (a modified removal
+/// "has still been paid", CR 118.11) before the cost's later removals, its
+/// residual, any selected return and the stack placement.
+pub(crate) fn resume_counter_cost_removal_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    action_event_start: Option<usize>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::CounterCostRemovalPayment {
+        player,
+        pending,
+        removal,
+        cost_paid_object,
+        completion,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("matched a counter-cost removal continuation")
+    };
+    let Some(mut pending) = pending else {
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    };
+    let PausedCounterCostRemoval {
+        in_flight,
+        remaining,
+        replacement_subtree: _,
+    } = *removal;
+    let settled = super::effects::counters::settled_in_flight_counter_removal(state, &in_flight);
+    let is_activation = pending.activation_ability_index.is_some();
+    if is_activation {
+        super::costs::credit_cost_removed_counters(
+            &mut pending.ability.context.cost_removed_counter_amount,
+            settled,
+        );
+    }
+    let ledger = is_activation.then_some(&mut pending.ability.context.cost_removed_counter_amount);
+    match super::costs::pay_counter_cost_removals(state, remaining, ledger, events) {
+        super::costs::CounterCostRemovalProgress::Complete => {}
+        super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
+            state.pending_cost_move_resume =
+                Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                    player,
+                    pending: Some(pending),
+                    removal: Box::new(removal),
+                    cost_paid_object,
+                    completion,
+                });
+            return Ok(state.waiting_for.clone());
+        }
+    }
+    stamp_counter_cost_paid_object(state, &mut pending, cost_paid_object);
+    match completion {
+        PendingCostMoveCompletion::FinishPending => {
+            finish_counter_cost_payment(state, player, *pending, events)
+        }
+        // CR 601.2h + CR 602.2b: the counter leg was the automatic part paid
+        // before an already selected return to hand; settle it first, then
+        // move the selected return.
+        PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+            selected,
+            automatic_remaining,
+        } => finish_selected_return_to_hand_after_automatic(
+            state,
+            player,
+            *pending,
+            selected,
+            automatic_remaining,
+            action_event_start.unwrap_or(events.len()),
+            true,
+            events,
+        ),
+        PendingCostMoveCompletion::PublishExileTrackedSet
+        | PendingCostMoveCompletion::FinalizeCast { .. }
+        | PendingCostMoveCompletion::FinalizeDelvedCast { .. } => Err(EngineError::InvalidAction(
+            "a counter-cost removal root cannot carry a cast finalization".to_string(),
+        )),
+    }
 }
 
 /// Blight cost — CR 701.68a: put N -1/-1 counters on the one chosen creature.
@@ -5358,6 +5638,7 @@ pub(crate) fn handle_behold_for_cost(
             PendingCostMoveCompletion::FinishPending,
             cost_event_start,
             false,
+            CostMoveLedger::default(),
             events,
         );
     } else if !revealed_ids.is_empty() {
@@ -5643,6 +5924,7 @@ fn finish_exile_selection_for_cost(
         PendingCostMoveCompletion::FinishPending,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -5729,6 +6011,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         PendingCostMoveCompletion::PublishExileTrackedSet,
         cost_event_start,
         false,
+        CostMoveLedger::default(),
         events,
     )
 }
@@ -6311,7 +6594,7 @@ fn surface_next_interactive_activation_cost_leg(
             kind: PayCostKind::ReturnToHand,
             choices: eligible,
             count: count as usize,
-            min_count: 0,
+            min_count: count as usize,
             resume: CostResume::Spell {
                 spell: Box::new(pending.clone()),
             },
@@ -7079,6 +7362,7 @@ pub(super) fn push_activated_ability_to_stack(
                 source_id,
                 cost,
                 Some(ability_index),
+                &mut resolved.context.cost_removed_counter_amount,
                 events,
             )?
         {
@@ -7265,6 +7549,9 @@ pub(super) fn push_ability_entry(
         }
     }
 
+    // CR 602.2b + CR 608.2h: `resolved.context.cost_removed_counter_amount`
+    // already holds the count this activation's own payment removed.
+
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
     stack::push_to_stack(
@@ -7294,39 +7581,14 @@ pub(super) fn push_ability_entry(
         record,
         events,
     );
-    if let Some(mut collection) = activation_trigger_collection {
-        // CR 603.2c: an occurrence a cost step already collected (claimed in the
-        // ledger) is not collected again by the stack push.
-        let unclaimed = super::announcement_triggers::unclaimed_events(state, events, 0);
-        collection.collect(state, &unclaimed);
-        let mut deferred_contexts = std::mem::take(&mut state.deferred_triggers);
-        collection.commit_into(state, &mut deferred_contexts);
-        state.deferred_triggers = deferred_contexts;
-        // CR 603.2c + CR 603.7b: terminal cost groups already claimed for both
-        // collectors must not fire again. Keep ordinary-only claims and new
-        // finishing events visible, with their original full-buffer positions.
-        let delayed_input = super::triggers::unclaimed_trigger_events_from(
-            events,
-            0,
-            super::triggers::TriggerCollectionRequester::Delayed,
-            &state.consumed_before_priority_trigger_events,
-        );
-        super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
-            state,
-            events,
-            &delayed_input,
-        );
-        state
-            .consumed_before_priority_trigger_events
-            .extend(events.iter().enumerate().map(|(index, event)| {
-                crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: crate::game::triggers::trigger_event_occurrence(events, index),
-                    scope: crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
-                }
-            }));
-    }
-    super::announcement_triggers::end_activation_announcement(state);
+    // CR 602.2b + CR 603.3b + CR 603.7b: the activation transaction owns its
+    // cost-payment events' trigger batch, delayed triggers included (Earthbend's
+    // dies-or-exiled return); the announcement authority commits it.
+    super::announcement_triggers::commit_activation_announcement(
+        state,
+        activation_trigger_collection,
+        events,
+    );
     priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
@@ -8165,7 +8427,14 @@ fn check_additional_cost_or_pay_with_kept_cost(
             .and_then(|permission| {
                 payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
             })
-            .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
+            .or_else(|| {
+                payable_spell_alternative_cost_details_at_index(
+                    state,
+                    player,
+                    object_id,
+                    casting_permission_index,
+                )
+            });
         if let Some(alt_cost) = alt_cost {
             // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
             // Foretold) across the choice round-trip so its per-turn slot is
@@ -9900,7 +10169,7 @@ fn pay_additional_cost_with_source(
                 kind: PayCostKind::ReturnToHand,
                 choices: eligible,
                 count: count as usize,
-                min_count: 0,
+                min_count: count as usize,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
@@ -12163,6 +12432,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
             },
             cost_event_start,
             false,
+            CostMoveLedger::default(),
             events,
         );
     }

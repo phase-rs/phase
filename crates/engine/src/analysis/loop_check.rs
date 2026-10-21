@@ -245,6 +245,10 @@ pub struct ShortcutProposal {
         skip_serializing_if = "crate::game::period_confirm::ConfirmedPeriod::is_empty"
     )]
     pub period: crate::game::period_confirm::ConfirmedPeriod,
+    /// CR 603.3d + CR 601.2c: the offer's `ShortcutDecisionSchema::leading_aims`, copied at declare
+    /// so a responder's preview splits the declaration by the lead the proposer's preview used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and

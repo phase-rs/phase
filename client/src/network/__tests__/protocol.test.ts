@@ -1,3 +1,4 @@
+import { WIRE_PROTOCOL_VERSION as GENERATED_VERSION } from "../../generated/protocol-versions";
 import { describe, it, expect } from "vitest";
 
 import {
@@ -90,8 +91,8 @@ describe("lobby capability floor for the Dandan format", () => {
 });
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v134", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(134);
+  it("uses the generated P2P wire protocol", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(GENERATED_VERSION);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {

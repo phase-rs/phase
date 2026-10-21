@@ -1028,6 +1028,33 @@ pub(crate) fn resolve_event_referent_objects(
         .collect()
 }
 
+/// CR 110.1 + CR 702.26b: only a phased-in permanent on the battlefield can be
+/// affected as a permanent. An event referent (CR 608.2k) can have left the
+/// battlefield (CR 400.7: it is then a new object) or phased out before the
+/// trigger resolves; neither is a permanent that can be affected.
+pub(crate) fn is_phased_in_battlefield_permanent(state: &GameState, id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
+}
+
+/// CR 608.2k + CR 400.7 + CR 110.1 + CR 702.26b: the permanents a pure
+/// event-subject anaphor (`TriggeringSource` / `EventTarget`) names — the
+/// incarnation-checked referents of [`resolve_event_referent_objects`] that are
+/// still phased-in battlefield permanents. Shared by every resolver that
+/// mutates a permanent referent (tap/untap, prepare, transient grants).
+pub(crate) fn resolve_event_referent_permanents(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    resolve_event_referent_objects(state, filter, source_id)
+        .into_iter()
+        .filter(|&id| is_phased_in_battlefield_permanent(state, id))
+        .collect()
+}
+
 /// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
 /// ability across the three Oracle-text target sources, in priority order:
 ///

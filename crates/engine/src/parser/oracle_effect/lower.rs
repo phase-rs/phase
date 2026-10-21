@@ -22,8 +22,8 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_event_context_quantity_with_context, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_short_of_clause_expr,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_clause_expr_with_context, parse_for_each_grouped_clause_expr,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -38,14 +38,14 @@ use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, E
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
-    CastPermissionConstraint, CastingPermission, CombatHistoryScope, Comparator, ConjureSource,
-    ContinuousModification, ControllerRef, CountBinding, DamageChannel, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider, FilterProp,
-    GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
-    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
+    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
+    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
+    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
+    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -2246,6 +2246,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             .declared_target_choice_timing
             .or_else(|| accepting_player_object_timing(clause_ir, &clause_ir.parsed.effect)),
         clause_ir.multi_target.is_some(),
+        clause_ir.target_selection_mode,
     )
 }
 
@@ -2366,6 +2367,7 @@ pub(super) fn target_choice_timing_for_parsed(
     fragment: &str,
     declared: Option<TargetChoiceTiming>,
     clause_multi_target: bool,
+    selection: TargetSelectionMode,
 ) -> TargetChoiceTiming {
     // CR 115.10a + CR 701.41a: a producer that expanded a keyword-action
     // SHORTHAND into a targeted effect already knows the answer the ladder below
@@ -2468,6 +2470,34 @@ pub(super) fn target_choice_timing_for_parsed(
         // choice at ITS OWN resolution (CR 608.2d), not inherit one shared
         // choice made once when the whole ability went on the stack.
         if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+    // CR 115.10a + CR 608.2d: an untargeted DESCRIBED damage recipient ("a
+    // creature or player", "another creature you control") is not announced when
+    // the ability goes on the stack — only a thing identified by the word "target"
+    // is a target — it is chosen while the damage is applied. The shape question
+    // ("is this a described population the controller chooses from?") is the
+    // resolver's own predicate, so what is timed for resolution here is exactly
+    // what the resolver prompts for. Excluded and left on their existing readings:
+    // anything the text says "target" about (the same printed-fragment scan as
+    // every arm above), a divided or multi-target announcement, a damage source
+    // other than the ability's own (a targets-positional referent, or the triggering event's source), and a selection the game makes
+    // rather than the controller ("chosen at random": CR 101.1, the card's own
+    // words override the controller's default choice).
+    if let Effect::DealDamage {
+        damage_source: None,
+        target,
+        ..
+    } = &parsed.effect
+    {
+        if selection == TargetSelectionMode::Chosen
+            && !clause_multi_target
+            && parsed.multi_target.is_none()
+            && parsed.distribute.is_none()
+            && !nom_primitives::scan_contains(&lower, "target ")
+            && crate::game::effects::deal_damage::names_resolution_chosen_recipient(target)
+        {
             return TargetChoiceTiming::Resolution;
         }
     }
@@ -3146,9 +3176,7 @@ impl ReflexiveGateParent {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -3910,49 +3938,17 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 111.1: is this a token-creation effect? The authority is
+/// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Populate | Effect::Token { .. } | Effect::CopyTokenOf { .. }
-    )
+    effect.is_token_creator()
 }
 
-/// CR 608.2c + CR 701.40a + CR 701.58a + CR 701.62a: Does this clause put a NEW
-/// permanent onto the battlefield that a later same-chain anaphor can name?
-///
-/// A created token and a face-down entry are indistinguishable to the anaphor.
-/// Both clauses produce exactly one new permanent and declare NO target, so a
-/// following "it" / "that creature" has exactly one possible referent — the
-/// thing the clause just made. Manifest (CR 701.40a), manifest dread
-/// (CR 701.62a) and cloak (CR 701.58a) all route through the one runtime
-/// producer (`game::morph::manifest_card`) and put a 2/2 face-down creature
-/// onto the battlefield, exactly as `Effect::Token` puts a token there.
-///
-/// Keying the chain-referent flag on "token" alone left the face-down producers
-/// with no referent, so their anaphor fell through to `ParentTarget` (empty —
-/// the producer has no targets) or to the trigger source: Conductive Machete
-/// attached to nothing, Weight Room put its counters on the Room (#7531).
-///
-/// `Effect::Conjure` (digital-only, no CR entry) is the same shape again: it
-/// puts exactly one new object into a zone and declares no target, so a
-/// following same-chain "it" has exactly one possible referent — the card it
-/// just conjured. Agent of Raffine's "Conjure a duplicate ... into your hand.
-/// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
-/// (the ability's actual chosen target — "target opponent" — not the
-/// conjured card).
-///
-/// The declined "if you do" walk (`game::effects`,
-/// `declined_gate_surviving_instructions`) reads the same answer to keep a
-/// created object and its later rider together.
+/// CR 608.2c: does this clause publish the created referent a later same-chain
+/// anaphor names? The authority (and its rationale) is
+/// [`Effect::publishes_created_referent`]; this name is kept for the parser's callers.
 pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
-    is_token_creating_effect(effect)
-        || matches!(
-            effect,
-            Effect::Manifest { .. }
-                | Effect::ManifestDread
-                | Effect::Cloak { .. }
-                | Effect::Conjure { .. }
-        )
+    effect.publishes_created_referent()
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
@@ -4792,12 +4788,13 @@ pub(super) fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
             | Effect::ExileFromTopUntil { .. }
             | Effect::Clash
             | Effect::TurnFaceUp { .. }
+            // CR 701.20a: only a search that actually reveals publishes this subject.
+            | Effect::SearchLibrary { reveal: true, .. }
             // Zone-change-class (emit ZoneChanged → last_zone_changed_ids).
             | Effect::ChangeZone { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::ExileTop { .. }
             | Effect::Mill { .. }
-            | Effect::SearchLibrary { .. }
     )
 }
 
@@ -4856,7 +4853,8 @@ fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> 
                 damage_source_filter,
                 Some(TargetFilter::ChosenDamageSource { .. })
             ),
-            Effect::FlipCoin {
+            // Branch recursion is mode-agnostic (single, N and until-loss runs).
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -4898,7 +4896,8 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
         {
             *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
-        Effect::FlipCoin {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -5200,7 +5199,7 @@ pub(super) fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut Ab
 /// True when a def is a rider clause bound to the just-created tokens
 /// (`TargetFilter::LastCreated`) — e.g. the "Those tokens gain haste" grant and
 /// the "Exile them at the beginning of the next end step" delayed cleanup that
-/// follow a token-creating `FlipCoinUntilLose` win clause (Mirror March #5966).
+/// follow a token-creating until-loss `FlipCoins` win clause (Mirror March #5966).
 /// Used as the absorb predicate that folds these into the per-win `win_effect`.
 fn def_is_last_created_rider(def: &AbilityDefinition) -> bool {
     effect_targets_last_created(&def.effect)
@@ -5246,11 +5245,17 @@ fn effect_targets_last_created(effect: &Effect) -> bool {
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
-/// branches into their parent `FlipCoin` effect.
+/// branches into their parent `FlipCoins` effect.
 ///
-/// Pattern: a bare `FlipCoin { win: None, lose: None }` followed by one or more
-/// `FlipCoin { win: Some(..), lose: None }` / `FlipCoin { win: None, lose: Some(..) }`
-/// defs produced by the "if you win/lose the flip" intercept in `parse_effect_clause`.
+/// Pattern: a bare single-flip `FlipCoins { win: None, lose: None }` followed by one or
+/// more single-flip `FlipCoins { win: Some(..), lose: None }` / `FlipCoins { win: None,
+/// lose: Some(..) }` defs produced by the "if you win/lose the flip" intercept in
+/// `parse_effect_clause`.
+///
+/// The three run shapes keep their pre-merge consolidation membership through the
+/// head's `flips`: a single flip absorbs only branch-only single-flip stubs, an
+/// `Exactly` multi-flip run absorbs its following clause as the per-heads branch, and
+/// `UntilLoss` absorbs its per-win clause chain.
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
@@ -5258,31 +5263,36 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
         // the `flipper` (which player flips); the following branch-only flips are
         // stubs with the default `Controller` flipper, so preserve the bare flip's
         // flipper rather than the stubs'.
-        if let Effect::FlipCoin {
-            win_effect: None,
-            lose_effect: None,
-            flipper,
-        } = &*defs[i].effect
-        {
-            let flipper = flipper.clone();
+        let bare_single_flipper = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips,
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if flips.is_single_flip() => Some(flipper.clone()),
+            _ => None,
+        };
+        if let Some(flipper) = bare_single_flipper {
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
             while j < defs.len() && (win.is_none() || lose.is_none()) {
                 match &*defs[j].effect {
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: Some(w),
                         lose_effect: None,
                         ..
-                    } if win.is_none() => {
+                    } if flips.is_single_flip() && win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
                     }
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: None,
                         lose_effect: Some(l),
                         ..
-                    } if lose.is_none() => {
+                    } if flips.is_single_flip() && lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
                     }
@@ -5290,7 +5300,8 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 }
             }
             if win.is_some() || lose.is_some() {
-                *defs[i].effect = Effect::FlipCoin {
+                *defs[i].effect = Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: win,
                     lose_effect: lose,
                     flipper,
@@ -5299,50 +5310,60 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             }
         }
 
-        // CR 705.2 + CR 608.2c: Consolidate FlipCoinUntilLose with its per-win
+        // CR 705.2 + CR 608.2c: Consolidate an until-loss run with its per-win
         // clause chain. Absorb the win head (e.g. the token-creating copy clause)
         // PLUS any trailing rider clauses that reference the just-created tokens
         // (`LastCreated`) — "Those tokens gain haste", "Exile them …", already
         // rebound to `LastCreated` by the earlier `resolve_populated_token_anaphors`
         // pass — into ONE win_effect chain. They must live INSIDE win_effect
-        // because `finish_until_lose` runs win_effect once per win and each
+        // because `complete_run` runs win_effect once per win and each
         // `CopyTokenOf` overwrites `state.last_created_token_ids`; left as post-loop
         // siblings they would grant haste to / exile only the final win's token
         // (Mirror March #5966). Riders that do NOT reference `LastCreated` stay
         // top-level siblings — the predicate is the reach guard against
         // over-absorbing an unrelated following clause.
-        if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
+        if matches!(
+            &*defs[i].effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                ..
+            }
+        ) && i + 1 < defs.len()
+        {
             let mut head = defs.remove(i + 1);
             absorb_last_created_riders(defs, i, &mut head);
-            *defs[i].effect = Effect::FlipCoinUntilLose {
-                win_effect: Box::new(head),
-            };
+            if let Effect::FlipCoins { win_effect, .. } = &mut *defs[i].effect {
+                *win_effect = Some(Box::new(head));
+            }
         }
 
-        // CR 705: Consolidate FlipCoins with its following effect clause — the
+        // CR 705: Consolidate a multi-flip run with its following effect clause — the
         // "for each heads …" / "skips their next X turns where X is the number of
-        // coins that came up heads" sentence. Like FlipCoinUntilLose, trailing
+        // coins that came up heads" sentence. Like the until-loss run, trailing
         // `LastCreated` riders must join the per-head chain, rather than apply
-        // only to the final token created by the loop.
-        if let Effect::FlipCoins {
-            win_effect: None,
-            lose_effect: None,
-            count,
-            flipper,
-        } = &*defs[i].effect
-        {
-            if i + 1 < defs.len() {
-                let count = count.clone();
-                let flipper = flipper.clone();
-                let mut next = defs.remove(i + 1);
-                absorb_last_created_riders(defs, i, &mut next);
-                *defs[i].effect = Effect::FlipCoins {
-                    count,
-                    win_effect: Some(Box::new(next)),
-                    lose_effect: None,
-                    flipper,
-                };
+        // only to the final token created by the loop. A single flip ("Flip a coin.
+        // Draw a card.") must NOT absorb its following clause: that clause is a
+        // sibling instruction, not a per-heads branch.
+        let multi_flip_head = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips: flips @ CoinFlipRun::Exactly { .. },
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if !flips.is_single_flip() && i + 1 < defs.len() => {
+                Some((flips.clone(), flipper.clone()))
             }
+            _ => None,
+        };
+        if let Some((flips, flipper)) = multi_flip_head {
+            let mut next = defs.remove(i + 1);
+            absorb_last_created_riders(defs, i, &mut next);
+            *defs[i].effect = Effect::FlipCoins {
+                flips,
+                win_effect: Some(Box::new(next)),
+                lose_effect: None,
+                flipper,
+            };
         }
 
         i += 1;
@@ -5439,6 +5460,12 @@ pub(crate) fn strip_for_each_prefix_with_difference(
             if let Some(short_of) = parse_for_each_short_of_clause_expr(clause) {
                 let offset = text.len() - remainder.len();
                 return (Some(short_of), None, text[offset..].to_string());
+            }
+            // CR 107.1 + CR 608.2c: "for each N <things>" repeats once per
+            // complete group of N (Sage of Hours).
+            if let Some(grouped) = parse_for_each_grouped_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(grouped), None, text[offset..].to_string());
             }
             let parsed_clause = parsed_comparison
                 .clone()
@@ -5551,8 +5578,8 @@ mod difference_binding_tests {
 /// whether it leads (`"for each flip you won, create …"` — Mirror March) or
 /// trails (`"put a +1/+1 counter on ~ for each flip you won"` — Crazed
 /// Firecat). Unlike `strip_for_each_prefix`, this carries NO iteration count:
-/// `FlipCoinUntilLose`/`FlipCoins` already run their `win_effect` once per win
-/// (`finish_until_lose`), so lifting the count into a `repeat_for` loop (or a
+/// `FlipCoins` already runs its `win_effect` once per win
+/// (`complete_run` for an until-loss run), so lifting the count into a `repeat_for` loop (or a
 /// counter-count multiplier) would double-apply it. Dropping the quantifier
 /// lets the bare imperative reach its own combinator. The `"flip(s) you won"`
 /// noun is not a countable `parse_for_each_clause` clause, so neither
@@ -8164,66 +8191,215 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
     Some(MultiTargetSpec::up_to(max))
 }
 
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover the announced exact
+/// target count from a targeted imperative spell, activated ability, or triggered ability.
 pub(crate) fn extract_exact_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let mut parser = terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" "));
-        let Ok((after_verb, _)) = parser.parse(lower.as_str()) else {
-            continue;
-        };
-        let (count, _) = strip_exact_target_prefix(after_verb)?;
-        return Some(MultiTargetSpec::exact(count));
-    }
-    None
+    let (after_verb, ()) = parse_required_target_count_verb(&lower).ok()?;
+    let (count, _) = strip_exact_target_prefix(after_verb)?;
+    Some(MultiTargetSpec::exact(count))
 }
 
-/// CR 115.1d: Recover bounded multi-target counts from imperative text where the
-/// verb precedes the count phrase — "return one or two target permanent cards
-/// from your graveyard" (Trystan's Command mode 2). The targeted-action parser
-/// strips the count via `parse_target` but does not attach `MultiTargetSpec`.
+/// CR 601.2c + CR 115.1a / CR 115.1c / CR 115.1d: Recover bounded announced
+/// target counts from imperative spell, activated-ability, or triggered-ability text
+/// where the verb precedes the count phrase — "return one or two target permanent
+/// cards from your graveyard" (Trystan's Command mode 2), or "put one, two, or three
+/// target creature cards" (Aberrant Return). The targeted-action parser strips the
+/// count via `parse_target` but does not attach `MultiTargetSpec`.
 pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let Ok((after_verb, _)) =
-            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
-        else {
-            continue;
-        };
-        for (prefix, min, max) in [
-            ("one or two ", 1usize, 2usize),
-            ("one, two, or three ", 1, 3),
-        ] {
-            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
-                if tag::<_, _, OracleError<'_>>("target ")
-                    .parse(after_prefix)
-                    .is_ok()
-                {
-                    return Some(MultiTargetSpec::fixed(min, max));
-                }
-            }
-        }
-    }
-    None
+    let (_, (_, spec, _)) = (
+        parse_required_target_count_verb,
+        parse_bounded_target_cardinality,
+        tag::<_, _, OracleError<'_>>(" target "),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    Some(spec)
 }
 
-/// CR 115.1d: Recover "up to N target …" from imperative text where the verb
-/// precedes the count phrase — "tap up to four target permanents" (Elder
-/// Deep-Fiend). The targeted-action parser strips the count via
-/// `strip_optional_target_prefix` but does not attach `MultiTargetSpec`.
-pub(crate) fn extract_optional_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
-    let lower = text.to_lowercase();
-    for verb in MULTI_TARGET_VERBS {
-        let Ok((after_verb, _)) =
-            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
-        else {
-            continue;
-        };
-        let (_, multi_target) = strip_optional_target_prefix(after_verb);
-        if multi_target.is_some() {
-            return multi_target;
-        }
+/// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: Detect a clause
+/// whose printed "up to N target …" / "any number of target …" quantifier
+/// governs the clause's FIRST target phrase, wherever that phrase sits. The
+/// spell/ability still requires targets (CR 115.6) while allowing zero to be
+/// chosen, so the recovered `MultiTargetSpec` has a fixed minimum of zero.
+///
+/// Detection is a two-offset match over masked, lowercased text:
+/// - P1 first-target-phrase: the first word-boundary occurrence of a target
+///   article (`target ` / `other target ` / `another target `) is at byte
+///   offset `first_target`.
+/// - P2 quantifier governs that phrase: `strip_optional_target_prefix` — the
+///   single authority for the optional-count vocabulary — matches at a word
+///   boundary, and the article it leaves behind starts at the SAME offset. A
+///   quantifier that governs anything else (a resource count, a later
+///   conjunct, an earlier mandatory phrase, a quoted granted ability) therefore
+///   declines.
+///
+/// Both scans use `nom_primitives::scan_preceded`; double-quoted spans are
+/// masked first with `nom_primitives::mask_double_quoted_spans_preserving_len`
+/// (byte-length preserving, so the offsets stay valid). An unterminated quote
+/// passes the remainder through unchanged — a malformed quoted "up to one
+/// target" is accepted as visible text; no corpus card has one.
+///
+/// Capacity exclusions: `Counter`, `Attach`, `CopySpell`, `BecomeCopy`,
+/// `DealDamage`, `MoveCounters`, `Token` and `Transform` decline. These effects
+/// have no safe representation for a declined optional target yet (the resolver
+/// errors, acts on the wrong object, or a later stage drops the spec), so keep
+/// base behavior until the effect grows the capability.
+/// - `Counter` has no field for the announced count, so "counter up to N
+///   target …" cannot carry the spec (Double Negative, Katara's Reversal, Repel
+///   Intruders, Repulsive Mutation, Tishana's Tidebinder).
+/// - `Attach` prints a target phrase for its HOST operand and/or its ATTACHMENT
+///   operand; the host frame is captured separately by the typed host capture in
+///   `imperative.rs`, and writing the host's "up to one" into
+///   `clause.multi_target` would bind the wrong operand (Luxior, Ignited; The
+///   Aetherspark; Sting, Bilbo's Sword).
+/// - `CopySpell` copies one object and a zero-target decline would copy the top
+///   of the stack instead (Display of Power).
+/// - `BecomeCopy` errors `MissingParam` on a declined copy source (Fleeting
+///   Reflection).
+/// - `DealDamage` is one segment of a damage COMPOUND ("2 damage to target
+///   opponent and 2 damage to up to one target creature or planeswalker" —
+///   Rakdos Firewheeler, Burning Sun's Avatar, Ravager of the Fells, Dragonspark
+///   Reactor, Chandra, Pyromaster, Soul of Shandalar, Trick Shot, Conduct
+///   Electricity). CR 115.6 + CR 601.2c: zero chosen targets is legal for the
+///   segment, but the chain walker then INHERITS the parent's player target:
+///   `inherited_parent_occurrences` gates only object targets on
+///   `has_independent_target_slot`, so the declined "creature or planeswalker"
+///   segment becomes the first segment's "target opponent" and the spell deals
+///   damage to that player. Follow-up: gate the `TargetRef::Player(_)` arm on
+///   `!has_independent_target_slot` too, then lift the exclusion.
+/// - `MoveCounters` reads only `ability.optional_targeting` in its engine arms,
+///   so the stamped spec would be dropped and a declined target still demanded
+///   (Heroic Sacrifice; Donatello, Mutant Mechanic; Graft Surgeon; Host of the
+///   Hereafter and the other stamped carriers).
+/// - `Token` treats a declined `attach_to` host as named and creates no token
+///   (Cut In; Eriette's Whisper; Gadwick's First Duel; Living Lectern; Shatter
+///   the Oath; Twisted Fealty; Witch's Mark).
+/// - `Transform` cannot tell a declined DECLARED target from its printed
+///   no-target self-transform: `transform_effect::resolve` maps an empty subject
+///   list to `ability.source_id` (`[] => source_id`), so "Transform up to one
+///   target Werewolf you control" (Waxing Moon) transforms the SOURCE on a
+///   decline and the error aborts the rest of the chain, losing the trample
+///   sibling. Follow-up: `transform_effect::resolve` must no-op on a declined
+///   declared optional target instead of falling through to `source_id`, then
+///   lift the exclusion.
+///
+/// Follow-ups (the reason each exclusion is temporary): the engine's
+/// `MoveCounters` arms must move to `targeting_is_optional()`; `become_copy.rs`
+/// already honours `multi_target` in its slot path, but its resolver needs an
+/// explicit empty-source no-op instead of `MissingParam` (`become_copy.rs:64-74`);
+/// `token.rs`'s host-request derivation must treat a declined optional host as
+/// `NotRequested`; `copy_spell.rs` needs an explicit zero-target decline; and the
+/// `DealDamage` / `Transform` follow-ups named above.
+///
+/// The write-side guards (no existing authority, announced non-context target)
+/// live in [`apply_optional_target_fixup`], the single clause-level caller. The
+/// compound producers that discard a sub-clause's spec (damage-compound copy,
+/// damage-chain segment, compound-shuffle operand) call this detector directly
+/// on the sub-clause text.
+pub(crate) fn extract_optional_target_multi_target(
+    text: &str,
+    effect: &Effect,
+) -> Option<MultiTargetSpec> {
+    if matches!(
+        effect,
+        Effect::Counter { .. }
+            | Effect::Attach { .. }
+            | Effect::CopySpell { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::DealDamage { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::Token { .. }
+            | Effect::Transform { .. }
+    ) {
+        return None;
     }
-    None
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let lower = masked.to_ascii_lowercase();
+    let (before, (), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("target "),
+                tag("other target "),
+                tag("another target "),
+            )),
+        )
+        .parse(input)
+    })?;
+    let first_target = before.len();
+    let (_, spec, rest) =
+        nom_primitives::scan_preceded(lower.as_str(), |input| match strip_optional_target_prefix(
+            input,
+        ) {
+            (rest, Some(spec)) => Ok((rest, spec)),
+            _ => Err(oracle_err(input)),
+        })?;
+    (lower.len() - rest.len() == first_target).then_some(spec)
+}
+
+/// CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: The single
+/// clause-level owner of the optional target-count fixup.
+///
+/// Called from `lower_clause_ast` — the `Imperative` arm, the
+/// `SubjectPredicate` arm (with `original_clause`, the text this clause was
+/// asked to lower), and the recursive `Conditional` body — after the clause's
+/// own effect lowering has settled. One other direct caller exists:
+/// `try_parse_for_each_effect` in `oracle_effect/mod.rs`, the for-each numeric
+/// producer, which lowers its base effect without going through the clause
+/// junction and so must make the same call. The clause fragment, not the
+/// enclosing chunk, is authoritative here: every sticky multi-sentence chunk
+/// the chunker can produce is claimed by an earlier parser before the generic
+/// tail, so the chunk this fixup owns is single-sentence on every measured
+/// route.
+///
+/// Guards:
+/// - P5 write gate: an existing `multi_target` is never overridden. Typed specs
+///   set by the clause's own parser (e.g. the distribution family's finite
+///   `{0,3}`) and the `refine_put_at_library_position` spec both win.
+/// - The effect must surface an announced target: `Effect::target_filter()` is
+///   `Some` and is not a context reference. A SelfRef/`ParentTarget` body has
+///   no target phrase the quantifier could govern.
+/// - The surfaced slot must not be the untyped `TargetFilter::Any`: that means
+///   the clause's lowering dropped the printed object type, so an announced
+///   count on it would be inert (Razorgrass Invoker's subject `Pump`).
+///   `EachSourceDealsDamage` is the one live carve-out: its untyped recipient
+///   is the printed one ("any target", CR 115.4), so it keeps the spec.
+/// - `extract_optional_target_multi_target` declines the eight effects that
+///   cannot yet represent a declined optional target (`Counter`, `Attach`,
+///   `CopySpell`, `BecomeCopy`, `DealDamage`, `MoveCounters`, `Token`,
+///   `Transform`), keeping their base behavior.
+///
+/// This function never writes `optional_targeting`; that flag belongs to the
+/// Attach HOST frame captured in `imperative.rs`, and non-Attach clauses are
+/// already optional through the min-0 `multi_target`
+/// (`ResolvedAbility::targeting_is_optional`, CR 601.2c).
+pub(crate) fn apply_optional_target_fixup(clause: &mut ParsedEffectClause, clause_text: &str) {
+    if clause.multi_target.is_some() {
+        return;
+    }
+    let Some(filter) = clause.effect.target_filter() else {
+        return;
+    };
+    if filter.is_context_ref() {
+        return;
+    }
+    // CR 115.1 + CR 115.4 + CR 601.2c: an untyped `Any` slot cannot carry the
+    // announced count — the lowering dropped the printed object type, so the
+    // slot would offer every target while the effect still reads its own
+    // referent (Razorgrass Invoker's subject `Pump`). `EachSourceDealsDamage`
+    // keeps the spec: "any target" is a printed untyped recipient. Mirrors the
+    // untyped-slot guard in the multi-slot splitter (`multi_target_list.rs`).
+    if filter == &TargetFilter::Any
+        && !matches!(clause.effect, Effect::EachSourceDealsDamage { .. })
+    {
+        return;
+    }
+    let Some(spec) = extract_optional_target_multi_target(clause_text, &clause.effect) else {
+        return;
+    };
+    clause.multi_target = Some(spec);
 }
 
 /// CR 115.1d: Recover "verb up to N <filter>" when the phrase omits the word
@@ -8573,9 +8749,40 @@ pub(super) fn parse_each_of_up_to_damage_target<'a>(
 /// UpTo(ObjectCount), min_count: 0 }` by `parse_one_or_more_sacrifice` — not a
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
+/// `put` is intentionally absent; see `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
 const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
+
+/// CR 601.2c + CR 115.1a: Verbs admitted ONLY to the required announced-count
+/// extractors (`extract_exact_target_multi_target`,
+/// `extract_bounded_target_multi_target`). "put" stays out of
+/// `MULTI_TARGET_VERBS` because that list also drives `strip_any_number_quantifier`
+/// (and through it `extract_verb_up_to_multi_target`), which strips an UNGUARDED
+/// "up to N" / "any number of" — a resource or resolution-choice count on "put"
+/// ("put up to three +1/+1 counters …", "put any number of land cards from your
+/// hand …"). Both required-count extractors demand the "target" article directly
+/// after the count, so "put two +1/+1 counters on target creature" never reads as
+/// a target count. The optional "put up to N target …" form is not admitted: put
+/// already carries that cardinality on its own channel (`ChangeZone.up_to` /
+/// `choice_count` from `parse_put_ast`).
+const REQUIRED_TARGET_COUNT_ONLY_VERBS: &[&str] = &["put"];
+
+/// CR 601.2c: the imperative verb (and its trailing space) opening a clause whose
+/// required announced target count is recovered post-parse — every
+/// `MULTI_TARGET_VERBS` verb plus `REQUIRED_TARGET_COUNT_ONLY_VERBS`.
+fn parse_required_target_count_verb(input: &str) -> OracleResult<'_, ()> {
+    for &verb in MULTI_TARGET_VERBS
+        .iter()
+        .chain(REQUIRED_TARGET_COUNT_ONLY_VERBS)
+    {
+        if let Ok((rest, _)) = terminated(tag::<_, _, OracleError<'_>>(verb), tag(" ")).parse(input)
+        {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
 
 /// CR 115.1d + CR 601.2d: The bounded target-cardinality lists. The stem carries
 /// the bare `" or "` that enumerates a target COUNT, never a disjunction of two
@@ -8585,7 +8792,8 @@ const MULTI_TARGET_VERBS: &[&str] = &[
 /// noun it needs off the stem (`" targets"`, `" target "`, `" target"`) rather
 /// than re-spelling the list, so a future cardinality ("one, two, three, or
 /// four …") is added here once. Consumers: `strip_bounded_targets_placeholder`,
-/// `strip_bounded_target_prefix`, `subject::…each-of`, `oracle_target`'s
+/// `strip_bounded_target_prefix`, `extract_bounded_target_multi_target`,
+/// `subject::…each-of`, `oracle_target`'s
 /// bare-count target arm, and the binary-choice splitter's divide/distribute
 /// bail (which keys on this cardinality axis — shared by CR 601.2d's "damage or
 /// counters" halves — rather than on a distribution verb).
@@ -9565,6 +9773,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DealDamage {
             amount,
@@ -9651,6 +9860,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PutCounter {
             counter_type,
@@ -9721,6 +9931,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
             amount,
@@ -9839,6 +10050,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        optional_targeting: false,
         unlowered_guard: None,
         effect: to_effect,
         duration: None,
@@ -11965,7 +12177,6 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::Discard { count: amount, .. }
         | Effect::EachSourceDealsDamage { amount, .. }
         | Effect::Endure { amount, .. }
-        | Effect::FlipCoins { count: amount, .. }
         | Effect::GainEnergy { amount, .. }
         | Effect::GivePlayerCounter { count: amount, .. }
         | Effect::GrantExtraLoyaltyActivations { amount, .. }
@@ -11988,6 +12199,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
             if rebind_magnitude_target_anaphor {
                 rebind_cost_paid_object_pt_to_target(amount);
+            }
+        }
+        // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
+        // `UntilLoss` run has no count to bind.
+        Effect::FlipCoins { flips, .. } => {
+            if let Some(amount) = flips.count_expr_mut() {
+                bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+                if rebind_magnitude_target_anaphor {
+                    rebind_cost_paid_object_pt_to_target(amount);
+                }
             }
         }
         // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
@@ -13200,6 +13421,10 @@ fn apply_where_x_ability_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
                 apply_where_x_ability_condition(c, where_x_expression, unbound);
@@ -13225,6 +13450,10 @@ fn apply_where_x_static_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for condition in conditions {
                 apply_where_x_static_condition(condition, where_x_expression, unbound);
@@ -14486,10 +14715,47 @@ mod tests {
     }
 
     #[test]
+    fn extract_required_target_count_admits_put_only_with_target_article() {
+        assert_eq!(
+            super::extract_exact_target_multi_target(
+                "put two target lands on top of their owners' libraries"
+            ),
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        let bounded = "put one, two, or three target creature cards from graveyards onto the battlefield under your control";
+        assert_eq!(
+            super::extract_bounded_target_multi_target(bounded),
+            Some(MultiTargetSpec::fixed(1, 3))
+        );
+        assert_eq!(super::extract_exact_target_multi_target(bounded), None);
+        for text in [
+            "put two +1/+1 counters on target creature",
+            "put two land cards from your hand onto the battlefield",
+        ] {
+            assert_eq!(super::extract_exact_target_multi_target(text), None);
+            assert_eq!(super::extract_bounded_target_multi_target(text), None);
+        }
+        assert_eq!(
+            super::extract_bounded_target_multi_target(
+                "return one or two target permanent cards from your graveyard to your hand"
+            ),
+            Some(MultiTargetSpec::fixed(1, 2))
+        );
+    }
+
+    #[test]
     fn extract_optional_target_multi_target_recovers_tap_up_to_four() {
         use crate::types::ability::MultiTargetSpec;
-        let spec = super::extract_optional_target_multi_target("tap up to four target permanents")
-            .expect("Elder Deep-Fiend cast trigger shape");
+        let effect = Effect::SetTapState {
+            target: TargetFilter::Any,
+            scope: EffectScope::Single,
+            state: crate::types::ability::TapStateChange::Tap,
+        };
+        let spec = super::extract_optional_target_multi_target(
+            "tap up to four target permanents",
+            &effect,
+        )
+        .expect("Elder Deep-Fiend cast trigger shape");
         assert_eq!(
             spec,
             MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })
@@ -16552,6 +16818,28 @@ mod where_x_tests {
             gain.contains(&demonstrative_mv),
             "you-gain GainLife.amount must bind Demonstrative mana value, got {gain:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod search_subject_publisher_tests {
+    use super::*;
+
+    /// SHAPE — CR 701.20a: choosing an unrevealed search result does not
+    /// publish a revealed subject for the following type condition.
+    #[test]
+    fn only_revealing_library_searches_publish_a_revealed_subject() {
+        for (oracle, expected) in [
+            ("Search your library for a card.", false),
+            ("Search your library for a card and reveal it.", true),
+        ] {
+            let search =
+                crate::parser::oracle_effect::parse_effect_chain(oracle, AbilityKind::Spell);
+            assert!(
+                matches!(search.effect.as_ref(), Effect::SearchLibrary { reveal, .. } if *reveal == expected)
+            );
+            assert_eq!(effect_publishes_revealed_subject(&search.effect), expected);
+        }
     }
 }
 

@@ -14,8 +14,8 @@ use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume, ManaTriggerFixedPointResume,
-    PayCostKind, PayableResource, PendingCostMoveResume, PendingManaAbility, ProductionOverride,
-    WaitingFor,
+    PausedCounterCostRemoval, PayCostKind, PayableResource, PendingCostMoveResume,
+    PendingCounterRemoval, PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -675,6 +675,7 @@ pub(super) fn resolve_mana_ability_excluding(
         chosen_exiled: Vec::new(),
         chosen_sacrificed_battlefield: Vec::new(),
         cost_paid_object: None,
+        cost_removed_counters: None,
         batch_siblings: Vec::new(),
     };
     // CR 605.3b + CR 616.1: This direct path is used by auto-tap and retains
@@ -719,6 +720,8 @@ pub(super) fn resolve_mana_ability_excluding(
 /// `cost_paid_object` carries the captured public characteristics of any
 /// object exiled or sacrificed as part of cost payment so production counts can
 /// resolve cost-paid-object refs (Food Chain / Burnt Offering class).
+/// `cost_removed_counters` is this activation's own payment's removed-counter
+/// count (`PendingManaAbility::cost_removed_counters`).
 #[allow(clippy::too_many_arguments)]
 fn produce_mana_from_ability(
     state: &mut GameState,
@@ -729,12 +732,63 @@ fn produce_mana_from_ability(
     color_override: Option<ProductionOverride>,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    cost_removed_counters: Option<u32>,
 ) {
+    with_bound_mana_activation(
+        state,
+        source_id,
+        player,
+        ability_def,
+        chosen_x,
+        cost_paid_object,
+        cost_removed_counters,
+        |state, resolved_for_quantity| {
+            produce_mana_from_bound_ability(
+                state,
+                source_id,
+                player,
+                ability_def,
+                events,
+                color_override,
+                resolved_for_quantity,
+            );
+        },
+    );
+}
+
+/// CR 605.3b + CR 602.2b + CR 608.2h: run `body` against this activation's
+/// resolved mana ability with its own paid removed-counter count bound — the
+/// context field and the "this way" scalar — then restore the outer
+/// `last_effect_amount` (a mana ability can resolve inside another payment).
+/// The single binding authority for the colour prompt and production.
+#[allow(clippy::too_many_arguments)]
+fn with_bound_mana_activation<R>(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    chosen_x: Option<u32>,
+    cost_paid_object: Option<CostPaidObjectSnapshot>,
+    cost_removed_counters: Option<u32>,
+    body: impl FnOnce(&mut GameState, &ResolvedAbility) -> R,
+) -> R {
+    // CR 605.3b + CR 602.2b + CR 608.2h: a mana ability resolves immediately, so
+    // its own payment's count binds here; another activation's payment cannot
+    // reach it. The count is the preceding "this way" amount for the head
+    // production and the sub-chain. It binds BEFORE the ability is built: an
+    // "instead" condition (`apply_condition_instead_mana_swap`) reads the "this
+    // way" amount when it picks the production (CR 608.2c), as the stack route's
+    // resolution does.
+    let outer_last_effect_amount = cost_removed_counters.map(|n| {
+        state
+            .last_effect_amount
+            .replace(super::arithmetic::u32_to_i32_saturating(n))
+    });
     // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
     // cost-paid object snapshot so quantity resolution sees it. Reused for
     // both production-count and sub-chain resolution paths so the same
     // snapshot is visible end-to-end.
-    let resolved_for_quantity = resolved_mana_ability_for_current_state(
+    let mut resolved = resolved_mana_ability_for_current_state(
         state,
         source_id,
         player,
@@ -742,7 +796,25 @@ fn produce_mana_from_ability(
         chosen_x,
         cost_paid_object,
     );
+    resolved.context.cost_removed_counter_amount = cost_removed_counters;
+    let result = body(state, &resolved);
+    if let Some(outer) = outer_last_effect_amount {
+        state.last_effect_amount = outer;
+    }
+    result
+}
 
+/// Produce mana from `resolved_for_quantity`, this activation's resolved mana
+/// ability with its paid count already bound (`with_bound_mana_activation`).
+fn produce_mana_from_bound_ability(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    color_override: Option<ProductionOverride>,
+    resolved_for_quantity: &ResolvedAbility,
+) {
     // CR 106.12: a permanent is "tapped for mana" when the activated mana
     // ability's cost includes the `{T}` symbol.
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
@@ -842,7 +914,7 @@ fn produce_mana_from_ability(
     // on the chain actually carrying an `AddChosenColor`, so ordinary producers
     // are untouched. Placed above the `TappedForMana` push below, which MOVES
     // `produced_mana`.
-    if chain_references_chosen_color(&resolved_for_quantity) {
+    if chain_references_chosen_color(resolved_for_quantity) {
         if let Some(color) = sole_produced_color(&produced_for_tap_event) {
             if let Some(obj) = state.objects.get_mut(&source_id) {
                 // CR 400.7: `chosen_attributes` persist on the permanent until it
@@ -887,7 +959,7 @@ fn produce_mana_from_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
-    resolve_mana_ability_sub_chain(state, &resolved_for_quantity, events);
+    resolve_mana_ability_sub_chain(state, resolved_for_quantity, events);
 }
 
 fn resolved_mana_ability_for_current_state(
@@ -1080,6 +1152,7 @@ pub fn activate_mana_ability(
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         },
         events,
@@ -1432,6 +1505,7 @@ pub fn handle_choose_mana_color(
             Some(override_value),
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.cost_removed_counters,
         );
         complete_mana_ability_activation(
             state,
@@ -2618,6 +2692,8 @@ fn mana_ability_cost_cursor(
         next_exiled: 0,
         next_sacrificed: 0,
         next_counter_choice: 0,
+        cost_removed_counters: None,
+        counter_removal: None,
         selected_exile_remaining: None,
         selected_sacrifice_remaining: None,
         // CR 603.2 + CR 603.3b: A nested child starts with an empty frame-local
@@ -3150,33 +3226,46 @@ fn pay_mana_ability_cost_component(
             )
         }
         cost if is_self_contained_mana_subcost(cost) => {
+            // CR 602.2b + CR 605.3b: a fixed- or ALL-count self counter leg
+            // (Pentad Prism) credits this activation's own cursor ledger.
             match super::costs::pay_ability_cost_for_activation(
                 state,
                 pending.player,
                 pending.source_id,
                 cost,
                 pending.ability_index,
+                &mut cursor.cost_removed_counters,
                 events,
             )? {
                 super::costs::PaymentOutcome::Paid => Ok(ManaAbilityPaymentProgress::Complete),
                 super::costs::PaymentOutcome::Paused { .. } => {
-                    let Some(PendingCostMoveResume::Cast { .. }) =
-                        state.pending_cost_move_resume.take()
-                    else {
-                        unreachable!(
-                            "a paused delegated mana-ability cost must retain the activation cost move"
-                        );
+                    // CR 118.11 + CR 616.1: the replacement pipeline delivers this
+                    // removal; the cursor settles it by measurement on resume.
+                    // The payer parked it with no attached payment and a
+                    // `FinishPending` tail, neither of which the cursor needs.
+                    let counter_removal = match state.pending_cost_move_resume.take() {
+                        Some(PendingCostMoveResume::Cast { .. }) => None,
+                        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                            pending: None,
+                            removal,
+                            ..
+                        }) => Some(removal),
+                        _ => unreachable!(
+                            "a paused delegated mana-ability cost must retain the activation cost move or its deferred counter removal"
+                        ),
                     };
                     let pre_delivery_choice_player = state
                         .pending_replacement
                         .is_some()
                         .then(|| state.waiting_for.acting_player())
                         .flatten();
+                    let mut resumed = mana_ability_cursor_after_current_component(cursor);
+                    resumed.counter_removal = counter_removal;
                     pause_mana_ability_cost_payment(
                         state,
                         pre_delivery_choice_player,
                         pending,
-                        mana_ability_cursor_after_current_component(cursor),
+                        resumed,
                         events,
                         cost_event_start,
                     );
@@ -3259,6 +3348,7 @@ fn pay_mana_ability_cost_component(
                 &mut sacrificed,
                 pending.chosen_mana_payment.as_deref(),
                 chosen_counter_count,
+                &mut cursor.cost_removed_counters,
                 pending.chosen_x,
                 &excluded_sources,
                 cursor.sub_cost_demand.as_ref(),
@@ -3284,11 +3374,13 @@ fn pay_mana_ability_cost_component(
                 ManaAbilityCostComponentProgress::Complete => None,
                 ManaAbilityCostComponentProgress::HandedToReplacement {
                     remaining_life_payments,
+                    counter_removal,
                     choice_player,
                 } => {
                     cursor
                         .remaining_life_payments
                         .clone_from(remaining_life_payments);
+                    cursor.counter_removal.clone_from(counter_removal);
                     Some(*choice_player)
                 }
             };
@@ -3365,6 +3457,10 @@ fn finish_mana_ability_cost_payment(
         .take()
         .filter(|parent| matches!(parent.lifecycle, ManaAbilityCostParentLifecycle::Suspended));
     let ability_def = mana_ability_definition(state, &pending)?;
+    // CR 602.2b + CR 605.3b: every cost leg is paid, so the cursor's ledger is
+    // this activation's final removed-counter count. It rides `pending` across
+    // the colour prompt to production.
+    pending.cost_removed_counters = cursor.cost_removed_counters;
     // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
     // has become activated. Publish it here — before the colour prompt and
     // before production — for every resolution mode (manual, auto-tap, nested
@@ -3388,21 +3484,30 @@ fn finish_mana_ability_cost_payment(
     super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     if !resolves_automatically && pending.color_override.is_none() {
-        let resolved_for_prompt = resolved_mana_ability_for_current_state(
+        // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
+        // and gated by this activation's own paid count, under the same binding
+        // its production uses; the outer "this way" amount is restored before
+        // the prompt is returned.
+        let source_id = pending.source_id;
+        let prompt = with_bound_mana_activation(
             state,
-            pending.source_id,
+            source_id,
             pending.player,
             &ability_def,
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.cost_removed_counters,
+            |state, resolved_for_prompt| {
+                mana_choice_prompt(
+                    &resolved_for_prompt.effect,
+                    state,
+                    source_id,
+                    Some(resolved_for_prompt),
+                    Some(resolved_for_prompt),
+                )
+            },
         );
-        if let Some(choice) = mana_choice_prompt(
-            &resolved_for_prompt.effect,
-            state,
-            pending.source_id,
-            Some(&resolved_for_prompt),
-            Some(&resolved_for_prompt),
-        ) {
+        if let Some(choice) = prompt {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
                 && cost_resolves_without_choice(&ability_def.cost)
             {
@@ -3460,6 +3565,7 @@ fn finish_mana_ability_cost_payment(
         pending.color_override.clone(),
         pending.chosen_x,
         pending.cost_paid_object,
+        pending.cost_removed_counters,
     );
     if !resolves_automatically {
         complete_mana_ability_activation(
@@ -4024,6 +4130,32 @@ fn continue_mana_ability_cost_payment_in_node(
             "This permanent is already committed to a spell sacrifice cost".to_string(),
         ));
     }
+    // CR 118.11 + CR 616.1 + CR 602.2b: a counter leg's removal that waited on a
+    // replacement choice is settled first: its measured count is this
+    // activation's (a modified removal has still been paid), then the leg's
+    // later removals are paid before any later component.
+    if let Some(paused) = cursor.counter_removal.take() {
+        let PausedCounterCostRemoval {
+            in_flight,
+            remaining,
+            replacement_subtree: _,
+        } = *paused;
+        let settled =
+            super::effects::counters::settled_in_flight_counter_removal(state, &in_flight);
+        super::costs::credit_cost_removed_counters(&mut cursor.cost_removed_counters, settled);
+        if let super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(paused) =
+            super::costs::pay_counter_cost_removals(
+                state,
+                remaining,
+                Some(&mut cursor.cost_removed_counters),
+                events,
+            )
+        {
+            cursor.counter_removal = Some(Box::new(paused));
+            pause_mana_ability_cost_payment(state, None, pending, cursor, events, cost_event_start);
+            return Ok(state.waiting_for.clone());
+        }
+    }
     while let Some(amount) = cursor.remaining_life_payments.first().copied() {
         cursor.remaining_life_payments.remove(0);
         // CR 118.3b + CR 119.4 + CR 616.1: Paying life is a life-loss event,
@@ -4109,6 +4241,20 @@ fn resolve_mana_ability_sub_chain(
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
     };
+    // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
+    // whose prelude resets `last_effect_amount`; carry the head's cost-removed
+    // counter count onto the sub root so that prelude reseeds it ("then add an
+    // additional {B} for each charge counter removed this way").
+    let carried;
+    let sub = match ability.context.cost_removed_counter_amount {
+        Some(removed) => {
+            let mut owned = sub.clone();
+            owned.context.cost_removed_counter_amount = Some(removed);
+            carried = owned;
+            &carried
+        }
+        None => sub,
+    };
     // Errors during the sub-chain are non-fatal — mana has already been
     // added to the pool and the cost has been paid. The damage/life clause
     // of a painland cannot legitimately fail in a well-formed game state.
@@ -4152,6 +4298,7 @@ fn pay_mana_ability_cost_with_choices<I, J, L>(
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
     chosen_counter_count: Option<u32>,
+    cost_removed_counters: &mut Option<u32>,
     chosen_x: Option<u32>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
@@ -4389,6 +4536,7 @@ where
                     source_id,
                     &cost,
                     ability_index,
+                    cost_removed_counters,
                     events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
@@ -4409,6 +4557,7 @@ where
                     source_id,
                     c,
                     ability_index,
+                    cost_removed_counters,
                     events,
                 )?,
                 super::costs::PaymentOutcome::Paused { .. }
@@ -4469,7 +4618,27 @@ where
                 }
                 count => count,
             };
-            remove_counters_for_mana_cost(state, source_id, counter_type, count, events);
+            let removals =
+                plan_counter_removals_for_mana_cost(state, source_id, counter_type, count);
+            // CR 605.3b + CR 602.2b + CR 601.2h: the mana ability's production
+            // reads the count actually removed, credited to this activation's
+            // own cursor ledger (`produce_mana_from_ability`). CR 616.1: a
+            // removal waiting on a replacement choice is handed to the cursor,
+            // which settles it on resume.
+            if let super::costs::CounterCostRemovalProgress::AwaitingReplacementChoice(paused) =
+                super::costs::pay_counter_cost_removals(
+                    state,
+                    removals,
+                    Some(cost_removed_counters),
+                    events,
+                )
+            {
+                return Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
+                    remaining_life_payments: Vec::new(),
+                    counter_removal: Some(Box::new(paused)),
+                    choice_player: None,
+                });
+            }
         }
         Some(other) => {
             return Err(EngineError::InvalidAction(format!(
@@ -4493,8 +4662,12 @@ enum ManaAbilityCostComponentProgress {
     /// the same way. Resuming continues after the component rather than paying
     /// it again. A payment that pauses before it spends anything (a nested
     /// source's own cost) never reaches here: that child parks its own cursor.
+    /// `counter_removal` is a counter-removal component whose current removal
+    /// waits on a replacement choice (CR 118.11): the cursor settles it by
+    /// measurement on resume and then pays its later removals.
     HandedToReplacement {
         remaining_life_payments: Vec<u32>,
+        counter_removal: Option<Box<PausedCounterCostRemoval>>,
         choice_player: Option<PlayerId>,
     },
 }
@@ -4627,12 +4800,14 @@ fn pay_life_cost(
         PayLifeCostResult::PaidWithDeferredSubstitution { .. } => {
             Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments: Vec::new(),
+                counter_removal: None,
                 choice_player: None,
             })
         }
         PayLifeCostResult::DeferredReplacementChoice { choice_player, .. } => {
             Ok(ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments: Vec::new(),
+                counter_removal: None,
                 choice_player: Some(choice_player),
             })
         }
@@ -4964,6 +5139,7 @@ fn pay_mana_sub_cost(
                 ..
             } => ManaAbilityCostComponentProgress::HandedToReplacement {
                 remaining_life_payments,
+                counter_removal: None,
                 choice_player,
             },
         });
@@ -5198,25 +5374,24 @@ fn removable_counter_count_for_mana_cost(
     }
 }
 
-fn remove_counters_for_mana_cost(
-    state: &mut GameState,
+/// CR 118.3 + CR 122.1 + CR 601.2h: plan a mana ability's remove-counter cost
+/// leaf as removals from `source_id`, before any counter moves. `Any` takes
+/// counters type by type, in `CounterType` order (issue #4878: the counter map
+/// is a default-RandomState HashMap, so its own order is per-process).
+fn plan_counter_removals_for_mana_cost(
+    state: &GameState,
     source_id: ObjectId,
     counter_type: &CounterMatch,
     mut count: u32,
-    events: &mut Vec<GameEvent>,
-) {
+) -> Vec<PendingCounterRemoval> {
     match counter_type {
-        CounterMatch::OfType(counter_type) => {
-            super::effects::counters::remove_counter_with_replacement(
-                state,
-                source_id,
-                counter_type.clone(),
-                count,
-                events,
-            );
-        }
+        CounterMatch::OfType(counter_type) => vec![PendingCounterRemoval {
+            object_id: source_id,
+            counter_type: counter_type.clone(),
+            count,
+        }],
         CounterMatch::Any => {
-            let counters: Vec<(CounterType, u32)> = state
+            let mut counters: Vec<(CounterType, u32)> = state
                 .objects
                 .get(&source_id)
                 .map(|obj| {
@@ -5226,22 +5401,23 @@ fn remove_counters_for_mana_cost(
                         .collect()
                 })
                 .unwrap_or_default();
+            counters.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut removals = Vec::new();
             for (counter_type, available) in counters {
                 if count == 0 {
                     break;
                 }
                 let to_remove = available.min(count);
                 if to_remove > 0 {
-                    super::effects::counters::remove_counter_with_replacement(
-                        state,
-                        source_id,
+                    removals.push(PendingCounterRemoval {
+                        object_id: source_id,
                         counter_type,
-                        to_remove,
-                        events,
-                    );
+                        count: to_remove,
+                    });
                     count -= to_remove;
                 }
             }
+            removals
         }
     }
 }
@@ -6821,7 +6997,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(wrapped.clone()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -6877,7 +7054,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(draw_one()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -7015,7 +7193,8 @@ mod tests {
             ),
             (
                 "FlipCoin lose branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: None,
                     lose_effect: Some(Box::new(link(draw_one()))),
                     flipper: TargetFilter::Controller,
@@ -7062,7 +7241,8 @@ mod tests {
                 branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
                 kind: ChooseOneOfKind::Ordinary,
             },
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: crate::types::ability::CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: Some(Box::new(link(Effect::NoOp))),
                 flipper: TargetFilter::Controller,
@@ -11755,6 +11935,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -11857,6 +12038,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         }
     }
@@ -12068,6 +12250,7 @@ mod tests {
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                cost_removed_counters: None,
                 batch_siblings: Vec::new(),
             };
             let prompt = ManaChoicePrompt::SingleColor {
@@ -12301,6 +12484,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -12407,6 +12591,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
@@ -13541,6 +13726,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
@@ -14460,6 +14646,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
 
@@ -14906,6 +15093,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
@@ -15471,6 +15659,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
 
@@ -15544,6 +15733,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
 
@@ -15675,6 +15865,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -15741,6 +15932,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -15899,6 +16091,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
@@ -16620,6 +16813,7 @@ mod tests {
                 &mut sacrificed,
                 None,
                 None,
+                &mut None,
                 chosen_x,
                 &HashSet::new(),
                 None,

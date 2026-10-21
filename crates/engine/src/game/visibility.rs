@@ -1257,7 +1257,8 @@ fn redact_activation_records(filtered: &mut GameState) {
     if let Some(resume) = filtered.pending_cost_move_resume.as_mut() {
         match resume {
             PendingCostMoveResume::Cast { pending, .. }
-            | PendingCostMoveResume::SacrificeForCost { pending, .. } => {
+            | PendingCostMoveResume::SacrificeForCost { pending, .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { pending, .. } => {
                 if let Some(pending) = pending.as_deref_mut() {
                     clear(pending);
                 }
@@ -1886,6 +1887,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             record
         })
         .collect();
+    // Engine-internal trigger-collection authority with no client consumer; a face-down
+    // entrant's projection carries its card_id/printed_ref, which other players may not see
+    // (CR 708.5).
+    filtered.battlefield_entry_observations.clear();
     redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
@@ -2170,15 +2175,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             // the entire declaration. The predicate itself is `pins_name_hidden_source` (this
             // file), the single authority shared with the `RespondToShortcut` projection below,
             // which receives this very template verbatim one state transition later.
-            let declaration = declaration.clone().filter(|template| {
-                !pins_name_hidden_source(
-                    &template.decisions,
-                    &target_hidden,
-                    PinCarrier::OfferWithSchema,
-                )
-            });
+            let keep_visible =
+                |template: &Option<crate::analysis::decision_template::DecisionTemplate>| {
+                    template.clone().filter(|template| {
+                        !pins_name_hidden_source(
+                            &template.decisions,
+                            &target_hidden,
+                            PinCarrier::OfferWithSchema,
+                        )
+                    })
+                };
+            let declaration = keep_visible(declaration);
             (
                 ShortcutDecisionSchema {
+                    // The suggestion is a declaration like the one above, under the same rule.
+                    suggested_declaration: keep_visible(&schema.suggested_declaration),
+                    // Public: a published slot and the seat a trigger already on the stack targets.
+                    leading_aims: schema.leading_aims.clone(),
                     iteration_count: schema.iteration_count.clone(),
                     // CR 732.2a: BOTH published answers are derived from PUBLIC board state
                     // (life, poison, library sizes over the living players) and the engine's own
@@ -3867,7 +3880,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
 /// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
-/// `pending_discard_for_cost`, `resolving_player_scope_linked_exile`;
+/// `pending_discard_for_cost`, `resolving_player_scope_tail`,
+/// `resolving_created_token_seats`;
 /// `return_result_frames`, `LogicalZoneChangeGroup` latches and
 /// `ResolvedCommands.zone_change_record` (cleared with `resolution_stack` /
 /// `resolved_rules_journal`), `NamedChoiceSource.context` and `OpponentGuessOwner.context`
@@ -4899,6 +4913,35 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
+    /// entrant's projection carries its card identity), so every viewer projection strips it.
+    #[test]
+    fn viewer_projections_strip_battlefield_entry_observations() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            assert!(
+                filter_state_for_scope(&state, viewer)
+                    .battlefield_entry_observations
+                    .is_empty(),
+                "viewer {viewer:?} must not receive the observation table"
+            );
+        }
+    }
 
     /// CR 400.2 + CR 400.7: a permanent that returns to its owner's hand leaves id-keyed LKI
     /// behind. The opponent's projection must not name it, in any table, while the owner's
@@ -7096,6 +7139,8 @@ mod tests {
                 next_exiled: 0,
                 next_sacrificed: 0,
                 next_counter_choice: 0,
+                cost_removed_counters: None,
+                counter_removal: None,
                 selected_exile_remaining: None,
                 selected_sacrifice_remaining: None,
                 deferred_cost_events: Vec::new(),
@@ -7450,6 +7495,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         })
     }
@@ -11619,6 +11665,8 @@ mod tests {
                 next_exiled: 0,
                 next_sacrificed: 0,
                 next_counter_choice: 0,
+                cost_removed_counters: None,
+                counter_removal: None,
                 selected_exile_remaining: Some(vec![hidden]),
                 selected_sacrifice_remaining: None,
                 deferred_cost_events: Vec::new(),
@@ -11634,6 +11682,8 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::Foretell {
                 player: PlayerId(0),
@@ -11651,6 +11701,8 @@ mod tests {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
                 },
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             },
             PendingCostMoveResume::SacrificeForCost {
                 player: PlayerId(0),
@@ -12936,6 +12988,8 @@ mod tests {
                 per_cycle: None,
             },
             schema: ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
                 measured_repetition_bound: Some(3),
                 deliverable_capacity: 3,
@@ -13364,6 +13418,7 @@ mod tests {
                 per_cycle: None,
                 shortened_by: None,
                 published_declaration: Some(declaration),
+                leading_aims: Vec::new(),
                 road: crate::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },

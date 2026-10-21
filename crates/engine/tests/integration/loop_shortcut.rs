@@ -1124,6 +1124,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         per_cycle: None,
         shortened_by: None,
         published_declaration: None,
+        leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
         period: Default::default(),
     };
@@ -1848,6 +1849,8 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         index: 0,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -4293,12 +4296,12 @@ fn sprout_shell_scenario(body: &str) -> (GameRunner, ObjectId, Vec<ObjectId>) {
 /// A2 halves reverted this fixture wrongly OFFERS (the coin advances the RNG 2→6 yet the cover
 /// passes).
 ///
-/// Non-vacuity: (1) item-5 — the body parses to `Token` (deterministic growth) + a `FlipCoin`
+/// Non-vacuity: (1) item-5 — the body parses to `Token` (deterministic growth) + a `FlipCoins`
 /// sub-effect (asserted below), so the coin genuinely fires; (2) reach-guard — the SAME shell with
 /// a coin-free body offers, isolating the coin (not the shell) as the disqualifier.
 #[test]
 fn object_growth_random_recast_body_does_not_offer() {
-    // item-5: verify the recast body carries a deterministic Token AND a FlipCoin (so the board
+    // item-5: verify the recast body carries a deterministic Token AND a FlipCoins (so the board
     // grows each cycle while the coin advances the RNG — else the fixture would be vacuous).
     let body_def = engine::parser::oracle_effect::parse_effect_chain(
         "Create a 1/1 green Saproling creature token. Flip a coin.",
@@ -4310,11 +4313,11 @@ fn object_growth_random_recast_body_does_not_offer() {
         body_def.effect
     );
     assert!(
-        body_def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|s| matches!(*s.effect, Effect::FlipCoin { .. })),
-        "recast body must carry a FlipCoin sub-effect (the randomness A2 rejects), got {:?}",
+        body_def.sub_ability.as_ref().is_some_and(|s| matches!(
+            &*s.effect,
+            Effect::FlipCoins { flips, .. } if flips.is_single_flip()
+        )),
+        "recast body must carry a FlipCoins sub-effect (the randomness A2 rejects), got {:?}",
         body_def.sub_ability
     );
 
@@ -4510,6 +4513,8 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         index: 0,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -4676,6 +4681,7 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 per_cycle: None,
                 shortened_by: None,
                 published_declaration: None,
+                leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },
@@ -6334,6 +6340,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                 ),
                 shortened_by: None,
                 published_declaration: None,
+                leading_aims: Vec::new(),
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 period: Default::default(),
             },
@@ -7427,6 +7434,8 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
         trigger_description: None,
     };
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: IterationCount::UntilLethal,
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
@@ -12607,6 +12616,7 @@ fn restored_proposal(
         per_cycle: Some(PeriodSignature::EveryRepetition(per_cycle)),
         shortened_by: None,
         published_declaration: None,
+        leading_aims: Vec::new(),
         road: engine::analysis::loop_check::OfferRoad::Ring,
         period: Default::default(),
     }
@@ -14835,6 +14845,8 @@ fn g1_declare_verdict(
         legal_targets.push(TargetRef::Object(obj_b));
     }
     let schema = ShortcutDecisionSchema {
+        suggested_declaration: None,
+        leading_aims: Vec::new(),
         iteration_count: count.clone(),
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
@@ -15586,6 +15598,8 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         certificate,
         schema: ShortcutDecisionSchema {
             points: vec![],
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             ..schema
         },
         // `None` is a RULING, not a default. Passing the live field through would stage the R5
@@ -16185,7 +16199,7 @@ fn an_over_cap_count_is_refused_at_consumption_and_at_the_responders_seam() {
 #[test]
 fn ai1_the_bounded_declare_candidate_carries_the_offers_own_pin_when_one_is_published() {
     // ── arm (a): the LIVE offer, which now publishes one point ──
-    let (mut runner, _slot, _bond, _hexproof, _lives) = r5_reach_offer();
+    let (mut runner, slot, _bond, _hexproof, _lives) = r5_reach_offer();
     let WaitingFor::LoopShortcut {
         schema,
         declaration,
@@ -16210,21 +16224,82 @@ fn ai1_the_bounded_declare_candidate_carries_the_offers_own_pin_when_one_is_publ
          publishes a declaration — without one arm (a) would measure the fail-closed path \
          `d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline` covers",
     );
+    assert_eq!(
+        declaration.replay,
+        ReplayMode::Scheduled {
+            count: IterationCount::Fixed(999)
+        },
+        "REACH-GUARD: the observation drives P1's 999 life"
+    );
+    // CR 104.2a: a win takes 999 + 1000 + 1000 repetitions, past the 1000 capacity, and the
+    // proposer only gains, so the suggestion is the witness at the capacity, cut to the segments
+    // 1000 repetitions reach.
+    assert_eq!(schema.deliverable_capacity, 1000);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1000));
+    let suggestion = schema
+        .suggested_declaration
+        .clone()
+        .expect("the offer publishes its witness as the suggestion");
+    let seat = |s: PlayerId| Ranking::one(AnnouncementSubject::Seat(s));
+    assert_eq!(
+        suggestion.decisions,
+        vec![PinnedDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+                (0, seat(P1)),
+                (998, seat(P2)),
+            ]))],
+        }]
+    );
     let live = engine::ai_support::legal_actions(runner.state());
     assert_eq!(
         live,
         vec![
             GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(
-                    crate::fantastic_four_bounded_loop::published_suggestion(&schema)
-                ),
-                template: Some(declaration),
+                count: IterationCount::Fixed(1000),
+                template: Some(suggestion),
             },
             GameAction::DeclineShortcut,
         ],
         "AI1(a): against a points-carrying bounded offer that HAS a declaration, the generator \
-         emits it — carrying the ENGINE's own pin set, never one the AI built"
+         emits the offer's suggestion — carrying the ENGINE's own pin set, never one the AI built"
     );
+    // CR 732.2b: the responder is stated the declaration the AI took, at its count.
+    let mut declared = runner.state().clone();
+    apply(&mut declared, P0, live[0].clone()).expect("the AI's declaration is admitted");
+    let WaitingFor::RespondToShortcut { player, .. } = declared.waiting_for.clone() else {
+        panic!("the declaration opens the respond window");
+    };
+    engine::game::interaction::bind_interaction_authority(
+        &mut declared,
+        engine::types::interaction::InteractionSessionId("ai1".into()),
+    )
+    .expect("valid interaction authority binding");
+    let filtered = engine::game::visibility::filter_state_for_viewer(&declared, player);
+    let view = engine::game::interaction::derive_viewer_interaction(&declared, &filtered, player);
+    let [opportunity] = view.opportunities.as_slice() else {
+        panic!("the responder reads one opportunity");
+    };
+    let engine::types::interaction::InteractionOpportunityResponse::Schema {
+        spec:
+            engine::types::interaction::InteractionResponseSpec::ShortcutReply {
+                declared: Some(preview),
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        panic!(
+            "the responder reads the declared preview, got {:?}",
+            opportunity.response
+        );
+    };
+    let life: Vec<(Option<u8>, i32)> = preview
+        .entries
+        .iter()
+        .map(|entry| (entry.player, entry.amount))
+        .collect();
+    assert_eq!(life, vec![(Some(0), 1000), (Some(1), -999), (Some(2), -1)]);
 
     // ── arm (b): the POSITIVE CONTROL — the same board with an EMPTY point set ──
     r28_empty_schema_offer(&mut runner);
@@ -16293,6 +16368,8 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
         predicted_winner: None,
         certificate: synthetic_lethal_cert(),
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(3),
             measured_repetition_bound: Some(3),
             deliverable_capacity: 3,

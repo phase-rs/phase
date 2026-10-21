@@ -178,12 +178,13 @@ export interface DeckFolder {
 }
 
 /**
- * Fire {@link DECKS_CHANGED_EVENT} so mounted views re-read folder state.
- * Contract: every mutator that changes folder membership or star state
- * (`setDeckFolder`, `toggleDeckStar`, `migrateDeckMeta`) MUST call this, and
- * every registry write goes through `saveFolderStore` which calls it — this is
- * what drives `useDeckFolders` to regroup. A new mutator that forgets it will
- * leave the library/switcher showing stale groupings.
+ * Fire {@link DECKS_CHANGED_EVENT} so mounted views re-read library state.
+ * Contract: every mutator that changes the deck inventory (deck data writes
+ * and removals, feed subscriptions and origins) or folder membership or star
+ * state MUST call this, and every registry write goes through
+ * `saveFolderStore` which calls it — this is what drives `useDeckFolders` to
+ * regroup and the shared AI deck catalog to rescan. A new mutator that
+ * forgets it will leave views showing stale decks or groupings.
  */
 function notifyDecksChanged(): void {
   if (typeof window !== "undefined") {
@@ -306,6 +307,7 @@ export function requireSavedDeckUnchanged(txn: SavedDeckTxn, deck: SavedDeckSnap
 export function writeSavedDeckData(txn: SavedDeckTxn, deckName: string, raw: string): SavedDeckSnapshot {
   void txn;
   localStorage.setItem(STORAGE_KEY_PREFIX + deckName, raw);
+  notifyDecksChanged();
   return { name: deckName, raw };
 }
 
@@ -342,6 +344,7 @@ export function adoptSavedDeckRewrite(baseline: SavedDeckSnapshot, rewrite: Save
 export function removeSavedDeckData(txn: SavedDeckTxn, deckName: string): void {
   void txn;
   localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
+  notifyDecksChanged();
 }
 
 /** Move a saved deck from `oldName` to `newName`: removes `oldName`'s data, carries its metadata
@@ -382,6 +385,15 @@ export function toggleDeckStar(txn: SavedDeckTxn, deckName: string): boolean {
 /** Get metadata for a single deck, or null if not tracked. */
 export function getDeckMeta(deckName: string): DeckMeta | null {
   return loadMetadataStore()[deckName] ?? null;
+}
+
+/**
+ * Bulk read of the deck metadata store: one parse for N lookups. Random-pool
+ * filtering reads through this (via `loadFolderIndex`) instead of calling
+ * `getDeckMeta` once per candidate.
+ */
+export function loadDeckMetaMap(): Record<string, DeckMeta> {
+  return loadMetadataStore();
 }
 
 /** Remove metadata for a deleted deck. */
@@ -684,6 +696,7 @@ export function loadFeedSubscriptions(): FeedSubscription[] {
 
 export function saveFeedSubscriptions(subs: FeedSubscription[]): void {
   localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(subs));
+  notifyDecksChanged();
 }
 
 export function loadDeckOrigins(): Record<string, string> {
@@ -697,4 +710,5 @@ export function loadDeckOrigins(): Record<string, string> {
 
 export function saveDeckOrigins(origins: Record<string, string>): void {
   localStorage.setItem(FEED_DECK_ORIGINS_KEY, JSON.stringify(origins));
+  notifyDecksChanged();
 }

@@ -139,7 +139,8 @@
     "startingLife": "起始生命",
     "useCustomFormat": "使用",
     "waitingForPlayer": "等待牌手",
-    "youHost": "你（房主）"
+    "youHost": "你（房主）",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机对手将从全部 {{total}} 套牌中选择。"
   },
   "joinErrorDialog": {
     "dismiss": "关闭"

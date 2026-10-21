@@ -285,7 +285,8 @@
     "botGameNotice": "Organizando la partida de Discord {{code}}. La conexión y la privacidad las define la publicación de Discord.",
     "botSeedIgnored": "Algunos ajustes de la publicación de Discord no se pueden usar aquí — revisa el formato y el número de jugadores.",
     "botP2PNotice": "Tu dispositivo ejecuta la partida. Mantén la aplicación abierta y conectada.",
-    "botServerNotice": "Un servidor dedicado ejecuta la partida. Puede ralentizarse o desconectarse."
+    "botServerNotice": "Un servidor dedicado ejecuta la partida. Puede ralentizarse o desconectarse.",
+    "poolBracketConflict": "Ninguno de los {{selected}} mazos elegidos es legal con los filtros actuales, así que los rivales aleatorios eligen entre los {{total}} mazos."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",

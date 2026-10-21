@@ -5,6 +5,15 @@ import { AI_DECK_RANDOM, type AiArchetypeFilter, type AiDeckSelection } from "..
 import type { AiDeckCandidate } from "./aiDeckCatalog";
 import { CEDH_BRACKET } from "./cedhLock";
 import { pickRandomDeckCandidate } from "./randomDeckSelection";
+import {
+  applyPoolSelection,
+  isPoolSelectionEmpty,
+  withCatalogSavedNames,
+  type AppliedPoolSelection,
+  type FolderIndex,
+  type PoolCandidate,
+  type RandomPoolSelection,
+} from "./randomPoolSelection";
 
 /**
  * Minimal shape for AI random-pool filtering: anything carrying the resolved
@@ -89,13 +98,50 @@ export function pickOpponentDeck(
   // non-empty, else the full legal catalog (an empty restriction warns at
   // setup, so reaching here means the fallback was accepted). Archetype +
   // coverage are soft preferences applied within that pool.
+  return pickRandomDeckCandidate(
+    applySoftPoolFallback(pool, archetypeFilter, coverageFloor),
+    { selectedFormat, excludeIds },
+  ) ?? catalog[0];
+}
+
+export interface EffectiveAiRandomPoolOptions extends RandomDrawPoolOptions {
+  archetypeFilter: AiArchetypeFilter;
+  coverageFloor: number;
+}
+
+/**
+ * Soft archetype/coverage preferences with production's fallback: when the
+ * preferences match nothing in the draw pool, Random draws from the full
+ * draw pool instead of failing. Shared by game start and the setup previews
+ * so "Random (N)" counts what production can actually draw.
+ */
+export function applySoftPoolFallback<T extends AiDeckCandidate>(
+  pool: readonly T[],
+  archetypeFilter: AiArchetypeFilter,
+  coverageFloor: number,
+): T[] {
   const filtered = pool.filter((candidate) =>
-    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
+    candidatePassesFilters(candidate, archetypeFilter, coverageFloor),
   );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : pool, {
-    selectedFormat,
-    excludeIds,
-  }) ?? catalog[0];
+  return filtered.length > 0 ? filtered : [...pool];
+}
+
+/**
+ * The effective AI Random draw universe: bracket/cEDH restriction (falling
+ * back to the catalog), then folder/deck curation (falling back to the
+ * bracket pool), then archetype/coverage soft preferences (falling back to
+ * the curated pool). Single authority behind production draws and every
+ * "Random (N)" preview.
+ */
+export function resolveEffectiveAiRandomPool<
+  T extends PoolCandidate & BracketTaggedCandidate & AiDeckCandidate,
+>(
+  candidates: readonly T[],
+  options: EffectiveAiRandomPoolOptions,
+  index?: FolderIndex,
+): T[] {
+  const { pool: drawPool } = resolveRandomDrawPool(candidates, options, index);
+  return applySoftPoolFallback(drawPool, options.archetypeFilter, options.coverageFloor);
 }
 
 export interface CedhSeatProblemOptions {
@@ -152,9 +198,58 @@ export interface PickAiSeatDecksOptions {
   bracketFilter: readonly CommanderBracket[];
   cedhMode: boolean;
   selectedFormat?: GameFormat | null;
+  /**
+   * Folder/deck curation for Random seats. Pinned seats bypass it; a selection
+   * that matches nothing falls back to the bracket pool (the setup page
+   * warns, mirroring the archetype/coverage soft-fallback below).
+   */
+  poolSelection?: RandomPoolSelection;
   /** Decks already taken at the table (e.g. a random player deck); Random seats
    *  avoid them while alternatives exist. */
   excludeIds?: Iterable<string>;
+}
+
+/**
+ * The pool Random picks draw from before curation and soft preferences: the
+ * bracket/cEDH-restricted pool, falling back to the full legal catalog when
+ * that restriction matches nothing. Single authority shared by game start
+ * and the setup UIs, so pool counts always describe the same base the draws
+ * use.
+ */
+export function resolveBracketDrawBase<T extends BracketTaggedCandidate>(
+  catalog: readonly T[],
+  options: AiRandomPoolOptions,
+): T[] {
+  const bracketPool = restrictAiPoolByBracket(catalog, options);
+  return bracketPool.length > 0 ? bracketPool : [...catalog];
+}
+
+export interface RandomDrawPoolOptions extends AiRandomPoolOptions {
+  /**
+   * Folder/deck curation for Random picks. Pinned/manual picks bypass it; a
+   * selection that matches nothing falls back to the bracket pool (the setup
+   * page warns).
+   */
+  poolSelection?: RandomPoolSelection;
+}
+
+/**
+ * Shared draw-pool layering for human and AI Random picks: the bracket
+ * restriction first (falling back to the catalog when it matches nothing),
+ * then the folder/deck curation (falling back to the bracket pool). Game
+ * start and the setup previews resolve through this so counts and draws
+ * always agree.
+ */
+export function resolveRandomDrawPool<T extends PoolCandidate & BracketTaggedCandidate>(
+  candidates: readonly T[],
+  options: RandomDrawPoolOptions,
+  index?: FolderIndex,
+): AppliedPoolSelection<T> {
+  const base = resolveBracketDrawBase(candidates, options);
+  if (!options.poolSelection || isPoolSelectionEmpty(options.poolSelection)) {
+    return { pool: base, fellBack: false };
+  }
+  return applyPoolSelection(base, options.poolSelection, index);
 }
 
 /**
@@ -165,8 +260,8 @@ export interface PickAiSeatDecksOptions {
  * - Pinned seats resolve against the full legal catalog and bypass every filter.
  * - Random seats draw from the bracket/cEDH-restricted pool (falling back to the
  *   full catalog when that restriction matches nothing), narrowed by the
- *   archetype + coverage preferences, and never repeat a deck already taken at
- *   the table while alternatives exist.
+ *   folder/deck selection and then by the archetype + coverage preferences, and
+ *   never repeat a deck already taken at the table while alternatives exist.
  */
 export function pickAiSeatDecks(options: PickAiSeatDecksOptions): AiDeckCandidate[] {
   const {
@@ -177,14 +272,21 @@ export function pickAiSeatDecks(options: PickAiSeatDecksOptions): AiDeckCandidat
     bracketFilter,
     cedhMode,
     selectedFormat,
+    poolSelection,
   } = options;
-  const bracketPool = restrictAiPoolByBracket(catalog, { bracketFilter, cedhMode, selectedFormat });
-  const randomPool = bracketPool.length > 0 ? bracketPool : catalog;
+  // Random seats draw from the shared bracket-then-curation layering; the
+  // setup previews resolve the same way.
+  const { pool: drawPool } = resolveRandomDrawPool(withCatalogSavedNames(catalog), {
+    bracketFilter,
+    cedhMode,
+    selectedFormat,
+    poolSelection,
+  });
   const excludeIds = new Set<string>(options.excludeIds);
   return requestedDeckIds.map((requestedDeckId) => {
     const pick = pickOpponentDeck(
       catalog,
-      randomPool,
+      drawPool,
       requestedDeckId,
       excludeIds,
       archetypeFilter,

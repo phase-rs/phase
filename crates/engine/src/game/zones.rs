@@ -1918,6 +1918,75 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     Some(record)
 }
 
+/// CR 603.10 + CR 603.6a + CR 611.3c + CR 608.2c: record, for every completed battlefield entry
+/// in `events` not yet observed, the entrant as it exists now — at an instruction boundary,
+/// after the entering instruction completed and before the next instruction can change it.
+/// Layers are flushed first (CR 613.1), so static continuous effects and the counters it
+/// entered with (CR 614.1c) are part of the observation. An entry whose `ZoneChanged` is parked
+/// in `deferred_entry_events` is still mid-entry (CR 614.12a / CR 707.5: its choice is made
+/// before it enters) and is skipped; its replay collects against the realized object.
+/// Idempotent. An entrant that is no longer the exact entered incarnation on the battlefield is
+/// not observed.
+pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
+    let parked_entry_keys: Vec<(u32, usize)> = state
+        .deferred_entry_events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => {
+                Some((record.recorded_turn_number, record.turn_zone_change_index))
+            }
+            _ => None,
+        })
+        .collect();
+    let pending: Vec<(usize, ObjectId, Option<u64>)> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
+            _ => None,
+        })
+        .filter(|record| {
+            record.recorded_turn_number == state.turn_number
+                && !state
+                    .battlefield_entry_observations
+                    .contains_key(&record.turn_zone_change_index)
+                // CR 614.12a + CR 707.5: a parked mid-entry entry is matched by its ledger key,
+                // not by full event equality, so later record stamping cannot unpark it.
+                && !parked_entry_keys
+                    .contains(&(record.recorded_turn_number, record.turn_zone_change_index))
+        })
+        .map(|record| {
+            (
+                record.turn_zone_change_index,
+                record.object_id,
+                record.entered_incarnation,
+            )
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    // CR 613.1 + CR 611.3c: the observation reads layer-applied characteristics.
+    super::layers::flush_layers(state);
+    for (index, object_id, entered_incarnation) in pending {
+        // CR 400.7: only the exact entered incarnation, still on the battlefield and phased in,
+        // is the entrant this entry describes.
+        let observation = state
+            .objects
+            .get(&object_id)
+            .filter(|obj| {
+                obj.zone == Zone::Battlefield
+                    && !obj.is_phased_out()
+                    && entered_incarnation.is_none_or(|incarnation| obj.incarnation == incarnation)
+            })
+            .map(|obj| super::triggers::trigger_source_context_for_latch(state, obj));
+        if let Some(observation) = observation {
+            state
+                .battlefield_entry_observations
+                .insert(index, observation);
+        }
+    }
+}
+
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
 /// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
 /// themselves in the group observe each other via last-known information (the
@@ -3101,6 +3170,126 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// A 1/1 creature that has just entered the battlefield from no zone, with its recorded
+    /// `ZoneChanged` in `events`.
+    fn entered_one_one(state: &mut GameState, events: &mut Vec<GameEvent>) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(9),
+            PlayerId(0),
+            "Entrant".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).expect("created");
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+        record_and_emit_entry_from_no_zone(state, id, events).expect("entrant exists");
+        id
+    }
+
+    /// U5 — CR 613.1 + CR 611.3c: capture flushes layers first, so a counter the entrant
+    /// carries is part of the observed power even when layers were still dirty.
+    #[test]
+    fn settle_entry_observation_flushes_layers_first() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let id = entered_one_one(&mut state, &mut events);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 1);
+        crate::game::layers::mark_layers_full(&mut state);
+        assert_eq!(
+            state.objects[&id].power,
+            Some(1),
+            "precondition: power not yet flushed"
+        );
+
+        settle_battlefield_entry_observations(&mut state, &events);
+
+        let row = state
+            .battlefield_entry_observations
+            .values()
+            .next()
+            .expect("the entry is observed");
+        assert_eq!(row.identity.reference.object_id, id);
+        assert_eq!(row.lki.power, Some(2));
+    }
+
+    /// U5 — capture is idempotent: an entry already observed keeps its first row.
+    #[test]
+    fn settle_entry_observation_is_idempotent() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let id = entered_one_one(&mut state, &mut events);
+        settle_battlefield_entry_observations(&mut state, &events);
+        assert_eq!(state.battlefield_entry_observations.len(), 1);
+
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 2);
+        crate::game::layers::mark_layers_full(&mut state);
+        settle_battlefield_entry_observations(&mut state, &events);
+
+        assert_eq!(state.battlefield_entry_observations.len(), 1);
+        let row = state
+            .battlefield_entry_observations
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(row.lki.power, Some(1), "the first observation is kept");
+    }
+
+    /// U5 — CR 400.7: an entrant that is no longer the entered incarnation is not observed;
+    /// a phased-out entrant is not observed. The paired fresh entrant is.
+    #[test]
+    fn settle_entry_observation_skips_other_incarnation_and_phased_out() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let id = entered_one_one(&mut state, &mut events);
+        state.objects.get_mut(&id).unwrap().incarnation += 1;
+        settle_battlefield_entry_observations(&mut state, &events);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "a later incarnation is a different object"
+        );
+
+        let mut state = setup();
+        let mut events = Vec::new();
+        let id = entered_one_one(&mut state, &mut events);
+        state.objects.get_mut(&id).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        settle_battlefield_entry_observations(&mut state, &events);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "a phased-out entrant is not observed"
+        );
+
+        let mut state = setup();
+        let mut events = Vec::new();
+        entered_one_one(&mut state, &mut events);
+        settle_battlefield_entry_observations(&mut state, &events);
+        assert_eq!(
+            state.battlefield_entry_observations.len(),
+            1,
+            "paired positive"
+        );
     }
 
     #[test]

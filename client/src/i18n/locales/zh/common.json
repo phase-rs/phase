@@ -285,7 +285,9 @@
     "loading": "加载中…"
   },
   "turnBanner": {
-    "turn": "第 {{number}} 回合"
+    "turn": "第 {{number}} 回合",
+    "yourTurn": "你的回合",
+    "opponentTurn": "{{name}}的回合"
   },
   "diceRoll": {
     "rollingForFirst": "掷骰决定先手",

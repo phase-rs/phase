@@ -3746,16 +3746,18 @@ pub fn candidate_actions_broad_with_probe(
             // (nothing to pin, so `template: None` is the complete answer), a published set
             // the offer ALREADY carries a declaration for, or a recorded period the take replays,
             // whose recorded answers `handle_declare_shortcut` admits with `template: None`. That
-            // `template` is the ENGINE'S OWN published declaration — the very value
-            // `handle_declare_shortcut` will validate — so there is exactly one pin authority at
-            // this node and the AI never constructs one. An offer with an empty period,
+            // `template` is the ENGINE'S OWN suggestion (`ShortcutDecisionSchema::suggestion`) —
+            // the very value `handle_declare_shortcut` resolves `template: None` to and validates
+            // — so there is exactly one pin authority at this node and the AI never constructs
+            // one. An offer with an empty period,
             // published points and NO declaration (a seat that never answered, or a `Conflicted`
             // latch) still fail-closes: the conjunct below is false, and `DeclineShortcut`
             // remains the only candidate.
             // CR 732.2a: THE SUGGESTION, not the capacity — and the two are no longer one number.
             // The capacity is the widest count SOME legal declaration may specify; the suggestion
-            // is a count the offer's OWN published declaration drives, which is the declaration
-            // this candidate carries (and which `template: None` would resolve to anyway). A
+            // is the count the offer's suggested declaration drives (see
+            // `ShortcutDecisionSchema::suggested_declaration`), which is the declaration this
+            // candidate carries (and which `template: None` would resolve to anyway). A
             // candidate at the capacity opens the CR 732.2b window and is then refused by the
             // consumption seam's drivability gate, committing zero cycles — the engine refusing
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
@@ -3775,7 +3777,7 @@ pub fn candidate_actions_broad_with_probe(
                 v.push(candidate(
                     GameAction::DeclareShortcut {
                         count: crate::analysis::decision_template::IterationCount::Fixed(n),
-                        template: declaration.clone(),
+                        template: schema.suggestion(declaration.as_ref()).cloned(),
                     },
                     TacticalClass::Utility,
                     Some(*proposer),
@@ -6566,6 +6568,127 @@ fn lethal_first_distribution(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legal_actions_prune_total_mana_value_return_combinations() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ids: Vec<_> = [
+            ("Canoptek Tomb Sentinel", 4, 4, 3),
+            ("Hexmark Destroyer", 6, 6, 6),
+            ("Myr Retriever", 2, 1, 1),
+        ]
+        .into_iter()
+        .map(|(name, value, power, toughness)| {
+            let cost = if value == 6 {
+                ManaCost::Cost {
+                    generic: 4,
+                    shards: vec![ManaCostShard::Black; 2],
+                }
+            } else {
+                ManaCost::generic(value)
+            };
+            scenario
+                .add_creature_to_graveyard(P0, name, power, toughness)
+                .as_artifact_creature()
+                .with_mana_cost(cost)
+                .id()
+        })
+        .collect();
+        // Exact Technomancer return clause isolates the choice class; the full
+        // creature ETB and mill pipeline is covered by integration regressions.
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Return clause harness", false,
+            "Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.")
+            .with_mana_cost(ManaCost::zero()).id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+            if ids.iter().all(|id| cards.contains(id)))
+        );
+        let actions = crate::ai_support::legal_actions(runner.state());
+        let selections: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+        assert!(selections.iter().any(|cards| cards.is_empty()));
+        assert!(selections.iter().any(|cards| cards.as_slice() == [ids[1]]));
+        assert!(selections
+            .iter()
+            .any(|cards| cards.len() == 2 && cards.contains(&ids[0]) && cards.contains(&ids[2])));
+        assert!(!selections
+            .iter()
+            .any(|cards| cards.contains(&ids[0]) && cards.contains(&ids[1])));
+    }
+    #[test]
+    fn legal_actions_bounded_zero_mana_value_return_count() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        // Synthetic return-clause harness: verbatim Lively Dirge return mode,
+        // without its separate spree payment machinery.
+        for reject_three in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ids: Vec<_> = (0..3)
+                .map(|index| {
+                    scenario
+                        .add_creature_to_graveyard(P0, &format!("Zero {index}"), 1, 1)
+                        .as_artifact_creature()
+                        .with_mana_cost(ManaCost::zero())
+                        .id()
+                })
+                .collect();
+            let spell = scenario.add_spell_to_hand_from_oracle(P0, "Bounded return clause harness", false,
+                "Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.")
+                .with_mana_cost(ManaCost::zero()).id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            assert!(
+                matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+                if cards.len() == 3 && ids.iter().all(|id| cards.contains(id)))
+            );
+            outcome.assert_zone(&ids, Zone::Graveyard);
+            let actions = crate::ai_support::legal_actions(runner.state());
+            let selections: Vec<_> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    GameAction::SelectCards { cards } => Some(cards),
+                    _ => None,
+                })
+                .collect();
+            // CR 608.2d: Zero mana value does not remove the independent two-card ceiling.
+            for count in 0..=2 {
+                assert!(selections
+                    .iter()
+                    .any(|cards| cards.as_slice() == &ids[..count]));
+            }
+            assert!(!selections.iter().any(|cards| cards.len() > 2));
+            if reject_three {
+                let prompt = runner.state().waiting_for.clone();
+                assert!(runner
+                    .act(GameAction::SelectCards { cards: ids.clone() })
+                    .is_err());
+                assert_eq!(runner.state().waiting_for, prompt);
+                assert!(ids
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+            } else {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: ids[..2].to_vec(),
+                    })
+                    .expect("two zero-MV cards are legal");
+                assert!(ids[..2]
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+                assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+            }
+        }
+    }
     use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
@@ -9768,6 +9891,8 @@ mod tests {
                 per_cycle: None,
             },
             schema: ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(5),
                 measured_repetition_bound: Some(5),
                 deliverable_capacity: 5,

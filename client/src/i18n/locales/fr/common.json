@@ -285,7 +285,9 @@
     "loading": "Chargement..."
   },
   "turnBanner": {
-    "turn": "Tour {{number}}"
+    "turn": "Tour {{number}}",
+    "yourTurn": "À toi de jouer",
+    "opponentTurn": "Tour de {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Tirage pour savoir qui commence",
