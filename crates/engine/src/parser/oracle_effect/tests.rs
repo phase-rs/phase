@@ -6,7 +6,7 @@ use super::sequence::split_clause_sequence;
 use super::*;
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
-use crate::parser::oracle_ir::ast::EntersUnderSpec;
+use crate::parser::oracle_ir::ast::{EntersUnderSpec, TargetedImperativeAst};
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
     bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
@@ -25,6 +25,352 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
+
+/// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
+/// choice, whose immediate continuation moves only the selected parents.
+#[test]
+fn technomancer_total_mana_value_return_shape() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, mill three cards, then return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.",
+        "Technomancer", &[], &["Artifact".to_string(), "Creature".to_string()], &[],
+    );
+    let execute = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(execute.effect.as_ref(), Effect::Mill { .. }));
+    let chosen = execute.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: u32::MAX,
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        chosen.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: explicitly synthetic selection-boundary fixture. CR 608.2c/d
+/// binds the delivery to the chosen cards, and the zone choice is a
+/// chosen-object boundary for the event-source lift: like a library search
+/// (`event_source_lift_stops_at_search_across_independent_siblings`), later
+/// siblings keep the chosen-object antecedent rather than the entering object.
+#[test]
+fn event_source_lift_stops_at_zone_choice_across_independent_siblings() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield. Then exile that creature.",
+        "Zone Choice Boundary Fixture", &[], &["Creature".to_string()], &[],
+    );
+    let chosen = parsed.triggers[0].execute.as_ref().unwrap();
+    assert!(matches!(
+        chosen.effect.as_ref(),
+        Effect::ChooseFromZone {
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6
+            }),
+            ..
+        }
+    ));
+    let delivery = chosen.sub_ability.as_ref().unwrap();
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    let sibling = delivery.sub_ability.as_ref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(matches!(
+        sibling.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: an origin-less aggregate-budget return fails closed (CR 608.2d)
+/// instead of dropping its total-mana-value budget, while the same return
+/// with its printed origin still lowers to the subset choice.
+#[test]
+fn origin_less_total_mana_value_return_fails_closed_but_origin_return_composes() {
+    let origin_less = "Return any number of artifact creature cards with total mana value 6 or less to the battlefield";
+    // Reach-guard: the AST really carries the budget with no origin, so the
+    // composing subset arm cannot consume it.
+    let lower = origin_less.to_lowercase();
+    let ast =
+        imperative::parse_targeted_action_ast(origin_less, &lower, &mut ParseContext::default());
+    assert!(
+        matches!(
+            ast,
+            Some(TargetedImperativeAst::ReturnToBattlefield {
+                choice_constraint: Some(ChooseFromZoneConstraint::TotalManaValue { .. }),
+                choice_cardinality: Some(_),
+                origin: None,
+                ..
+            })
+        ),
+        "{ast:?}"
+    );
+    let clause = parse_effect_clause(origin_less, &mut ParseContext::default());
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { .. }),
+        "an unconsumed budget must not lower to a budget-free return: {:?}",
+        clause.effect
+    );
+
+    let with_origin = parse_effect_clause(
+        "Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            with_origin.effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                    comparator: Comparator::LE,
+                    value: 6
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        with_origin.effect
+    );
+    assert!(matches!(
+        with_origin.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: Lively Dirge's exact return mode has a separate count limit.
+#[test]
+fn lively_dirge_bounded_total_mana_value_return_shape() {
+    let parsed = parse_oracle_text(
+        "Spree (Choose one or more additional costs.)\n+ {1} — Search your library for a card, put it into your graveyard, then shuffle.\n+ {2} — Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Lively Dirge", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "both Spree modes must be reached"
+    );
+    let clause = &parsed.abilities[1];
+    assert!(
+        matches!(
+            clause.effect.as_ref(),
+            Effect::ChooseFromZone {
+                count: 2,
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue {
+                    comparator: Comparator::LE,
+                    value: 4
+                }),
+                ..
+            }
+        ),
+        "{:?}",
+        clause.effect
+    );
+    assert!(matches!(
+        clause.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+}
+
+/// SHAPE: targeted aggregate and individual-card restrictions keep their paths.
+#[test]
+fn total_mana_value_return_targeted_and_per_card_siblings_shape() {
+    for text in [
+        "Return up to three target creature cards with total mana value 3 or less from your graveyard to the battlefield.",
+        "Return up to X target artifact and/or non-Aura enchantment cards each with mana value X or less from your graveyard to the battlefield.",
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(matches!(clause.effect, Effect::ChangeZone { origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield, .. }), "{text}: {:?}", clause.effect);
+    }
+}
+
+/// SHAPE: a dynamic untargeted budget is not claimed by the fixed-budget subset
+/// lowering; it reaches the shared aggregate-selection refusal, never a zero cap.
+#[test]
+fn total_mana_value_return_dynamic_untargeted_budget_is_honest_gap() {
+    let parsed = parse_oracle_text(
+        "Return any number of creature cards with total mana value X or less from your graveyard to the battlefield.",
+        "Dynamic aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { name, .. }
+        if name == super::lower::UNENFORCED_AGGREGATE_RESOLUTION_SELECTION_GAP),
+        "{:?}",
+        parsed.abilities[0].effect
+    );
+}
+
+/// SHAPE: an unconsumed destination rider fails closed; a rider the shared
+/// destination grammar consumes (a fixed-count counter) keeps the subset choice.
+#[test]
+fn aggregate_return_unconsumed_rider_is_honest_gap() {
+    let gap = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield with X +1/+1 counters on them.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(gap.effect, Effect::Unimplemented { ref name, .. }
+        if name == "return_subset_unconsumed_rider"),
+        "{:?}",
+        gap.effect
+    );
+
+    let control = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield with a finality counter on it.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            control.effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::TotalManaValue { value: 6, .. }),
+                ..
+            }
+        ),
+        "{:?}",
+        control.effect
+    );
+    assert!(
+        matches!(
+            control.sub_ability.as_ref().unwrap().effect.as_ref(),
+            Effect::ChangeZone { enter_with_counters, .. } if enter_with_counters.len() == 1
+        ),
+        "{:?}",
+        control.sub_ability
+    );
+}
+
+/// SHAPE: a recognized dynamic cardinality reaches the existing gap marker
+/// instead of becoming an ordinary return that drops the aggregate budget.
+#[test]
+fn aggregate_return_dynamic_cardinality_is_honest_gap() {
+    let parsed = parse_oracle_text(
+        "Return up to X creature cards with total mana value 6 or less from your graveyard to the battlefield.",
+        "Dynamic cardinality aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { name, .. }
+        if name == "return_subset_dynamic_cardinality"),
+        "{:?}",
+        parsed.abilities[0].effect
+    );
+}
+
+/// SHAPE: a delayed instruction must keep the descriptor's own count, too.
+#[test]
+fn delayed_aggregate_return_keeps_resolution_choice_cardinality() {
+    let parsed = parse_oracle_text(
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+        "Delayed aggregate return", &[], &["Sorcery".to_string()], &[],
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!("expected delayed trigger: {:?}", parsed.abilities);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::ChooseFromZone {
+            count: 2,
+            constraint: Some(ChooseFromZoneConstraint::TotalManaValue { value: 4, .. }),
+            ..
+        }
+    ));
+}
+
+/// A clause harness drives the delayed normalization branch and the actual
+/// resolution-time choice, independently of the immediate Technomancer ETB.
+#[test]
+fn delayed_aggregate_return_rejects_excess_count_then_returns_selected_cards() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ids: Vec<_> = (0..3)
+        .map(|_| {
+            scenario
+                .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+                .as_artifact_creature()
+                .with_mana_cost(ManaCost::zero())
+                .id()
+        })
+        .collect();
+    let spell = scenario.add_spell_to_hand_from_oracle(
+        P0, "Delayed return clause harness", false,
+        "At the beginning of the next end step, return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.",
+    ).with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { cards, count: 2, .. }
+        if ids.iter().all(|id| cards.contains(id)))
+    );
+    let prompt = runner.state().waiting_for.clone();
+    assert!(runner
+        .act(GameAction::SelectCards { cards: ids.clone() })
+        .is_err());
+    assert_eq!(runner.state().waiting_for, prompt);
+    assert!(ids
+        .iter()
+        .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+    runner
+        .act(GameAction::SelectCards {
+            cards: ids[..2].to_vec(),
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&ids[0]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[1]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+}
+
+/// SHAPE: the bare-effect compound dispatcher must not drop the choice fields.
+#[test]
+fn compound_aggregate_return_remains_an_honest_gap() {
+    let clause = parse_effect_clause(
+        "Return any number of creature cards with total mana value 6 or less from your graveyard to the battlefield and draw a card.",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { ref name, .. }
+        if name == "return_subset_compound")
+    );
+}
 
 fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
@@ -1477,11 +1823,15 @@ fn targeted_player_conjunct_binds_through_a_target_only_head() {
         assert!(
             matches!(
                 &*body.effect,
-                Effect::FlipCoin { .. }
-                    | Effect::Choose {
-                        choice_type: ChoiceType::NumberRange { .. },
-                        ..
-                    }
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 }
+                    },
+                    ..
+                } | Effect::Choose {
+                    choice_type: ChoiceType::NumberRange { .. },
+                    ..
+                }
             ),
             "{text:?}: the body is the parsed verb, got {:#?}",
             body.effect
@@ -14295,7 +14645,11 @@ fn effect_krark_full_flip_coin_ir_embeds_win_retarget() {
         .clauses
         .iter()
         .find_map(|c| {
-            if let Effect::FlipCoin {
+            if let Effect::FlipCoins {
+                flips:
+                    CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
                 win_effect: Some(win),
                 ..
             } = &c.parsed.effect
@@ -14305,7 +14659,7 @@ fn effect_krark_full_flip_coin_ir_embeds_win_retarget() {
                 None
             }
         })
-        .expect("win-branch FlipCoin clause");
+        .expect("win-branch single-flip FlipCoins clause");
     if let Effect::CopySpell { retarget, .. } = win_branch.effect.as_ref() {
         assert_eq!(
             *retarget,
@@ -14324,14 +14678,19 @@ fn effect_krark_full_flip_coin_chain_preserves_win_retarget() {
     let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
             If you win the flip, copy that spell, and you may choose new targets for the copy.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect,
         lose_effect,
         ..
     } = &*def.effect
     else {
-        panic!("expected FlipCoin, got {:?}", def.effect);
+        panic!("expected FlipCoins, got {:?}", def.effect);
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     let win = win_effect.as_ref().expect("win branch");
     let lose = lose_effect.as_ref().expect("lose branch");
     assert!(
@@ -36545,7 +36904,7 @@ fn ral_zarek_coin_result_shell_preserves_singular_extra_turn_count() {
         AbilityKind::Activated,
     );
     let Effect::FlipCoins {
-        count,
+        flips: CoinFlipRun::Exactly { count },
         win_effect: Some(win_effect),
         lose_effect: None,
         ..
@@ -42436,14 +42795,22 @@ fn effect_flip_coin_branches_keep_next_time_replacements() {
             "flip a coin. if you win the flip, the next time that creature would deal combat damage this turn, it deals double that damage instead. if you lose the flip, the next time that creature would deal combat damage this turn, prevent that damage.",
             AbilityKind::Spell,
         );
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect: Some(win),
         lose_effect: Some(lose),
         ..
     } = def.effect.as_ref()
     else {
-        panic!("expected FlipCoin with both branches, got {:?}", def.effect);
+        panic!(
+            "expected FlipCoins with both branches, got {:?}",
+            def.effect
+        );
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     assert!(matches!(
         win.effect.as_ref(),
         Effect::AddTargetReplacement { replacement, target }
@@ -49927,7 +50294,7 @@ fn ral_zarek_flip_five_coins_skip_turn_per_heads() {
         );
 
     let Effect::FlipCoins {
-        count,
+        flips: CoinFlipRun::Exactly { count },
         win_effect,
         lose_effect,
         ..
@@ -49981,15 +50348,130 @@ fn flip_n_coins_emits_flip_coins_variant() {
         matches!(
             &*def.effect,
             Effect::FlipCoins {
-                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                flips: CoinFlipRun::Exactly {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                },
                 win_effect: None,
                 lose_effect: None,
                 ..
             }
         ),
-        "expected FlipCoins count=2, got {:?}",
+        "expected FlipCoins flips=Exactly(2), got {:?}",
         def.effect
     );
+}
+
+/// CR 705.1 + CR 608.2c: `consolidate_die_and_coin_defs` keeps each run shape's
+/// pre-merge absorb membership, decided by the head's `flips`.
+///
+///   * A single flip ("Flip a coin.") is a complete instruction. A following
+///     sentence ("Draw a card.") is a sibling instruction, not a per-heads
+///     branch, so it stays the `sub_ability` — the `!is_single_flip()` guard on the
+///     `Exactly` absorb. Dropping the guard makes `win_effect == Some(Draw)`.
+///   * A multi-flip `Exactly` run absorbs its following clause as the per-heads
+///     branch (positive sibling: the guard must not disable this).
+///   * An `UntilLoss` run absorbs its per-win clause chain (positive sibling).
+///   * A single flip still merges explicit "if you win/lose the flip" branch stubs.
+#[test]
+fn single_flip_does_not_absorb_a_following_clause() {
+    // Reach guard + negative: the single flip stays bare and `Draw` is its sibling.
+    let def = parse_effect_chain("Flip a coin. Draw a card.", AbilityKind::Spell);
+    let Effect::FlipCoins {
+        flips,
+        win_effect,
+        lose_effect,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected FlipCoins, got {:?}", def.effect);
+    };
+    assert!(flips.is_single_flip(), "expected a single flip: {flips:?}");
+    assert!(
+        win_effect.is_none() && lose_effect.is_none(),
+        "a following sentence must not become a per-heads branch, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("`Draw` stays the single flip's sub_ability");
+    assert!(
+        matches!(&*sub.effect, Effect::Draw { .. }),
+        "expected Draw sub_ability, got {:?}",
+        sub.effect
+    );
+
+    // Positive sibling: a multi-flip run absorbs its following clause.
+    let def = parse_effect_chain("Flip two coins. Draw a card.", AbilityKind::Spell);
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::Exactly { count },
+        win_effect: Some(win),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected Exactly FlipCoins with a win branch, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+    assert!(
+        matches!(&*win.effect, Effect::Draw { .. }),
+        "the multi-flip run absorbs the following clause, got {:?}",
+        win.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the clause moved into win_effect"
+    );
+
+    // Positive sibling: an until-loss run absorbs its per-win clause.
+    let def = parse_effect_chain(
+        "Flip a coin until you lose a flip. For each flip you won, draw a card.",
+        AbilityKind::Spell,
+    );
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(win),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected UntilLoss FlipCoins with a win branch, got {:?}",
+            def.effect
+        );
+    };
+    assert!(
+        matches!(&*win.effect, Effect::Draw { .. }),
+        "the until-loss run absorbs its per-win clause, got {:?}",
+        win.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "the clause moved into win_effect"
+    );
+
+    // Positive sibling: a single flip still merges explicit win/lose branch stubs.
+    let def = parse_effect_chain(
+        "Flip a coin. If you win the flip, draw a card. If you lose the flip, discard a card.",
+        AbilityKind::Spell,
+    );
+    let Effect::FlipCoins {
+        flips,
+        win_effect: Some(win),
+        lose_effect: Some(lose),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected a single flip with both branches, got {:?}",
+            def.effect
+        );
+    };
+    assert!(flips.is_single_flip(), "expected a single flip: {flips:?}");
+    assert!(matches!(&*win.effect, Effect::Draw { .. }));
+    assert!(matches!(&*lose.effect, Effect::Discard { .. }));
+    assert!(def.sub_ability.is_none());
 }
 
 /// CR 614.10: skipping a future turn replaces that turn with nothing.
@@ -61709,7 +62191,7 @@ fn repeat_process_directive_lose_flip_while_condition() {
 /// Regression (CR 705.2): an inline coin-flip branch whose body is NOT "repeat
 /// this process" is body-gated OUT of the repeat directive — the whole function
 /// returns None so the chunk falls through to the inline coin-flip fold, keeping
-/// Krark / Desperate Gambit / Ral Zarek `FlipCoin.win_effect` branches intact.
+/// Krark / Desperate Gambit / Ral Zarek `FlipCoins.win_effect` branches intact.
 #[test]
 fn repeat_process_directive_ignores_non_repeat_flip_branch() {
     let mut ctx = ParseContext::default();
@@ -62002,7 +62484,10 @@ fn unleash_the_flux_parses_repeat_while_lost_flip() {
     assert!(
         matches!(
             &*flip.effect,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 1 }
+                },
                 win_effect: None,
                 lose_effect: None,
                 ..
@@ -68670,9 +69155,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -73406,7 +73889,8 @@ fn counter_gate_rebind_reaches_reveal_from_hand_on_decline() {
 #[test]
 fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     let gate_qty = gate_qty_fixture();
-    let mut coin = Effect::FlipCoin {
+    let mut coin = Effect::FlipCoins {
+        flips: CoinFlipRun::single(),
         win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
@@ -73418,7 +73902,7 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
         flipper: TargetFilter::Controller,
     };
     rebind_event_context_amount_counts(&mut coin, &gate_qty);
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
         win_effect,
         lose_effect,
         ..
@@ -73429,16 +73913,18 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     assert_put_counter_rebound(
         &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoin::win_effect",
+        "FlipCoins(single)::win_effect",
     );
     assert_put_counter_rebound(
         &lose_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoin::lose_effect",
+        "FlipCoins(single)::lose_effect",
     );
 
     let mut coins = Effect::FlipCoins {
-        count: QuantityExpr::Fixed { value: 2 },
+        flips: CoinFlipRun::Exactly {
+            count: QuantityExpr::Fixed { value: 2 },
+        },
         win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
@@ -73453,27 +73939,30 @@ fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
     assert_put_counter_rebound(
         &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoins::win_effect",
+        "FlipCoins(Exactly 2)::win_effect",
     );
 }
 
 #[test]
 fn counter_gate_rebind_reaches_flip_coin_until_lose() {
     let gate_qty = gate_qty_fixture();
-    let mut effect = Effect::FlipCoinUntilLose {
-        win_effect: Box::new(AbilityDefinition::new(
+    let mut effect = Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             event_context_put_counter(TargetFilter::Any),
-        )),
+        ))),
+        lose_effect: None,
+        flipper: TargetFilter::Controller,
     };
     rebind_event_context_amount_counts(&mut effect, &gate_qty);
-    let Effect::FlipCoinUntilLose { win_effect } = &effect else {
+    let Effect::FlipCoins { win_effect, .. } = &effect else {
         unreachable!()
     };
     assert_put_counter_rebound(
-        &win_effect.effect,
+        &win_effect.as_ref().unwrap().effect,
         &gate_qty,
-        "FlipCoinUntilLose::win_effect",
+        "FlipCoins(UntilLoss)::win_effect",
     );
 }
 

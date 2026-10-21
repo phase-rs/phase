@@ -106,22 +106,61 @@ pub struct OptionalEffectFrame {
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
 }
 
-/// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
-/// Krark's Thumb keep-one choice, carrying the loop position needed to re-enter.
+/// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
+///
+/// CR 608.2c: the position is everything the run needs to follow its remaining
+/// instructions in order once the kept flip settles. The frames written before
+/// resolution-wire version 8 (`Single`, `FlipN`, `UntilLose`) are read losslessly
+/// through [`PendingCoinFlipKindWire`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PendingCoinFlipKindWire")]
 pub enum PendingCoinFlipKind {
-    /// `Effect::FlipCoin` — a single logical flip.
-    Single,
-    /// `Effect::FlipCoins { count }` — `remaining` flips still to perform after
-    /// the one currently paused for a keep choice.
-    FlipN { remaining: u32 },
-    /// `Effect::FlipCoinUntilLose` — `wins_so_far` flips won before the one
-    /// currently paused for a keep choice.
-    UntilLose { wins_so_far: u32 },
+    /// CR 705.1: flips still owed after the one paused for the keep choice.
+    Exactly { remaining: u32 },
+    /// CR 705.2 + CR 608.2c: flips won so far in this run, before the paused one. Their
+    /// rewards are still owed: they are paid after the losing flip.
+    UntilLoss { wins_so_far: u32 },
 }
 
-/// CR 705.1 + CR 614.1a: Full resolution context and loop position for a
-/// multi-flip resolver paused at a Krark's Thumb keep-one choice.
+/// The persisted shapes of [`PendingCoinFlipKind`]: the current kinds plus the
+/// pre-version-8 kinds, each mapped totally and losslessly onto a current kind.
+///
+/// Shape rules: the current-shape variants mirror [`PendingCoinFlipKind`] field for
+/// field, so a later serde-defaulted frame field is a pure addition to both.
+#[derive(Deserialize)]
+enum PendingCoinFlipKindWire {
+    Exactly {
+        remaining: u32,
+    },
+    UntilLoss {
+        wins_so_far: u32,
+    },
+    /// Legacy single flip: the same resume behaviour as `Exactly { remaining: 0 }`.
+    Single,
+    /// Legacy N-flip run: the same meaning as `Exactly { remaining }`.
+    FlipN {
+        remaining: u32,
+    },
+    /// Legacy until-loss run: the same meaning as `UntilLoss { wins_so_far }`.
+    UntilLose {
+        wins_so_far: u32,
+    },
+}
+
+impl From<PendingCoinFlipKindWire> for PendingCoinFlipKind {
+    fn from(wire: PendingCoinFlipKindWire) -> Self {
+        match wire {
+            PendingCoinFlipKindWire::Exactly { remaining }
+            | PendingCoinFlipKindWire::FlipN { remaining } => Self::Exactly { remaining },
+            PendingCoinFlipKindWire::Single => Self::Exactly { remaining: 0 },
+            PendingCoinFlipKindWire::UntilLoss { wins_so_far }
+            | PendingCoinFlipKindWire::UntilLose { wins_so_far } => Self::UntilLoss { wins_so_far },
+        }
+    }
+}
+
+/// CR 705.1 + CR 614.1a: Full resolution context and run position for a
+/// coin-flip run paused at a Krark's Thumb keep-one choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
@@ -3818,7 +3857,8 @@ impl ResolutionStack {
 /// Version 7 carries each unprocessed member of a parked ChangeZone with the
 /// entry modifications resolved before the event's first member moved
 /// (`ChangeZoneMemberEntry`) in place of a bare id and the raw entry gates.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
+/// Version 8 replaces the coin-flip frame's `Single`/`FlipN`/`UntilLose` kinds with `Exactly`/`UntilLoss`; the older kinds are still read losslessly.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3843,6 +3883,10 @@ const LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
 /// (`migrate_legacy_change_zone_member_entries` for v2–v6 frames and the v1
 /// reader arm for v1, both through `migrate_legacy_change_zone_carrier`).
 const LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+
+/// Last wire version whose coin-flip frame kinds were `Single`/`FlipN`/
+/// `UntilLose`; `PendingCoinFlipKindWire` reads them losslessly.
+const LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
 
 /// Stable, machine-recognizable restore refusal for a v1–v6 save paused inside
 /// a multi-object ChangeZone whose unprocessed members' entry modifications
@@ -4488,7 +4532,7 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             // stack written that late also carries `delivery_owner` on every
             // draw frame, which v7 validation still requires.
             let declared_version = if unversioned_stack_has_resolved_change_zone_members {
-                RESOLUTION_STATE_WIRE_VERSION
+                LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_delivery_owner {
                 LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
             } else {
@@ -4590,7 +4634,7 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 through 7 use the same
+    /// 2 and 3 share the typed-frame reader; versions 4 through 8 use the same
     /// frame layout with an explicit draw-result-owner presence check, and a
     /// version-4 draw frame simply has no dealer. A v2–v6 parked ChangeZone
     /// frame carrier is migrated or refused first by
@@ -4621,10 +4665,11 @@ impl ResolutionStateWire {
             LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
             | 5
             | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -6851,7 +6896,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
         });
         let mut stack = ResolutionStack::default();
@@ -6915,7 +6960,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
         }));
         assert_eq!(
@@ -7229,7 +7274,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
         };
 
@@ -7257,9 +7302,87 @@ mod tests {
         );
     }
 
+    /// CR 705.1 + CR 705.2: every pre-version-8 coin-flip kind is read onto the
+    /// current kind with the same meaning, so no persisted frame is refused.
+    #[test]
+    fn coin_flip_kind_reader_maps_every_legacy_kind() {
+        let read = |json: Value| {
+            serde_json::from_value::<PendingCoinFlipKind>(json)
+                .expect("every coin-flip kind shape is readable")
+        };
+
+        // Legacy kinds map totally and losslessly.
+        assert_eq!(
+            read(serde_json::json!("Single")),
+            PendingCoinFlipKind::Exactly { remaining: 0 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "FlipN": { "remaining": 2 } })),
+            PendingCoinFlipKind::Exactly { remaining: 2 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "UntilLose": { "wins_so_far": 0 } })),
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 0 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "UntilLose": { "wins_so_far": 3 } })),
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 3 }
+        );
+
+        // Positive control: the current kinds round-trip, and are written in the current shape.
+        for kind in [
+            PendingCoinFlipKind::Exactly { remaining: 4 },
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 7 },
+        ] {
+            let written = serde_json::to_value(&kind).expect("current kind serializes");
+            assert_eq!(read(written.clone()), kind);
+            assert!(
+                written.get("Exactly").is_some() || written.get("UntilLoss").is_some(),
+                "current kinds are written as named-field variants, got {written}"
+            );
+        }
+
+        // A v1 `pending_coin_flip` carrying the legacy `Single` kind converts through
+        // `ResolutionStateWire` onto the current frame.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        let expected = PendingCoinFlip {
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: Vec::new(),
+        };
+        let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
+        let mut legacy_frame = serde_json::to_value(&expected).expect("frame serializes");
+        legacy_frame["kind"] = serde_json::json!("Single");
+        v1["pending_coin_flip"] = legacy_frame;
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("a v1 frame with the legacy Single kind converts");
+        assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&expected));
+
+        // A version-6 payload (the last version before the reshape) still decodes.
+        let mut v6 = serde_json::to_value(&wire).expect("current wire serializes");
+        v6["resolution_state_version"] = Value::from(6_u64);
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v6).expect("a version-6 payload decodes");
+        assert_eq!(
+            restored.into_game_state().active_coin_flip_frame(),
+            Some(&expected)
+        );
+    }
+
     #[test]
     fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 7);
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 8);
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
         assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
@@ -7653,7 +7776,7 @@ mod tests {
                 targets: Vec::new(),
                 win_effect: None,
                 lose_effect: None,
-                kind: PendingCoinFlipKind::Single,
+                kind: PendingCoinFlipKind::Exactly { remaining: 0 },
                 chain_root_targets: Vec::new(),
             },
         );
@@ -9008,7 +9131,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
         };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
@@ -9184,7 +9307,7 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
         }));
         assert!(
@@ -9306,6 +9429,6 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, 5, 6, or 7"), "{error}");
+        assert!(error.contains("1, 2, 3, 4, 5, 6, 7, or 8"), "{error}");
     }
 }

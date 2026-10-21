@@ -12,19 +12,20 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChooseOneOfKind, ChosenAttribute, CombatHistoryScope, Comparator, ContinuousModification,
-    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
-    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
-    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    ChooseOneOfKind, ChosenAttribute, CoinFlipRun, CombatHistoryScope, Comparator,
+    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
+    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
+    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
     ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
-    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, SpentColor,
+    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, NumberQuality, Parity,
+    SpentColor, StaticCondition, StaticDefinition,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -262,11 +263,11 @@ fn extract_had_counters_positive_quantifier_composes_with_type_axis() {
     }
 }
 
-/// Binding-rule unit test for `positive_had_counter_gate_qty`: only a positive
+/// Binding-rule unit test for `positive_count_gate_qty`: only a positive
 /// `HadCounters` (directly, or as an agreeing `And` conjunct) establishes the
 /// event-source counter read; `Not`, `Or`, and ambiguous `And`s never bind.
 #[test]
-fn positive_had_counter_gate_qty_binds_only_positive_gates() {
+fn positive_count_gate_qty_binds_only_positive_gates() {
     let any = TriggerCondition::HadCounters { counter_type: None };
     let plus = TriggerCondition::HadCounters {
         counter_type: Some(CounterType::Plus1Plus1),
@@ -276,38 +277,438 @@ fn positive_had_counter_gate_qty_binds_only_positive_gates() {
         counter_type: None,
     };
 
-    assert_eq!(positive_had_counter_gate_qty(&any), Some(any_read.clone()));
+    assert_eq!(positive_count_gate_qty(&any), Some(any_read.clone()));
     assert_eq!(
-        positive_had_counter_gate_qty(&TriggerCondition::And {
+        positive_count_gate_qty(&TriggerCondition::And {
             conditions: vec![TriggerCondition::LostLifeLastTurn, any.clone()],
         }),
         Some(any_read),
         "an intervening-if ANDed onto a pre-existing condition still binds"
     );
     assert_eq!(
-        positive_had_counter_gate_qty(&TriggerCondition::Not {
+        positive_count_gate_qty(&TriggerCondition::Not {
             condition: Box::new(any.clone()),
         }),
         None,
         "\"if it had no counters\" measured nothing — never an antecedent"
     );
     assert_eq!(
-        positive_had_counter_gate_qty(&TriggerCondition::Or {
+        positive_count_gate_qty(&TriggerCondition::Or {
             conditions: vec![any.clone(), TriggerCondition::LostLifeLastTurn],
         }),
         None,
         "a disjunction does not establish which operand held"
     );
     assert_eq!(
-        positive_had_counter_gate_qty(&TriggerCondition::And {
+        positive_count_gate_qty(&TriggerCondition::And {
             conditions: vec![any, plus],
         }),
         None,
         "two disagreeing counter gates are ambiguous and fail closed"
     );
     assert_eq!(
-        positive_had_counter_gate_qty(&TriggerCondition::LostLifeLastTurn),
+        positive_count_gate_qty(&TriggerCondition::LostLifeLastTurn),
         None
+    );
+
+    // CR 107.1: an arithmetic-quality gate over a quantity reference names
+    // that reference (positive reach-guard for the negatives below).
+    let lands = lands_you_count();
+    let creatures = QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        ),
+    };
+    let prime_lands = quality_gate(lands.clone(), NumberQuality::Prime);
+    let odd_creatures = quality_gate(creatures, NumberQuality::Parity(Parity::Odd));
+    assert_eq!(positive_count_gate_qty(&prime_lands), Some(lands.clone()));
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::And {
+            conditions: vec![land_entered_this_turn(), prime_lands.clone()],
+        }),
+        Some(lands.clone()),
+        "a non-gate conjunct (the entered-this-turn tally) does not take part"
+    );
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::Not {
+            condition: Box::new(prime_lands.clone()),
+        }),
+        None,
+        "a negated quality gate measured nothing"
+    );
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::Or {
+            conditions: vec![prime_lands.clone(), TriggerCondition::LostLifeLastTurn],
+        }),
+        None
+    );
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::And {
+            conditions: vec![prime_lands.clone(), odd_creatures],
+        }),
+        None,
+        "two disagreeing quality gates are ambiguous and fail closed"
+    );
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::HadCounters { counter_type: None },
+                prime_lands,
+            ],
+        }),
+        None,
+        "a counter gate and a quality gate disagree"
+    );
+    assert_eq!(
+        positive_count_gate_qty(&TriggerCondition::QuantityQuality {
+            quantity: QuantityExpr::Fixed { value: 3 },
+            quality: NumberQuality::Prime,
+        }),
+        None,
+        "a constant names no reference"
+    );
+}
+
+/// CR 603.4 + CR 508.5 + CR 608.2h: `lower_trigger_ir` binds "that many" to the
+/// trigger condition's quantity only after every rewrite of that quantity. On an
+/// attack trigger naming the attacked player, the "that player" rebind turns a
+/// `ScopedPlayer` gate quantity into `DefendingPlayer`; the bound effect count
+/// must be that post-rebind quantity, the same one the condition evaluates.
+/// The gate is hand-built (no parsed "that player has an odd number of …" gate
+/// exists yet) and swapped into the parsed IR before lowering.
+#[test]
+fn lower_trigger_ir_binds_that_many_after_attack_anaphor_rebind() {
+    let mut ir = parse_trigger_line_with_index_ir(
+        "Whenever a creature attacks one of your opponents, if that player has seven or more \
+         cards in hand, you draw that many cards.",
+        "Test Card",
+        None,
+        &mut ParseContext::default(),
+    );
+    ir.modifiers.intervening_if = Some(quality_gate(
+        QuantityRef::HandSize {
+            player: PlayerScope::ScopedPlayer,
+        },
+        NumberQuality::Parity(Parity::Odd),
+    ));
+    let def = lower_trigger_ir(&ir);
+
+    let defending_hand = QuantityExpr::Ref {
+        qty: QuantityRef::HandSize {
+            player: PlayerScope::DefendingPlayer,
+        },
+    };
+    // Reach-guard: the attack anaphor rebind ran and rewrote the gate.
+    assert!(attack_intervening_if_anaphor_is_defending_player(&def));
+    let Some(TriggerCondition::QuantityQuality { quantity, .. }) = def.condition.as_ref() else {
+        panic!(
+            "gate must lower to QuantityQuality, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(
+        *quantity, defending_hand,
+        "the rebind must read the attacked player's hand"
+    );
+    let execute = def.execute.as_deref().expect("draw body");
+    let Effect::Draw { count, .. } = execute.effect.as_ref() else {
+        panic!("body must parse to Draw, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *count, *quantity,
+        "\"that many\" must bind the post-rebind condition quantity, not a pre-rebind copy"
+    );
+}
+
+/// Zimone, All-Questioning — verbatim Oracle text.
+const ZIMONE: &str = "At the beginning of your end step, if a land entered the battlefield under your control this turn and you control a prime number of lands, create Primo, the Indivisible, a legendary 0/0 green and blue Fractal creature token, then put that many +1/+1 counters on it. (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, and 31 are prime numbers.)";
+
+/// Lands on the battlefield under the ability controller's control.
+fn lands_you_count() -> QuantityRef {
+    QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(
+            TypedFilter::land()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        ),
+    }
+}
+
+fn quality_gate(qty: QuantityRef, quality: NumberQuality) -> TriggerCondition {
+    TriggerCondition::QuantityQuality {
+        quantity: QuantityExpr::Ref { qty },
+        quality,
+    }
+}
+
+/// CR 608.2i: "a land entered the battlefield under your control this turn".
+fn land_entered_this_turn() -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    }
+}
+
+fn the_only_trigger(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> TriggerDefinition {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let parsed = parse_oracle_text(text, name, &[], &owned(types), &owned(subtypes));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    parsed.triggers.into_iter().next().unwrap()
+}
+
+/// Every effect the walker reaches, failing on any `Unimplemented`; returns
+/// the number of `Token` effects visited (positive walker guard).
+fn tokens_visited_without_gaps(def: &AbilityDefinition) -> usize {
+    let mut tokens = 0;
+    let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "{effect:?}"
+        );
+        if matches!(effect, Effect::Token { .. }) {
+            tokens += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    tokens
+}
+
+/// CR 608.2c + CR 122.1: the counters a created token receives from the
+/// imperative "then put … counters on it" — the token carries no entry
+/// counters, and its direct `ContinuationStep` sub is a
+/// `PutCounter { target: LastCreated }`. Returns that placement's counter type
+/// and count; panics on any other shape.
+fn created_token_counter_placement(def: &AbilityDefinition) -> (&CounterType, &QuantityExpr) {
+    match def.effect.as_ref() {
+        Effect::Token {
+            enter_with_counters,
+            ..
+        } => assert!(
+            enter_with_counters.is_empty(),
+            "the token carries no entry counters: {enter_with_counters:?}"
+        ),
+        other => panic!("expected Token, got {other:?}"),
+    }
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("the counter placement is the token's direct sub");
+    assert_eq!(sub.sub_link, SubAbilityLink::ContinuationStep);
+    match sub.effect.as_ref() {
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::LastCreated,
+        } => (counter_type, count),
+        other => panic!("expected PutCounter {{ LastCreated }}, got {other:?}"),
+    }
+}
+
+const GAIN_LIFE_FRACTAL: &str = "Whenever you gain life, create a 0/0 green and blue Fractal creature token, then put that many +1/+1 counters on it.";
+
+/// CR 614.1c + CR 608.2h: the gate rebind reaches a declarative token's
+/// entry-counter magnitudes ("The token enters with that many …") but not the
+/// statics the token is granted. Constructed: the imperative class lowers to a
+/// `PutCounter` sub instead, so the entry-counter arm is driven directly.
+#[test]
+fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
+    let placeholder = QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let granted_condition = StaticCondition::QuantityComparison {
+        lhs: placeholder.clone(),
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    };
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Token {
+            name: "Fractal".to_string(),
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            types: vec!["Creature".to_string(), "Fractal".to_string()],
+            colors: vec![ManaColor::Green, ManaColor::Blue],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![
+                StaticDefinition::continuous().condition(granted_condition.clone())
+            ],
+            enter_with_counters: vec![(CounterType::Plus1Plus1, placeholder.clone())],
+        },
+    );
+    match execute.effect.as_ref() {
+        Effect::Token {
+            enter_with_counters,
+            ..
+        } => {
+            // Reach-guard: the placeholder is there before the rebind.
+            assert_eq!(enter_with_counters[0].1, placeholder);
+        }
+        other => panic!("expected Token, got {other:?}"),
+    }
+    let lands = lands_you_count();
+    rebind_event_context_amount_counts_in_ability(&mut execute, &lands);
+    match execute.effect.as_ref() {
+        Effect::Token {
+            static_abilities,
+            enter_with_counters,
+            count,
+            ..
+        } => {
+            assert_eq!(
+                enter_with_counters[0].1,
+                QuantityExpr::Ref { qty: lands.clone() }
+            );
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            assert_eq!(static_abilities[0].condition, Some(granted_condition));
+        }
+        other => panic!("expected Token, got {other:?}"),
+    }
+}
+
+/// Zimone, All-Questioning parses to a fully supported end-step trigger whose
+/// "that many" reads the very count its intervening-if checks.
+#[test]
+fn zimone_all_questioning_parses_gate_bound_primo() {
+    let trigger = the_only_trigger(
+        ZIMONE,
+        "Zimone, All-Questioning",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::End));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    let lands = lands_you_count();
+    // CR 603.4: the intervening-if conjunction.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::And {
+            conditions: vec![
+                land_entered_this_turn(),
+                quality_gate(lands.clone(), NumberQuality::Prime),
+            ],
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(tokens_visited_without_gaps(execute), 1);
+    // CR 608.2c + CR 122.1 + CR 608.2h: Primo is created, then receives
+    // counters counting the gate's lands.
+    assert_eq!(
+        created_token_counter_placement(execute),
+        (
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Ref { qty: lands.clone() }
+        )
+    );
+    match execute.effect.as_ref() {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            count,
+            supertypes,
+            ..
+        } => {
+            // CR 111.4: the creating effect names the token.
+            assert_eq!(name, "Primo, the Indivisible");
+            assert_eq!(supertypes, &vec![Supertype::Legendary]);
+            assert_eq!(*power, PtValue::Fixed(0));
+            assert_eq!(*toughness, PtValue::Fixed(0));
+            assert_eq!(colors, &vec![ManaColor::Green, ManaColor::Blue]);
+            assert_eq!(types, &vec!["Creature".to_string(), "Fractal".to_string()]);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        }
+        other => panic!("expected Token, got {other:?}"),
+    }
+}
+
+/// With no gate, "that many" stays the `EventContextAmount` placeholder.
+/// Parse shape only: runtime resolution of the placeholder on event triggers
+/// is not claimed here.
+#[test]
+fn ungated_that_many_token_counters_keep_the_placeholder() {
+    let trigger = the_only_trigger(GAIN_LIFE_FRACTAL, "Test Fractalist", &["Creature"], &[]);
+    assert_eq!(trigger.condition, None);
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(tokens_visited_without_gaps(execute), 1);
+    assert_eq!(
+        created_token_counter_placement(execute),
+        (
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        )
+    );
+}
+
+/// Assumption (no printed card): on an event trigger, a positive quality gate
+/// still binds "that many" — the `HadCounters`-consistent reading.
+#[test]
+fn quality_gate_on_event_trigger_binds_that_many_to_the_gate() {
+    let trigger = the_only_trigger(
+        "Whenever you gain life, if you control an odd number of creatures, create a 0/0 green and blue Fractal creature token, then put that many +1/+1 counters on it.",
+        "Test Fractalist",
+        &["Creature"],
+        &[],
+    );
+    let creatures = QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        ),
+    };
+    assert_eq!(
+        trigger.condition,
+        Some(quality_gate(
+            creatures.clone(),
+            NumberQuality::Parity(Parity::Odd)
+        ))
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(tokens_visited_without_gaps(execute), 1);
+    assert_eq!(
+        created_token_counter_placement(execute),
+        (
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Ref { qty: creatures }
+        )
     );
 }
 
@@ -481,9 +882,7 @@ fn reyhan_typed_counter_lookback_binds_typed_event_source_count() {
         };
         put_counter_defs += 1;
         assert_eq!(
-            def.condition
-                .as_ref()
-                .and_then(positive_had_counter_gate_qty),
+            def.condition.as_ref().and_then(positive_count_gate_qty),
             Some(plus_read.clone()),
             "the +1/+1 intervening-if must hoist as a positive typed gate: {:?}",
             def.condition
@@ -5336,8 +5735,8 @@ fn malcolm_keen_eyed_navigator_damage_trigger_counts_damaged_opponents() {
 #[test]
 fn primo_the_unbounded_combat_damage_trigger() {
     // Primo, the Unbounded (#1361): the triggering creatures' base power is 0,
-    // and the Fractal token enters with +1/+1 counters equal to the combat
-    // damage dealt (EventContextAmount). Verifies the full trigger:
+    // and the Fractal token is created, then receives +1/+1 counters equal to
+    // the combat damage dealt (EventContextAmount). Verifies the full trigger:
     //   - DamageDoneOnceByController mode
     //   - valid_source carries a base-power-0 check (CR 208.4b)
     //   - the token-creation body has no Unimplemented effects
@@ -5386,34 +5785,29 @@ fn primo_the_unbounded_combat_damage_trigger() {
         current = ability.sub_ability.as_deref();
     }
 
-    // The Fractal token must enter with +1/+1 counters equal to the combat
-    // damage dealt (EventContextAmount), not a fixed count. Walk the
-    // sub-ability chain to find the Token effect and verify its
-    // enter_with_counters payload.
+    // CR 608.2c + CR 122.1: the Fractal token is created, then receives +1/+1
+    // counters equal to the combat damage dealt (EventContextAmount), not a
+    // fixed count. Walk the sub-ability chain to the Token effect and read its
+    // counter placement.
     let mut current: Option<&AbilityDefinition> = Some(execute);
-    let mut enter_with_counters: Option<&Vec<(CounterType, QuantityExpr)>> = None;
+    let mut token: Option<&AbilityDefinition> = None;
     while let Some(ability) = current {
-        if let Effect::Token {
-            enter_with_counters: counters,
-            ..
-        } = &*ability.effect
-        {
-            enter_with_counters = Some(counters);
+        if matches!(&*ability.effect, Effect::Token { .. }) {
+            token = Some(ability);
             break;
         }
         current = ability.sub_ability.as_deref();
     }
-    let counters = enter_with_counters.expect("trigger body should contain a Token effect");
-    let expected: Vec<(CounterType, QuantityExpr)> = vec![(
-        CounterType::Plus1Plus1,
-        QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        },
-    )];
+    let token = token.expect("trigger body should contain a Token effect");
     assert_eq!(
-        counters, &expected,
-        "Fractal token must enter with +1/+1 counters equal to damage dealt, got: {:?}",
-        counters
+        created_token_counter_placement(token),
+        (
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        ),
+        "the Fractal token must receive +1/+1 counters equal to the damage dealt"
     );
 }
 
@@ -9600,13 +9994,12 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
 /// per-win/per-head token-rider shape.
 fn collect_through_flip<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     out.push(&def.effect);
-    match &*def.effect {
-        Effect::FlipCoinUntilLose { win_effect } => collect_through_flip(win_effect, out),
-        Effect::FlipCoins {
-            win_effect: Some(win_effect),
-            ..
-        } => collect_through_flip(win_effect, out),
-        _ => {}
+    if let Effect::FlipCoins {
+        win_effect: Some(win_effect),
+        ..
+    } = &*def.effect
+    {
+        collect_through_flip(win_effect, out);
     }
     if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
         collect_through_flip(inner, out);
@@ -9650,8 +10043,14 @@ fn mirror_march_flip_win_effect_folds_copy_haste_exile_on_last_created() {
     // Structural fold guard (revert-fails Step 2): the per-win riders live inside
     // `win_effect`, NOT as post-loop siblings of the flip effect.
     assert!(
-        matches!(&*exec.effect, Effect::FlipCoinUntilLose { .. }),
-        "top-level effect must be FlipCoinUntilLose"
+        matches!(
+            &*exec.effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                ..
+            }
+        ),
+        "top-level effect must be FlipCoins {{ flips: UntilLoss, .. }}"
     );
     assert!(
         exec.sub_ability.is_none(),
@@ -9722,8 +10121,16 @@ fn flip_coins_present_tense_win_effect_folds_last_created_riders() {
     let exec = def.execute.as_ref().expect("execute must be Some");
 
     assert!(
-        matches!(&*exec.effect, Effect::FlipCoins { .. }),
-        "top-level effect must be FlipCoins"
+        matches!(
+            &*exec.effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 }
+                },
+                ..
+            }
+        ),
+        "top-level effect must be FlipCoins {{ flips: Exactly {{ count: Fixed 2 }}, .. }}"
     );
     assert!(
         exec.sub_ability.is_none(),
@@ -37712,6 +38119,73 @@ fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
     }
 }
 
+/// CR 603.4: "a player cast two or more spells last turn" (verbatim Gatstaf
+/// Howler back face) is true only when ONE player cast two or more spells. The
+/// table-wide `SpellsCastLastTurn` total cannot express that (two players
+/// casting one spell each would satisfy it), so the guard must not lower to it:
+/// the trigger fails closed as an `unparsed_condition` gap instead of firing on
+/// a wrong count.
+/// REVERT-PROBE: restore the per-player arm in `parse_spells_cast_last_turn` →
+/// the guard hoists as `SpellsCastLastTurn >= 2` and the body parses as a
+/// transform, so the `condition == None` and gap-kind assertions flip.
+#[test]
+fn per_player_spells_cast_last_turn_guard_fails_the_trigger_closed() {
+    let def = parse_trigger_line(
+        "At the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.",
+        "Gatstaf Howler",
+    );
+
+    // Reach guard: the upkeep trigger head was recognized, so the guard was
+    // examined in intervening-if position rather than the line being rejected.
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.condition, None,
+        "the per-player guard must not hoist to a table-wide count"
+    );
+    let exec = def.execute.as_deref().expect("trigger execute body");
+    match &*exec.effect {
+        Effect::Unimplemented { name, description } => {
+            assert_eq!(name, ClauseGapKind::Condition.unimplemented_name());
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("a player cast two or more spells")),
+                "the gap must carry the rejected guard: {description:?}"
+            );
+        }
+        other => panic!("the per-player guard must fail the trigger closed, got {other:?}"),
+    }
+}
+
+/// Control for the per-player decline: the table-wide "no spells were cast last
+/// turn" guard (verbatim Gatstaf Shepherd) still hoists as
+/// `SpellsCastLastTurn == 0`, with its transform body intact.
+#[test]
+fn no_spells_cast_last_turn_guard_still_hoists_as_table_wide_count() {
+    let def = parse_trigger_line(
+        "At the beginning of each upkeep, if no spells were cast last turn, transform this creature.",
+        "Gatstaf Shepherd",
+    );
+
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastLastTurn,
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+    let exec = def.execute.as_deref().expect("trigger execute body");
+    assert!(
+        !matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "the transform body must survive the hoist: {:?}",
+        exec.effect
+    );
+}
+
 /// Reach guard for the fail-closed back-reference rule: a NON-leading "if it's a
 /// [type] card" after a real reveal is a legitimate resolution-time gate and stays
 /// on the effect chain.
@@ -38712,7 +39186,8 @@ fn chain_creates_reflexive_ability_descends_nested_definitions() {
     let flip_coin = |win: AbilityDefinition| {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(win)),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,

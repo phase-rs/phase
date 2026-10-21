@@ -2836,15 +2836,54 @@ pub struct PendingAttachmentRemainder {
     pub producer: Box<ResolvedAbility>,
 }
 
-/// Private continuation authority for an interactive player-scope exile
-/// instruction. Keeping the detached tail here makes generated APNAP nodes
-/// explicit without adding runtime provenance to `ResolvedAbility`.
+/// Private continuation authority for an interactive player-scope instruction
+/// whose detached unscoped tail must wait until every generated APNAP seat leg
+/// has drained. Keeping the tail here makes the generated legs explicit without
+/// adding runtime provenance to `ResolvedAbility`. It carries two channels, each
+/// read only by the consumer that needs it:
+/// - the linked-exile batch (CR 607.2a + CR 608.2f), live when `after_scope`
+///   holds a linked-exile consumer;
+/// - each seat's pinned creation result (CR 608.2c + CR 608.2e + CR 608.2f +
+///   CR 111.1), live when `created_tokens` is `Some`: per seat, in APNAP
+///   order, every token that seat's instruction of the scoped creation action
+///   made (replacement-made tokens included, CR 614.1a), pinned at creation
+///   (CR 400.7). Their union is the referent of a tail that reads "the tokens";
+///   each entry is the "it" of that seat's co-scoped second action. The last
+///   entry is the seat in progress.
+///
+/// Wire keys are unchanged from the linked-exile-only sidecar; a sidecar
+/// serialized without `created_tokens` decodes as linked-exile-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PendingPlayerScopeLinkedExile {
+pub(crate) struct PendingPlayerScopeTail {
     pub source_id: ObjectId,
     pub after_scope: Box<ResolvedAbility>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub batch: Vec<ObjectIncarnationRef>,
+    #[serde(rename = "batch", default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_exile_batch: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_tokens: Option<Vec<SeatCreatedTokens>>,
+}
+
+/// CR 608.2e + CR 400.7: one seat's creation result inside a player-scoped
+/// token-creation action — the tokens that seat's instruction created, each
+/// pinned to the incarnation it had when created. Keyed by the instructed
+/// seat, never by a token's owner or controller: a replacement can change who
+/// controls a created token (CR 616.1b), but the token is still the product of
+/// that seat's instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeatCreatedTokens {
+    pub seat: PlayerId,
+    pub tokens: Vec<ObjectIncarnationRef>,
+}
+
+/// Execution-local handoff of a completed player-scoped token-creation
+/// clause's per-seat results to its detached tail, installed only for the
+/// duration of that tail's resolution call. `source_id` is the producing
+/// instruction's source, so a co-scoped consumer binds origin only from its
+/// own producer's results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatedTokenSeatsHandoff {
+    pub source_id: ObjectId,
+    pub seats: Vec<SeatCreatedTokens>,
 }
 
 /// One execution of a resolving root, distinct for originals and spell copies.
@@ -2890,10 +2929,15 @@ pub struct PendingContinuation {
     /// unprocessed members of a selected multi-attachment operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_remainder: Option<PendingAttachmentRemainder>,
-    /// CR 608.2f: exact linked-exile union and detached unscoped tail owned by
-    /// a generated player-scope continuation. Legacy saves default to `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+    /// CR 608.2f: the detached unscoped tail of a generated player-scope
+    /// continuation and the channels it reads (linked-exile batch, per-seat
+    /// creation results). Legacy saves default to `None`.
+    #[serde(
+        rename = "player_scope_linked_exile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) player_scope_tail: Option<PendingPlayerScopeTail>,
     /// Private queue terminator for generated player-scope continuations. The
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2941,7 +2985,7 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
         }
     }
@@ -2965,9 +3009,101 @@ impl PendingContinuation {
             trigger_firing: state.resolving_trigger_firing,
             attachment_choice: None,
             attachment_remainder: None,
-            player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
+            player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod player_scope_tail_serde_tests {
+    use super::*;
+    use crate::types::ability::{Effect, ResolvedAbility};
+
+    fn continuation_with_tail(tail: PendingPlayerScopeTail) -> PendingContinuation {
+        let state = GameState {
+            resolving_player_scope_tail: Some(tail),
+            ..GameState::default()
+        };
+        let chain = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(7), PlayerId(0));
+        PendingContinuation::new(Box::new(chain), &state)
+    }
+
+    fn tail(created_tokens: Option<Vec<SeatCreatedTokens>>) -> PendingPlayerScopeTail {
+        PendingPlayerScopeTail {
+            source_id: ObjectId(7),
+            after_scope: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(7),
+                PlayerId(0),
+            )),
+            linked_exile_batch: vec![ObjectIncarnationRef::of(ObjectId(11), 2)],
+            created_tokens,
+        }
+    }
+
+    /// The generalized sidecar keeps the linked-exile-only wire shape: a
+    /// sidecar without a created-token channel serializes under the legacy
+    /// keys only, and that JSON decodes with the channel absent.
+    #[test]
+    fn linked_only_sidecar_keeps_legacy_wire_keys_and_decodes_without_created_channel() {
+        let pending = continuation_with_tail(tail(None));
+        let json = serde_json::to_value(&pending).expect("continuation serializes");
+        let sidecar = json
+            .get("player_scope_linked_exile")
+            .and_then(serde_json::Value::as_object)
+            .expect("sidecar rides its legacy key");
+        let mut keys: Vec<&str> = sidecar.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["after_scope", "batch", "source_id"]);
+
+        let decoded: PendingContinuation =
+            serde_json::from_value(json).expect("legacy-shaped sidecar decodes");
+        let decoded_tail = decoded.player_scope_tail.expect("sidecar decoded");
+        assert_eq!(
+            decoded_tail.linked_exile_batch,
+            vec![ObjectIncarnationRef::of(ObjectId(11), 2)]
+        );
+        assert_eq!(decoded_tail.created_tokens, None);
+    }
+
+    /// The per-seat creation channel round-trips with each seat's pins, in
+    /// order, including an empty seat (the shape a seat in progress has), and
+    /// its wire element is `{seat, tokens}`.
+    #[test]
+    fn created_token_channel_round_trips() {
+        let seats = vec![
+            SeatCreatedTokens {
+                seat: PlayerId(1),
+                tokens: vec![ObjectIncarnationRef::of(ObjectId(21), 3)],
+            },
+            SeatCreatedTokens {
+                seat: PlayerId(2),
+                tokens: Vec::new(),
+            },
+        ];
+        let pending = continuation_with_tail(tail(Some(seats.clone())));
+        let wire = serde_json::to_value(&pending).expect("continuation serializes");
+        let element = &wire["player_scope_linked_exile"]["created_tokens"][0];
+        let mut keys: Vec<&str> = element
+            .as_object()
+            .expect("a seat entry is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["seat", "tokens"]);
+        assert_eq!(element["seat"], serde_json::json!(1));
+        let decoded: PendingContinuation =
+            serde_json::from_value(wire).expect("continuation decodes");
+        assert_eq!(decoded, pending);
+        assert_eq!(
+            decoded
+                .player_scope_tail
+                .and_then(|scope| scope.created_tokens),
+            Some(seats)
+        );
     }
 }
 
@@ -13887,6 +14023,87 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
 }
 
+/// Upgrade the pre-merge coin-flip effects (`FlipCoin`, `FlipCoins { count }` and
+/// `FlipCoinUntilLose`) to the merged `FlipCoins { flips, .. }` at the persisted-state
+/// boundary, following the `migrate_legacy_tap_effects` precedent: card data and the
+/// transport `GameStateDecode::decode` path get no alias or migration, so obsolete tags
+/// stay rejected there.
+///
+/// The migration is total and lossless, so nothing is refused: each rewrite yields exactly
+/// the shape a fresh parse of the same card produces, and the run driver resolves it as
+/// the retired variant resolved.
+///
+/// Scope: `Effect` payloads under the two field names `Effect` occupies, `effect` and
+/// `replacement_effect` (`CreateDrawReplacement` and `CreatePlaneswalkReplacement` nest an
+/// `Effect` there). Coin-flip tags elsewhere are left alone.
+///
+/// Rewrite rules:
+/// - `FlipCoin` becomes `FlipCoins` with `flips: Exactly { count: Fixed 1 }`.
+/// - `FlipCoins` without a `flips` key moves its `count` (default `Fixed 1`) into
+///   `flips: Exactly { count }`.
+/// - `FlipCoinUntilLose { win_effect }` becomes `FlipCoins` with `flips: UntilLoss`, the same
+///   `win_effect`, no `lose_effect` and no `flipper` key (the retired variant always flipped
+///   for the controller, which is the `flipper` default).
+///
+/// Idempotent: a current `FlipCoins` always carries `flips`.
+///
+/// A legacy `FlipCoins` whose count is `Fixed 1` (no writer produced one) becomes the single flip.
+fn migrate_legacy_coin_flip_effects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_coin_flip_effects(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["effect", "replacement_effect"] {
+                if let Some(effect) = object.get_mut(key) {
+                    migrate_legacy_coin_flip_effect(effect);
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_coin_flip_effects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_legacy_coin_flip_effect(effect: &mut serde_json::Value) {
+    let Some(effect) = effect.as_object_mut() else {
+        return;
+    };
+    let Some(effect_type) = effect
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let exactly =
+        |count: serde_json::Value| serde_json::json!({ "type": "Exactly", "count": count });
+    let flips = match effect_type.as_str() {
+        "FlipCoin" => exactly(serde_json::json!({ "type": "Fixed", "value": 1 })),
+        "FlipCoins" if !effect.contains_key("flips") => exactly(
+            effect
+                .remove("count")
+                .unwrap_or_else(|| serde_json::json!({ "type": "Fixed", "value": 1 })),
+        ),
+        "FlipCoinUntilLose" => {
+            effect.insert("lose_effect".to_string(), serde_json::Value::Null);
+            effect.remove("flipper");
+            serde_json::json!({ "type": "UntilLoss" })
+        }
+        _ => return,
+    };
+
+    effect.insert(
+        "type".to_string(),
+        serde_json::Value::String("FlipCoins".to_string()),
+    );
+    effect.insert("flips".to_string(), flips);
+}
+
 /// Maps the pre-Option turn-face-up continuation wire shape onto the typed
 /// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
 /// never an X announcement, while `true` plus zero was.
@@ -23248,7 +23465,16 @@ declare_game_state! {
     /// The serialized authority lives on `PendingContinuation`; every pause
     /// re-parks it before control returns to callers.
     #[serde(skip)]
-    pub(crate) resolving_player_scope_linked_exile: Option<PendingPlayerScopeLinkedExile>,
+    pub(crate) resolving_player_scope_tail: Option<PendingPlayerScopeTail>,
+
+    /// Execution-local handoff of a completed player-scoped token clause's
+    /// per-seat creation results to its detached tail. Installed only around
+    /// that tail's resolution call and restored on every return (including
+    /// errors), so it is `None` whenever a stack object begins resolving.
+    /// Never serialized: a pause inside the tail carries the results on the
+    /// tail's own continuation instead.
+    #[serde(skip)]
+    pub(crate) resolving_created_token_seats: Option<CreatedTokenSeatsHandoff>,
 
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
@@ -24691,6 +24917,7 @@ impl GameStateDecode {
         )?;
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
+        migrate_legacy_coin_flip_effects(value);
         migrate_legacy_turn_face_up_resume(value)?;
         // Protocol 36: a v2 resolution wire is still accepted, and a v2 save can
         // be paused at either dungeon prompt, so the compatibility boundary has
@@ -29926,7 +30153,8 @@ impl GameState {
             payment_transaction_replay: false,
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
-            resolving_player_scope_linked_exile: None,
+            resolving_player_scope_tail: None,
+            resolving_created_token_seats: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -32960,7 +33188,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         payment_transaction_replay: _,
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
-        resolving_player_scope_linked_exile: _,
+        resolving_player_scope_tail: _,
+        resolving_created_token_seats: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
         may_trigger_auto_choices: _,
@@ -35498,6 +35727,148 @@ mod tests {
             persisted["unrelated"],
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_coin_flip_effects_migrate_only_effect_payloads() {
+        let single_flips =
+            serde_json::json!({ "type": "Exactly", "count": { "type": "Fixed", "value": 1 } });
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        // A single flip, with a nested counted flip in its win branch.
+                        "effect": {
+                            "type": "FlipCoin",
+                            "win_effect": {
+                                "effect": {
+                                    "type": "FlipCoins",
+                                    "count": { "type": "Fixed", "value": 3 },
+                                    "win_effect": null,
+                                    "lose_effect": null
+                                }
+                            },
+                            "lose_effect": null,
+                            "flipper": { "type": "TriggeringPlayer" }
+                        },
+                        "sub_ability": {
+                            // A counted flip with no `count` key reads as one flip.
+                            "effect": { "type": "FlipCoins", "win_effect": null }
+                        }
+                    }],
+                    "replacements": [{
+                        "execute": {
+                            "effect": {
+                                "type": "CreateDrawReplacement",
+                                "replacement_effect": {
+                                    "type": "FlipCoinUntilLose",
+                                    "win_effect": { "effect": { "type": "Draw" } }
+                                }
+                            }
+                        }
+                    }]
+                }
+            },
+            "unrelated": { "type": "FlipCoin" },
+            "unrelated_list": [{ "type": "FlipCoinUntilLose" }]
+        });
+
+        migrate_legacy_coin_flip_effects(&mut persisted);
+
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": single_flips,
+                "win_effect": {
+                    "effect": {
+                        "type": "FlipCoins",
+                        "flips": {
+                            "type": "Exactly",
+                            "count": { "type": "Fixed", "value": 3 }
+                        },
+                        "win_effect": null,
+                        "lose_effect": null
+                    }
+                },
+                "lose_effect": null,
+                "flipper": { "type": "TriggeringPlayer" }
+            }),
+            "FlipCoin becomes a single-flip FlipCoins, keeping its branches and flipper, \
+             and a nested FlipCoins moves its count into `flips`"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["sub_ability"]["effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": single_flips,
+                "win_effect": null
+            }),
+            "a FlipCoins without a count defaults to Fixed 1"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["replacements"][0]["execute"]["effect"]["replacement_effect"],
+            serde_json::json!({
+                "type": "FlipCoins",
+                "flips": { "type": "UntilLoss" },
+                "win_effect": { "effect": { "type": "Draw" } },
+                "lose_effect": null
+            }),
+            "FlipCoinUntilLose under `replacement_effect` becomes UntilLoss with no flipper key"
+        );
+        assert_eq!(
+            persisted["unrelated"],
+            serde_json::json!({ "type": "FlipCoin" }),
+            "only serialized Effect payloads are migrated"
+        );
+        assert_eq!(
+            persisted["unrelated_list"],
+            serde_json::json!([{ "type": "FlipCoinUntilLose" }]),
+            "only serialized Effect payloads are migrated"
+        );
+
+        let migrated = persisted.clone();
+        migrate_legacy_coin_flip_effects(&mut persisted);
+        assert_eq!(persisted, migrated, "the migration is idempotent");
+    }
+
+    /// The committed Dina/Conqueror capture holds legacy single `FlipCoin` triggers
+    /// (Krark-style objects 191 and 383); restoring it must reach the migration.
+    #[test]
+    fn committed_dump_coin_flips_restore_as_single_runs() {
+        use std::io::Read;
+
+        let dump = &include_bytes!("../../tests/fixtures/dina_conqueror_4p.json.gz")[..];
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(dump)
+            .read_to_string(&mut json)
+            .expect("the dump inflates");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        assert!(
+            json.contains("\"FlipCoin\""),
+            "reach guard: the capture predates the merge and carries legacy FlipCoin nodes"
+        );
+        let state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("the dump deserializes through the production decoder")
+            .into_game_state()
+            .expect("the dump restores");
+
+        let single_flip_triggers = state
+            .objects
+            .values()
+            .flat_map(|object| object.base_trigger_definitions.iter())
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .filter(|execute| {
+                matches!(
+                    &*execute.effect,
+                    Effect::FlipCoins { flips, .. } if flips.is_single_flip()
+                )
+            })
+            .count();
+        assert!(
+            single_flip_triggers >= 1,
+            "legacy FlipCoin triggers restore as single-flip FlipCoins"
         );
     }
 

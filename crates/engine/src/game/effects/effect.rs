@@ -229,6 +229,9 @@ fn evaluate_static_condition_for_ability(
             resolve_quantity_with_targets(state, lhs, ability),
             resolve_quantity_with_targets(state, rhs, ability),
         ),
+        StaticCondition::QuantityQuality { quantity, quality } => quality.matches(i64::from(
+            resolve_quantity_with_targets(state, quantity, ability),
+        )),
         StaticCondition::And { conditions } => conditions
             .iter()
             .all(|condition| evaluate_static_condition_for_ability(state, condition, ability)),
@@ -1497,6 +1500,62 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn quantity_quality_static_condition_for_ability_resolves_targets() {
+        use crate::types::ability::{NumberQuality, Parity, PlayerScope, TargetRef};
+        // The ability-scoped evaluator resolves the quantity against the
+        // ability's targets: "target player has an odd number of cards in hand".
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0x0D000),
+            PlayerId(0),
+            "Quality Target Source".to_string(),
+            Zone::Battlefield,
+        );
+        for (owner, count) in [(PlayerId(1), 3_u64), (PlayerId(0), 2)] {
+            for i in 0..count {
+                create_object(
+                    &mut state,
+                    CardId(0x0D100 + u64::from(owner.0) * 0x10 + i),
+                    owner,
+                    format!("Hand Card {i}"),
+                    Zone::Hand,
+                );
+            }
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Proliferate,
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let target_hand = |quality| StaticCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            quality,
+        };
+        assert!(
+            evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Odd)),
+                &ability
+            ),
+            "the targeted player's 3 cards are odd"
+        );
+        assert!(
+            !evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Even)),
+                &ability
+            ),
+            "the targeted player's 3 cards are not even"
+        );
+    }
 
     #[test]
     fn generic_effect_registers_transient_effect_for_self_ref() {

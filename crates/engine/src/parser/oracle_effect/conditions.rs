@@ -4836,6 +4836,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaid { .. }
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::QuantityQuality { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -6061,6 +6062,17 @@ pub(crate) fn static_condition_to_ability_condition(
             comparator: *comparator,
             rhs: rhs.clone(),
         }),
+        // CR 608.2h: 1:1 bridge, never None — a caller that drops a None lowers
+        // the effect to unconditional (see
+        // delayed_trigger_intervening_if_retains_the_commander_control_gate).
+        // `Not` over this variant goes through the generic `other =>` arm of the
+        // `Not` sub-match, giving `AbilityCondition::Not { QuantityQuality }`.
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            Some(AbilityCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
+            })
+        }
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
         // CR 103.1: Starting-player status — 1:1 bridge (same `controller` field).
         StaticCondition::WasStartingPlayer { controller } => {
@@ -6489,6 +6501,12 @@ pub(crate) fn ability_condition_to_static_condition(
                 lhs: lhs.clone(),
                 comparator: *comparator,
                 rhs: rhs.clone(),
+            })
+        }
+        AbilityCondition::QuantityQuality { quantity, quality } => {
+            Some(StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
             })
         }
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
@@ -9246,6 +9264,63 @@ mod tests {
         SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
+    /// returns `None` for it — a dropped `None` would lower the effect to
+    /// unconditional. Negation and conjunction ride the generic arms.
+    #[test]
+    fn quantity_quality_bridges_to_ability_condition_and_back() {
+        use crate::types::ability::NumberQuality;
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            },
+        };
+        let affirmative = StaticCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let ability_affirmative = AbilityCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&affirmative, &mut ParseContext::default()),
+            Some(ability_affirmative.clone())
+        );
+
+        let negated = StaticCondition::Not {
+            condition: Box::new(affirmative.clone()),
+        };
+        let ability_negated = AbilityCondition::Not {
+            condition: Box::new(ability_affirmative.clone()),
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&negated, &mut ParseContext::default()),
+            Some(ability_negated.clone()),
+            "Not(QuantityQuality) bridges structurally, never to None"
+        );
+
+        let conjunction = StaticCondition::And {
+            conditions: vec![affirmative.clone(), StaticCondition::DuringYourTurn],
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&conjunction, &mut ParseContext::default()),
+            Some(AbilityCondition::And {
+                conditions: vec![ability_affirmative.clone(), AbilityCondition::IsYourTurn],
+            })
+        );
+
+        // Reverse bridge round-trips both forms back to the static input.
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_affirmative),
+            Some(affirmative)
+        );
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_negated),
+            Some(negated)
+        );
+    }
 
     /// SHAPE: both adapters preserve the complete owner-relative negative predicate.
     /// CR 109.5 + CR 400.3: an owner's private zone must belong to the live controller.
