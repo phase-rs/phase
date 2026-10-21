@@ -3473,11 +3473,11 @@ mod tests {
         }
     }
 
-    /// v156: `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
+    /// v160: `ProtectionTarget` gains `EachColor(ProtectionColorSet)` (CR 702.16i
     /// "protection from each color that's not in your commander's color
     /// identity", Commander's Plate), which card data and `GameState` static
     /// definitions can now carry; a v155 peer cannot parse it, so it must be
-    /// refused before it receives v156 state.
+    /// refused before it receives v160 state.
     ///
     /// v155: `PendingChangeZoneIteration.remaining` carries each member's
     /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
@@ -3742,8 +3742,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_156_for_each_color_protection_set() {
-        assert_eq!(PROTOCOL_VERSION, 156);
+    fn protocol_version_is_160_for_each_color_protection_set() {
+        assert_eq!(PROTOCOL_VERSION, 160);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3754,7 +3754,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_156_for_each_color_protection_set` stays
+    /// `protocol_version_is_160_for_each_color_protection_set` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

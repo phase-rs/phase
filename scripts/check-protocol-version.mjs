@@ -97,7 +97,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // `ShortcutProposal.leading_aims`.
 // v155 carries each parked ChangeZone member's pre-event entry modifications
 // (`ChangeZoneMemberEntry`, CR 603.6a + CR 614.12) in GameState.
-// v156 adds `ProtectionTarget::EachColor(ProtectionColorSet)` (CR 702.16i) to card data and GameState static definitions.
+// v160 adds `ProtectionTarget::EachColor(ProtectionColorSet)` (CR 702.16i) to card data and GameState static definitions.
+// v156-v159 are held by other open PRs, so this PR's pair is reserved at 160/142.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -202,9 +203,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      `ManaAbilityCostCursor.counter_removal` to GameState.
 // +84: v155 retypes `PendingChangeZoneIteration.remaining` to `ChangeZoneMemberEntry`
 //      (pre-event entry modifications) and drops the raw gate fields.
-// +85: v156 adds `ProtectionTarget::EachColor(ProtectionColorSet)` to card data and
-//      GameState static definitions.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 85;
+// +89: v160 adds `ProtectionTarget::EachColor(ProtectionColorSet)` to card data and
+//      GameState static definitions (v156-v159 are held by other open PRs).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 89;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -314,8 +315,9 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
 // +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
 // +83: wire 137 moves with full-game v155 for the pre-event ChangeZone member entries.
-// +84: wire 138 moves with full-game v156 for the each-color protection set.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 84;
+// +88: wire 142 moves with full-game v160 for the each-color protection set (wire
+//      138-141 are held by other open PRs).
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 88;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

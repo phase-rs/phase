@@ -215,10 +215,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 156 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
+ * 160 — ProtectionTarget gains EachColor(ProtectionColorSet) (CR 702.16i "protection from
  *      each color that's not in your commander's color identity", Commander's Plate) in
- *      card data and GameState static definitions; a v155 peer cannot parse it. Wire 138
- *      moves with it.
+ *      card data and GameState static definitions; a v155 peer cannot parse it. Wire 142
+ *      moves with it. v156-v159 are held by other open PRs.
  * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
  *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
  *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
@@ -948,7 +948,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 156;
+export const PROTOCOL_VERSION = 160;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

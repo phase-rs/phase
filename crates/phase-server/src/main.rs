@@ -20358,50 +20358,19 @@ mod handshake_tests {
                 hello_acceptance(ServerMode::Full),
             )
         };
+        // v156-v159 are other open PRs' reserved versions; each is refused by a
+        // v160 server.
+        for client in [150, 151, 152, 153, 154, 155, 156, 157, 158, 159] {
+            assert_eq!(
+                classify(client),
+                HelloGateOutcome::RejectProtocol {
+                    client,
+                    server: 160
+                }
+            );
+        }
         assert_eq!(
-            classify(150),
-            HelloGateOutcome::RejectProtocol {
-                client: 150,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(151),
-            HelloGateOutcome::RejectProtocol {
-                client: 151,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(152),
-            HelloGateOutcome::RejectProtocol {
-                client: 152,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(153),
-            HelloGateOutcome::RejectProtocol {
-                client: 153,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(154),
-            HelloGateOutcome::RejectProtocol {
-                client: 154,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(155),
-            HelloGateOutcome::RejectProtocol {
-                client: 155,
-                server: 156
-            }
-        );
-        assert_eq!(
-            classify(156),
+            classify(160),
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "bestow-peer".into(),
                 build_commit: "bestow-build".into(),

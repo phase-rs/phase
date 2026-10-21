@@ -443,7 +443,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it.each([152, 153, 154, 155])("rejects Full v%s before it can read the EachColor protection set", async (version) => {
+  it.each([152, 153, 154, 155, 156, 157, 158, 159])("rejects Full v%s before it can read the EachColor protection set", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: version }));
@@ -454,10 +454,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v156 each-color protection set, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
+  it("accepts the literal Full v160 each-color protection set, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 156 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 160 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
