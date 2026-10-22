@@ -1,9 +1,12 @@
 //! CR 100.7 + CR 608.2c: a put-to-battlefield clause whose qualifier is
 //! "combined into one creature" (Monster Mash-Up; Grusilda, Monster Masher)
-//! instructs the player to create a combined creature, which the engine has no
-//! representation for. CR 100.7 says casual-play cards "may have features and
-//! text that aren't covered by these rules", and the keyword that causes a CR 730
-//! merge is mutate (CR 730.1), so the qualifier must NOT be read as CR 730.
+//! instructs the player to create a combined creature. The engine's combine
+//! machinery (`Effect::CombineHost`, `MergeKind::{Mutate, Meld, Augment}`) only
+//! merges onto an existing permanent and cannot enter two creature cards as one
+//! creature with summed power and toughness. CR 100.7 says casual-play cards
+//! "may have features and text that aren't covered by these rules", and the
+//! keyword that causes a CR 730 merge is mutate (CR 730.1), so the qualifier
+//! must NOT be read as CR 730.
 //! CR 608.2c requires reading the whole text, so silently lowering a plain
 //! `ChangeZone` (two separate creatures) would execute a different instruction
 //! than the card prints.
