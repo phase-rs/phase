@@ -325,6 +325,35 @@ fn barbarian_ring_ability_word_activated_router_is_ir_native() {
     insta::assert_json_snapshot!("barbarian_ring_activated_lowered", &lowered);
 }
 
+/// CR 602.1b + CR 511.1: "Activate only during the end of combat step" is an
+/// activation instruction naming one turn step with no turn owner; it lowers to
+/// a typed `RequiresCondition { CurrentPhaseIs }` restriction and leaves no
+/// `Effect::Unimplemented` residue on the damage ability.
+#[test]
+fn desert_named_step_activated_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "{T}: Add {C}.\n{T}: This land deals 1 damage to target attacking creature. Activate only during the end of combat step.",
+        "Desert",
+        &["Land"],
+        &["Desert"],
+    );
+
+    assert_eq!(lowered.abilities.len(), 2);
+    let ability = &lowered.abilities[1];
+    assert!(
+        !ability_has_unimplemented(ability),
+        "named-step activated route must not fall back: {ability:?}"
+    );
+    assert!(matches!(ability.effect.as_ref(), Effect::DealDamage { .. }));
+    assert!(
+        !ability.activation_restrictions.is_empty(),
+        "explicit Activate only restriction must survive"
+    );
+
+    insta::assert_json_snapshot!("desert_named_step_activated_ir", &ir);
+    insta::assert_json_snapshot!("desert_named_step_activated_lowered", &lowered);
+}
+
 /// CR 706.3b: an activated terminal die roll owns only its contiguous result
 /// rows and preserves them as native branch IR until final lowering.
 #[test]
@@ -3051,11 +3080,9 @@ fn themberchaud() {
 /// Conditional form: `"If this creature hasn't been exerted this turn, …"`.
 /// Combat Celebrant is the ONLY card in the pool that reaches this arm.
 ///
-/// Baselines a known pre-existing gap rather than hiding it: the leading
-/// if-gate is parsed for dispatch and then **dropped** — the emitted trigger
-/// carries no condition for it. That is recorded as a census harvest item; this
-/// fixture pins the current (wrong) shape so the conversion is provably
-/// behavior-preserving and the gap stays visible for a separate fix.
+/// The leading condition is retained as `attack_cost_condition`, checked before
+/// optional payment (CR 508.1g). The paid linked payoff remains a real trigger;
+/// the payment gate is not an intervening-if condition (CR 603.4).
 #[test]
 fn combat_celebrant() {
     let (ir, lowered) = parse_two_layer(

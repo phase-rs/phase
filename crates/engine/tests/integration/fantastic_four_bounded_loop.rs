@@ -5602,6 +5602,7 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         GameAction::ActivateAbility {
             source_id: torch,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
     assert!(

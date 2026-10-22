@@ -73,6 +73,7 @@ fn volatile_fault_that_player_search_routes_to_destroyed_lands_controller() {
         .act(GameAction::ActivateAbility {
             source_id: fault,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Volatile Fault's destroy ability must succeed");
 

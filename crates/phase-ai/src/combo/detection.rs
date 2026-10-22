@@ -144,6 +144,7 @@ fn resolve_action_sequence(
                 GameAction::ActivateAbility {
                     source_id,
                     ability_index: *ability_index as usize,
+                    payment_mode: CastPaymentMode::Auto,
                 }
             }),
             ComboStep::Cast { predicate } => {
@@ -291,6 +292,7 @@ mod tests {
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     } => {
                         assert_eq!(*source_id, src_id);
                         assert_eq!(*ability_index, 3);

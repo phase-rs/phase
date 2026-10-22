@@ -5377,6 +5377,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::InTrackedSet { .. }
@@ -6293,17 +6294,29 @@ fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
     ))
 }
 
+/// CR 509.1g + CR 509.1h: "blocking or blocked by <subject>". The subject is
+/// either another target ("... by target creature", resolved against the parent
+/// target) or the ability's own source ("... by ~" / "... by this creature" —
+/// Cromat, Lesser Werewolf, Sisters of Stone Death). `game::filter` evaluates
+/// both subjects; the source form mirrors the static-subject grammar in
+/// `oracle_static::shared`.
 fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
-        tag("creature"),
+    let (rest, subject) = preceded(
+        tag::<_, _, OracleError<'_>>(" blocking or blocked by "),
+        alt((
+            value(CombatRelationSubject::ParentTarget, tag("target creature")),
+            value(
+                CombatRelationSubject::Source,
+                alt((tag("~"), tag("this creature"))),
+            ),
+        )),
     )
-        .parse(text)
-        .ok()?;
+    .parse(text)
+    .ok()?;
     Some((
         FilterProp::CombatRelation {
             relation: CombatRelation::BlockingOrBlockedBy,
-            subject: CombatRelationSubject::ParentTarget,
+            subject,
         },
         text.len() - rest.len(),
     ))
@@ -11746,6 +11759,30 @@ mod tests {
                 }
             ]))
         );
+    }
+
+    /// CR 509.1g + CR 509.1h: the source-referent form ("~" after self-reference
+    /// normalization, or the literal "this creature") anchors the relation to the
+    /// ability's source instead of dropping it.
+    #[test]
+    fn target_creature_blocking_or_blocked_by_source() {
+        for text in [
+            "target creature blocking or blocked by ~",
+            "target creature blocking or blocked by this creature",
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockingOrBlockedBy,
+                        subject: CombatRelationSubject::Source,
+                    }
+                ])),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -245,6 +245,10 @@ impl ThresholdParser<'_> {
                 maximum: None,
             });
             def.activation_restrictions = restrictions;
+            crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
+                &mut def,
+                description,
+            );
             output.abilities.push((line_idx, def));
             return true;
         }

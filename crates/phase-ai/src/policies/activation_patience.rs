@@ -231,6 +231,7 @@ impl TacticalPolicy for ActivationPatiencePolicy {
         let GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } = &ctx.candidate.action
         else {
             return na();

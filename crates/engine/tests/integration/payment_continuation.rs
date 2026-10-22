@@ -98,6 +98,7 @@ fn flexible_mana_payment_state() -> engine::types::game_state::GameState {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real zero-cost mana ability is activatable while paying");
     assert!(matches!(

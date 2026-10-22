@@ -6,7 +6,7 @@ use crate::types::ability::{
     DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
     TargetRef, TriggerDefinition, TypedFilter,
 };
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::{ExertOrigin, GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -983,7 +983,7 @@ fn count_matching_trigger_event_subjects(
     let count_one = |id| u32::from(matches(id));
     match event {
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
-        GameEvent::CreatureExerted { object_id } => count_one(*object_id),
+        GameEvent::CreatureExerted { object_id, .. } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
@@ -1918,18 +1918,41 @@ pub(super) fn match_attacks(
     !matching_attack_events(event, trigger, source_context, state).is_empty()
 }
 
-/// CR 701.43d: The linked "when you do" trigger fires when its source creature
-/// is exerted (the optional "exert as it attacks" cost was paid). The exert
-/// ability is self-referential, so the exerted object must be the trigger
-/// source.
+/// CR 701.43a + CR 701.43d: Matches a permanent being exerted. The linked
+/// "when you do" trigger (CR 701.43d, CR 607.2h) is self-referential - its
+/// `valid_card` is `SelfRef`, so only its own source being exerted matches. A
+/// "whenever you exert a creature" observer carries a creature `valid_card` and
+/// `valid_target: Controller`, matching any creature exerted by the trigger's
+/// controller ("you" is the player who chose to exert, `CreatureExerted.player`).
 pub(super) fn match_exerted(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
-    let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::CreatureExerted { object_id } if *object_id == source_id)
+    let GameEvent::CreatureExerted {
+        object_id,
+        player,
+        origin,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if !valid_card_matches(trigger, state, *object_id, source_context) {
+        return false;
+    }
+    match trigger.valid_target {
+        // CR 701.43d + CR 607.2h: the attack-linked "when you do" trigger names
+        // no exerting player (an observer always does), and refers only to the
+        // exert paid as its own optional attack cost, never to one paid as part
+        // of an activated ability's cost on the same permanent.
+        None => *origin == ExertOrigin::AttackCost,
+        // A "whenever you exert" observer reads the saved actor; a legacy event
+        // that never recorded one matches no actor filter.
+        Some(_) => player
+            .is_some_and(|player| valid_player_matches(trigger, state, player, source_context)),
+    }
 }
 
 /// CR 607.2h + CR 702.154b: Enlist's linked "when you do" trigger fires only

@@ -1,5 +1,6 @@
 //! CR 612: word-substitution text changes driven through the real cast pipeline with the cards' verbatim Oracle text from the shared card database.
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::BTreeSet;
 
 use engine::game::ability_utils::build_resolved_from_def;
@@ -573,6 +574,7 @@ fn mana_symbols_are_not_words_but_the_color_word_is() {
         .act(GameAction::ActivateAbility {
             source_id: monument,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the mana ability");
     let WaitingFor::ChooseManaColor { choice, .. } = &runner.state().waiting_for else {

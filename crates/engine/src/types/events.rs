@@ -7,7 +7,7 @@ use crate::types::ability::AttachmentReferent;
 
 use super::ability::{
     AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
-    TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+    TargetRef, ThisWayCause, TriggerDefinitionRef, TypeFilter, TypedFilter,
 };
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
@@ -809,6 +809,16 @@ impl EventObjectSnapshot {
             // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
             // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
             FilterProp::Goaded
+            // CR 722.3a: prepared is a designation on the LIVE permanent
+            // (`GameObject::prepared`). The departure ledger carries it
+            // (`LKISnapshot` / `ZoneChangeRecord::was_prepared`, read by the
+            // runtime), but the event-subject projection (`EventObjectSnapshot`)
+            // this reach gate walks does not, so an event-subject prepared
+            // filter cannot be answered from a snapshot. Classify Unsupported so
+            // a future prepared event-subject filter fails the reach gate LOUDLY
+            // rather than silently reading an unprepared projection. Deferred
+            // follow-up (option a): snapshot prepared onto EventObjectSnapshot.
+            | FilterProp::Prepared
             | FilterProp::WasPlayed
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
@@ -880,6 +890,18 @@ impl PartialEq for LifeTotalReading {
 }
 
 impl Eq for LifeTotalReading {}
+
+/// CR 701.43: the way a permanent came to be exerted. CR 701.43d links an attack
+/// exert to its own "when you do" trigger (CR 607.2h), so that trigger must not
+/// see an exert paid as part of an activated ability's cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExertOrigin {
+    /// CR 701.43d: the optional cost of attacking ("exert this creature as it attacks").
+    #[default]
+    AttackCost,
+    /// CR 602.2b + CR 605.3b: an `{Exert}` cost of an activated ability.
+    AbilityCost,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -1135,11 +1157,29 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         incarnation: Option<u64>,
     },
-    /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
-    /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
-    /// Glory-Bound Initiate, ...).
+    /// CR 701.43a: A permanent was exerted by `player`, either as an optional
+    /// attack cost (CR 701.43d) or as part of an activated ability's cost.
+    /// Fires the linked `TriggerMode::Exerted` "when you do" trigger (Combat
+    /// Celebrant, Glory-Bound Initiate, ...) and "whenever you exert a creature"
+    /// observers, which key on `player`.
     CreatureExerted {
         object_id: ObjectId,
+        /// The player who chose to exert it. `None` on a legacy event: the
+        /// historical shape (an attack exert) never recorded its actor, and no
+        /// actor is invented for it - an observer keyed on "you exert" does not
+        /// match an event whose actor was not saved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<PlayerId>,
+        /// Which exert this was. A legacy event defaults to
+        /// [`ExertOrigin::AttackCost`]: attack exert was the only emitter before
+        /// activated-ability exert costs were recorded, so that is the saved
+        /// fact, not a guess.
+        #[serde(default)]
+        origin: ExertOrigin,
+        /// CR 607.2h: Exact optional attack permission whose cost was paid.
+        /// Historical completed events retain their original unbound meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attack_permission: Option<TriggerDefinitionRef>,
     },
     /// CR 702.154c: A creature enlisted another creature as it attacked. Fires
     /// the linked `TriggerMode::Enlisted` "when you do" trigger and carries the
@@ -2399,6 +2439,25 @@ mod tests {
             properties: vec![FilterProp::Goaded],
         });
         assert_eq!(classify(&goaded), Unsupported);
+    }
+
+    /// CR 722.3a: prepared is a designation on the LIVE permanent. The
+    /// departure ledger now carries it (`LKISnapshot` / `ZoneChangeRecord::
+    /// was_prepared`, read by the runtime), but the event-subject projection
+    /// (`EventObjectSnapshot`) still does not. The reach-gate classifier must
+    /// AGREE: a prepared event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently
+    /// certifying unprepared.
+    /// Revert-probe: returning Prepared to the Supported group makes classify
+    /// yield Supported, flipping this assertion.
+    #[test]
+    fn prepared_subject_filter_is_unsupported() {
+        let prepared = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Prepared],
+        });
+        assert_eq!(classify(&prepared), Unsupported);
     }
 
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole

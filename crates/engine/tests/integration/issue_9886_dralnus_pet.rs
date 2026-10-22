@@ -444,6 +444,7 @@ fn activated_discard_cost_does_not_overwrite_the_cast_carrier() {
         .act(GameAction::ActivateAbility {
             source_id: pet,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("P0 activates the discard ability");
     let mut discarded = false;

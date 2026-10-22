@@ -75,6 +75,22 @@ pub(crate) fn source_saddled_filter() -> TargetFilter {
     })
 }
 
+/// CR 722.3a: The runtime filter matching the prepared designation. Shared by
+/// the `parse_source_is_prepared` leaf (oracle_nom/condition.rs) and the
+/// trigger-side bridge, so both compose the same `SourceMatchesFilter {
+/// Typed([Prepared]) }` shape.
+///
+/// Property-only (empty `type_filters`): the designation is a permanent
+/// property, not a card-type fact. A prepared source that lost its creature
+/// type (One with the Stars) stays bound to "this creature" (CR 700.7), so a
+/// creature-type gate would misfire the negated intervening-if.
+pub(crate) fn prepared_source_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::Prepared],
+        ..Default::default()
+    })
+}
+
 fn parse_creature_subtype_or_list_prefix(lower: &str) -> Option<(TargetFilter, &str)> {
     crate::parser::oracle_static::parse_subtype_or_list_insensitive_prefix(lower)
 }
@@ -5194,14 +5210,15 @@ fn parse_cast_during_phase_condition(
 
 /// CR 500.1 + CR 505.1 + CR 505.1a: Map a phase/step *name phrase* to the
 /// concrete `Phase` set it denotes. Shared by the casting-time
-/// `parse_cast_during_phase_condition` and the resolution-time
-/// `parse_current_phase_condition`. NON-`all_consuming` by design — callers
+/// `parse_cast_during_phase_condition`, the resolution-time
+/// `parse_current_phase_condition`, and the activation during-gate in
+/// `oracle.rs` (`parse_activation_during_gate`). NON-`all_consuming` by design — callers
 /// wrap with `all_consuming` (or `preceded`) and own any trailing text. The
 /// `alt` ordering is load-bearing: the grouped "main phase" (both main phases,
 /// CR 505.1/505.1a) is tried before the "precombat"/"postcombat" refinements,
 /// and "end of combat step" before "end step", so the longest/grouped phrase
-/// wins.
-fn parse_phase_name_set(
+/// wins; likewise "upkeep step" is tried before the bare "upkeep" spelling.
+pub(crate) fn parse_phase_name_set(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
     alt((
@@ -5211,7 +5228,10 @@ fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
-        value(vec![Phase::Upkeep], tag("upkeep")),
+        value(
+            vec![Phase::Upkeep],
+            alt((tag("upkeep step"), tag("upkeep"))),
+        ),
         value(vec![Phase::Draw], tag("draw step")),
         value(vec![Phase::BeginCombat], tag("beginning of combat step")),
         value(vec![Phase::DeclareAttackers], tag("declare attackers step")),
@@ -6399,6 +6419,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not
         // an effect-resolution gate — no `AbilityCondition` equivalent.
@@ -9953,6 +9974,13 @@ mod tests {
             parse("it's your end step"),
             Some(your_phase(vec![Phase::End])),
         );
+        // The "upkeep step" spelling (shared with the activation during-gate)
+        // denotes the same step as the bare "upkeep" spelling (CR 503.1).
+        assert_eq!(
+            parse("it isn't your upkeep step"),
+            parse("it isn't your upkeep"),
+        );
+        assert!(parse("it isn't your upkeep step").is_some());
 
         // Negative: an unrelated condition must NOT be captured by this arm.
         assert_ne!(

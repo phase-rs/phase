@@ -40,6 +40,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -3357,6 +3358,7 @@ fn spellskite_on_fiery(with_equipment: bool) -> (GameRunner, ObjectId, ObjectId,
         .act(GameAction::ActivateAbility {
             source_id: spellskite,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Spellskite");
     if matches!(

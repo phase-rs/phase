@@ -7938,6 +7938,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: iron_fist,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation announced");
 
@@ -8045,6 +8046,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: red_hulk,
                     ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect("activation announced");
             let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for

@@ -114,6 +114,13 @@ pub enum EngineError {
     /// so there is no earlier acceptance to undo.
     #[error("Activation reversed: its locked cost can't be paid")]
     ActivationReversed { player: PlayerId },
+    /// CR 601.2 + CR 733.1: failure of the announced casting procedure, whose
+    /// pre-announcement boundary owns earlier cost payments too.
+    #[error("Spell cast reversed: its required cost can't be paid")]
+    SpellCastReversed {
+        player: PlayerId,
+        pending: Box<crate::types::game_state::PendingCast>,
+    },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -127,9 +134,9 @@ pub(crate) fn action_rejection_for_engine_error(
         EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
         EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
         EngineError::StaleAction => ActionRejectionCode::StaleAction,
-        EngineError::ActionNotAllowed(_) | EngineError::ActivationReversed { .. } => {
-            ActionRejectionCode::ActionNotAllowed
-        }
+        EngineError::ActionNotAllowed(_)
+        | EngineError::ActivationReversed { .. }
+        | EngineError::SpellCastReversed { .. } => ActionRejectionCode::ActionNotAllowed,
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -390,6 +397,7 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::ActivateAbility(announcement) => GameAction::ActivateAbility {
             source_id: announcement.source_id(&_access),
             ability_index: announcement.ability_index(&_access),
+            payment_mode: announcement.payment_mode(&_access),
         },
         PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
             object_id: announcement.object_id(&_access),
@@ -1412,9 +1420,12 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
+    records_cast_cost: bool,
+    independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
     suppress_auto_pass_once: bool,
-    boundary_snapshot: GameState,
+    boundary_snapshot: std::sync::Arc<GameState>,
+    cast_start_snapshot: Option<super::engine_casting::CastStartBoundary>,
     previous_interaction_waiting: WaitingFor,
     previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
     submitted_interaction_owner: Option<PlayerId>,
@@ -1534,8 +1545,15 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
-    let boundary_snapshot = state.clone();
-    let journal_start = state.resolved_rules_journal.entries().len();
+    let boundary_snapshot = std::sync::Arc::new(state.clone());
+    let cast_undo_boundary =
+        super::engine_casting::CastUndoBoundaryGuard::enter(boundary_snapshot.clone());
+    let mut journal_start = state.resolved_rules_journal.entries().len();
+    let independent_cast_action = matches!(&action, GameAction::Concede { .. })
+        .then(|| (authenticated_actor, semantic_owner, action.clone()));
+    let records_cast_cost = independent_cast_action.is_none()
+        && !matches!(&action, GameAction::Debug(_))
+        && !action.is_submitter_scoped();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
@@ -1565,7 +1583,7 @@ fn apply_action_boundary_core(
     if authorize_actor && !recovered_stale_priority_pass {
         if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     }
@@ -1573,9 +1591,12 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result: ActionResult::applied(vec![], state.waiting_for.clone()),
             journal_start,
+            records_cast_cost,
+            independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
             boundary_snapshot,
+            cast_start_snapshot: cast_undo_boundary.take(),
             previous_interaction_waiting,
             previous_interaction_slots,
             submitted_interaction_owner,
@@ -1608,9 +1629,52 @@ fn apply_action_boundary_core(
         Err(EngineError::ActivationReversed { player }) => {
             ActionResult::reversed(WaitingFor::Priority { player })
         }
+        Err(EngineError::SpellCastReversed { player, pending }) => {
+            if records_cast_cost {
+                super::engine_casting::record_spell_cast_undo(
+                    state,
+                    &boundary_snapshot,
+                    journal_start,
+                    None,
+                )?;
+            }
+            if boundary_snapshot.spell_cast_reversal.is_none() {
+                lifecycle.discard();
+                *state = cast_undo_boundary.restore(boundary_snapshot);
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay required additional cost".into(),
+                ));
+            }
+            let settlement = (|| {
+                journal_start = state
+                    .spell_cast_reversal
+                    .as_ref()
+                    .map(|root| root.journal_start)
+                    .unwrap_or(journal_start);
+                let mut events = Vec::new();
+                let waiting = super::engine_casting::cancel_pending_cast(
+                    state,
+                    player,
+                    &pending,
+                    &mut events,
+                )?;
+                Ok::<_, EngineError>((events, waiting))
+            })();
+            let (events, waiting) = match settlement {
+                Ok(settled) => settled,
+                Err(error) => {
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(error);
+                }
+            };
+            state.waiting_for = waiting.clone();
+            super::play_trace::casting_procedure_reversed(state);
+            ActionResult::applied(events, waiting)
+        }
         Err(err) => {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     };
@@ -1623,14 +1687,17 @@ fn apply_action_boundary_core(
     // and discards the lifecycle frame for a reversed result.
     if !result.disposition.is_applied() {
         let reversal = result.waiting_for.clone();
-        *state = boundary_snapshot.clone();
+        *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
         return Ok(RawActionApplication {
             result,
             journal_start,
+            records_cast_cost,
+            independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
             boundary_snapshot,
+            cast_start_snapshot: cast_undo_boundary.take(),
             previous_interaction_waiting,
             previous_interaction_slots,
             submitted_interaction_owner,
@@ -1670,7 +1737,7 @@ fn apply_action_boundary_core(
         }
         Ok(None) => false,
         Err(err) => {
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     };
@@ -1689,7 +1756,7 @@ fn apply_action_boundary_core(
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     }
@@ -1705,9 +1772,12 @@ fn apply_action_boundary_core(
     Ok(RawActionApplication {
         result,
         journal_start,
+        records_cast_cost,
+        independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
         boundary_snapshot,
+        cast_start_snapshot: cast_undo_boundary.take(),
         previous_interaction_waiting,
         previous_interaction_slots,
         submitted_interaction_owner,
@@ -2221,9 +2291,12 @@ fn finish_action_boundary_with_lifecycle(
     let RawActionApplication {
         mut result,
         journal_start,
+        records_cast_cost,
+        independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
         boundary_snapshot,
+        cast_start_snapshot,
         previous_interaction_waiting,
         previous_interaction_slots,
         submitted_interaction_owner,
@@ -2236,7 +2309,7 @@ fn finish_action_boundary_with_lifecycle(
         reconcile_terminal_result,
     ) {
         lifecycle.discard();
-        *state = boundary_snapshot;
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(err);
     }
     bump_state_revision(state);
@@ -2266,7 +2339,7 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         lifecycle.discard();
-        *state = boundary_snapshot;
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(err);
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
@@ -2304,11 +2377,43 @@ fn finish_action_boundary_with_lifecycle(
         .is_err()
         {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
             return Err(EngineError::InvalidAction(
                 "Unable to allocate interaction authority for the resulting decision".to_string(),
             ));
         }
+    }
+    // CR 733.1: capture after information/interaction settlement too, so a
+    // library reveal cannot evade its exception merely by journaling late.
+    let recording = (|| {
+        if let Some((actor, owner, action)) = independent_cast_action {
+            super::engine_casting::preserve_independent_cast_action(
+                state,
+                &boundary_snapshot,
+                actor,
+                owner,
+                action,
+            )?;
+        } else if records_cast_cost && !reversed {
+            let cast_start = cast_start_snapshot.as_ref().filter(|boundary| {
+                state
+                    .spell_cast_reversal
+                    .as_ref()
+                    .is_some_and(|root| root.object_id == boundary.object_id)
+            });
+            super::engine_casting::record_spell_cast_undo(
+                state,
+                &boundary_snapshot,
+                boundary_snapshot.resolved_rules_journal.entries().len(),
+                cast_start,
+            )?;
+        }
+        Ok::<_, EngineError>(())
+    })();
+    if let Err(error) = recording {
+        lifecycle.discard();
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        return Err(error);
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -7146,6 +7251,110 @@ struct RecastAbort;
 /// activation (it stopped at its CR 601.2f cost election) can put it back.
 /// Called from exactly two places: the `ActivateAbility` arm and the
 /// activation-election resume arm.
+/// CR 107.4f + CR 601.2f + CR 601.2h: the existing Phyrexian payment answer —
+/// a spell's, or an automatically paid activation's — validated against the
+/// current state (choice count, each shard's current options and the whole
+/// route's affordability) before the cast or activation resumes.
+fn submit_ordinary_phyrexian_choices(
+    state: &mut GameState,
+    player: PlayerId,
+    spell_object: ObjectId,
+    expected_len: usize,
+    choices: &[crate::types::game_state::ShardChoice],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if choices.len() != expected_len {
+        return Err(EngineError::InvalidAction(format!(
+            "Phyrexian choice count mismatch: expected {expected_len}, got {}",
+            choices.len()
+        )));
+    }
+    // CR 118.3: Re-validate affordability against current state — life may have
+    // dropped mid-cast (e.g., a life-loss replacement fired), so `PayLife` choices
+    // on shards that now show `LifeOnly`/`ManaOrLife` must still have life available.
+    {
+        let pending_ref = state.pending_cast.as_ref().ok_or_else(|| {
+            EngineError::InvalidAction("No pending cast for Phyrexian payment".to_string())
+        })?;
+        let cost = pending_ref.cost.clone();
+        let player_pool = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.clone())
+            .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+        let activation_ability_index = pending_ref.activation_ability_index;
+        let current_shards = if let Some(ability_index) = activation_ability_index {
+            let activation_context =
+                casting::activation_payment_context(state, spell_object, Some(ability_index));
+            let activation_ctx = activation_context.as_payment_context();
+            let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
+                state,
+                player,
+                Some(spell_object),
+                Some(&activation_ctx),
+            );
+            let permissions = super::static_abilities::build_cost_permission_context(
+                state,
+                player,
+                mana_spend_permission,
+            );
+            mana_payment::compute_phyrexian_shards(
+                &player_pool,
+                &cost,
+                Some(&activation_ctx),
+                permissions,
+            )
+        } else {
+            let spell_meta = casting::build_spell_meta(state, player, spell_object);
+            let spell_ctx = spell_meta
+                .as_ref()
+                .map(crate::types::mana::PaymentContext::Spell);
+            let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
+                state,
+                player,
+                Some(spell_object),
+                spell_ctx.as_ref(),
+            );
+            let permissions = super::static_abilities::build_cost_permission_context(
+                state,
+                player,
+                mana_spend_permission,
+            );
+            mana_payment::compute_phyrexian_shards(
+                &player_pool,
+                &cost,
+                spell_ctx.as_ref(),
+                permissions,
+            )
+        };
+        if current_shards.len() != expected_len {
+            return Err(EngineError::ActionNotAllowed(
+                "Phyrexian shard count changed during pause".to_string(),
+            ));
+        }
+        for (choice, shard) in choices.iter().zip(current_shards.iter()) {
+            if let (
+                crate::types::game_state::ShardChoice::PayLife,
+                crate::types::game_state::ShardOptions::ManaOnly,
+            ) = (choice, shard.options)
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay life for shard — only mana available".to_string(),
+                ));
+            }
+        }
+        if !casting::pending_phyrexian_route_is_payable(state, player, spell_object, choices) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost with selected Phyrexian route".to_string(),
+            ));
+        }
+    }
+    // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
+    // `active_payment_pins` itself on every Ok/Err path; no caller clear.
+    casting_costs::finalize_mana_payment_with_phyrexian_choices(state, player, choices, events)
+}
+
 fn begin_non_mana_activation(state: &mut GameState, player: PlayerId) -> Option<Vec<ObjectId>> {
     state.lands_tapped_for_mana.remove(&player)
 }
@@ -8259,10 +8468,10 @@ fn seed_representative_fodder(
         count: 1,
         copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
             values: Box::new(profile.clone()),
-            display_source: crate::game::game_object::DisplaySource::Token,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: crate::game::game_object::DisplaySource::Token,
+                ..Default::default()
+            },
             extra_keywords: vec![],
             additional_modifications: vec![],
             tapped,
@@ -12231,6 +12440,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode,
             },
         ) => {
             if state.priority_player
@@ -12287,21 +12497,23 @@ fn apply_non_priority_pass_action(
             {
                 // CR 606.3: Loyalty abilities activate once per turn at sorcery speed.
                 state.lands_tapped_for_mana.remove(player);
-                planeswalker::handle_activate_loyalty(
+                planeswalker::handle_activate_loyalty_with_payment_mode(
                     state,
                     *player,
                     source_id,
                     ability_index,
+                    payment_mode,
                     &mut events,
                 )?
             } else {
                 // Non-mana activated ability — the acceptance authority brackets it.
                 let cleared = begin_non_mana_activation(state, *player);
-                let wf = casting::handle_activate_ability(
+                let wf = casting::handle_activate_ability_with_payment_mode(
                     state,
                     *player,
                     source_id,
                     ability_index,
+                    payment_mode,
                     &mut events,
                 )?;
                 if activation_cost_still_open(state, &wf) {
@@ -13381,14 +13593,37 @@ fn apply_non_priority_pass_action(
                 pending_cast,
             },
             GameAction::ChooseActivationCostBranch { index },
-        ) => engine_casting::handle_activation_cost_one_of_choice(
-            state,
-            *player,
-            *pending_cast.clone(),
-            costs,
-            index,
-            &mut events,
-        )?,
+        ) => {
+            // CR 601.2b + CR 601.2f + CR 602.2: an alternative announced while
+            // the activation is proposed precedes its cost lock, so its answer
+            // continues to that lock: the acceptance authority brackets it
+            // exactly as it brackets `ActivateAbility`.
+            let proposal = pending_cast
+                .activation_cost_snapshot
+                .as_deref()
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.lock,
+                        crate::types::casting_costs::ActivationCostLock::Open { .. }
+                    )
+                });
+            let player = *player;
+            let cleared = proposal.then(|| begin_non_mana_activation(state, player));
+            let waiting_for = engine_casting::handle_activation_cost_one_of_choice(
+                state,
+                player,
+                *pending_cast.clone(),
+                costs,
+                index,
+                &mut events,
+            )?;
+            if let Some(cleared) = cleared {
+                if activation_cost_still_open(state, &waiting_for) {
+                    restore_non_mana_activation(state, player, cleared);
+                }
+            }
+            waiting_for
+        }
         (
             WaitingFor::ActivationCostOneOfChoice {
                 player,
@@ -13866,6 +14101,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             },
         ) => engine_payment_choices::handle_unless_payment_activate_ability(
             state,
@@ -13925,7 +14161,7 @@ fn apply_non_priority_pass_action(
             // its origin zone via `cancel_pending_cast`.
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -13980,7 +14216,7 @@ fn apply_non_priority_pass_action(
             // X value. Pop the stack entry placed at announcement and restore.
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -14085,6 +14321,18 @@ fn apply_non_priority_pass_action(
                 object_id,
                 value,
             });
+            // CR 118.13a + CR 601.2b: a manually paid activation announces how
+            // it will pay its printed Phyrexian symbols after X and before its
+            // targets and the lock that waited for X; nothing is paid.
+            let whole_cost = state
+                .pending_cast
+                .as_deref()
+                .map(casting::activation_x_whole_cost)
+                .filter(|whole_cost| {
+                    state.pending_cast.as_deref().is_some_and(|pending| {
+                        casting::manual_activation_awaits_native_announcement(pending, whole_cost)
+                    })
+                });
             // CR 601.2b + CR 601.2f + CR 602.2b: an activation whose mana `{X}`
             // deferred its cost lock locks it now, against the concrete cost —
             // and may raise the reduction-order election here. The activation is
@@ -14105,7 +14353,15 @@ fn apply_non_priority_pass_action(
                     })
                 })
                 .and_then(|pending| pending.activation_ability_index);
-            if let Some(prompt) = casting::lock_activation_cost_at_x(state, player, convoke_mode)? {
+            if let Some(whole_cost) = whole_cost {
+                let root = *state
+                    .pending_cast
+                    .take()
+                    .expect("checked pending cast presence");
+                casting::native_phyrexian_announcement_prompt(state, player, root, &whole_cost)
+            } else if let Some(prompt) =
+                casting::lock_activation_cost_at_x(state, player, convoke_mode)?
+            {
                 prompt
             } else {
                 if x_lock_acceptance.is_some() {
@@ -14212,7 +14468,7 @@ fn apply_non_priority_pass_action(
         (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -14306,117 +14562,78 @@ fn apply_non_priority_pass_action(
         ) => {
             let player = *player;
             let spell_object = *spell_object;
-            let expected_len = shards.len();
-            if choices.len() != expected_len {
-                return Err(EngineError::InvalidAction(format!(
-                    "Phyrexian choice count mismatch: expected {expected_len}, got {}",
-                    choices.len()
-                )));
-            }
-            // CR 118.3: Re-validate affordability against current state — life may have
-            // dropped mid-cast (e.g., a life-loss replacement fired), so `PayLife` choices
-            // on shards that now show `LifeOnly`/`ManaOrLife` must still have life available.
-            {
-                let pending_ref = state.pending_cast.as_ref().ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for Phyrexian payment".to_string())
-                })?;
-                let cost = pending_ref.cost.clone();
-                let player_pool = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.mana_pool.clone())
-                    .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                let activation_ability_index = pending_ref.activation_ability_index;
-                let current_shards = if let Some(ability_index) = activation_ability_index {
-                    let activation_context = casting::activation_payment_context(
-                        state,
-                        spell_object,
-                        Some(ability_index),
-                    );
-                    let activation_ctx = activation_context.as_payment_context();
-                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
+            match casting::manual_activation_phyrexian_prompt_kind(state) {
+                // CR 118.13a + CR 601.2b: a manually paid activation's
+                // announcement, made while it is proposed. Nothing is paid and no
+                // resource is checked; the activation resumes its proposal with
+                // the announcement bound (its lock follows). It is accepted where
+                // its cost locks, so the acceptance authority brackets the resume
+                // exactly as it brackets `ActivateAbility`.
+                Some(casting::ManualPhyrexianPrompt::Announcement) => {
+                    let records = casting::native_announcement_records(state, shards, &choices)?;
+                    let cleared = begin_non_mana_activation(state, player);
+                    let waiting_for = casting::resume_activation_after_native_announcement(
                         state,
                         player,
-                        Some(spell_object),
-                        Some(&activation_ctx),
-                    );
-                    let permissions = super::static_abilities::build_cost_permission_context(
-                        state,
-                        player,
-                        mana_spend_permission,
-                    );
-                    mana_payment::compute_phyrexian_shards(
-                        &player_pool,
-                        &cost,
-                        Some(&activation_ctx),
-                        permissions,
-                    )
-                } else {
-                    let spell_meta = casting::build_spell_meta(state, player, spell_object);
-                    let spell_ctx = spell_meta
-                        .as_ref()
-                        .map(crate::types::mana::PaymentContext::Spell);
-                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
-                        state,
-                        player,
-                        Some(spell_object),
-                        spell_ctx.as_ref(),
-                    );
-                    let permissions = super::static_abilities::build_cost_permission_context(
-                        state,
-                        player,
-                        mana_spend_permission,
-                    );
-                    mana_payment::compute_phyrexian_shards(
-                        &player_pool,
-                        &cost,
-                        spell_ctx.as_ref(),
-                        permissions,
-                    )
-                };
-                if current_shards.len() != expected_len {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Phyrexian shard count changed during pause".to_string(),
-                    ));
+                        records,
+                        None,
+                        &mut events,
+                    )?;
+                    if activation_cost_still_open(state, &waiting_for) {
+                        restore_non_mana_activation(state, player, cleared);
+                    }
+                    waiting_for
                 }
-                for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-                    if let (
-                        crate::types::game_state::ShardChoice::PayLife,
-                        crate::types::game_state::ShardOptions::ManaOnly,
-                    ) = (choice, shard.options)
-                    {
+                // CR 601.2h + CR 107.4f: a manually paid activation's actual
+                // payment, after the CR 601.2g opportunity. The answers are bound
+                // to their raw symbols on the root, then the whole announced route
+                // must be payable now — the moment the cost is paid, so the
+                // current life total limits each life payment (CR 118.3 +
+                // CR 119.4).
+                Some(casting::ManualPhyrexianPrompt::Payment) => {
+                    casting_costs::bind_manual_activation_payment_choices(state, shards, &choices)?;
+                    let payment = {
+                        let pending = state.pending_cast.as_deref().ok_or_else(|| {
+                            EngineError::InvalidAction(
+                                "No pending activation for Phyrexian payment".to_string(),
+                            )
+                        })?;
+                        casting_costs::manual_activation_payment(state, player, pending)?
+                    };
+                    if !casting::pending_phyrexian_route_is_payable_for(
+                        state,
+                        player,
+                        spell_object,
+                        &payment.view,
+                        &payment.choices,
+                    ) {
                         return Err(EngineError::ActionNotAllowed(
-                            "Cannot pay life for shard — only mana available".to_string(),
+                            "Cannot pay mana cost with selected Phyrexian route".to_string(),
                         ));
                     }
+                    casting_costs::finalize_mana_payment_with_phyrexian_choices(
+                        state,
+                        player,
+                        &payment.choices,
+                        &mut events,
+                    )?
                 }
-                if !casting::pending_phyrexian_route_is_payable(
+                None => submit_ordinary_phyrexian_choices(
                     state,
                     player,
                     spell_object,
+                    shards.len(),
                     &choices,
-                ) {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot pay mana cost with selected Phyrexian route".to_string(),
-                    ));
-                }
+                    &mut events,
+                )?,
             }
-            // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
-            // `active_payment_pins` itself on every Ok/Err path; no caller clear.
-            casting_costs::finalize_mana_payment_with_phyrexian_choices(
-                state,
-                player,
-                &choices,
-                &mut events,
-            )?
         }
         // CR 601.2i: CancelCast during Phyrexian payment rolls back the cast —
         // mirrors the ManaPayment CancelCast path.
         (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -14430,6 +14647,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             },
         ) => {
             let (player, resume) =
@@ -14920,6 +15138,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::ExertChoice {
                 player,
                 attacker,
+                permission,
                 remaining,
             },
             GameAction::ChooseExert { exert },
@@ -14930,13 +15149,20 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            engine_combat::validate_attack_exert_permission(state, *player, *attacker, permission)?;
             if exert {
-                engine_combat::apply_attack_exert(state, *attacker, &mut events);
+                engine_combat::apply_attack_exert(
+                    state,
+                    *attacker,
+                    permission.clone(),
+                    &mut events,
+                );
             }
             if let Some((next, rest)) = remaining.split_first() {
                 WaitingFor::ExertChoice {
                     player: *player,
-                    attacker: *next,
+                    attacker: next.attacker,
+                    permission: next.permission.clone(),
                     remaining: rest.to_vec(),
                 }
             } else if let Some(waiting_for) =
@@ -16364,7 +16590,7 @@ fn apply_non_priority_pass_action(
         (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -16578,6 +16804,7 @@ fn apply_non_priority_pass_action(
                 player,
                 source_id,
                 available,
+                max_total,
                 pending_effect,
                 ..
             },
@@ -16589,6 +16816,7 @@ fn apply_non_priority_pass_action(
                 &selections,
                 *source_id,
                 available,
+                *max_total,
                 pending_effect,
             )
             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
@@ -17534,6 +17762,8 @@ pub(super) fn begin_pending_trigger_target_selection(
                                     ability_index: None,
                                     ability_cost: None,
                                     activation_cost_snapshot: None,
+                                    activation_payment_mode:
+                                        crate::types::game_state::CastPaymentMode::Auto,
                                     unavailable_modes,
                                 }));
                             }
@@ -17559,6 +17789,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 ability_index: None,
                 ability_cost: None,
                 activation_cost_snapshot: None,
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 unavailable_modes,
             }));
         }
@@ -20766,6 +20997,75 @@ mod priority_principal_tests {
 
         assert!(apply_actionless_priority_pass_for_prospective(&mut state).is_err());
         assert_eq!(state, before);
+    }
+
+    /// CR 602.2b + CR 601.2g: the Priority preflight announces an activation in
+    /// the payment mode its offer carries. Greed ("{B}, Pay 2 life: Draw a
+    /// card.") at one life with a Swamp and two Pristine Talismans ("{T}: Add
+    /// {C}. You gain 1 life.") can be completed only by a manual payment, so its
+    /// announcement reconstructs a Manual activation, which the reducer opens
+    /// into the mana-payment window; at three life the same announcement is
+    /// automatic and the activation is put on the stack.
+    #[test]
+    fn activate_ability_announcement_carries_the_offered_payment_mode() {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::CastPaymentMode;
+
+        for (life, expected) in [(1, CastPaymentMode::Manual), (3, CastPaymentMode::Auto)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain).with_life(P0, life);
+            let greed = scenario
+                .add_enchantment_from_oracle(P0, "Greed", "{B}, Pay 2 life: Draw a card.")
+                .id();
+            scenario.add_basic_land(P0, ManaColor::Black);
+            for _ in 0..2 {
+                scenario.add_artifact_from_oracle(
+                    P0,
+                    "Pristine Talisman",
+                    "{T}: Add {C}. You gain 1 life.",
+                );
+            }
+            let runner = scenario.build();
+            let state = runner.state();
+            let principal =
+                priority_principal_for_preflight(state).expect("a synchronized priority window");
+
+            let announced: Vec<GameAction> = priority_preflight_candidates(state, &principal)
+                .into_iter()
+                .filter_map(|candidate| match candidate {
+                    PriorityPreflightCandidate::Announcement(announcement) => {
+                        Some(priority_announcement_to_action(announcement))
+                    }
+                    PriorityPreflightCandidate::Indeterminate { .. } => None,
+                })
+                .filter(|action| {
+                    matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == greed)
+                })
+                .collect();
+            assert_eq!(
+                announced,
+                vec![GameAction::ActivateAbility {
+                    source_id: greed,
+                    ability_index: 0,
+                    payment_mode: expected,
+                }],
+                "life {life}"
+            );
+
+            let mut projected = state.clone();
+            super::apply_as_current(&mut projected, announced[0].clone())
+                .expect("the announced activation reduces");
+            match expected {
+                CastPaymentMode::Manual => assert!(
+                    matches!(projected.waiting_for, WaitingFor::ManaPayment { .. }),
+                    "CR 601.2g: the manual activation opens the window: {:?}",
+                    projected.waiting_for
+                ),
+                CastPaymentMode::Auto | CastPaymentMode::AutoExceptSacrificialMana => {
+                    assert_eq!(projected.stack.len(), 1, "the activation is on the stack")
+                }
+            }
+        }
     }
 }
 
@@ -24623,6 +24923,7 @@ mod kilo_interruptibility_tests {
             GameAction::ActivateAbility {
                 source_id: RELIC,
                 ability_index: RELIC_TAP_MANA,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate Relic mana ability");
@@ -24671,6 +24972,7 @@ mod kilo_interruptibility_tests {
                             GameAction::ActivateAbility {
                                 source_id: FREED,
                                 ability_index: FREED_UNTAP,
+                                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                             },
                         )
                         .expect("activate Freed untap");
@@ -27752,6 +28054,7 @@ mod resolving_carrier_settle_tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
             let mut events = resolve_from_nonactive_window(&mut runner);
@@ -28019,6 +28322,7 @@ mod resolving_carrier_settle_tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap()
                 .events;

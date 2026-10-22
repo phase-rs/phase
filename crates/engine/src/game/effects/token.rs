@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
+use crate::game::game_object::{
+    AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
+};
 use crate::game::quantity::{
     quantity_expr_recipient_read, resolve_quantity_with_targets,
     resolve_quantity_with_targets_and_recipient, RecipientRead,
@@ -1520,13 +1522,7 @@ pub(crate) fn materialize_token_copy_body(
         &copy.additional_modifications,
     );
     values.static_definitions = Arc::new(cda_pruning.definitions);
-    apply_copiable_values_to_liminal_object(
-        object,
-        &values,
-        copy.display_source,
-        copy.printed_ref.clone(),
-        copy.token_image_ref.clone(),
-    );
+    apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
     // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
     // on top of the copied characteristics. Twinflame's haste copies are the
@@ -1583,14 +1579,9 @@ pub(crate) fn reserve_liminal_token_object(
 pub(crate) fn apply_copiable_values_to_liminal_object(
     object: &mut GameObject,
     values: &CopiableValues,
-    display_source: DisplaySource,
-    printed_ref: Option<crate::types::card::PrintedCardRef>,
-    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    display: &DisplayIdentity,
 ) {
-    object.display_source = display_source;
-    object.printed_ref = printed_ref.clone();
-    object.base_printed_ref = printed_ref;
-    object.token_image_ref = token_image_ref;
+    object.install_display_identity_as_base(display);
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
@@ -4918,9 +4909,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         state.objects.insert(token_id, token);
 
@@ -6325,6 +6317,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: spawn,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Spawn mana ability should activate");
@@ -8560,9 +8553,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         let timestamp = state.next_timestamp();
         token.reset_for_battlefield_entry(state.turn_number, timestamp);
@@ -8582,10 +8576,10 @@ mod tests {
                 created_ids: Vec::new(),
                 copy_resume: Some(Box::new(CopyTokenSpec {
                     values: Box::new(values.clone()),
-                    display_source: DisplaySource::Token,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: DisplayIdentity {
+                        display_source: DisplaySource::Token,
+                        ..Default::default()
+                    },
                     extra_keywords: Vec::new(),
                     additional_modifications: Vec::new(),
                     tapped: false,

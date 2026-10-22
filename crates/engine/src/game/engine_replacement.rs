@@ -964,11 +964,21 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
-                // are always Mandatory and applied inline by
-                // `flip_coin::flip_through_replacement`; they never reach the
-                // optional replacement-choice resume path. Unreachable in
-                // practice — present only for match exhaustiveness.
+                // CR 616.1 + CR 705.1: every coin-flip replacement parsed today
+                // (Krark's Thumb) is a count multiplier that
+                // `candidate_materiality` classifies as a commuting `Count`
+                // writer, and its mode is Mandatory — so competing coin-flip
+                // replacements auto-apply and a CoinFlip NEVER parks for an
+                // ordering or an optional choice. An optional coin-flip
+                // replacement (Pokey, the Scallywagg, currently unparsed) would
+                // reach this arm even alone, through the optional-choice path.
+                //
+                // A non-commuting coin-flip replacement would need its flip
+                // context parked OUTSIDE the resolution stack (the
+                // `pending_die_roll_instruction` precedent) plus a delivery
+                // here; `flip_through_replacement`'s `NeedsChoice` arm cannot
+                // serve it, because it parks a keep-choice frame whose gate does
+                // not match `ReplacementChoice`.
                 ProposedEvent::CoinFlip { .. } => {
                     debug_assert!(
                         false,
@@ -2009,26 +2019,17 @@ fn handle_persist_chosen_attribute_choice(
     )?;
     // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
     // source), captured alongside the values — NOT a copiable value itself.
-    let (display_source, printed_ref, token_image_ref, token_art) = state
+    let display = state
         .objects
         .get(&donor_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-                o.token_art.clone(),
-            )
-        })
+        .map(|o| o.display_identity())
         .unwrap_or_default();
 
     // CR 400.7: persist the frozen snapshot on the Aura so it is cleared
     // automatically when the Aura changes zones (exactly the copy's lifetime).
     let snapshot = crate::types::ability::LatchedCopiableSnapshot {
         values: values.clone(),
-        display_source,
-        printed_ref: printed_ref.clone(),
-        token_image_ref: token_image_ref.clone(),
+        display: display.clone(),
     };
     if let Some(aura) = state.objects.get_mut(&source_id) {
         aura.chosen_attributes
@@ -2136,10 +2137,7 @@ fn handle_persist_chosen_attribute_choice(
         duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         additional_modifications: Vec::new(),
         effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
     };
@@ -8231,10 +8229,10 @@ mod tests {
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Token,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: crate::game::game_object::DisplayIdentity {
+                    display_source: crate::game::game_object::DisplaySource::Token,
+                    ..Default::default()
+                },
                 extra_keywords: Vec::new(),
                 additional_modifications: Vec::new(),
                 tapped: false,

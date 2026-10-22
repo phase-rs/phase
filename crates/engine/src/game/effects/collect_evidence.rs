@@ -638,6 +638,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
             cost_move_resume: None,

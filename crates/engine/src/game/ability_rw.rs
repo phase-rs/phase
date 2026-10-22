@@ -2097,6 +2097,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -2590,6 +2591,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -2889,6 +2891,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -3032,6 +3035,10 @@ fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
 fn legacy_trigger_definition(td: &TriggerDefinition) -> bool {
     td.execute.as_deref().is_some_and(legacy_definition)
         || td.condition.as_ref().is_some_and(legacy_trigger_condition)
+        || td
+            .attack_cost_condition
+            .as_ref()
+            .is_some_and(legacy_static_condition)
         || td.valid_card.as_ref().is_some_and(legacy_target_filter)
         || td.valid_source.as_ref().is_some_and(legacy_target_filter)
 }
@@ -4262,6 +4269,7 @@ fn walk_ability(
         source_id: _,
         cast_occurrence: _,    // finalized-cast provenance, no read/write effect
         source_incarnation: _, // self-transform epoch latch, no read/write effect
+        announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         delayed_origin: _,     // delayed-trigger identity, no read/write effect
@@ -7131,6 +7139,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         StaticCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         StaticCondition::IsTapped { scope, .. } => read_object_scope(scope, StateKind::TapState),
         StaticCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
+        StaticCondition::SourceExertedThisTurn => RwProfile::conservative(),
         StaticCondition::OpponentPoisonAtLeast { count: _ } => {
             reads_player_of(StateKind::PlayerLife)
         }

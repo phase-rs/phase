@@ -1626,7 +1626,7 @@ fn combat_effect_condition_controller(
 /// resolution-created continuous effect.
 // CR 109.5: "you"/"your" on a static ability refers to the current controller
 // of its source, while a resolved spell or ability retains its controller.
-fn condition_controller(
+pub(crate) fn condition_controller(
     state: &GameState,
     transient_id: Option<u64>,
     controller: PlayerId,
@@ -2223,6 +2223,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2393,6 +2394,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2524,6 +2526,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2872,6 +2875,8 @@ fn evaluate_condition_inner(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
+        // CR 701.43b: Untapping does not erase an exert from this turn.
+        StaticCondition::SourceExertedThisTurn => state.exerted_this_turn.contains(&source_id),
         // CR 611.2b + CR 110.5d: require battlefield — cards not on the battlefield are
         // neither tapped nor untapped. A source that has left the battlefield (e.g.
         // Callous Oppressor dying while tapped) fails this predicate and any
@@ -5025,6 +5030,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -5206,6 +5212,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -8774,6 +8781,11 @@ fn expand_granted_triggered_abilities(
                 continue;
             };
             for entry in provider.trigger_definitions.iter_all() {
+                // CR 701.43d + CR 603.1: A triggered-only grant does not copy
+                // a standalone static attack permission from the aggregate.
+                if entry.definition.is_standalone_attack_exert_permission() {
+                    continue;
+                }
                 let provider_ref = provider.trigger_definition_ref(entry);
                 let modification = ContinuousModification::GrantTrigger {
                     trigger: Box::new(entry.definition.clone()),
@@ -10687,6 +10699,60 @@ fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
         .expect("trigger-producing continuous effect must carry an exact origin")
 }
 
+/// Layer 6 `AddKeyword` tail: push one already-resolved keyword instance onto
+/// `obj` under the three-way grant policy and install its keyword-derived
+/// companion triggers. `keyword_output_index` distinguishes the several keyword
+/// instances one modification can expand into (CR 702.16i), keeping each
+/// companion trigger's producer identity distinct.
+fn grant_keyword_instance(
+    obj: &mut crate::game::game_object::GameObject,
+    resolved_keyword: Keyword,
+    effect: &ActiveContinuousEffect,
+    keyword_output_index: usize,
+) {
+    // Three-way grant policy:
+    // CR 702.164b: summing keywords (Toxic) accumulate even when an
+    // identical instance is already present (granted Toxic 1 on
+    // printed Toxic 1 -> total 2).
+    // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
+    // see `overrides_same_kind_on_grant`) replace any earlier same-kind
+    // instance so a "first match" reader never sees a stale value.
+    // All other parameterized keywords keep deduping identical instances
+    // per CR 702.16g (Protection A+B are separate abilities;
+    // Ward/Annihilator each apply independently). `evaluate_layers` resets
+    // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
+    // accumulates unbounded across re-evaluations.
+    if resolved_keyword.instances_must_coexist() {
+        obj.keywords.push(resolved_keyword.clone());
+    } else if resolved_keyword.overrides_same_kind_on_grant() {
+        // CR 613.7: this grant is a single-authoritative-value keyword — the
+        // most recently applied instance (this one, since modifications are
+        // applied in ascending timestamp order, see `order_by_timestamp`)
+        // replaces any earlier same-discriminant instance (printed or a prior
+        // grant) rather than coexisting with it. Mirrors `RemoveKeyword`'s
+        // discriminant technique, but replaces instead of strips.
+        obj.keywords
+            .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword));
+        obj.keywords.push(resolved_keyword.clone());
+    } else if !obj.keywords.contains(&resolved_keyword) {
+        obj.keywords.push(resolved_keyword.clone());
+    }
+    for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(&resolved_keyword)
+        .into_iter()
+        .enumerate()
+    {
+        install_trigger_candidate(
+            obj,
+            TriggerGrantProducerKey::KeywordCompanion {
+                origin: trigger_origin(effect),
+                keyword_output_index,
+                companion_index,
+            },
+            trigger,
+        );
+    }
+}
+
 /// Apply a continuous effect's modification only to the subset of its affected
 /// objects that are in `restrict_to`. Used by the incremental layer-flush fast
 /// path so a pre-existing anthem/static re-applies to a freshly-entered object
@@ -11281,12 +11347,14 @@ fn apply_continuous_effect_filtered(
 
     // Pre-read chosen color from source (avoids borrow conflict in the loop).
     // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
-    // is `HexproofFrom(ChosenColor)` / `Protection(ChosenColor)` AND by
-    // `AddStaticMode` when the static mode carries an `IsChosenColor` filter
-    // prop — CR 702.11d + CR 702.16 + CR 509.1b + CR 105.4 + CR 609.6: the
-    // granting source's chosen color must be baked into the granted modifier
-    // at apply-time, because the modifier lives on the granted creature
-    // (which has no chosen-color attribute of its own).
+    // is `HexproofFrom(ChosenColor)` AND by `AddStaticMode` when the static mode
+    // carries an `IsChosenColor` filter prop — CR 702.11d + CR 509.1b +
+    // CR 105.4 + CR 609.6: the granting source's chosen color must be baked into
+    // the granted modifier at apply-time, because the modifier lives on the
+    // granted creature (which has no chosen-color attribute of its own).
+    // `Protection(ChosenColor)` resolves through the shared
+    // `keywords::resolve_granted_protection` (the `granted_protection` pre-read
+    // below), not this one.
     //
     // A resolution-generated `AddKeyword { Protection | HexproofFrom(ChosenColor) }`
     // effect (CR 608.2h) now arrives here PRE-BAKED to a concrete
@@ -11295,12 +11363,14 @@ fn apply_continuous_effect_filtered(
     // source can no longer retroactively change a grant already in flight. This
     // pre-read therefore still exists for, and this loop still runs live for,
     // all four remaining consumers of the unresolved `ChosenColor` form:
-    // (a) a printed STATIC ability's `AddKeyword { .. ChosenColor }` grant
-    //     (CR 611.3a: a continuous effect generated by a static ability is
+    // (a) a printed STATIC ability's `AddKeyword { HexproofFrom(ChosenColor) }`
+    //     grant (the `Protection(ChosenColor)` form of (a)/(b) is resolved live
+    //     by the `granted_protection` pre-read below; CR 611.3a: a continuous
+    //     effect generated by a static ability is
     //     never "locked in" — it is gathered by `gather_active_continuous_effects`
     //     and reaches this function directly from `static_definitions`, so it
     //     is baked live, every evaluation, right here);
-    // (b) a resolution-generated `AddKeyword { .. ChosenColor }` grant whose
+    // (b) a resolution-generated `AddKeyword { HexproofFrom(ChosenColor) }` grant whose
     //     source announced no colour at all (the `None` fallback arm of
     //     `snapshot_transient_modifications`, CR 609.3 + follow-up F1) — the
     //     modification is left unresolved and still needs this live read;
@@ -11319,8 +11389,6 @@ fn apply_continuous_effect_filtered(
                 keyword,
                 crate::types::keywords::Keyword::HexproofFrom(
                     crate::types::keywords::HexproofFilter::ChosenColor,
-                ) | crate::types::keywords::Keyword::Protection(
-                    crate::types::keywords::ProtectionTarget::ChosenColor,
                 )
             )
     ) || matches!(
@@ -11342,8 +11410,8 @@ fn apply_continuous_effect_filtered(
     // was selected at resolution time (Urborg / Walking Sponge). Read once
     // here so the per-recipient loop below can strip by discriminant without
     // re-borrowing `state` for every affected object — mirrors the
-    // `chosen_color` / `chosen_subtype` / `chosen_card_type` pre-read blocks
-    // immediately above and below.
+    // `chosen_color` / `chosen_subtype` pre-read blocks immediately above and
+    // the `granted_protection` pre-read below.
     //
     // Caveat (mirrors `chosen_color` semantics): if the same source has
     // multiple concurrent `RemoveChosenKeyword` effects (e.g., Urborg
@@ -11352,7 +11420,9 @@ fn apply_continuous_effect_filtered(
     // limitation. It is NOT the same for `chosen_color`: since the accessor
     // split that read is deliberately oldest-since-entry (CR 607.2d, the linked
     // ability's own choice), with `current_chosen_color()` for CR 608.2d's
-    // "current answer". `chosen_card_type` remains in the Keyword case.
+    // "current answer". The chosen card type read (`chosen_card_type()`, now
+    // inside `keywords::resolve_granted_protection`, the `granted_protection`
+    // pre-read below) still shares the Keyword case's first-match limitation.
     // Acceptable for v1 — fix paired with the broader chosen-attribute scoping
     // refactor.
     let chosen_keyword = if matches!(
@@ -11387,35 +11457,34 @@ fn apply_continuous_effect_filtered(
         Vec::new()
     };
 
-    // Pre-read chosen card type from source (avoids borrow conflict in the loop).
-    // CR 702.16 + CR 205.2: when the granted keyword is
-    // `Protection(ChosenCardType)`, the granting source's chosen card type must
-    // be baked into the granted modifier at apply-time — the modifier lives on
-    // the granted creature, which has no chosen-card-type attribute of its own.
-    let chosen_card_type = if matches!(
-        &effect.modification,
-        ContinuousModification::AddKeyword { keyword }
-            if matches!(
-                keyword,
-                crate::types::keywords::Keyword::Protection(
-                    crate::types::keywords::ProtectionTarget::ChosenCardType,
-                )
+    // Pre-resolve a granted protection quality (avoids borrow conflict in the loop).
+    // CR 702.16 + CR 702.16i + CR 109.5: the granting source's chosen color /
+    // chosen card type, or the members of a dynamic color set relative to the
+    // effect's "you", must be baked into concrete `Protection` qualities at
+    // apply-time — the modifier lives on the granted creature, which has none of
+    // those attributes. `keywords::resolve_granted_protection` is the single
+    // authority shared with attachment legality (`effects/attach.rs`).
+    let granted_protection: Vec<crate::types::keywords::ProtectionTarget> =
+        if let ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(quality),
+        } = &effect.modification
+        {
+            crate::game::keywords::resolve_granted_protection(
+                state,
+                quality,
+                effect.source_id,
+                active_effect_condition_controller(state, effect),
             )
-    ) {
-        state
-            .objects
-            .get(&effect.source_id)
-            .and_then(|src| src.chosen_card_type())
-    } else {
-        None
-    };
+        } else {
+            Vec::new()
+        };
 
     // Pre-read chosen card name from source (avoids borrow conflict in the loop).
     // CR 612.8 + CR 613.1c: `SetChosenName` sets the recipient's name to the
     // granting source's chosen card name. Read once here (the source's most recent
     // `ChosenAttribute::CardName`) so the per-recipient loop can assign without
-    // re-borrowing `state` — mirrors the `chosen_color` / `chosen_subtype` /
-    // `chosen_card_type` pre-read blocks above.
+    // re-borrowing `state` — mirrors the `chosen_color` / `chosen_subtype`
+    // pre-read blocks above.
     let chosen_card_name = if matches!(effect.modification, ContinuousModification::SetChosenName) {
         state
             .objects
@@ -11610,13 +11679,7 @@ fn apply_continuous_effect_filtered(
             // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
             // so applying anything here would double-install. Explicit no-op.
             ContinuousModification::CopyChosen => {}
-            ContinuousModification::CopyValues {
-                values,
-                display_source,
-                printed_ref,
-                token_image_ref,
-                token_art,
-            } => {
+            ContinuousModification::CopyValues { values, display } => {
                 let copy_effect = crate::types::ability::CopyEffectInstanceRef {
                     continuous_effect_id: effect
                         .transient_id
@@ -11636,10 +11699,7 @@ fn apply_continuous_effect_filtered(
                 // copied name has no real-card printing); for a printed source,
                 // `display_source = Card` + `printed_ref`. None are copiable
                 // values — purely display routing.
-                obj.display_source = *display_source;
-                obj.printed_ref = printed_ref.clone();
-                obj.token_image_ref = token_image_ref.clone();
-                obj.token_art = token_art.clone();
+                obj.install_display_identity(display);
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -11693,104 +11753,55 @@ fn apply_continuous_effect_filtered(
             // `Protection(ColorWhite)` and `Protection(ColorBlue)` share an
             // enum discriminant, so a discriminant-based "already has" check
             // (`has_keyword`, see `keywords.rs::has_keyword`) would drop the
-            // second grant. Use `Vec::contains` (PartialEq, exact match) so
-            // each distinct parameter value is preserved on the keyword list.
+            // second grant. `grant_keyword_instance` dedups with `Vec::contains`
+            // (PartialEq, exact match) so each distinct parameter value is
+            // preserved on the keyword list.
             // CR 613.1f: This deduplication runs in Layer 6 alongside other
             // keyword-granting effects. Same shape applies to `Ward(_)`,
             // `Annihilator(_)`, `Cumulative Upkeep(_)`, and any other
             // parameterized keyword variant.
-            ContinuousModification::AddKeyword { keyword } => {
-                // CR 702.11d + CR 702.16 + CR 609.6: When the granted keyword
-                // refers to "the chosen color" of the granting source, resolve
-                // it to the concrete color before push so the keyword is
-                // self-contained on the recipient. `chosen_color` is pre-read
-                // above when the keyword's variant requires it.
-                let resolved_keyword = match keyword {
-                    crate::types::keywords::Keyword::HexproofFrom(
-                        crate::types::keywords::HexproofFilter::ChosenColor,
-                    ) => {
-                        if let Some(color) = chosen_color {
-                            crate::types::keywords::Keyword::HexproofFrom(
-                                crate::types::keywords::HexproofFilter::Color(color),
-                            )
-                        } else {
-                            // No chosen color yet — skip the grant rather than
-                            // pushing an unresolvable variant.
-                            continue;
-                        }
-                    }
-                    crate::types::keywords::Keyword::Protection(
-                        crate::types::keywords::ProtectionTarget::ChosenColor,
-                    ) => {
-                        if let Some(color) = chosen_color {
-                            crate::types::keywords::Keyword::Protection(
-                                crate::types::keywords::ProtectionTarget::Color(color),
-                            )
-                        } else {
-                            continue;
-                        }
-                    }
-                    // CR 702.16 + CR 205.2: "protection from the
-                    // chosen card type" — resolve to a concrete
-                    // `Protection(CardType("creature"))` from the granting
-                    // source's chosen card type, so the keyword is
-                    // self-contained on the recipient. `source_matches_card_type`
-                    // then enforces CR 702.16b/d/e/f. Skip the grant if the
-                    // chosen card type is unresolved or has no protection noun.
-                    crate::types::keywords::Keyword::Protection(
-                        crate::types::keywords::ProtectionTarget::ChosenCardType,
-                    ) => match chosen_card_type.and_then(|ct| ct.protection_quality_str()) {
-                        Some(quality) => crate::types::keywords::Keyword::Protection(
-                            crate::types::keywords::ProtectionTarget::CardType(quality.to_string()),
-                        ),
-                        None => continue,
-                    },
-                    other => other.clone(),
-                };
-                // Three-way grant policy:
-                // CR 702.164b: summing keywords (Toxic) accumulate even when an
-                // identical instance is already present (granted Toxic 1 on
-                // printed Toxic 1 -> total 2).
-                // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
-                // see `overrides_same_kind_on_grant`) replace any earlier same-kind
-                // instance so a "first match" reader never sees a stale value.
-                // All other parameterized keywords keep deduping identical instances
-                // per CR 702.16g (Protection A+B are separate abilities;
-                // Ward/Annihilator each apply independently). `evaluate_layers` resets
-                // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
-                // accumulates unbounded across re-evaluations.
-                if resolved_keyword.instances_must_coexist() {
-                    obj.keywords.push(resolved_keyword.clone());
-                } else if resolved_keyword.overrides_same_kind_on_grant() {
-                    // CR 613.7: this grant is a single-authoritative-value keyword — the
-                    // most recently applied instance (this one, since modifications are
-                    // applied in ascending timestamp order, see `order_by_timestamp`)
-                    // replaces any earlier same-discriminant instance (printed or a prior
-                    // grant) rather than coexisting with it. Mirrors `RemoveKeyword`'s
-                    // discriminant technique below, but replaces instead of strips.
-                    obj.keywords.retain(|k| {
-                        std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword)
-                    });
-                    obj.keywords.push(resolved_keyword.clone());
-                } else if !obj.keywords.contains(&resolved_keyword) {
-                    obj.keywords.push(resolved_keyword.clone());
-                }
-                for (companion_index, trigger) in
-                    KeywordTriggerInstaller::triggers_for(&resolved_keyword)
-                        .into_iter()
-                        .enumerate()
-                {
-                    install_trigger_candidate(
+            ContinuousModification::AddKeyword { keyword } => match keyword {
+                // CR 702.11d + CR 609.6: When the granted hexproof quality is
+                // "the chosen color" of the granting source, resolve it to the
+                // concrete color before push so the keyword is self-contained
+                // on the recipient. `chosen_color` is pre-read above for this
+                // variant.
+                crate::types::keywords::Keyword::HexproofFrom(
+                    crate::types::keywords::HexproofFilter::ChosenColor,
+                ) => {
+                    let Some(color) = chosen_color else {
+                        // No chosen color yet — skip the grant rather than
+                        // pushing an unresolvable variant.
+                        continue;
+                    };
+                    grant_keyword_instance(
                         obj,
-                        TriggerGrantProducerKey::KeywordCompanion {
-                            origin: trigger_origin(effect),
-                            keyword_output_index: 0,
-                            companion_index,
-                        },
-                        trigger,
+                        crate::types::keywords::Keyword::HexproofFrom(
+                            crate::types::keywords::HexproofFilter::Color(color),
+                        ),
+                        effect,
+                        0,
                     );
                 }
-            }
+                // CR 702.16 + CR 702.16i: a granted protection quality resolves
+                // (via `keywords::resolve_granted_protection`, pre-read above)
+                // into zero or more concrete qualities — the chosen color / card
+                // type of the granting source, or each member of a dynamic color
+                // set. One protection ability per resolved quality, so the keyword
+                // is self-contained on the recipient and `source_matches_*`
+                // enforces CR 702.16b/d/e/f. An unresolved quality grants nothing.
+                crate::types::keywords::Keyword::Protection(_) => {
+                    for (keyword_output_index, quality) in granted_protection.iter().enumerate() {
+                        grant_keyword_instance(
+                            obj,
+                            crate::types::keywords::Keyword::Protection(quality.clone()),
+                            effect,
+                            keyword_output_index,
+                        );
+                    }
+                }
+                other => grant_keyword_instance(obj, other.clone(), effect, 0),
+            },
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
             // shares the same discriminant (e.g. "lose all flying"). The
             // current Oracle parser only emits unparameterized variants here,
@@ -13186,10 +13197,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: copier },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: crate::game::game_object::DisplayIdentity::default(),
                 }],
                 None,
             )
@@ -14548,10 +14556,7 @@ mod tests {
             TargetFilter::SpecificObject { id: recipient },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -15019,10 +15024,7 @@ mod tests {
             host,
             ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             },
         );
         install_until_end_of_turn(
@@ -27240,10 +27242,7 @@ mod tests {
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&donor],
             )),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: Default::default(),
         }
     }
 
@@ -28950,6 +28949,7 @@ mod tests {
                 counters: std::collections::HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -29216,10 +29216,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: target },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(copy_values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )
@@ -30843,10 +30840,7 @@ mod tests {
             TargetFilter::SpecificObject { id: fd },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -30870,10 +30864,7 @@ mod tests {
             TargetFilter::SpecificObject { id: plain },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(donor_values2),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -31768,10 +31759,7 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -31854,10 +31842,7 @@ mod tests {
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -31944,10 +31929,7 @@ mod tests {
         );
         let copy_of = |values: CopiableValues| ContinuousModification::CopyValues {
             values: Box::new(values),
-            display_source: crate::game::game_object::DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: Default::default(),
         };
 
         // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
@@ -32112,10 +32094,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: target },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             );
@@ -32208,10 +32187,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: recipient },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             );
@@ -32347,10 +32323,7 @@ mod tests {
                     prepare_face: None,
                     name_origin: Default::default(),
                 }),
-                display_source: Default::default(),
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             },
             ContinuousModification::CopyChosen,
             ContinuousModification::SetName {

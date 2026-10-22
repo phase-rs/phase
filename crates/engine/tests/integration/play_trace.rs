@@ -95,7 +95,7 @@ fn activates(source: ObjectId) -> impl Fn(&GameAction) -> bool {
 
 fn activates_index(source: ObjectId, index: usize) -> impl Fn(&GameAction) -> bool {
     move |action| {
-        matches!(action, GameAction::ActivateAbility { source_id, ability_index }
+        matches!(action, GameAction::ActivateAbility { source_id, ability_index, .. }
             if *source_id == source && *ability_index == index)
     }
 }
@@ -139,6 +139,7 @@ pub(crate) fn activate(runner: &mut GameRunner, source: ObjectId, index: usize) 
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 }
@@ -255,6 +256,7 @@ fn names_the_period(state: &GameState, wanted: &[PeriodStep], resolves: bool) ->
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     } => PeriodStep::Activate(*source_id, Some(*ability_index)),
                     GameAction::TapLandForMana { selection }
                     | GameAction::ActivateManaSource { selection } => {
@@ -814,6 +816,7 @@ fn play_trace_names_each_members_period_grand_architect_pili_pala() {
                 == GameAction::ActivateAbility {
                     source_id: architect,
                     ability_index: tap_blue,
+                    payment_mode: CastPaymentMode::Auto,
                 }),
             play_node(&view, activates(pili)),
         ],

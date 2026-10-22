@@ -496,7 +496,18 @@ function formatWard(val: unknown): string {
   const w = val as { type: string; data?: unknown };
   if (w.type === "Mana") return formatKeywordManaCost(w.data as ManaCost);
   if (w.type === "PayLife") return `pay ${w.data} life`;
-  if (w.type === "DiscardCard") return "discard a card";
+  if (w.type === "Discard") {
+    const d = w.data as
+      | { count: number; filter: unknown; selection: "Chosen" | "Random" }
+      | undefined;
+    if (!d || d.filter != null) return "";
+    return i18n.t(
+      d.selection === "Random"
+        ? "game:keywordDetail.wardDiscardAtRandom"
+        : "game:keywordDetail.wardDiscard",
+      { count: d.count },
+    );
+  }
   if (w.type === "Sacrifice") {
     const d = w.data as { count: number; filter: { type: string } } | undefined;
     if (d?.filter.type !== "Any") return "";

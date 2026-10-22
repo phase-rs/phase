@@ -1890,6 +1890,10 @@ pub fn player_protection_from_object(
                 | ProtectionTarget::Quality(_)
                 | ProtectionTarget::CardType(_)
                 | ProtectionTarget::Filter(_) => false,
+                // CR 702.16i: no card grants a color-set protection to a player;
+                // inert like the arms above. Object-level sets expand through
+                // `keywords::resolve_granted_protection`.
+                ProtectionTarget::EachColor(_) => false,
             };
             if protects {
                 return true;

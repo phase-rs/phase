@@ -33,6 +33,23 @@ use super::{
     zone_pipeline,
 };
 
+/// CR 608.2c: does the parked zone-choice continuation `chain` treat
+/// the objects NOT picked as "the rest" for its next instruction (a
+/// `ChooseFromZone` partition)?
+///
+/// It does not for counter-placement continuations (Bolster, Gluntch: their
+/// `sub_ability` is an independent trailing clause), nor for a parked
+/// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
+/// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
+fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
+    use crate::types::ability::{Effect, TargetChoiceTiming};
+    !matches!(
+        chain.effect,
+        Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
+    ) && !(matches!(chain.effect, Effect::TargetOnly { .. })
+        && chain.target_choice_timing == TargetChoiceTiming::Resolution)
+}
+
 /// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
 /// an instruction's announced targets. Result-dependent instructions bind the
 /// settled selection, including clearing a previous result on an empty choice.
@@ -3428,11 +3445,11 @@ pub(super) fn handle_resolution_choice(
                                     count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
                                         values: growth.profile.clone(),
-                                        display_source:
-                                            crate::game::game_object::DisplaySource::Token,
-                                        printed_ref: None,
-                                        token_image_ref: None,
-                                        token_art: None,
+                                        display: crate::game::game_object::DisplayIdentity {
+                                            display_source:
+                                                crate::game::game_object::DisplaySource::Token,
+                                            ..Default::default()
+                                        },
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,
@@ -5627,12 +5644,11 @@ pub(super) fn handle_resolution_choice(
                 // control") is NOT a partition — its `sub_ability` is an
                 // independent trailing clause (e.g. the next `Choose`) and
                 // must not have the non-picked objects forced into its target
-                // list. Gate the forward on the continuation's own effect.
-                let is_partition = !matches!(
-                    cont.chain.effect,
-                    crate::types::ability::Effect::PutCounter { .. }
-                        | crate::types::ability::Effect::ChooseCounterKind { .. }
-                );
+                // list. Neither is a parked untargeted `TargetOnly` chooser
+                // ("choose a creature you control", CR 115.10a): the pick is
+                // the whole choice, and the unchosen candidates are not "the
+                // rest". Gate the forward on the continuation's own effect.
+                let is_partition = continuation_forwards_unchosen_complement(&cont.chain);
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
                         // CR 707.12a: A `CastCopyOfCard` continuation casts the
@@ -14772,5 +14788,55 @@ mod tests {
             vec![pile[1], pile[3], p1c, pile[5], pile[9]],
             "separate libraries place the card third from the top of its owner's"
         );
+    }
+
+    /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)
+    /// `TargetOnly` chooser, and the counter-placement continuations, decline the
+    /// unchosen-complement forward; a Stack-timed `TargetOnly` wrapper after a
+    /// `ChooseFromZone` and an ordinary partition head keep it.
+    #[test]
+    fn only_untargeted_choosers_and_counter_placements_skip_the_complement_forward() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetChoiceTiming, TargetFilter};
+        let chain = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut chain = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            chain.target_choice_timing = timing;
+            chain
+        };
+        let target_only = || Effect::TargetOnly {
+            target: TargetFilter::Any,
+        };
+
+        assert!(
+            !continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Resolution
+            )),
+            "the Resolution-timed chooser's pick is the whole choice"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Stack
+            )),
+            "reach: the same effect Stack-timed still forwards the complement"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                TargetChoiceTiming::Resolution
+            )),
+            "an ordinary head keeps the forward"
+        );
+        assert!(!continuation_forwards_unchosen_complement(&chain(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            TargetChoiceTiming::Resolution
+        )));
     }
 }

@@ -1764,6 +1764,7 @@ mod tests {
                     GameAction::ActivateAbility {
                         source_id: assault,
                         ability_index: index,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     }
                 }
                 WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
@@ -1874,6 +1875,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect("the activation");
             loop {

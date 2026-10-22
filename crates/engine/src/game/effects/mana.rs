@@ -3241,6 +3241,7 @@ mod tests {
                 create_object(&mut state, card_id, owner, name.to_string(), Zone::Command);
             let obj = state.objects.get_mut(&commander).unwrap();
             obj.is_commander = true;
+            obj.base_color = colors.clone();
             obj.color = colors;
         }
 

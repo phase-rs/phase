@@ -2682,6 +2682,24 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
+    // CR 605.1b + CR 605.4a: mana-event triggers that can add mana must
+    // resolve immediately, including their non-mana clauses. The mixed-chain
+    // resolver cannot do that for a linked paid cast; expose the composition
+    // as a gap rather than queueing a supported ordinary triggered ability.
+    if matches!(
+        def.mode,
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
+    ) {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+                super::oracle_effect::refuse_linked_paid_cast_in_mana_ability(
+                    execute,
+                    def.description.as_deref().unwrap_or_default(),
+                );
+            }
+        }
+    }
+
     // CR 603.4 + CR 111.1: Token intervening-ifs parsed via
     // `zone_change_object_token_condition` default to destination Battlefield
     // (correct for ETB). On dies/leave triggers the zone-change event's `to`
@@ -6643,6 +6661,7 @@ pub(crate) fn static_condition_to_trigger_condition(
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
         StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::DevotionGE { .. }

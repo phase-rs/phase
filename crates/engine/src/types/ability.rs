@@ -9,7 +9,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -33,7 +33,7 @@ use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
-use crate::game::game_object::{BackFaceData, DisplaySource};
+use crate::game::game_object::{BackFaceData, DisplayIdentity};
 use crate::types::events::{ActivatedAbilityKind, ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
@@ -7430,6 +7430,10 @@ pub enum FilterProp {
     /// CR 701.15b/c: Matches creatures with the goaded designation (at least one
     /// player has goaded it).
     Goaded,
+    /// CR 722.3a: Matches permanents with the prepared designation. A permanent
+    /// can only gain this designation if it has a prepare spell, and only while
+    /// it does not already have it.
+    Prepared,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
     /// CR 208.1 + CR 613.4a + CR 613.4b: Matches a creature whose current
@@ -13357,6 +13361,8 @@ pub enum StaticCondition {
     /// yet" (Palladia-Mors, the Ruiner; Karakyk Guardian). The "hasn't" negation
     /// wraps this in `StaticCondition::Not`.
     SourceHasDealtDamage,
+    /// CR 701.43b: The source has been exerted during the current turn.
+    SourceExertedThisTurn,
     /// CR 601.2 + CR 611.3a: True when the source permanent was cast (its
     /// `cast_from_zone` is `Some`). `zone: None` = cast from any zone; `Some(z)`
     /// = cast specifically from zone `z`. Used for "as long as it was cast"
@@ -13581,6 +13587,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -13694,6 +13701,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -13930,6 +13938,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -14051,6 +14060,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -14374,14 +14384,19 @@ pub enum ParsedCondition {
     /// Team membership is never re-derived here — evaluation delegates to the
     /// single authority `crate::game::players::is_opponent`.
     IsOpponentsTurn,
-    /// CR 503.1: True when the game is currently in the upkeep step. A
-    /// turn-structure predicate with NO player scope — it asks only "is it an
-    /// upkeep step", not whose. Player scope composes at the restriction layer:
-    /// "during an opponent's upkeep" is `And([IsOpponentsTurn, IsDuringUpkeep])`
-    /// (CR 102.1 fixes the active player from the turn), reusing the
-    /// turn-scope leaf rather than adding a `DuringOpponents*` restriction
-    /// sibling per step.
-    IsDuringUpkeep,
+    /// CR 500.1 + CR 602.1b + CR 602.5: True when the game is currently in one of
+    /// `phases`. Restriction-layer reading of "Activate only during the <step> step"
+    /// / "during any upkeep step": a turn-structure predicate with NO player scope;
+    /// turn-owner scope composes via `And([IsOpponentsTurn|IsYourTurn, CurrentPhaseIs])`.
+    /// `phases` is a set so grouped names (CR 505.1 "main phase") need no sibling.
+    /// Mirror of `AbilityCondition::CurrentPhaseIs`; both read `parse_phase_name_set`.
+    /// Replaces the unit `IsDuringUpkeep` (= `[Upkeep]`); the alias + default keep that
+    /// legacy tag loadable (serializer always writes `phases`), as `Duration::UntilNextStepOf`.
+    #[serde(alias = "IsDuringUpkeep")]
+    CurrentPhaseIs {
+        #[serde(default = "legacy_is_during_upkeep_phases")]
+        phases: Vec<Phase>,
+    },
     /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
     /// least one object that matches `filter`. Gates a target-dependent casting
     /// permission (Timely Ward — "you may cast this spell as though it had flash if
@@ -14429,6 +14444,13 @@ pub enum ParsedCondition {
     Not {
         condition: Box<ParsedCondition>,
     },
+}
+
+/// Serde default for `ParsedCondition::CurrentPhaseIs::phases`. The serializer
+/// always writes `phases`, so a missing field can only come from the legacy
+/// unit tag `{"type":"IsDuringUpkeep"}`, which meant the upkeep step.
+fn legacy_is_during_upkeep_phases() -> Vec<Phase> {
+    vec![Phase::Upkeep]
 }
 
 // ---------------------------------------------------------------------------
@@ -16116,6 +16138,11 @@ pub struct AdditionalCostInstance {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub origin_ordinal: u32,
     pub cost: AdditionalCost,
+    /// CR 611.3b: the permanent whose static ability grants this instance
+    /// (Silverquill, the Disputant). `None` for a printed instance and for a
+    /// grant no permanent generates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_source: Option<ObjectId>,
 }
 
 impl AdditionalCostInstance {
@@ -16124,7 +16151,13 @@ impl AdditionalCostInstance {
             origin,
             origin_ordinal: 0,
             cost,
+            grant_source: None,
         }
+    }
+
+    pub fn with_grant_source(mut self, grant_source: Option<ObjectId>) -> Self {
+        self.grant_source = grant_source;
+        self
     }
 
     pub fn new_with_ordinal(
@@ -16136,6 +16169,7 @@ impl AdditionalCostInstance {
             origin,
             origin_ordinal,
             cost,
+            grant_source: None,
         }
     }
 }
@@ -16151,6 +16185,10 @@ pub struct AdditionalCostInstancePayment {
     pub origin_ordinal: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub count: u32,
+    /// CR 702.153b: the `grant_source` of the instance this payment was made
+    /// for, so a trigger reads the payment of its own instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_source: Option<ObjectId>,
 }
 
 impl AdditionalCostInstancePayment {
@@ -16159,6 +16197,7 @@ impl AdditionalCostInstancePayment {
             origin,
             origin_ordinal: 0,
             count,
+            grant_source: None,
         }
     }
 
@@ -16167,6 +16206,7 @@ impl AdditionalCostInstancePayment {
             origin,
             origin_ordinal,
             count,
+            grant_source: None,
         }
     }
 }
@@ -18327,6 +18367,11 @@ pub enum Effect {
         /// The literal `QuantityExpr::Fixed { value: -1 }` is the legacy
         /// "remove all" sentinel — `resolve_remove` keys off `< 0` to strip
         /// every counter of the named type (Vampire Hexmage).
+        /// CR 608.2d: `QuantityExpr::UpTo { max }` is the controller's
+        /// resolution-time choice of which counters to remove, at most `max`
+        /// in total ("remove up to X counters", Hex Parasite); over the
+        /// "remove all" sentinel it is the uncapped "remove any number of
+        /// counters" (CR 107.1c, Rhys, the Evermore).
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
@@ -31705,18 +31750,35 @@ impl SpellContext {
         origin_ordinal: u32,
         count: u32,
     ) {
-        if count == 0 {
+        self.record_instance_payment(AdditionalCostInstancePayment::new_with_ordinal(
+            origin,
+            origin_ordinal,
+            count,
+        ));
+    }
+
+    /// CR 702.153b: record a payment for one queued instance, keeping the
+    /// instance's `grant_source` on the payment.
+    pub fn record_payment_for_instance(&mut self, instance: &AdditionalCostInstance, count: u32) {
+        self.record_instance_payment(AdditionalCostInstancePayment {
+            grant_source: instance.grant_source,
+            ..AdditionalCostInstancePayment::new_with_ordinal(
+                instance.origin,
+                instance.origin_ordinal,
+                count,
+            )
+        });
+    }
+
+    fn record_instance_payment(&mut self, payment: AdditionalCostInstancePayment) {
+        if payment.count == 0 {
             return;
         }
-        self.additional_cost_payments
-            .push(AdditionalCostInstancePayment::new_with_ordinal(
-                origin,
-                origin_ordinal,
-                count,
-            ));
+        self.additional_cost_payment_count = self
+            .additional_cost_payment_count
+            .saturating_add(payment.count);
+        self.additional_cost_payments.push(payment);
         self.additional_cost_paid = true;
-        self.additional_cost_payment_count =
-            self.additional_cost_payment_count.saturating_add(count);
     }
 
     pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
@@ -33113,6 +33175,10 @@ pub struct TriggerDefinition {
     pub constraint: Option<TriggerConstraint>,
     #[serde(default)]
     pub condition: Option<TriggerCondition>,
+    /// CR 508.1g: Pre-payment eligibility of the linked optional attack cost.
+    /// Unlike an intervening-if, this is not rechecked after payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_cost_condition: Option<StaticCondition>,
     /// Optional filter for counter-related trigger modes (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_filter: Option<CounterTriggerFilter>,
@@ -33789,6 +33855,20 @@ impl Default for TriggerOccurrenceState {
 }
 
 impl TriggerDefinition {
+    /// CR 701.43d: The self-referential exert component grants an optional
+    /// attack cost; an actor-filtered exert observer grants no such permission.
+    pub fn is_attack_exert_permission(&self) -> bool {
+        self.mode == TriggerMode::Exerted
+            && self.valid_card == Some(TargetFilter::SelfRef)
+            && self.valid_target.is_none()
+    }
+
+    /// CR 701.43d + CR 603.1: Without a linked effect, this aggregate contains
+    /// only the static attack permission, not a triggered ability.
+    pub fn is_standalone_attack_exert_permission(&self) -> bool {
+        self.is_attack_exert_permission() && self.execute.is_none()
+    }
+
     pub fn new(mode: TriggerMode) -> Self {
         Self {
             mode,
@@ -33811,6 +33891,7 @@ impl TriggerDefinition {
             description: None,
             constraint: None,
             condition: None,
+            attack_cost_condition: None,
             counter_filter: None,
             saga_chapter: None,
             unless_pay: None,
@@ -33912,6 +33993,11 @@ impl TriggerDefinition {
 
     pub fn condition(mut self, condition: TriggerCondition) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    pub fn attack_cost_condition(mut self, condition: StaticCondition) -> Self {
+        self.attack_cost_condition = Some(condition);
         self
     }
 
@@ -35630,19 +35716,15 @@ pub enum CopiedNameOrigin {
 /// Per CR 707.2c the copiable values a static copy effect grants are determined
 /// only when the effect first starts to apply, and per CR 707.2b later changes
 /// to the chosen object never propagate — so the values are frozen here rather
-/// than re-read live. The display trio (`display_source` / `printed_ref` /
-/// `token_image_ref`) is art routing only (NOT a CR 707.2 copiable value),
-/// carried so the enchanted host renders the chosen creature's art; it mirrors
-/// the identical trio on `ContinuousModification::CopyValues`.
+/// than re-read live. The `display` identity is art routing only (NOT a CR 707.2
+/// copiable value; see [`DisplayIdentity`]), carried so the enchanted host
+/// renders the chosen creature's art; it mirrors the identical identity on
+/// `ContinuousModification::CopyValues`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatchedCopiableSnapshot {
     pub values: CopiableValues,
-    #[serde(default)]
-    pub display_source: DisplaySource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub printed_ref: Option<PrintedCardRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_image_ref: Option<TokenImageRef>,
+    #[serde(flatten)]
+    pub display: DisplayIdentity,
 }
 
 /// CR 707.2 + CR 707.2c: Why a `WaitingFor::CopyTargetChoice` was raised, which
@@ -35707,35 +35789,10 @@ pub enum ContinuousModification {
         values: Box<CopiableValues>,
         /// Image-routing identity of the copy source, carried so the copy renders
         /// the source's art and reverts through the same layer pass as the copied
-        /// characteristics. NONE of these three are CR 707.2 copiable values
-        /// (status/art are not copied per CR 707.2) — they are display routing
-        /// only, deliberately kept off `CopiableValues`, and mirror the flat
-        /// `GameObject`/`CopyTokenSpec` storage (`display_source` discriminates:
-        /// `Card` ⇒ read `printed_ref`; `Token` ⇒ read `token_image_ref`).
-        ///
-        /// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token*
-        /// stays a nontoken (token-ness is created by a token-making effect per
-        /// CR 111.1, and is not among the CR 707.2 copiable values), but its name
-        /// is the token's, which only resolves in the token art database — so the
-        /// source's `display_source = Token` and `token_image_ref` must ride
-        /// along, not just `printed_ref`.
-        #[serde(default)]
-        display_source: DisplaySource,
-        /// Scryfall oracle-id pointer of the source when it is a printed card.
-        /// `None` when the source is a true token (then `token_image_ref` carries
-        /// the routing).
-        #[serde(default)]
-        printed_ref: Option<PrintedCardRef>,
-        /// Exact token-art pointer of the source when it is a true token.
-        /// `None` for printed-card sources.
-        #[serde(default)]
-        token_image_ref: Option<TokenImageRef>,
-        /// Intrinsic token-art body of the source, carried so a copy of a
-        /// token without an exact ref still renders from the source's shape
-        /// rather than the recipient's stale descriptor. `None` for
-        /// printed-card sources and pre-descriptor snapshots.
-        #[serde(default)]
-        token_art: Option<TokenArtDescriptor>,
+        /// characteristics. Display routing only — see [`DisplayIdentity`] for the
+        /// CR 707.2 / CR 111.1 rationale.
+        #[serde(flatten)]
+        display: DisplayIdentity,
     },
     /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
     /// "enchanted creature is a copy of the chosen creature" (Metamorphic
@@ -36856,8 +36913,23 @@ pub struct ResolvedAbility {
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
     /// delayed self-transform abilities that do not carry trigger provenance.
+    /// For an activated ability this is the epoch the source had as the ability
+    /// was put on the stack, after its costs were paid — the reference point the
+    /// source-reconstruction consumers (Embalm/Eternalize/Encore copy sources,
+    /// aura and equipment host references, craft returns) look the source up
+    /// by. The announcement epoch is a separate field
+    /// (`announced_source_incarnation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_incarnation: Option<u64>,
+    /// CR 400.7 + CR 602.2a: Exact source incarnation captured at an
+    /// activation's announcement (`casting::record_activation_announcement`),
+    /// before any cost that moves the source is paid (CR 601.2h). The
+    /// source-subject condition gate reads this epoch for activated abilities,
+    /// so a cost that moves the source (self-sacrifice, self-exile) cannot
+    /// rebind the condition to the moved object's live state; an existing
+    /// capture is never overwritten, and stack placement never restamps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_source_incarnation: Option<u64>,
     /// CR 400.7 + CR 113.7a: Complete event-time authority for a triggered
     /// source. This is recursive across an ability chain and replaces the old
     /// independent incarnation/card-id latches.
@@ -37359,6 +37431,7 @@ impl PartialEq for ResolvedAbility {
             source_id: a_source_id,
             cast_occurrence: a_cast_occurrence,
             source_incarnation: a_source_incarnation,
+            announced_source_incarnation: a_announced_source_incarnation,
             trigger_source: a_trigger_source,
             trigger_definition_ref: a_trigger_definition_ref,
             delayed_origin: a_delayed_origin,
@@ -37434,6 +37507,7 @@ impl PartialEq for ResolvedAbility {
             source_id: b_source_id,
             cast_occurrence: b_cast_occurrence,
             source_incarnation: b_source_incarnation,
+            announced_source_incarnation: b_announced_source_incarnation,
             trigger_source: b_trigger_source,
             trigger_definition_ref: b_trigger_definition_ref,
             delayed_origin: b_delayed_origin,
@@ -37509,6 +37583,7 @@ impl PartialEq for ResolvedAbility {
             && a_source_id == b_source_id
             && a_cast_occurrence == b_cast_occurrence
             && a_source_incarnation == b_source_incarnation
+            && a_announced_source_incarnation == b_announced_source_incarnation
             && a_trigger_source == b_trigger_source
             && a_trigger_definition_ref == b_trigger_definition_ref
             && a_delayed_origin == b_delayed_origin
@@ -37963,6 +38038,7 @@ impl ResolvedAbility {
             target_reads: TargetReadOrigin::OwnAnnouncement,
             sibling_condition: SiblingCondition::Dependent,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
             delayed_origin: None,
@@ -38382,6 +38458,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_source_incarnation_recursive(incarnation);
+        }
+    }
+
+    /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
+    /// activation's announcement — before any cost is paid — to this ability
+    /// and every continuation branch. Called only by
+    /// `casting::record_activation_announcement`; stack placement and trigger
+    /// creation never touch it.
+    pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
+        self.announced_source_incarnation = incarnation;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_announced_source_incarnation_recursive(incarnation);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_announced_source_incarnation_recursive(incarnation);
         }
     }
 
@@ -39693,6 +39784,29 @@ mod tests {
             assert_eq!(serde_json::to_string(&value).unwrap(), json);
             assert_eq!(serde_json::from_str::<QuantityRef>(json).unwrap(), value);
         }
+    }
+
+    /// The legacy unit tag `{"type":"IsDuringUpkeep"}` still deserializes, as
+    /// the upkeep step (CR 503.1), into the parameterized `CurrentPhaseIs`, and
+    /// the new shape always serializes `phases` so it round-trips.
+    #[test]
+    fn parsed_condition_current_phase_is_loads_legacy_upkeep_tag() {
+        let legacy: ParsedCondition =
+            serde_json::from_str(r#"{"type":"IsDuringUpkeep"}"#).expect("legacy tag loads");
+        assert_eq!(
+            legacy,
+            ParsedCondition::CurrentPhaseIs {
+                phases: vec![Phase::Upkeep],
+            }
+        );
+
+        let current = ParsedCondition::CurrentPhaseIs {
+            phases: vec![Phase::EndCombat],
+        };
+        let json = serde_json::to_string(&current).expect("serializes");
+        assert!(json.contains("\"phases\""), "phases always written: {json}");
+        let reparsed: ParsedCondition = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(reparsed, current);
     }
 
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
@@ -42728,6 +42842,35 @@ mod tests {
         assert_eq!(deserialized, cost);
     }
 
+    #[test]
+    fn attack_exert_permission_classification_preserves_triggered_components() {
+        // CR 701.43d + CR 603.1: Only the permission with no linked effect
+        // lacks a triggered component; unsupported effects still have one.
+        let permission =
+            TriggerDefinition::new(TriggerMode::Exerted).valid_card(TargetFilter::SelfRef);
+        assert!(permission.is_attack_exert_permission());
+        assert!(permission.is_standalone_attack_exert_permission());
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Effect::unimplemented("ExertLinkedBody", "unsupported linked effect"),
+        ] {
+            let linked = permission
+                .clone()
+                .execute(AbilityDefinition::new(AbilityKind::Spell, effect));
+            assert!(linked.is_attack_exert_permission());
+            assert!(!linked.is_standalone_attack_exert_permission());
+        }
+        let observer = permission.valid_target(TargetFilter::Controller);
+        assert!(!observer.is_attack_exert_permission());
+        assert!(!observer.is_standalone_attack_exert_permission());
+        let unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        assert!(unrelated.execute.is_none());
+        assert!(!unrelated.is_standalone_attack_exert_permission());
+    }
+
     // --- Serde roundtrip tests for new typed definitions ---
 
     #[test]
@@ -42759,6 +42902,7 @@ mod tests {
             description: Some("When ~ dies, draw a card.".to_string()),
             constraint: None,
             condition: None,
+            attack_cost_condition: None,
             counter_filter: None,
             saga_chapter: None,
             unless_pay: None,
@@ -46797,6 +46941,7 @@ mod static_condition_traversal_tests {
             StaticCondition::RecipientAttackingOwnerTarget {
                 target: crate::types::triggers::AttackTargetFilter::Player,
             },
+            StaticCondition::SourceExertedThisTurn,
             StaticCondition::SourceIsTapped,
             StaticCondition::None,
         ] {

@@ -160,6 +160,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         },
         incarnation: 0,

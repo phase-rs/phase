@@ -1326,6 +1326,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => crate::game::payment_transaction::project_without_viewer(state),
     };
     filtered.play_trace = None;
+    filtered.spell_cast_reversal = None;
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };
@@ -4554,6 +4555,7 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         counters,
         tapped: _,
         is_suspected: _,
+        was_prepared: _,
         attachments,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
@@ -6642,6 +6644,7 @@ mod tests {
                     source_id: paid,
                     counter_type: None,
                     available: Vec::new(),
+                    max_total: None,
                     pending_effect: effect(),
                 }),
             ),
@@ -7421,6 +7424,9 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
+            alternative_cost_election:
+                crate::types::game_state::SpellAlternativeCostElection::Undecided,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -7436,6 +7442,7 @@ mod tests {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         })
     }
 
@@ -7483,6 +7490,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
