@@ -139,7 +139,7 @@ fn opponent_wastes_only_produces_no_mana() {
 
     assert!(
         runner.state().objects[&orchard].tapped,
-        "the ability is activatable: its {{T}} cost was paid (CR 602.2b)"
+        "the ability is activatable: its {{T}} cost was paid (CR 602.2b + CR 601.2h)"
     );
     assert!(
         !matches!(
