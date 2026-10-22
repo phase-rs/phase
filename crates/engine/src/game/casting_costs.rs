@@ -3088,17 +3088,12 @@ fn finish_cost_object_moves(
     // component's records settled on their own seam and must not be re-judged
     // against these moves.
     //
-    // TAGGED `Relocation`, and that is the ONLY correct tag here even though
-    // this function is shared: its `destination` parameter is `Zone::Exile`
-    // (CR 701.13a) or `Zone::Hand` — never a discard (CR 701.9a moves a card
-    // from hand to graveyard; nothing routes that through here). CR 701.9c is
-    // discard-scoped, so it cannot reach either caller. That matters most for
-    // the HAND destination, which is hidden EVERY time: demoting there would
-    // destroy the captured `lki` that CR 608.2h makes the correct reading for a
-    // returned permanent, on every single return-to-hand cost payment. The
-    // `Relocation` arm instead leaves the entry `Captured` with a stale pin, so
-    // the `lki` survives while `live_object_id` still refuses the hidden
-    // referent (CR 400.7j licenses finding only a public-zone delivery).
+    // `Relocation` is the fallback for selected exile/return-to-hand moves.
+    // Automatic self-cost resumes also reach this seam, including a
+    // `Zone::Graveyard` discard. Their captured binding carries the actual
+    // typed outcome, which `settle_after_cost_move` uses before this fallback.
+    // Hidden discard demotes to membership; hidden relocation preserves LKI
+    // with a stale pin. The destination alone never chooses the outcome.
     //
     // Placed after the loop so it is correct regardless of how many zones the
     // move traversed or whether a replacement effect redirected it; the
