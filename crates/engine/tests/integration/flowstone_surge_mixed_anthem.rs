@@ -2402,6 +2402,7 @@ fn complete_continuous_rakdos_granted_cost_retains_granting_equipment() {
 #[test]
 fn complete_continuous_elturel_counts_each_actual_player_and_planeswalker_defender() {
     use engine::game::combat::AttackTarget;
+    use engine::types::game_state::CastPaymentMode;
     use engine::types::player::PlayerId;
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 1803);
@@ -2423,6 +2424,15 @@ fn complete_continuous_elturel_counts_each_actual_player_and_planeswalker_defend
         .id();
     let second = scenario
         .add_creature_from_oracle(P0, "Elturel Survivors", 0, 4, ELTUREL)
+        .id();
+    let theft = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Turn Against",
+            true,
+            "Devoid (This card has no color.)\nGain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+        )
+        .with_mana_cost(complete_publication_cost("{4}{R}"))
         .id();
     let mut runner = scenario.build();
     assert_eq!(effective_pt(&mut runner, first), (0, 4));
@@ -2467,6 +2477,76 @@ fn complete_continuous_elturel_counts_each_actual_player_and_planeswalker_defend
         assert_eq!(player, expected);
         runner.declare_blockers(&[]).unwrap();
     }
+    let epoch = runner.state().objects[&first].incarnation;
+    complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+    assert_eq!(runner.state().priority_player, P0);
+    runner.act(GameAction::PassPriority).unwrap();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: theft,
+            card_id: runner.state().objects[&theft].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::default(),
+        })
+        .unwrap();
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("required control target: {:?}", runner.state().waiting_for)
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(target_slots.len(), 1);
+    assert_eq!(selection.current_slot, 0);
+    let slot = &target_slots[selection.current_slot];
+    assert!(!slot.optional);
+    assert!(slot.legal_targets.contains(&TargetRef::Object(first)));
+    assert!(slot.legal_targets.contains(&TargetRef::Object(second)));
+    assert!(!slot.legal_targets.contains(&TargetRef::Object(walker)));
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(walker)),
+        })
+        .is_err());
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(first)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    assert_eq!(runner.state().objects[&theft].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&first].owner, P0);
+    assert_eq!(runner.state().objects[&first].controller, P1);
+    assert_eq!(runner.state().objects[&first].incarnation, epoch);
+    assert!(!runner.state().objects[&first].tapped);
+    assert!(runner.state().objects[&first]
+        .keywords
+        .contains(&Keyword::Haste));
+    // CR 506.4: a controller change removes this source from combat, ending
+    // its live attacking bonus without changing its owner or incarnation.
+    let combat = runner.state().combat.as_ref().unwrap();
+    assert!(!combat
+        .attackers
+        .iter()
+        .any(|attacker| attacker.object_id == first));
+    let still_attacking = combat
+        .attackers
+        .iter()
+        .find(|attacker| attacker.object_id == second)
+        .unwrap();
+    assert_eq!(
+        still_attacking.attack_target,
+        AttackTarget::Planeswalker(walker)
+    );
+    assert_eq!(still_attacking.defending_player, p2);
+    assert_eq!(effective_pt(&mut runner, first), (0, 4));
+    assert_eq!(effective_pt(&mut runner, second), (5, 4));
+    assert_continuous_complete(runner.state());
     runner.advance_to_phase(Phase::PostCombatMain);
     assert_eq!(effective_pt(&mut runner, first), (0, 4));
     assert_eq!(effective_pt(&mut runner, second), (0, 4));
@@ -5357,7 +5437,8 @@ fn complete_continuous_history_full_food_draft_reflexive_and_restricted_mana() {
         })
         .unwrap();
     runner.advance_until_stack_empty();
-    assert_eq!(runner.state().objects[&food[0]].zone, Zone::Graveyard);
+    // CR 704.5d: the sacrificed Food token ceases to exist at the next SBA check.
+    assert!(!runner.state().objects.contains_key(&food[0]));
     let drafted = runner.state().players[0]
         .hand
         .iter()
