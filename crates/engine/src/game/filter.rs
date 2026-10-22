@@ -11249,19 +11249,41 @@ fn matches_filter_prop(
         FilterProp::PowerExceedsBase => {
             obj.power.unwrap_or(0) > obj.layer_base_power.or(obj.base_power).unwrap_or(0)
         }
-        // Match objects whose name differs from all controlled battlefield objects matching the filter.
+        // CR 201.2c: the object has a different name than a group of objects only
+        // if it has at least one name and has no name in common with any of
+        // them, even if some of them have no name. A nameless object (face-down
+        // permanent, CR 708.2a) never has a different name. Names are read
+        // through the shared `SharedQuality::Name` value set, which is empty for
+        // a nameless object, so a nameless reference never collides.
+        // CR 109.5: the group is the permanents "you" control — the source's
+        // controller. `SourceContext::controller` is backfilled from the source's
+        // LKI by `source_context_from_filter`, so `None` is not expected here;
+        // handle it explicitly (no "you", no group, no match) rather than
+        // defaulting to player 0's permanents.
         FilterProp::DifferentNameFrom { filter } => {
-            let controller = source.controller.unwrap_or(PlayerId(0));
+            let Some(controller) = source.controller else {
+                return false;
+            };
+            let candidate_names =
+                object_shared_quality_values(obj, &SharedQuality::Name, &state.all_creature_types);
+            if candidate_names.is_empty() {
+                return false;
+            }
             let nested_ctx = FilterContext::from_source_with_controller(source.id, controller);
-            let controlled_names: Vec<&str> = state
+            !state
                 .battlefield
                 .iter()
                 .filter_map(|&bid| state.objects.get(&bid))
                 .filter(|bobj| bobj.controller == controller)
                 .filter(|bobj| matches_target_filter(state, bobj.id, filter, &nested_ctx))
-                .map(|bobj| bobj.name.as_str())
-                .collect();
-            !controlled_names.contains(&obj.name.as_str())
+                .any(|bobj| {
+                    object_shares_quality_values(
+                        bobj,
+                        &SharedQuality::Name,
+                        &candidate_names,
+                        &state.all_creature_types,
+                    )
+                })
         }
         // CR 109.1 + CR 120.3: Match objects that are NOT the same object as any
         // object the `reference` filter resolves to. `ParentTarget` resolves to
@@ -19047,6 +19069,129 @@ mod tests {
         assert!(
             matches_target_filter(&state, other_name, &does_not_share, source),
             "a card named unlike any battlefield creature does not share"
+        );
+    }
+
+    /// CR 201.2c: an object has a different name than a group of objects only if
+    /// it has at least one name and shares no name with any of them (a nameless
+    /// reference never collides); an object with no name never has a different
+    /// name than anything, even a group of named objects. CR 109.5: the group is
+    /// the permanents "you" (the source's controller) control.
+    ///
+    /// The candidates are library cards (the Light-Paws search shape), outside the
+    /// battlefield reference pool. P0 controls a named creature and a nameless
+    /// face-down creature (CR 708.2a); P1 controls only "Gray Ogre".
+    /// Fails on revert:
+    /// - R2 (P1, nameless candidate): the pre-fix `!names.contains(&name)` found
+    ///   no `""` in P1's population and matched the nameless candidate.
+    /// - E1 (empty population, nameless candidate): same, vacuously.
+    /// - R7 (`GRIZZLY BEARS` vs "Grizzly Bears"): the pre-fix comparison was an
+    ///   exact string match, so the case-differing name read as different.
+    #[test]
+    fn different_name_from_follows_cr_201_2c() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let face_down = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        // CR 708.2a: a face-down permanent has no name.
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down].name, "");
+        add_creature(&mut state, PlayerId(1), "Gray Ogre");
+
+        let mut library_card = |card_id: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            )
+        };
+        let nameless = library_card(101, "");
+        let bears = library_card(102, "Grizzly Bears");
+        let elves = library_card(103, "Llanowar Elves");
+        let ogre = library_card(104, "Gray Ogre");
+        let bears_upper = library_card(105, "GRIZZLY BEARS");
+
+        let different_name_from = |reference: TypedFilter| {
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DifferentNameFrom {
+                    filter: Box::new(TargetFilter::Typed(reference)),
+                },
+            ]))
+        };
+        // "a different name than each creature you control".
+        let from_creatures = different_name_from(TypedFilter::creature());
+        // A reference filter nothing on the board matches: empty population.
+        let from_artifacts = different_name_from(TypedFilter::new(TypeFilter::Artifact));
+        let as_p1 = |state: &GameState, id: ObjectId, filter: &TargetFilter| {
+            super::matches_target_filter(
+                state,
+                id,
+                filter,
+                &FilterContext::from_source_with_controller(source, PlayerId(1)),
+            )
+        };
+
+        // R3: a named candidate unlike every creature P0 controls matches — the
+        // nameless face-down creature does not exclude it. Reach guard for R1/R4/R7.
+        assert!(
+            matches_target_filter(&state, elves, &from_creatures, source),
+            "CR 201.2c: a nameless reference has no name in common with anything"
+        );
+        // R1: a nameless candidate has no different name, even when the group
+        // holds a nameless object.
+        assert!(
+            !matches_target_filter(&state, nameless, &from_creatures, source),
+            "CR 201.2c: a nameless object never has a different name"
+        );
+        // R4: a candidate named like a creature in the group does not match.
+        assert!(
+            !matches_target_filter(&state, bears, &from_creatures, source),
+            "a candidate sharing a name with a creature in the group is excluded"
+        );
+        // R7: name comparison is case-insensitive, like `SharesQuality`.
+        assert!(
+            !matches_target_filter(&state, bears_upper, &from_creatures, source),
+            "names differing only in case are the same name"
+        );
+        // R5: the group is controller-scoped; P1's "Gray Ogre" is not in P0's group.
+        assert!(
+            matches_target_filter(&state, ogre, &from_creatures, source),
+            "CR 109.5: an opponent's same-named creature is not in the group"
+        );
+
+        // R2g: reach guard for P1's context — a candidate unlike P1's "Gray Ogre"
+        // matches, so the P1 population is read and not empty-failing.
+        assert!(
+            as_p1(&state, elves, &from_creatures),
+            "P1's group is {{Gray Ogre}}; Llanowar Elves differs"
+        );
+        // R2: P1's group holds no nameless object, yet a nameless candidate still
+        // has no different name.
+        assert!(
+            !as_p1(&state, nameless, &from_creatures),
+            "CR 201.2c: a nameless object never has a different name"
+        );
+        // R5 mirror: under P1 the ogre is in the group, P0's creatures are not.
+        assert!(
+            !as_p1(&state, ogre, &from_creatures),
+            "CR 109.5: P1's own same-named creature is in the group"
+        );
+
+        // E2: with an empty group a named candidate has a different name
+        // (vacuously). Reach guard for E1.
+        assert!(
+            matches_target_filter(&state, elves, &from_artifacts, source),
+            "an empty group shares no name with a named candidate"
+        );
+        // E1: with an empty group a nameless candidate still has no different name.
+        assert!(
+            !matches_target_filter(&state, nameless, &from_artifacts, source),
+            "CR 201.2c: a nameless object never has a different name, even vs. no objects"
         );
     }
 
