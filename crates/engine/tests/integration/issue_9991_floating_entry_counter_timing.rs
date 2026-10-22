@@ -236,12 +236,12 @@ fn nested_player_threshold_keeps_entering_object_mana_value_live() {
                 attr: Box::new(QuantityRef::LifeTotal {
                     player: PlayerScope::ScopedPlayer,
                 }),
-                comparator: Comparator::GE,
+                comparator: Comparator::LE,
                 value: Box::new(QuantityExpr::Offset {
                     inner: Box::new(quantity(QuantityRef::ObjectManaValue {
                         scope: ObjectScope::Recipient,
                     })),
-                    offset: 16,
+                    offset: 12,
                 }),
             },
         })),
@@ -249,9 +249,11 @@ fn nested_player_threshold_keeps_entering_object_mana_value_live() {
     let spell = entrant(&mut scenario);
     let mut runner = scenario.build();
     install(&mut runner, spell);
-    // CR 614.1c: the preserved threshold is entrant MV8 + 16, not source MV1 + 16.
-    // Neither player's 20 life reaches 24; freezing at install would count both.
-    finish(&mut runner, spell, 0);
+    // CR 614.1c: the preserved threshold is entrant MV8 + 12 = 20, so both
+    // players at 20 life satisfy "life <= threshold". Freezing the recipient read
+    // at install would use source MV1 + 12 = 13 and count neither player, so the
+    // positive count of 2 also proves the player census itself was evaluated.
+    finish(&mut runner, spell, 2);
 }
 
 #[test]

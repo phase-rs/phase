@@ -518,6 +518,11 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         },
         QuantityRef::PlayerCount { filter } => match filter {
             // The threshold preserves ctx.entering, unlike object filter thresholds.
+            // The threshold is deferred as a whole: its `ScopedPlayer` leaves rebind
+            // per candidate player, so a leaf-level rewrite is not safe here. A
+            // resolution-only leaf (an event-scoped read) inside a threshold that
+            // also holds an entering-object read is therefore unsupported; no
+            // corpus rider has that shape.
             PlayerFilter::PlayerAttribute { value, .. } => {
                 value.any_ref(&mut entry_counter_reference_is_deferred)
             }
