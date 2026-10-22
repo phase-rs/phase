@@ -167,6 +167,7 @@ fn sibling_native_tap_pays_demand(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } if *source_id == object_id => state
             .objects
             .get(source_id)

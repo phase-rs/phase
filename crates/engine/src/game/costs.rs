@@ -2154,6 +2154,10 @@ pub(crate) fn can_pay(
             // …])`), nor sibling mana legs summed with a branch's mana (Camellia's
             // `Composite([Mana {2}, OneOf([Exile, Sacrifice])])`).
             if let Some(branches) = super::casting::find_one_of_cost(cost) {
+                // Each branch is judged on `state` as given: a manual activation's
+                // CR 601.2g life retry wraps this whole check
+                // (`can_pay_ability_cost_now`), so it already runs on that retry's
+                // board and must not open a second one here.
                 return branches.iter().any(|branch| {
                     super::casting::one_of_branch_payable_in(
                         state,
@@ -2162,6 +2166,7 @@ pub(crate) fn can_pay(
                         cost,
                         branch,
                         *ability_index,
+                        &super::casting::ActivationLifeWindow::Current,
                     )
                 });
             }

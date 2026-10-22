@@ -85,6 +85,7 @@ fn activate_with_prior_counters(prior: u32) -> (engine::game::scenario::GameRunn
         .act(GameAction::ActivateAbility {
             source_id: map,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Treasure Map's ability must be payable ({1}, {T})");
     for _ in 0..20 {

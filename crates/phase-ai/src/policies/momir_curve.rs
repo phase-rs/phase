@@ -245,6 +245,7 @@ impl TacticalPolicy for MomirCurvePolicy {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => {
                 if !is_pool_sink_activation(ctx.state, source_id, *ability_index) {
                     return na();

@@ -253,6 +253,7 @@ fn activation_is_refused(runner: &mut GameRunner, id: ObjectId, index: usize) ->
         .act(GameAction::ActivateAbility {
             source_id: id,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
 }
@@ -262,6 +263,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId, index: usize) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|error| panic!("the activation must be accepted: {error:?}"));
 }

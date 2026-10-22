@@ -486,6 +486,7 @@ fn vohar_discards_an_instant(rest_in_peace: bool) {
     r.act(GameAction::ActivateAbility {
         source_id: vohar,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     })
     .expect("activate");
     let out = drive(&mut r, Plan::new(bolt).picks(vec![bolt]));
@@ -533,6 +534,7 @@ fn evie_frye_activation_reflexive_targets_after_the_discard() {
     r.act(GameAction::ActivateAbility {
         source_id: evie,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     })
     .expect("activate");
     let out = drive(
@@ -574,6 +576,7 @@ fn serum_core_chimera_activation_reflexive_targets_after_the_discard() {
     r.act(GameAction::ActivateAbility {
         source_id: chimera,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     })
     .expect("activate");
     assert_eq!(

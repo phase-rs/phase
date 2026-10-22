@@ -35,7 +35,7 @@ fn quirion_ranger_activatable_with_forest_and_other_creature() {
             a,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == ranger_id
         )),
         "expected ActivateAbility on Quirion Ranger when Forest + creature exist; got {ranger_actions:?}",
