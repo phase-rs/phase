@@ -31035,11 +31035,10 @@ its replicate cost was paid.)\nDraw a card.";
 
         // What the fix adds after `pay_deferred_spell_sacrifices_at_commit`.
         // Scoped/tagged exactly as that seam calls it: the deferred sacrifice
-        // moved this one permanent (CR 701.21a ⇒ `Relocation`). Both arguments
-        // are inert for THIS assertion — the SINGULAR referent under test is
-        // re-pinned unconditionally, independent of `moved` and `outcome` — and
-        // they are passed in production form so the fixture cannot drift away
-        // from the seam it stands in for.
+        // moved this one permanent (CR 701.21a ⇒ `Relocation`). The moved list must
+        // include this sacrificed object, and Relocation preserves its captured facts
+        // while public settlement repins it exactly once. These are the same arguments
+        // the production seam supplies.
         ability.settle_cost_paid_provenance_recursive(
             &state,
             &[sacrificed],
@@ -31100,10 +31099,9 @@ its replicate cost was paid.)\nDraw a card.";
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, sacrificed, Zone::Graveyard, &mut events);
         // Same production shape as the sibling test: the deferred sacrifice
-        // seam settles the id it moved with `CostMoveOutcome::Relocation`. The
-        // SINGULAR referent this test asserts on re-pins regardless of either
-        // argument, so the test's intent (the LATER move must not be blessed)
-        // is unchanged.
+        // seam settles the id it moved with `CostMoveOutcome::Relocation`. This scoped
+        // Relocation settlement repins the captured referent exactly once. The later
+        // unrelated move must leave that settled pin stale.
         ability.settle_cost_paid_provenance_recursive(
             &state,
             &[sacrificed],

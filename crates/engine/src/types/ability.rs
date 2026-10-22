@@ -42450,14 +42450,11 @@ impl ResolvedAbility {
     /// publication time; that is belt-and-braces (it prevents even a transient
     /// `Captured` for a hidden card) and agrees with this rule by construction.
     ///
-    /// The SINGULAR `cost_paid_object` referent keeps a plain, UNCONDITIONAL
-    /// re-pin here: unscoped by `moved` and unaffected by `outcome`. That is
-    /// this traversal's whole singular job and it is deliberately narrow — a
-    /// re-pin moves the INCARNATION epoch, never the characteristics. Refreshing
-    /// the singular's CHARACTERISTICS across a deferred payment belongs to the
-    /// pre-move counterpart [`Self::refresh_cost_paid_capture_recursive`],
-    /// which now covers both carriers under one scoping rule; settling is not
-    /// re-capturing, and the two must not be merged.
+    /// The singular `cost_paid_object` is scoped to `moved`, just like the plural
+    /// records. Legacy snapshots with no binding retain compatible repinning;
+    /// authoritative snapshots use the same once-only typed settlement, including
+    /// hidden-discard demotion. Settlement preserves captured characteristics;
+    /// refreshing them belongs to `refresh_cost_paid_capture_recursive` before payment.
     ///
     /// This is the SINGLE traversal authority for cost-paid provenance
     /// settlement: it covers the singular `cost_paid_object` referent AND every
@@ -42539,8 +42536,8 @@ impl ResolvedAbility {
     /// ETB trigger via the spell's `cast_cost_paid_object`, so an unrefreshed
     /// singular reports selection-time state to effects and triggers that
     /// CR 608.2h entitles to the state immediately before the actual payment.
-    /// The settlement traversal only RE-PINS the singular (incarnation), which
-    /// cannot fix stale characteristics — capture is this traversal's job.
+    /// Settlement may repin a public delivery or discard an undefined hidden-discard
+    /// snapshot, but never refreshes captured characteristics; capture is this traversal's job.
     ///
     /// The spell object's `cast_cost_paid_object` carrier is the one cost-paid
     /// carrier this traversal cannot reach: it lives on `GameObject`, not on

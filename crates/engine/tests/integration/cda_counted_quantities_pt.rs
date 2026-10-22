@@ -2677,6 +2677,7 @@ fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
 // cost currency, including the immediate resumed special-action intercept.
 #[test]
 fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
+    const DJINN: &str = "Flying\nPlot {3}{U} (You may pay {3}{U} and exile this card from your hand. Cast it as a sorcery on a later turn without paying its mana cost. Plot only as a sorcery.)";
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastingPermission, Effect,
         ReplacementDefinition, ReplacementMode,
@@ -2715,9 +2716,10 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
             let own_printed_top = if granted {
                 Some(
                     scenario
-                        .add_spell_to_library_top(P0, "Highway Robbery", false)
-                        .from_oracle_text_with_keywords(&["Plot"], HIGHWAY)
-                        .with_mana_cost(cda_cost(1, vec![ManaCostShard::Red]))
+                        .add_creature_to_hand(P0, "Djinn of Fool's Fall", 4, 3)
+                        .with_subtypes(vec!["Djinn"])
+                        .from_oracle_text_with_keywords(&["Flying", "Plot"], DJINN)
+                        .with_mana_cost(cda_cost(4, vec![ManaCostShard::Blue]))
                         .id(),
                 )
             } else {
@@ -2737,6 +2739,18 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                     .id()
             };
             let mut runner = scenario.build();
+            if let Some(printed) = own_printed_top {
+                engine::game::zones::move_to_zone(
+                    runner.state_mut(),
+                    printed,
+                    Zone::Library,
+                    &mut vec![],
+                );
+                let library = &mut runner.state_mut().players[0].library;
+                library.retain(|id| *id != printed);
+                library.insert(1, printed);
+                assert_eq!(library.front(), Some(&card));
+            }
             runner.state_mut().objects.get_mut(&land_a).unwrap().tapped = true;
             runner.state_mut().objects.get_mut(&land_b).unwrap().tapped = true;
             cda_full_source(runner.state(), card);
@@ -2804,20 +2818,95 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 );
                 assert_eq!(unequal.state().players[0].library.front(), Some(&printed));
                 cda_full_source(unequal.state(), printed);
+                let mut own_hand = GameRunner::from_state(unequal.state().clone());
+                engine::game::zones::move_to_zone(
+                    own_hand.state_mut(),
+                    printed,
+                    Zone::Hand,
+                    &mut vec![],
+                );
+                let own_index =
+                    engine::game::casting::activated_ability_definitions(own_hand.state(), printed)
+                        .into_iter()
+                        .find(|(_, def)| def.activation_zone == Some(Zone::Hand))
+                        .expect("full Djinn retains its printed Hand Plot")
+                        .0;
+                own_hand.state_mut().players[0].mana_pool.clear();
+                cda_fund(
+                    &mut own_hand,
+                    P0,
+                    &[
+                        ManaType::Blue,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                    ],
+                );
+                own_hand
+                    .act(GameAction::ActivateAbility {
+                        source_id: printed,
+                        ability_index: own_index,
+                    })
+                    .unwrap();
+                assert_eq!(own_hand.state().players[0].mana_pool.total(), 0);
+                assert_eq!(own_hand.state().objects[&printed].zone, Zone::Exile);
+                assert!(own_hand.state().objects[&printed]
+                    .casting_permissions
+                    .iter()
+                    .any(|p| matches!(p, CastingPermission::Plotted { .. })));
+                assert!(own_hand.state().objects[&card]
+                    .casting_permissions
+                    .is_empty());
+                cda_complete(own_hand.state());
                 let granted_index =
                     engine::game::casting::activated_ability_definitions(unequal.state(), printed)
                         .into_iter()
                         .find(|(_, def)| def.activation_zone == Some(Zone::Library))
-                        .unwrap()
+                        .expect("fresh Djinn top receives Fblthp's Library Plot")
                         .0;
-                unequal.state_mut().players[0].mana_pool.clear();
-                cda_fund(&mut unequal, P0, &[ManaType::Red, ManaType::Colorless]);
-                assert!(unequal.act(GameAction::ActivateAbility { source_id: printed, ability_index: granted_index }).is_err(), "printed Hand Plot 1R cannot pay the independently granted top-Library Plot cost");
+                let printed_original = unequal.state().objects[&printed].incarnation;
                 unequal.state_mut().players[0].mana_pool.clear();
                 cda_fund(
                     &mut unequal,
                     P0,
-                    &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
+                    &[
+                        ManaType::Blue,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                    ],
+                );
+                assert!(
+                    unequal
+                        .act(GameAction::ActivateAbility {
+                            source_id: printed,
+                            ability_index: granted_index
+                        })
+                        .is_err(),
+                    "Djinn's printed Plot 3U cannot pay Fblthp's mana-cost-derived Library Plot 4U"
+                );
+                assert_eq!(unequal.state().players[0].mana_pool.total(), 4);
+                assert_eq!(unequal.state().objects[&printed].zone, Zone::Library);
+                assert_eq!(
+                    unequal.state().objects[&printed].incarnation,
+                    printed_original
+                );
+                assert_eq!(unequal.state().players[0].library.front(), Some(&printed));
+                assert!(unequal.state().objects[&printed]
+                    .casting_permissions
+                    .is_empty());
+                cda_complete(unequal.state());
+                unequal.state_mut().players[0].mana_pool.clear();
+                cda_fund(
+                    &mut unequal,
+                    P0,
+                    &[
+                        ManaType::Blue,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                    ],
                 );
                 unequal
                     .act(GameAction::ActivateAbility {
@@ -2826,6 +2915,11 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                     })
                     .unwrap();
                 assert_eq!(unequal.state().players[0].mana_pool.total(), 0);
+                assert_eq!(unequal.state().objects[&printed].zone, Zone::Exile);
+                assert_ne!(
+                    unequal.state().objects[&printed].incarnation,
+                    printed_original
+                );
                 assert!(unequal.state().objects[&printed]
                     .casting_permissions
                     .iter()
