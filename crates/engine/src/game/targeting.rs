@@ -801,6 +801,7 @@ pub fn resolve_event_context_target(
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner => {
@@ -1653,6 +1654,7 @@ pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
@@ -2345,6 +2347,21 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                     _ => None,
                 })
                 .map(TargetRef::Player)
+        }
+        // CR 506.3 + CR 508.1b: "the player or planeswalker it's attacking" names a
+        // player or a planeswalker; a creature attacking a battle has no referent.
+        TargetFilter::SourceAttackTarget => {
+            crate::game::combat::attack_target_for_attacker(state, source_id).and_then(|target| {
+                match target {
+                    crate::game::combat::AttackTarget::Player(player) => {
+                        Some(TargetRef::Player(player))
+                    }
+                    crate::game::combat::AttackTarget::Planeswalker(pw_id) => {
+                        Some(TargetRef::Object(pw_id))
+                    }
+                    crate::game::combat::AttackTarget::Battle(_) => None,
+                }
+            })
         }
         TargetFilter::AttachedTo => {
             let host = resolve_source_attached_to(state, source_id)?;

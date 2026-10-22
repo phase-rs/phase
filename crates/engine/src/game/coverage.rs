@@ -777,6 +777,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::SourceAttackTarget => "the player or planeswalker it's attacking".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),

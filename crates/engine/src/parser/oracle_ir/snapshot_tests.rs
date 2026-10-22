@@ -3162,16 +3162,16 @@ mod diagnostic_snapshots {
     #[test]
     fn diagnostic_ignored_remainder() {
         let diagnostics = parse_diagnostics(
-            "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.\nEncore {5}{R} ({5}{R}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
-            "Fathom Fleet Swordjack",
+            "Whenever this creature blocks, it deals damage to the creature it's blocking equal to the number of artifacts you control.",
+            "Synthetic Blocker",
             &["Creature"],
-            &["Orc", "Pirate"],
+            &["Orc"],
         );
         assert!(
             diagnostics
                 .iter()
                 .any(|d| d.category_name() == "ignored-remainder"),
-            "Expected ignored-remainder diagnostic for Fathom Fleet Swordjack, got: {:?}",
+            "Expected ignored-remainder diagnostic for Synthetic Blocker, got: {:?}",
             diagnostics
         );
         insta::assert_json_snapshot!("diagnostic_ignored_remainder", &diagnostics);

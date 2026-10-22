@@ -1359,6 +1359,7 @@ mod queen_velocity_skip_turns;
 mod queen_velocity_upkeep;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
+mod rakdos_roustabout;
 mod random_discard_cost_replacement_resume;
 mod raubahn_bull_of_ala_mhigo;
 mod raw_resolution_stack_restore;

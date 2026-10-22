@@ -905,6 +905,10 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // CR 115.10a: a compound "you and permanents you control" recipient.
         TargetFilter::ControllerAndControlledPermanents { .. } => FilterDomain::ANYTHING,
 
+        // CR 506.3: the source attacker's attack target is a player, a
+        // planeswalker, or a battle.
+        TargetFilter::SourceAttackTarget => FilterDomain::ANYTHING,
+
         TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::SourceController

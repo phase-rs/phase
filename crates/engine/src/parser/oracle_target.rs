@@ -329,6 +329,18 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // protector of the battle / controller of the planeswalker) that the
             // attacking creature is attacking.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
+            // CR 506.3 + CR 508.1b: "the player or planeswalker it's attacking" — the
+            // attack target of the source creature.
+            value(
+                TargetFilter::SourceAttackTarget,
+                preceded(
+                    opt(tag("the ")),
+                    alt((
+                        tag("player or planeswalker it's attacking"),
+                        tag("player or planeswalker it\u{2019}s attacking"),
+                    )),
+                ),
+            ),
         ))
         .parse(input)
     })
@@ -9920,6 +9932,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }

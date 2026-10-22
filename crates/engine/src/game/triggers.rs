@@ -12860,6 +12860,9 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer => false,
+        // CR 506.3 + CR 508.1b: the source's attack target is read from combat
+        // state, not derived from the triggering event, so it never diverges.
+        TargetFilter::SourceAttackTarget => false,
     }
 }
 

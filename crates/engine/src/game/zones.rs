@@ -678,6 +678,27 @@ pub(crate) fn apply_zone_exit_cleanup(
         // battlefield. Combat role is snapshotted into the zone-change record
         // (capture_combat_status) before this cleanup runs so look-back
         // triggers still read attacking/blocking status (CR 603.10a).
+        //
+        // CR 506.3 + CR 400.7 + CR 608.2h: Preserve a departing attacker's
+        // attack target as last-known information before
+        // `remove_object_from_combat` drops its `AttackerInfo`, so a
+        // "deals damage to the player or planeswalker it's attacking" ability
+        // that resolves after the source has left the battlefield still finds
+        // its referent (Fathom Fleet Swordjack ruling). Only a battlefield
+        // exit preserves the target — a creature removed from combat while
+        // remaining on the battlefield is not recorded here and keeps no
+        // referent.
+        if let Some(combat) = state.combat.as_mut() {
+            if let Some(info) = combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == object_id)
+            {
+                combat
+                    .departed_attacker_targets
+                    .insert(object_id, info.attack_target);
+            }
+        }
         super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
@@ -1652,6 +1673,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
                 true,
             )
         };
+    // CR 400.7: an attacker returning to the battlefield is a new object — it
+    // cannot inherit a departed attacker's preserved attack target. Drop any
+    // stale record so a later SourceAttackTarget lookup finds no referent for
+    // a creature that was never redeclared as an attacker this combat.
+    if to == Zone::Battlefield {
+        if let Some(combat) = state.combat.as_mut() {
+            combat.departed_attacker_targets.remove(&object_id);
+        }
+    }
     record_linked_exile_departure(
         state,
         object_id,

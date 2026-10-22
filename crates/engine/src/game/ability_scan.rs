@@ -3776,6 +3776,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
+        TargetFilter::SourceAttackTarget => Axes::NONE,
         TargetFilter::HasChosenName => Axes::NONE,
         TargetFilter::ChosenDamageSource { filter } => {
             let mut acc = Axes {

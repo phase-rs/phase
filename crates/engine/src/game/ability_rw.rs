@@ -1481,6 +1481,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -2481,6 +2482,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         // `SpecificObject`, its concretized form).
         | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2743,6 +2745,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,
@@ -4227,7 +4230,9 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner => (true, false),
         // "any target" and player-or-object filters ⇒ both recipients.
-        TargetFilter::Any | TargetFilter::Or { .. } => (true, true),
+        TargetFilter::Any | TargetFilter::Or { .. } | TargetFilter::SourceAttackTarget => {
+            (true, true)
+        }
         // Everything else is object-scoped for damage purposes.
         _ => (false, true),
     }
@@ -7356,6 +7361,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // to `SpecificObject` at resolution).
         | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -8209,6 +8215,7 @@ mod tests {
             TargetFilter::ScopedPlayer,
             TargetFilter::LastRevealed,
             TargetFilter::DefendingPlayer,
+            TargetFilter::SourceAttackTarget,
             typed_ctrl(ControllerRef::You),
             // The delegation is the referent's own verdict, not a blanket TRUE
             // for the prop: a controller-relative attachment referent stays

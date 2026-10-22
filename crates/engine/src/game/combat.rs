@@ -395,6 +395,21 @@ pub struct CombatState {
     pub pending_damage: Vec<(ObjectId, DamageAssignment)>,
     /// Whether regular damage has been applied (guards against re-entry from triggers).
     pub regular_damage_done: bool,
+    /// CR 506.3 + CR 400.7 + CR 608.2h: Attack targets of attackers that left the
+    /// battlefield while attacking, preserved as last-known information so a
+    /// "deals damage to the player or planeswalker it's attacking" ability that
+    /// resolves after its source is gone still finds its referent (e.g. the
+    /// Fathom Fleet Swordjack / Rakdos Roustabout ruling). Keyed by ObjectId,
+    /// which persists across the zone change; an ObjectId that re-enters the
+    /// battlefield is a new object (CR 400.7), so its stale entry is cleared at
+    /// battlefield entry. A creature removed from combat while remaining on the
+    /// battlefield is never recorded here — it keeps the pre-existing
+    /// no-referent result.
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
+    pub departed_attacker_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 impl PartialEq for CombatState {
@@ -7958,6 +7973,31 @@ pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> O
             None
         }
     })
+}
+
+/// CR 506.3: Returns the attack target (Player, Planeswalker, or Battle) for the
+/// given attacker, if it is currently an attacking creature.
+pub(crate) fn attack_target_for_attacker(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<AttackTarget> {
+    let combat = state.combat.as_ref()?;
+    // A creature still in combat answers from its live `AttackerInfo`.
+    if let Some(target) = combat
+        .attackers
+        .iter()
+        .find(|info| info.object_id == attacker)
+        .map(|info| info.attack_target)
+    {
+        return Some(target);
+    }
+    // CR 400.7 + CR 608.2h: the source left the battlefield before its attack
+    // trigger resolved — fall back to the last-known attack target captured at
+    // its battlefield exit, so a "deals damage to the player or planeswalker
+    // it's attacking" ability still resolves (Fathom Fleet Swordjack ruling).
+    // A creature removed from combat while remaining on the battlefield was
+    // never recorded above, so it keeps the pre-existing no-referent result.
+    combat.departed_attacker_targets.get(&attacker).copied()
 }
 
 /// CR 508.1k + CR 506.4: the player `attacker` is recorded as attacking, if the
@@ -22631,6 +22671,79 @@ mod tests {
         assert_eq!(combat.blocker_to_attacker.get(&multi), Some(&vec![]));
         assert_eq!(combat.blocker_to_attacker.get(&shared), Some(&vec![]));
         assert!(combat.blocker_assignments.is_empty());
+    }
+
+    /// CR 506.3 + CR 400.7 + CR 608.2h: `attack_target_for_attacker` answers
+    /// from the live `AttackerInfo` while the creature is in combat, falls back
+    /// to the last-known target captured when the attacker left the
+    /// battlefield, and returns `None` for a creature removed from combat while
+    /// still on the battlefield (no referent) or one never declared as an
+    /// attacker.
+    #[test]
+    fn attack_target_for_attacker_survives_battlefield_exit() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        // Still in combat: the live record wins.
+        assert_eq!(
+            attack_target_for_attacker(&state, attacker),
+            Some(AttackTarget::Player(PlayerId(1)))
+        );
+
+        // Leaves the battlefield: the `AttackerInfo` is pruned but the target
+        // is preserved as last-known information.
+        crate::game::zones::move_to_zone(&mut state, attacker, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(
+            attack_target_for_attacker(&state, attacker),
+            Some(AttackTarget::Player(PlayerId(1))),
+            "the departed attacker's attack target is preserved"
+        );
+
+        // Re-enters the battlefield: CR 400.7 — a new object, no referent.
+        crate::game::zones::move_to_zone(&mut state, attacker, Zone::Battlefield, &mut Vec::new());
+        assert_eq!(
+            attack_target_for_attacker(&state, attacker),
+            None,
+            "the returned object is not the departed attacker"
+        );
+    }
+
+    /// CR 506.4: a creature removed from combat while remaining on the
+    /// battlefield keeps no attack-target referent — only a battlefield exit
+    /// preserves last-known information.
+    #[test]
+    fn attack_target_for_attacker_none_when_removed_from_combat_in_play() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let bystander = create_creature(&mut state, PlayerId(0), "Wall", 0, 4);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, attacker);
+        assert_eq!(
+            attack_target_for_attacker(&state, attacker),
+            None,
+            "removed from combat but still in play: no referent"
+        );
+        assert_eq!(
+            attack_target_for_attacker(&state, bystander),
+            None,
+            "never an attacker: no referent"
+        );
     }
 
     /// CR 506.5 + CR 603.10a: the "blocking alone" authority and the

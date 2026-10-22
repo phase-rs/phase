@@ -126,6 +126,17 @@ fn bound_player_context_target(
             .map(TargetRef::Player);
     }
 
+    // CR 506.3 + CR 120.1: the source attacker's attack target is a player OR a
+    // planeswalker/battle, so it resolves to a full `TargetRef` from combat state
+    // rather than through the player-only context resolver below.
+    if matches!(target_filter, TargetFilter::SourceAttackTarget) {
+        return crate::game::targeting::resolve_event_context_target(
+            state,
+            target_filter,
+            ability.source_id,
+        );
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller

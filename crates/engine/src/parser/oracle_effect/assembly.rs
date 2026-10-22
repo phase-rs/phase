@@ -1779,6 +1779,7 @@ fn subject_anchored_optional_actor(
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer => None,
@@ -1895,7 +1896,10 @@ fn subject_anchored_optional_actor(
             // resolution time binds the seat). The reference-vs-seat distinction
             // is a data-model fact about this variant's `PlayerId` payload, not a
             // CR one, so only CR 109.5 is cited.
-            TargetFilter::SpecificPlayer { .. } => None,
+            TargetFilter::SpecificPlayer { .. }
+            // CR 506.3: resolves to a player OR a planeswalker object, so it can
+            // never be the player-only announcing actor.
+            | TargetFilter::SourceAttackTarget => None,
 
             // DEAD ADMISSIONS: player-denoting, but NO arm in
             // `targeting::resolve_effect_player_ref` NOR in

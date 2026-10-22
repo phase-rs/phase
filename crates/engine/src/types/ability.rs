@@ -8668,6 +8668,11 @@ pub enum TargetFilter {
     /// attacking creature, looked up per attacker through
     /// `combat::defending_player_for_attacker`.
     DefendingPlayer,
+    /// CR 506.3 + CR 508.1b: Resolves to the attack target (Player or Planeswalker)
+    /// of the source creature (a battle has no referent), looked up per attacker through
+    /// `combat::attack_target_for_attacker`. Used for phrases like
+    /// "the player or planeswalker it's attacking".
+    SourceAttackTarget,
     /// Matches objects whose name equals the source's ChosenAttribute::CardName.
     /// Used for "card with the chosen name" patterns.
     HasChosenName,
@@ -23063,6 +23068,9 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSource
                 | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
+                // CR 506.3: the source attacker's recorded attack target is read
+                // from combat state at resolution, never declared as a target.
+                | TargetFilter::SourceAttackTarget
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
                 // continuations bind to objects created earlier in the same
                 // resolution; they are never declared as player-chosen targets.
