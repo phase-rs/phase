@@ -1678,9 +1678,10 @@ fn handle_replacement_choice_inner(
                 // are the same point.
                 finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
                 // CR 614.12 + CR 616.1: a prevented placement still owes a settled
-                // enter-as-copy entry its fallible tail. Resume only that owed
-                // work; every other prevented-counter pause keeps its existing,
-                // non-resuming exit.
+                // enter-as-copy entry its fallible tail. Run the engine boundary
+                // (which consumes that tail) only when such a tail is ready; every
+                // other prevented-counter pause keeps its existing, non-resuming
+                // exit.
                 if effects::counters::copy_entry_completion_is_ready(state) {
                     super::engine::resume_pending_continuation_if_priority(state, events)?;
                 }
@@ -2905,7 +2906,9 @@ pub(crate) fn resume_copy_target_choice_entry(
 ) -> Result<CopyEntryResumption, EngineError> {
     // CR 400.7: a later incarnation must not receive choices, replayed ETBs,
     // or attachment work owed by the original entry. Its counter frame was
-    // popped before this call, so retiring the spent dispatch strands no owner.
+    // popped before this call; the spell-resolution frame was retired before the
+    // counter pause, so this only retires whichever paused dispatch is still
+    // active at this point (the same call the live path makes after the tail).
     if !entrant.is_current(state)
         || state
             .objects

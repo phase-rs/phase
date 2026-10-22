@@ -683,10 +683,20 @@ pub(crate) fn resume_copy_target_entry_completions(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), crate::game::engine::EngineError> {
+    // Only a remainder left behind by a consumed tail is drained here. A frame
+    // this function did not consume belongs to the ordinary drains, which also
+    // defer to a due counter-cost root; draining it first would reorder the
+    // boundary for every card, not just copy entries.
+    let mut consumed_tail = false;
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        drain_pending_counter_additions(state, events);
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if state.counter_cost_root_is_due() {
             return Ok(());
+        }
+        if consumed_tail {
+            drain_pending_counter_additions(state, events);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(());
+            }
         }
         let Some(entrant) = state
             .active_counter_additions()
@@ -716,6 +726,7 @@ pub(crate) fn resume_copy_target_entry_completions(
             }
             CopyEntryResumption::Completed => {}
         }
+        consumed_tail = true;
         // Emit the completion event only AFTER its post-actions. A non-noop
         // remainder is drained on the next iteration; no empty frame survives.
         if !completion.is_noop() {
