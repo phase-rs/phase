@@ -2229,6 +2229,13 @@ fn protection_blocks_attachment(
         if !matches_target_filter(state, host_id, &affected, &ctx) {
             continue;
         }
+        // CR 109.5: "you" in a static ability is its source's current controller.
+        let you = crate::game::layers::condition_controller(
+            state,
+            None,
+            source_obj.controller,
+            source_id,
+        );
         for (mod_index, modification) in def.modifications.iter().enumerate() {
             let ContinuousModification::AddKeyword {
                 keyword: Keyword::Protection(pt),
@@ -2236,24 +2243,27 @@ fn protection_blocks_attachment(
             else {
                 continue;
             };
-            let resolved = resolve_protection_target_for_grant(state, source_id, pt);
-            let Some(resolved) = resolved else {
-                continue;
-            };
-            if !crate::game::keywords::source_matches_protection_target(&resolved, host, attachment)
+            // CR 702.16i + CR 702.16n: each expanded quality is its own protection
+            // ability; another grant's "doesn't remove" rider never exempts this one.
+            for resolved in
+                crate::game::keywords::resolve_granted_protection(state, pt, source_id, you)
             {
-                continue;
-            }
-            any_matching_grant = true;
-            if !protection_grant_exempts_attachment(
-                state,
-                attachment_id,
-                source_id,
-                (def_index, mod_index, host_id),
-                &resolved,
-                def.protection_does_not_remove.as_ref(),
-            ) {
-                return true;
+                if !crate::game::keywords::source_matches_protection_target(
+                    &resolved, host, attachment,
+                ) {
+                    continue;
+                }
+                any_matching_grant = true;
+                if !protection_grant_exempts_attachment(
+                    state,
+                    attachment_id,
+                    source_id,
+                    (def_index, mod_index, host_id),
+                    &resolved,
+                    def.protection_does_not_remove.as_ref(),
+                ) {
+                    return true;
+                }
             }
         }
     }
@@ -2265,6 +2275,14 @@ fn protection_blocks_attachment(
         if !matches_target_filter(state, host_id, &tce.affected, &ctx) {
             continue;
         }
+        // CR 109.5: "you" in a resolution-created effect is the controller that
+        // created it, not its source's current controller.
+        let you = crate::game::layers::condition_controller(
+            state,
+            Some(tce.id),
+            tce.controller,
+            tce.source_id,
+        );
         for modification in &tce.modifications {
             let ContinuousModification::AddKeyword {
                 keyword: Keyword::Protection(pt),
@@ -2272,12 +2290,15 @@ fn protection_blocks_attachment(
             else {
                 continue;
             };
-            let resolved = resolve_protection_target_for_grant(state, tce.source_id, pt);
-            let Some(resolved) = resolved else {
-                continue;
-            };
-            if crate::game::keywords::source_matches_protection_target(&resolved, host, attachment)
-            {
+            let blocks =
+                crate::game::keywords::resolve_granted_protection(state, pt, tce.source_id, you)
+                    .iter()
+                    .any(|resolved| {
+                        crate::game::keywords::source_matches_protection_target(
+                            resolved, host, attachment,
+                        )
+                    });
+            if blocks {
                 // Transients currently carry no 702.16n rider field.
                 return true;
             }
@@ -2292,30 +2313,6 @@ fn protection_blocks_attachment(
     }
 
     false
-}
-
-/// CR 702.16 + CR 105.4: Resolve `ChosenColor` / `ChosenCardType` against the
-/// granting source before matching the attachment (mirrors layer bake-in).
-fn resolve_protection_target_for_grant(
-    state: &GameState,
-    source_id: ObjectId,
-    pt: &crate::types::keywords::ProtectionTarget,
-) -> Option<crate::types::keywords::ProtectionTarget> {
-    use crate::types::keywords::ProtectionTarget;
-    match pt {
-        ProtectionTarget::ChosenColor => state
-            .objects
-            .get(&source_id)
-            .and_then(|src| src.chosen_color())
-            .map(ProtectionTarget::Color),
-        ProtectionTarget::ChosenCardType => state
-            .objects
-            .get(&source_id)
-            .and_then(|src| src.chosen_card_type())
-            .and_then(|ct| ct.protection_quality_str())
-            .map(|quality| ProtectionTarget::CardType(quality.to_string())),
-        other => Some(other.clone()),
-    }
 }
 
 /// Composite key for one protection modification on a host:
@@ -2405,6 +2402,13 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
         let def_index = live_static_def_index(source_obj, def);
         let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
         let ctx = FilterContext::from_source(state, source_id);
+        // CR 109.5: "you" in a static ability is its source's current controller.
+        let you = crate::game::layers::condition_controller(
+            state,
+            None,
+            source_obj.controller,
+            source_id,
+        );
         for (mod_index, modification) in def.modifications.iter().enumerate() {
             let ContinuousModification::AddKeyword {
                 keyword: Keyword::Protection(pt),
@@ -2412,9 +2416,23 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
             else {
                 continue;
             };
-            let Some(resolved_pt) = resolve_protection_target_for_grant(state, source_id, pt)
-            else {
+            // CR 702.16p: the already-attached rider exists only on Benevolent
+            // Blessing, a single chosen quality. `ProtectionStartSnapshot` keys one
+            // quality per (def, mod, host), so a color-set grant (CR 702.16i: one
+            // protection ability per member) is never snapshotted, whatever its
+            // member count, and therefore exempts nothing: its protections apply
+            // normally.
+            if matches!(pt, crate::types::keywords::ProtectionTarget::EachColor(_)) {
                 continue;
+            }
+            let resolved =
+                crate::game::keywords::resolve_granted_protection(state, pt, source_id, you);
+            let resolved_pt = match resolved.as_slice() {
+                [] => continue,
+                [single] => single.clone(),
+                // Only a set quality resolves to more than one entry, and set
+                // grants were skipped above.
+                [_, _, ..] => continue,
             };
             for &host_id in &state.battlefield {
                 if !matches_target_filter(state, host_id, &affected, &ctx) {
@@ -5488,6 +5506,90 @@ mod tests {
             state.objects.get(&equipment).unwrap().attached_to,
             Some(AttachTarget::Object(host)),
             "CR 702.16p: exempt Equipment must stay attached through SBA"
+        );
+    }
+
+    /// CR 702.16i + CR 109.5: attachment legality expands a resolution-created
+    /// color-set protection grant with the controller that CREATED the effect
+    /// (`tce.controller`), not the controller of its source object. P0 (the
+    /// creator) has a {U,R} commander, so the grant is protection from W, B and G;
+    /// the source is controlled by P1, who has no commander (CR 903.4f: no colors).
+    /// Another grant's CR 702.16n rider (Flickering Ward, chosen White) exempts only
+    /// itself, so the white Aura must still be illegal through the transient grant.
+    #[test]
+    fn transient_each_color_grant_uses_creating_controller_identity() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::ability::{ChosenAttribute, ContinuousModification, Duration};
+        use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        // P0's pool-less commander: printed identity {U, R}.
+        let commander = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Niv-Mizzet".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.is_commander = true;
+            obj.base_color = vec![ManaColor::Blue, ManaColor::Red];
+            obj.color = obj.base_color.clone();
+        }
+
+        let host = spawn_creature(&mut state, "Bear");
+        let ward = spawn_with_subtype(&mut state, "Flickering Ward", "Aura");
+        {
+            let obj = state.objects.get_mut(&ward).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_color = vec![ManaColor::White];
+            obj.color = vec![ManaColor::White];
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(ManaColor::White));
+        }
+        attach_to(&mut state, ward, host);
+        apply_protection_grant(
+            &mut state,
+            ward,
+            host,
+            ProtectionTarget::ChosenColor,
+            Some(ProtectionDoesNotRemove::Source),
+        );
+        evaluate_protection_layers(&mut state);
+        // Reach guard: before the transient grant, Ward's own rider keeps it legal.
+        assert_eq!(attachment_illegality(&state, ward, host), None);
+
+        // The granting source is controlled by P1 (no commander); the effect was
+        // created by P0 (commander {U, R}).
+        let grant_source = spawn_grant_source(&mut state, "Equipment Source", 31);
+        {
+            let obj = state.objects.get_mut(&grant_source).unwrap();
+            obj.owner = PlayerId(1);
+            obj.controller = PlayerId(1);
+        }
+        state
+            .add_transient_continuous_effect(
+                grant_source,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                        ProtectionColorSet::OutsideCommanderColorIdentity,
+                    )),
+                }],
+                None,
+            )
+            .expect("transient grant must register");
+        evaluate_protection_layers(&mut state);
+
+        assert_eq!(
+            attachment_illegality(&state, ward, host),
+            Some(AttachIllegality::Protection),
+            "CR 702.16i: the creating controller's identity {{U,R}} leaves protection \
+             from White, which Ward's own rider does not exempt"
         );
     }
 

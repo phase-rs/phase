@@ -1457,9 +1457,10 @@ fn thrill_board(swiftspear: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, 
 }
 
 /// V25 — Thrill of Possibility ("As an additional cost to cast this spell,
-/// discard a card") with Drake Haven and Monastery Swiftspear. A spell's
-/// `CancelCast` does not return a paid discard, so Haven's trigger stays; that
-/// is the spell behavior this change leaves alone (it only changes activations).
+/// discard a card") with Drake Haven and Monastery Swiftspear. CR 733.1: a
+/// spell's `CancelCast` reverses the whole unfinished cast, so the paid discard
+/// returns to hand and Haven does not trigger ("No abilities trigger and no
+/// effects apply as a result of an undone action").
 #[test]
 fn v25_spell_with_a_paid_discard_across_a_manual_payment_pause() {
     // Auto leg: the unpaused reference.
@@ -1488,14 +1489,15 @@ fn v25_spell_with_a_paid_discard_across_a_manual_payment_pause() {
     assert_eq!(stack_triggers_from(&r, swiftspear), 1);
 
     // Cancel leg.
-    let (mut r, thrill, fodder, haven, _) = thrill_board(true);
+    let (mut r, thrill, fodder, _, _) = thrill_board(true);
     cast(&mut r, thrill, CastPaymentMode::Manual);
     select_cards(&mut r, vec![fodder]);
+    assert_eq!(r.state().objects[&fodder].zone, Zone::Graveyard);
     let wf = act(&mut r, GameAction::CancelCast);
     assert!(matches!(wf, WaitingFor::Priority { .. }), "{wf:?}");
     assert_eq!(r.state().objects[&thrill].zone, Zone::Hand);
-    assert_eq!(r.state().objects[&fodder].zone, Zone::Graveyard);
-    assert_eq!(stack(&r), vec![(Kind::Triggered, haven, P0)]);
+    assert_eq!(r.state().objects[&fodder].zone, Zone::Hand);
+    assert_eq!(stack(&r), vec![]);
 }
 
 // ---------------------------------------------------------------------------

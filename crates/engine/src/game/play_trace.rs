@@ -466,6 +466,8 @@ pub(crate) struct PlayTrace {
     undo: im::Vector<UndoPoint>,
     /// CR 733.1: the mana abilities the engine reversed inside the action in progress.
     reversed: Vec<(ObjectId, usize)>,
+    /// A reducer-discovered illegal casting procedure, rather than CancelCast.
+    process_reversed: bool,
     /// Each entry that activates a mana ability or answers one of its choices (CR 605.3b), with
     /// the ability it belongs to.
     mana_ability_entries: im::HashMap<usize, (ObjectId, usize)>,
@@ -496,6 +498,7 @@ impl PlayTrace {
             offered: None,
             undo: im::Vector::new(),
             reversed: Vec::new(),
+            process_reversed: false,
             mana_ability_entries: im::HashMap::new(),
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
@@ -1405,6 +1408,31 @@ pub(crate) fn mana_ability_reversed(state: &mut GameState, source: ObjectId, pla
     }
 }
 
+/// CR 733.1: the cast rollback also reversed mana activations made during it.
+/// Use the trace's exact undo identities, including nested choices.
+pub(crate) fn cast_mana_abilities_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        let abilities: Vec<_> = trace
+            .undo
+            .iter()
+            .rev()
+            .take_while(|point| point.undoes != Reversal::Process)
+            .filter_map(|point| match point.undoes {
+                Reversal::ManaAbility(source, place) => Some((source, place)),
+                Reversal::Process | Reversal::ManaSource(_) => None,
+            })
+            .collect();
+        trace.reversed.extend(abilities);
+    }
+}
+
+/// CR 733.1: a failed casting procedure reverses the same play as CancelCast.
+pub(crate) fn casting_procedure_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        trace.process_reversed = true;
+    }
+}
+
 /// Restores the trace when the action did not apply; applies the reversal when it did.
 pub(crate) fn end_action(
     state: &mut GameState,
@@ -1433,8 +1461,14 @@ pub(crate) fn end_action(
         .as_deref_mut()
         .map(|trace| std::mem::take(&mut trace.reversed))
         .unwrap_or_default();
+    let process_reversed = state
+        .play_trace
+        .as_deref_mut()
+        .is_some_and(|trace| std::mem::take(&mut trace.process_reversed));
     if let Some(reversal) = snapshot.reverses {
         reverse(state, reversal);
+    } else if process_reversed {
+        reverse(state, Reversal::Process);
     }
     let began_play = play_in_progress(state);
     let cost_move = snapshot

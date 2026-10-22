@@ -1326,6 +1326,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => crate::game::payment_transaction::project_without_viewer(state),
     };
     filtered.play_trace = None;
+    filtered.spell_cast_reversal = None;
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };
@@ -7421,6 +7422,9 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
+            alternative_cost_election:
+                crate::types::game_state::SpellAlternativeCostElection::Undecided,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

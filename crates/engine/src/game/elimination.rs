@@ -56,8 +56,16 @@ fn abandon_pending_casts(
         if !abandoned {
             continue;
         }
+        let object_id = pending.object_id;
         super::announcement_triggers::publish_abandoned_announcement(state, owner);
         state.retire_pending_cast_owner(owner, departing_player);
+        if state
+            .spell_cast_reversal
+            .as_ref()
+            .is_some_and(|root| root.object_id == object_id)
+        {
+            state.spell_cast_reversal = None;
+        }
     }
 }
 

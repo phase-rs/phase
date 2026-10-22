@@ -114,6 +114,13 @@ pub enum EngineError {
     /// so there is no earlier acceptance to undo.
     #[error("Activation reversed: its locked cost can't be paid")]
     ActivationReversed { player: PlayerId },
+    /// CR 601.2 + CR 733.1: failure of the announced casting procedure, whose
+    /// pre-announcement boundary owns earlier cost payments too.
+    #[error("Spell cast reversed: its required cost can't be paid")]
+    SpellCastReversed {
+        player: PlayerId,
+        pending: Box<crate::types::game_state::PendingCast>,
+    },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -127,9 +134,9 @@ pub(crate) fn action_rejection_for_engine_error(
         EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
         EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
         EngineError::StaleAction => ActionRejectionCode::StaleAction,
-        EngineError::ActionNotAllowed(_) | EngineError::ActivationReversed { .. } => {
-            ActionRejectionCode::ActionNotAllowed
-        }
+        EngineError::ActionNotAllowed(_)
+        | EngineError::ActivationReversed { .. }
+        | EngineError::SpellCastReversed { .. } => ActionRejectionCode::ActionNotAllowed,
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -1412,9 +1419,12 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
+    records_cast_cost: bool,
+    independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
     suppress_auto_pass_once: bool,
-    boundary_snapshot: GameState,
+    boundary_snapshot: std::sync::Arc<GameState>,
+    cast_start_snapshot: Option<super::engine_casting::CastStartBoundary>,
     previous_interaction_waiting: WaitingFor,
     previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
     submitted_interaction_owner: Option<PlayerId>,
@@ -1534,8 +1544,15 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
-    let boundary_snapshot = state.clone();
-    let journal_start = state.resolved_rules_journal.entries().len();
+    let boundary_snapshot = std::sync::Arc::new(state.clone());
+    let cast_undo_boundary =
+        super::engine_casting::CastUndoBoundaryGuard::enter(boundary_snapshot.clone());
+    let mut journal_start = state.resolved_rules_journal.entries().len();
+    let independent_cast_action = matches!(&action, GameAction::Concede { .. })
+        .then(|| (authenticated_actor, semantic_owner, action.clone()));
+    let records_cast_cost = independent_cast_action.is_none()
+        && !matches!(&action, GameAction::Debug(_))
+        && !action.is_submitter_scoped();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
@@ -1565,7 +1582,7 @@ fn apply_action_boundary_core(
     if authorize_actor && !recovered_stale_priority_pass {
         if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     }
@@ -1573,9 +1590,12 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result: ActionResult::applied(vec![], state.waiting_for.clone()),
             journal_start,
+            records_cast_cost,
+            independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
             boundary_snapshot,
+            cast_start_snapshot: cast_undo_boundary.take(),
             previous_interaction_waiting,
             previous_interaction_slots,
             submitted_interaction_owner,
@@ -1608,9 +1628,52 @@ fn apply_action_boundary_core(
         Err(EngineError::ActivationReversed { player }) => {
             ActionResult::reversed(WaitingFor::Priority { player })
         }
+        Err(EngineError::SpellCastReversed { player, pending }) => {
+            if records_cast_cost {
+                super::engine_casting::record_spell_cast_undo(
+                    state,
+                    &boundary_snapshot,
+                    journal_start,
+                    None,
+                )?;
+            }
+            if boundary_snapshot.spell_cast_reversal.is_none() {
+                lifecycle.discard();
+                *state = cast_undo_boundary.restore(boundary_snapshot);
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay required additional cost".into(),
+                ));
+            }
+            let settlement = (|| {
+                journal_start = state
+                    .spell_cast_reversal
+                    .as_ref()
+                    .map(|root| root.journal_start)
+                    .unwrap_or(journal_start);
+                let mut events = Vec::new();
+                let waiting = super::engine_casting::cancel_pending_cast(
+                    state,
+                    player,
+                    &pending,
+                    &mut events,
+                )?;
+                Ok::<_, EngineError>((events, waiting))
+            })();
+            let (events, waiting) = match settlement {
+                Ok(settled) => settled,
+                Err(error) => {
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(error);
+                }
+            };
+            state.waiting_for = waiting.clone();
+            super::play_trace::casting_procedure_reversed(state);
+            ActionResult::applied(events, waiting)
+        }
         Err(err) => {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     };
@@ -1623,14 +1686,17 @@ fn apply_action_boundary_core(
     // and discards the lifecycle frame for a reversed result.
     if !result.disposition.is_applied() {
         let reversal = result.waiting_for.clone();
-        *state = boundary_snapshot.clone();
+        *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
         return Ok(RawActionApplication {
             result,
             journal_start,
+            records_cast_cost,
+            independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
             boundary_snapshot,
+            cast_start_snapshot: cast_undo_boundary.take(),
             previous_interaction_waiting,
             previous_interaction_slots,
             submitted_interaction_owner,
@@ -1670,7 +1736,7 @@ fn apply_action_boundary_core(
         }
         Ok(None) => false,
         Err(err) => {
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     };
@@ -1689,7 +1755,7 @@ fn apply_action_boundary_core(
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            *state = boundary_snapshot;
+            *state = cast_undo_boundary.restore(boundary_snapshot);
             return Err(err);
         }
     }
@@ -1705,9 +1771,12 @@ fn apply_action_boundary_core(
     Ok(RawActionApplication {
         result,
         journal_start,
+        records_cast_cost,
+        independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
         boundary_snapshot,
+        cast_start_snapshot: cast_undo_boundary.take(),
         previous_interaction_waiting,
         previous_interaction_slots,
         submitted_interaction_owner,
@@ -2221,9 +2290,12 @@ fn finish_action_boundary_with_lifecycle(
     let RawActionApplication {
         mut result,
         journal_start,
+        records_cast_cost,
+        independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
         boundary_snapshot,
+        cast_start_snapshot,
         previous_interaction_waiting,
         previous_interaction_slots,
         submitted_interaction_owner,
@@ -2236,7 +2308,7 @@ fn finish_action_boundary_with_lifecycle(
         reconcile_terminal_result,
     ) {
         lifecycle.discard();
-        *state = boundary_snapshot;
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(err);
     }
     bump_state_revision(state);
@@ -2266,7 +2338,7 @@ fn finish_action_boundary_with_lifecycle(
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
         lifecycle.discard();
-        *state = boundary_snapshot;
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
         return Err(err);
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
@@ -2304,11 +2376,43 @@ fn finish_action_boundary_with_lifecycle(
         .is_err()
         {
             lifecycle.discard();
-            *state = boundary_snapshot;
+            *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
             return Err(EngineError::InvalidAction(
                 "Unable to allocate interaction authority for the resulting decision".to_string(),
             ));
         }
+    }
+    // CR 733.1: capture after information/interaction settlement too, so a
+    // library reveal cannot evade its exception merely by journaling late.
+    let recording = (|| {
+        if let Some((actor, owner, action)) = independent_cast_action {
+            super::engine_casting::preserve_independent_cast_action(
+                state,
+                &boundary_snapshot,
+                actor,
+                owner,
+                action,
+            )?;
+        } else if records_cast_cost && !reversed {
+            let cast_start = cast_start_snapshot.as_ref().filter(|boundary| {
+                state
+                    .spell_cast_reversal
+                    .as_ref()
+                    .is_some_and(|root| root.object_id == boundary.object_id)
+            });
+            super::engine_casting::record_spell_cast_undo(
+                state,
+                &boundary_snapshot,
+                boundary_snapshot.resolved_rules_journal.entries().len(),
+                cast_start,
+            )?;
+        }
+        Ok::<_, EngineError>(())
+    })();
+    if let Err(error) = recording {
+        lifecycle.discard();
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        return Err(error);
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -13925,7 +14029,7 @@ fn apply_non_priority_pass_action(
             // its origin zone via `cancel_pending_cast`.
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -13980,7 +14084,7 @@ fn apply_non_priority_pass_action(
             // X value. Pop the stack entry placed at announcement and restore.
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -14212,7 +14316,7 @@ fn apply_non_priority_pass_action(
         (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -14416,7 +14520,7 @@ fn apply_non_priority_pass_action(
         (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }
@@ -16364,7 +16468,7 @@ fn apply_non_priority_pass_action(
         (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
-            match state.pending_cast.take() {
+            match state.pending_cast.as_deref().cloned() {
                 Some(pending) => {
                     engine_casting::cancel_pending_cast(state, player, &pending, &mut events)?
                 }

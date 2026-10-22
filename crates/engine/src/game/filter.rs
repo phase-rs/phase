@@ -12249,14 +12249,16 @@ fn evaluate_shares_quality(
     let shares = reference.as_ref().is_none_or(|reference_filter| {
         object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
     });
+    // CR 201.2a: an object with no name doesn't have the same name as any other
+    // object, including another object with no name. `quality_sets_overlap`
+    // already answers "no common value" for an empty value set (face-down
+    // permanent CR 708.2a, fully locked Room CR 709.5), so "doesn't share" is
+    // the exact complement of "shares" for every quality. CR 201.2c's "different
+    // name than" is a distinct predicate (FilterProp::DifferentNameFrom), not
+    // this relation.
     match relation {
         SharedQualityRelation::Shares => shares,
-        SharedQualityRelation::DoesNotShare => {
-            !shares
-                && (!matches!(quality, SharedQuality::Name)
-                    || !object_shared_quality_values(obj, quality, &state.all_creature_types)
-                        .is_empty())
-        }
+        SharedQualityRelation::DoesNotShare => !shares,
     }
 }
 
@@ -18823,6 +18825,91 @@ mod tests {
 
         assert!(!matches_target_filter(&state, matching, &filter, source));
         assert!(matches_target_filter(&state, different, &filter, source));
+    }
+
+    /// CR 201.2a: an object with no name doesn't have the same name as any other
+    /// object, including another object with no name — so a nameless object
+    /// satisfies "doesn't share a name" vacuously.
+    ///
+    /// The compared object is a nameless library card (the Central Elevator
+    /// shape: a card the ability is searching for), and the reference population
+    /// is the battlefield, which holds a nameless face-down creature (CR 708.2a)
+    /// next to a named one. Fails on revert: the pre-fix `DoesNotShare` arm also
+    /// required the compared object's name set to be non-empty, so a nameless
+    /// candidate could never qualify.
+    #[test]
+    fn shares_quality_name_negated_reference_nameless_object_shares_no_name() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let face_down = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        // CR 708.2a: a face-down permanent has no name.
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down].name, "");
+
+        // Candidates live in the library (the searched-card shape), so they are
+        // outside the battlefield reference pool.
+        let nameless = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            String::new(),
+            Zone::Library,
+        );
+        let same_name = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Library,
+        );
+        let other_name = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Gray Ogre".to_string(),
+            Zone::Library,
+        );
+
+        let shares_name_relation = |relation: SharedQualityRelation| {
+            let reference = TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            );
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(reference)),
+                    relation,
+                },
+            ]))
+        };
+        let does_not_share = shares_name_relation(SharedQualityRelation::DoesNotShare);
+        let shares = shares_name_relation(SharedQualityRelation::Shares);
+
+        assert!(
+            matches_target_filter(&state, nameless, &does_not_share, source),
+            "CR 201.2a: a nameless object shares no name with any other object"
+        );
+        assert!(
+            !matches_target_filter(&state, nameless, &shares, source),
+            "mirror: a nameless object does not share a name either"
+        );
+        // Reach guards on the same filter: the relation still discriminates.
+        assert!(
+            !matches_target_filter(&state, same_name, &does_not_share, source),
+            "a card named after a battlefield creature shares that name"
+        );
+        assert!(
+            matches_target_filter(&state, other_name, &does_not_share, source),
+            "a card named unlike any battlefield creature does not share"
+        );
     }
 
     #[test]

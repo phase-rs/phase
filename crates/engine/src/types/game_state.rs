@@ -7870,6 +7870,62 @@ pub struct DeferredSacrificeSelection {
 #[serde(transparent)]
 pub struct CastingPermissionIndex(pub usize);
 
+/// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SpellCastReversal {
+    pub object_id: ObjectId,
+    pub player: PlayerId,
+    pub journal_start: usize,
+    /// CR 733.1: only values changed by admitted casting actions are retained.
+    /// No nested GameState or complete players/zones collection is retained;
+    /// the descriptor stores inverse edits for changed members.
+    #[serde(default)]
+    pub undo: Vec<SpellCastUndo>,
+    #[serde(default)]
+    pub cost_mutations: bool,
+    #[serde(default)]
+    pub library_undo_forbidden: bool,
+}
+
+/// CR 733.1: inverse edits captured at the existing action boundary. Paths
+/// address serialized state fields; applying them restores values, never
+/// re-evaluates an Oracle instruction or pays an alternative cost.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum SpellCastUndo {
+    Value {
+        path: Vec<String>,
+        before: Option<serde_json::Value>,
+    },
+    Splice {
+        path: Vec<String>,
+        index: usize,
+        remove: usize,
+        insert: Vec<serde_json::Value>,
+    },
+    /// CR 402.3: restore hand membership while retaining the player's current
+    /// ordering of the cards that remained in hand.
+    Hand {
+        path: Vec<String>,
+        removed: Vec<(usize, serde_json::Value)>,
+        added: Vec<serde_json::Value>,
+    },
+}
+
+/// CR 601.2b: the alternative-cost declaration belongs to this cast, rather
+/// than to whichever cost choice or granting permanent is live later.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SpellAlternativeCostElection {
+    #[default]
+    Undecided,
+    Offered,
+    Accepted,
+    Declined,
+    /// The old save retains its already determined total, but has no
+    /// recoverable declaration/reversal history. It can finish payment;
+    /// unresolved legacy choice and cancellation cannot invent that history.
+    Legacy,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -8017,6 +8073,17 @@ pub struct PendingCast {
     /// after the player selects targets.
     #[serde(default)]
     pub additional_cost_decided: bool,
+    /// CR 601.2b + CR 601.2f: the keyword additional costs (casualty, teamwork,
+    /// gift, ...) were announced through the queue before targets. Once targets
+    /// are chosen, the additional-cost authority still collects the spell's
+    /// other costs (a required sacrifice, a printed choice, a cost an effect
+    /// imposes for the chosen targets) and does not offer the queue again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword_queue_before_targets: bool,
+    /// CR 601.2b + CR 601.2f: retain the alternative declaration across
+    /// additional costs, targets and departure of the alternative's source.
+    #[serde(default)]
+    pub alternative_cost_election: SpellAlternativeCostElection,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_kickers_to_pay: Vec<KickerVariant>,
     /// CR 702.33f: Non-repeatable kicker options the player has declined in
@@ -8370,6 +8437,12 @@ pub struct ManaAbilityCostCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PendingSacrificeCostCompletion {
+    /// CR 601.2f-h + CR 616.1: declaration and mana payment are complete.
+    /// Carry their determinations across sacrifice replacement ordering.
+    FinalizeSpell {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        pre_payment_checks: Box<FinalizePrePaymentChecks>,
+    },
     SelectedNonSelf,
     SelfRef,
     /// CR 118.3 + CR 118.11-12: a resolving optional PayCost branch owns its
@@ -8824,6 +8897,9 @@ impl PendingCast {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
+            alternative_cost_election:
+                crate::types::game_state::SpellAlternativeCostElection::Undecided,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -21675,6 +21751,20 @@ macro_rules! declare_game_state {
             }
         }
 
+        impl GameState {
+            /// CR 733.1: restore only fields touched by inverse casting edits.
+            /// Runtime-only handles and unrelated live fields retain custody.
+            pub(crate) fn restore_cast_fields(
+                &mut self, restored: Self, changed: &std::collections::BTreeSet<String>,
+            ) {
+                $(
+                    if changed.contains(stringify!($field)) {
+                        self.$field = restored.$field;
+                    }
+                )*
+            }
+        }
+
         #[derive(Deserialize)]
         struct RawGameStateFields {
             $(
@@ -23449,6 +23539,10 @@ declare_game_state! {
     /// the two execution flags below are transient replay guards only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_transaction: Option<Box<ResolutionPaymentTransaction>>,
+    /// CR 601.2 + CR 733.1: the pre-announcement state of an unfinished spell.
+    /// Shared across action snapshots; viewer projections must redact it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) spell_cast_reversal: Option<std::sync::Arc<SpellCastReversal>>,
     #[serde(skip)]
     pub payment_transaction_replay: bool,
     #[serde(skip)]
@@ -24617,10 +24711,64 @@ fn reject_legacy_exploit_event_evidence(value: &serde_json::Value) -> Result<(),
     visit(value, "$")
 }
 
+/// Preserve the determined total of legacy pending spells without inventing
+/// their missing declaration/reversal history. An unresolved old Choice cannot
+/// identify alternative-vs-additional provenance and is refused honestly.
+fn migrate_legacy_spell_cost_elections(value: &mut serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("OptionalCostChoice")
+                && object
+                    .get("data")
+                    .and_then(|data| data.get("cost"))
+                    .and_then(|cost| cost.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("Choice")
+                && object
+                    .get("data")
+                    .and_then(|data| data.get("pending_cast"))
+                    .is_some_and(|pending| {
+                        pending.get("alternative_cost_election").is_none()
+                            && pending
+                                .get("activation_ability_index")
+                                .is_none_or(serde_json::Value::is_null)
+                    })
+            {
+                return Err(
+                    "Legacy cost choice has no alternative-vs-additional declaration authority"
+                        .into(),
+                );
+            }
+            if object.contains_key("additional_cost_decided")
+                && object.contains_key("object_id")
+                && object.contains_key("card_id")
+                && object
+                    .get("activation_ability_index")
+                    .is_none_or(serde_json::Value::is_null)
+                && !object.contains_key("alternative_cost_election")
+            {
+                object.insert(
+                    "alternative_cost_election".into(),
+                    serde_json::Value::String("Legacy".into()),
+                );
+            }
+            for child in object.values_mut() {
+                migrate_legacy_spell_cost_elections(child)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                migrate_legacy_spell_cost_elections(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Field-migrate the former paid-resolution offer into its canonical cleanup
-/// carrier.  This runs before every raw, persisted, trusted, and versioned
-/// decode materializes `CastOfferKind`, keeping its compatibility boundary
-/// independent of the transport selected by the caller.
+/// carrier. This runs before raw, persisted, trusted and versioned decoding
+/// materializes `CastOfferKind`, independent of the transport.
 fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> Result<(), String> {
     fn legacy_delayed_trigger_receipts(
         value: &serde_json::Value,
@@ -24858,6 +25006,7 @@ impl GameStateDecode {
         }
         migrate_legacy_turn_face_up_resume(&mut value)?;
         migrate_legacy_dungeon_choice_previews(&mut value)?;
+        migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
@@ -24923,6 +25072,7 @@ impl GameStateDecode {
         // be paused at either dungeon prompt, so the compatibility boundary has
         // to rebuild those payloads before `RawGameStateFields` sees them.
         migrate_legacy_dungeon_choice_previews(value)?;
+        migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
@@ -30150,6 +30300,7 @@ impl GameState {
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
             payment_transaction: None,
+            spell_cast_reversal: None,
             payment_transaction_replay: false,
             payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
@@ -33185,6 +33336,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         product_knowledge_state: _,
         resolution_stack: _,
         payment_transaction: _,
+        spell_cast_reversal: _,
         payment_transaction_replay: _,
         payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
@@ -33549,6 +33701,7 @@ impl PartialEq for GameState {
             && self.product_knowledge_state == other.product_knowledge_state
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.payment_transaction == other.payment_transaction
+            && self.spell_cast_reversal == other.spell_cast_reversal
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.resolving_spell_final_part == other.resolving_spell_final_part
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
@@ -45162,6 +45315,9 @@ mod tests {
                 deferred_target_selection: false,
                 chosen_modes: Vec::new(),
                 additional_cost_decided: false,
+                keyword_queue_before_targets: false,
+                alternative_cost_election:
+                    crate::types::game_state::SpellAlternativeCostElection::Undecided,
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
@@ -45707,6 +45863,9 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
+            alternative_cost_election:
+                crate::types::game_state::SpellAlternativeCostElection::Undecided,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

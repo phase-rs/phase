@@ -14362,14 +14362,19 @@ pub enum ParsedCondition {
     /// Team membership is never re-derived here — evaluation delegates to the
     /// single authority `crate::game::players::is_opponent`.
     IsOpponentsTurn,
-    /// CR 503.1: True when the game is currently in the upkeep step. A
-    /// turn-structure predicate with NO player scope — it asks only "is it an
-    /// upkeep step", not whose. Player scope composes at the restriction layer:
-    /// "during an opponent's upkeep" is `And([IsOpponentsTurn, IsDuringUpkeep])`
-    /// (CR 102.1 fixes the active player from the turn), reusing the
-    /// turn-scope leaf rather than adding a `DuringOpponents*` restriction
-    /// sibling per step.
-    IsDuringUpkeep,
+    /// CR 500.1 + CR 602.1b + CR 602.5: True when the game is currently in one of
+    /// `phases`. Restriction-layer reading of "Activate only during the <step> step"
+    /// / "during any upkeep step": a turn-structure predicate with NO player scope;
+    /// turn-owner scope composes via `And([IsOpponentsTurn|IsYourTurn, CurrentPhaseIs])`.
+    /// `phases` is a set so grouped names (CR 505.1 "main phase") need no sibling.
+    /// Mirror of `AbilityCondition::CurrentPhaseIs`; both read `parse_phase_name_set`.
+    /// Replaces the unit `IsDuringUpkeep` (= `[Upkeep]`); the alias + default keep that
+    /// legacy tag loadable (serializer always writes `phases`), as `Duration::UntilNextStepOf`.
+    #[serde(alias = "IsDuringUpkeep")]
+    CurrentPhaseIs {
+        #[serde(default = "legacy_is_during_upkeep_phases")]
+        phases: Vec<Phase>,
+    },
     /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
     /// least one object that matches `filter`. Gates a target-dependent casting
     /// permission (Timely Ward — "you may cast this spell as though it had flash if
@@ -14417,6 +14422,13 @@ pub enum ParsedCondition {
     Not {
         condition: Box<ParsedCondition>,
     },
+}
+
+/// Serde default for `ParsedCondition::CurrentPhaseIs::phases`. The serializer
+/// always writes `phases`, so a missing field can only come from the legacy
+/// unit tag `{"type":"IsDuringUpkeep"}`, which meant the upkeep step.
+fn legacy_is_during_upkeep_phases() -> Vec<Phase> {
+    vec![Phase::Upkeep]
 }
 
 // ---------------------------------------------------------------------------
@@ -16104,6 +16116,11 @@ pub struct AdditionalCostInstance {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub origin_ordinal: u32,
     pub cost: AdditionalCost,
+    /// CR 611.3b: the permanent whose static ability grants this instance
+    /// (Silverquill, the Disputant). `None` for a printed instance and for a
+    /// grant no permanent generates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_source: Option<ObjectId>,
 }
 
 impl AdditionalCostInstance {
@@ -16112,7 +16129,13 @@ impl AdditionalCostInstance {
             origin,
             origin_ordinal: 0,
             cost,
+            grant_source: None,
         }
+    }
+
+    pub fn with_grant_source(mut self, grant_source: Option<ObjectId>) -> Self {
+        self.grant_source = grant_source;
+        self
     }
 
     pub fn new_with_ordinal(
@@ -16124,6 +16147,7 @@ impl AdditionalCostInstance {
             origin,
             origin_ordinal,
             cost,
+            grant_source: None,
         }
     }
 }
@@ -16139,6 +16163,10 @@ pub struct AdditionalCostInstancePayment {
     pub origin_ordinal: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub count: u32,
+    /// CR 702.153b: the `grant_source` of the instance this payment was made
+    /// for, so a trigger reads the payment of its own instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_source: Option<ObjectId>,
 }
 
 impl AdditionalCostInstancePayment {
@@ -16147,6 +16175,7 @@ impl AdditionalCostInstancePayment {
             origin,
             origin_ordinal: 0,
             count,
+            grant_source: None,
         }
     }
 
@@ -16155,6 +16184,7 @@ impl AdditionalCostInstancePayment {
             origin,
             origin_ordinal,
             count,
+            grant_source: None,
         }
     }
 }
@@ -31693,18 +31723,35 @@ impl SpellContext {
         origin_ordinal: u32,
         count: u32,
     ) {
-        if count == 0 {
+        self.record_instance_payment(AdditionalCostInstancePayment::new_with_ordinal(
+            origin,
+            origin_ordinal,
+            count,
+        ));
+    }
+
+    /// CR 702.153b: record a payment for one queued instance, keeping the
+    /// instance's `grant_source` on the payment.
+    pub fn record_payment_for_instance(&mut self, instance: &AdditionalCostInstance, count: u32) {
+        self.record_instance_payment(AdditionalCostInstancePayment {
+            grant_source: instance.grant_source,
+            ..AdditionalCostInstancePayment::new_with_ordinal(
+                instance.origin,
+                instance.origin_ordinal,
+                count,
+            )
+        });
+    }
+
+    fn record_instance_payment(&mut self, payment: AdditionalCostInstancePayment) {
+        if payment.count == 0 {
             return;
         }
-        self.additional_cost_payments
-            .push(AdditionalCostInstancePayment::new_with_ordinal(
-                origin,
-                origin_ordinal,
-                count,
-            ));
+        self.additional_cost_payment_count = self
+            .additional_cost_payment_count
+            .saturating_add(payment.count);
+        self.additional_cost_payments.push(payment);
         self.additional_cost_paid = true;
-        self.additional_cost_payment_count =
-            self.additional_cost_payment_count.saturating_add(count);
     }
 
     pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
@@ -35008,7 +35055,7 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
-    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending
     /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
     ///
     /// The object half of `source_controller` (directly above), added for the same
@@ -35043,16 +35090,23 @@ pub struct ReplacementDefinition {
     /// object-hosting before the authority existed: `Zone::Battlefield` for
     /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
     /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
-    /// `create_damage_replacement`'s already-registry arm. A shield created by a
-    /// resolving instant never had a host, so it has no host identity to anchor and
-    /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
-    /// that branch already routed to the registry before this field existed.
-    /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
-    /// every replacement that existed before this field.
+    /// `create_damage_replacement`'s already-registry arm. `add_target_replacement::
+    /// resolve`'s `TargetFilter::None` arm also passes `Zone::Battlefield`, but its
+    /// riders were never object-hosted: anchoring them is a deliberate change
+    /// (issue #9991) so a battlefield-sourced rider's host-relative references
+    /// (Communal Brewing's "this enchantment") read its installing source. A shield
+    /// created by a resolving instant never had a host, so it has no host identity
+    /// to anchor and keeps `None`; so does an untargeted shield from a Command-zone
+    /// emblem, which that branch already routed to the registry before this field
+    /// existed. `None` therefore reproduces the pre-anchor sentinel behavior
+    /// exactly, for every replacement that existed before this field other than the
+    /// battlefield-sourced `TargetFilter::None` riders anchored above.
     ///
-    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
-    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
-    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// Consumed through `game::replacement::replacement_source_host` by the pending
+    /// scan in `find_applicable_replacements`, the CR 616.1 display label, and
+    /// `apply_single_replacement`'s entry-modifier evaluation. The scan fills with
+    /// the host every argument position that `object_replacement_candidate_applies`
+    /// fills with `obj.id`.
     /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
     /// is the STORAGE discriminator that routes ~14 downstream consumers to the
     /// registry rather than to `state.objects`.
@@ -39674,6 +39728,29 @@ mod tests {
             assert_eq!(serde_json::to_string(&value).unwrap(), json);
             assert_eq!(serde_json::from_str::<QuantityRef>(json).unwrap(), value);
         }
+    }
+
+    /// The legacy unit tag `{"type":"IsDuringUpkeep"}` still deserializes, as
+    /// the upkeep step (CR 503.1), into the parameterized `CurrentPhaseIs`, and
+    /// the new shape always serializes `phases` so it round-trips.
+    #[test]
+    fn parsed_condition_current_phase_is_loads_legacy_upkeep_tag() {
+        let legacy: ParsedCondition =
+            serde_json::from_str(r#"{"type":"IsDuringUpkeep"}"#).expect("legacy tag loads");
+        assert_eq!(
+            legacy,
+            ParsedCondition::CurrentPhaseIs {
+                phases: vec![Phase::Upkeep],
+            }
+        );
+
+        let current = ParsedCondition::CurrentPhaseIs {
+            phases: vec![Phase::EndCombat],
+        };
+        let json = serde_json::to_string(&current).expect("serializes");
+        assert!(json.contains("\"phases\""), "phases always written: {json}");
+        let reparsed: ParsedCondition = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(reparsed, current);
     }
 
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies

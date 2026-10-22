@@ -215,6 +215,23 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
         && !chain_moves_card_to_or_from_library(ability_def)
 }
 
+/// CR 605.1a: semantic support check for a complete activated ability,
+/// including mana produced after another instruction. The legacy inline router
+/// (`is_mana_ability`) requires a Mana root; using that narrower admission here
+/// would let the parser newly support a linked cast on an ordinary stack
+/// ability even though the whole ability must resolve immediately. This check
+/// does not widen runtime admission for other mixed chains. The shared own-
+/// resolution walk supplies mana/target semantics; cost/library exclusions use
+/// the same authorities as the existing activated classifier.
+pub(crate) fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
+    could_be_triggered_mana_ability_body(def)
+        && !mana_sources::cost_has_component(&def.cost, |cost| {
+            matches!(cost, AbilityCost::Loyalty { .. })
+        })
+        && !cost_moves_card_to_or_from_library(def)
+        && !chain_moves_card_to_or_from_library(def)
+}
+
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
 ///
 /// Also detects a self-`ReturnToHand` cost: either form removes the source from

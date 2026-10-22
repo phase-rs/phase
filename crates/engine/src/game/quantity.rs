@@ -14231,7 +14231,9 @@ mod tests {
             let obj = state.objects.get_mut(&cmd_id).unwrap();
             obj.is_commander = true;
             obj.color = vec![ManaColor::White, ManaColor::Blue, ManaColor::Black];
+            obj.base_color = obj.color.clone();
             obj.mana_cost = ManaCost::NoCost;
+            obj.base_mana_cost = ManaCost::NoCost;
         }
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
 
@@ -25652,6 +25654,7 @@ mod tests {
             lose_effect: None,
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
+            branch_context: crate::types::resolution::FlipBranchContext::default(),
         };
 
         let mut events = Vec::new();

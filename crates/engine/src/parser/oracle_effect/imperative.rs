@@ -4720,6 +4720,41 @@ fn try_parse_choose_battlefield_object(
     Some(ChooseImperativeAst::BattlefieldObject { filter, min, max })
 }
 
+/// CR 115.10a + CR 608.2d: the object and player are chosen during resolution.
+fn try_parse_choose_object_and_player(
+    rest: &str,
+    rest_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    let (offset, player, _) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(rest_lower, |i| {
+            all_consuming(preceded(tag("and "), super::parse_player_choice_noun)).parse(i)
+        })?;
+    let object_text = TextPair::new(rest, rest_lower)
+        .split_at(offset)
+        .0
+        .trim_end();
+    let mut choice_ctx = ctx.clone();
+    let (object, min, max) = parse_battlefield_object_choice_core(
+        object_text.original,
+        object_text.lower,
+        &mut choice_ctx,
+    )?;
+    if min != 1 || max != Some(1) {
+        return None;
+    }
+    choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+    choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
+        index: choice_ctx.chosen_player_count,
+    });
+    *ctx = choice_ctx;
+    Some(ChooseImperativeAst::ObjectAndPlayer {
+        object,
+        player,
+        clause: rest.trim().to_string(),
+    })
+}
+
 /// CR 607.2d + CR 608.2c: Gate B's head-shape provenance — does this head
 /// clause fragment have the standalone battlefield-object choice shape?
 ///
@@ -4865,6 +4900,10 @@ pub(super) fn parse_choose_ast(
         // the shared core. Must precede `is_choose_as_targeting`, which would
         // otherwise take the clause as the degraded targeting fallback.
         if let Some(ast) = try_parse_choose_battlefield_object(rest, rest_lower, lower, ctx) {
+            return Some(ast);
+        }
+
+        if let Some(ast) = try_parse_choose_object_and_player(rest, rest_lower, ctx) {
             return Some(ast);
         }
 
@@ -5885,6 +5924,143 @@ pub(super) fn parse_for_each_player_exile_controlled(
     Some(clause)
 }
 
+/// CR 608.2c: an "exile a card from each graveyard" sentence with a qualifier
+/// [`parse_exile_one_card_from_each_graveyard`] doesn't model.
+pub(super) const PER_GRAVEYARD_EXILE_QUALIFIER_GAP: &str = "per_graveyard_exile_qualifier";
+
+/// CR 101.4c + CR 404.1 + CR 608.2c: "exile a[n] `<type>` card [at random] from
+/// each [opponent's] graveyard" — one card from EVERY graveyard of the named
+/// population, chosen by the controller as the ability resolves (Summon: Esper
+/// Valigarmanda, King Narfi's Betrayal) or selected at random (Kefka, Dancing
+/// Mad). The same per-iterated-player choose + mass-exile shape
+/// as Kaya's `parse_for_each_player_exile_controlled`: a `ChooseFromZone {
+/// Each(..) }` that accumulates one pick per player into the chain's tracked
+/// set, then `ChangeZoneAll { TrackedSet }` exiles them all. Without the
+/// per-player choice "from each graveyard" read as one card from any graveyard.
+/// A qualifier this reader doesn't model (before or after "from each
+/// graveyard") fails closed as [`PER_GRAVEYARD_EXILE_QUALIFIER_GAP`] instead of
+/// falling back to that one-card reading.
+pub(super) fn parse_exile_one_card_from_each_graveyard(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+
+    let (after_article, _) = (
+        tag::<_, _, E>("exile "),
+        alt((tag::<_, _, E>("an "), tag("a "))),
+    )
+        .parse(lower)
+        .ok()?;
+    // "<type phrase> card[ at random] from each [opponent's] graveyard", or
+    // "from each of your opponents' graveyards"
+    let tail_parser = |i| {
+        (
+            tag::<_, _, E>("card"),
+            opt(value((), tag(" at random"))),
+            preceded(
+                tag(" from each "),
+                alt((
+                    value(PerPlayerScope::Opponents, tag("opponent's graveyard")),
+                    value(
+                        PerPlayerScope::Opponents,
+                        tag("of your opponents' graveyards"),
+                    ),
+                    value(PerPlayerScope::AllPlayers, tag("graveyard")),
+                )),
+            ),
+        )
+            .parse(i)
+    };
+    let qualifier_gap = || {
+        Some(parsed_clause(Effect::unimplemented(
+            PER_GRAVEYARD_EXILE_QUALIFIER_GAP,
+            lower,
+        )))
+    };
+    let Some((head, tail)) = nom_primitives::scan_split_at_phrase(after_article, tail_parser)
+    else {
+        // A qualifier between "card" and "from each graveyard" ("a creature
+        // card with mana value 3 or less from each graveyard").
+        let names_each_graveyard = nom_primitives::scan_split_at_phrase(after_article, |i| {
+            (
+                tag::<_, _, E>("from each "),
+                alt((
+                    tag::<_, _, E>("opponent's graveyard"),
+                    tag("of your opponents' graveyards"),
+                    tag("graveyard"),
+                )),
+            )
+                .parse(i)
+        })
+        .is_some();
+        return if names_each_graveyard {
+            qualifier_gap()
+        } else {
+            None
+        };
+    };
+    let (after_scope, (_, random, scope)) = tail_parser(tail).ok()?;
+    let type_phrase = head.trim_end();
+    if !terminal_punctuation_only(after_scope) {
+        return qualifier_gap();
+    }
+    let filter = if type_phrase.is_empty() {
+        None
+    } else {
+        // The whole phrase must be a type phrase: anything else ("2/2") is a
+        // qualifier the filter reader would silently drop.
+        if (super::super::oracle_nom::target::parse_type_phrase, eof)
+            .parse(type_phrase)
+            .is_err()
+        {
+            return qualifier_gap();
+        }
+        Some(super::search::parse_search_filter(type_phrase, ctx))
+    };
+
+    let choose = Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Graveyard,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::Each(scope),
+        filter,
+        chooser: Chooser::Controller.into(),
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
+        reciprocal_role: None,
+        up_to: false,
+        selection: if random.is_some() {
+            CardSelectionMode::Random
+        } else {
+            CardSelectionMode::Chosen
+        },
+        constraint: None,
+    };
+    // CR 608.2c: exile EVERY chosen card (`ChangeZoneAll` over the
+    // tracked set the per-player choose accumulated).
+    let exile_all = Effect::ChangeZoneAll {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target: TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        },
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        enter_with_counters: vec![],
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    };
+    let mut clause = parsed_clause(choose);
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        exile_all,
+    )));
+    Some(clause)
+}
+
 /// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
 /// to one] [other] `<type-phrase>` that player controls" — Ultimate Magic:
 /// Meteor. The spell's controller chooses, for every opponent, one permanent
@@ -6477,6 +6653,11 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             Effect::ChooseDamageSource { source_filter }
         }
         ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
+        // A bare `Effect` cannot hold both choices, so this entry point fails
+        // closed with the printed clause; the chain lowering emits both.
+        ChooseImperativeAst::ObjectAndPlayer { clause, .. } => {
+            Effect::unimplemented("compound_object_player_choice", clause)
+        }
         ChooseImperativeAst::Reparse { text } => super::parse_effect(&text),
         ChooseImperativeAst::NamedChoice {
             choice_type,
@@ -15520,6 +15701,22 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             );
             target_b_clause.multi_target = target_b_multi_target;
             clause.sub_ability = Some(Box::new(target_b_clause));
+            clause
+        }
+        // CR 115.10a + CR 608.2d: untargeted object and player choices resolve
+        // in order. The parser marks only the object head as Resolution-timed.
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::ObjectAndPlayer { object, player, .. },
+        )) => {
+            let mut clause = parsed_clause(Effect::TargetOnly { target: object });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: player,
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+            )));
             clause
         }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
