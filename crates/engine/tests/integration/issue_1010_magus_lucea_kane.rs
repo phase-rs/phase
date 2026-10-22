@@ -150,6 +150,7 @@ fn magus_delayed_copy_trigger_sits_above_activated_ability_on_stack() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce activation");
     runner

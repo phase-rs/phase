@@ -718,6 +718,7 @@ fn kaito_surveil_and_draw() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: kaito_id,
         ability_index: surveil_ability_index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_ok(),

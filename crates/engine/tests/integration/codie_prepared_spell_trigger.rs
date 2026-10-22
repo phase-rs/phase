@@ -14,6 +14,7 @@
 //! the full activate-then-cast end-to-end flow are covered at the end of the
 //! file without any Debug action.
 
+use engine::types::game_state::CastPaymentMode;
 use std::sync::Arc;
 
 use engine::database::CardDatabase;
@@ -1195,6 +1196,7 @@ fn drive_activation(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activation must be accepted");
     let mut visited = Vec::new();

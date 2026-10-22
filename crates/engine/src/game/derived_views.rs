@@ -5197,6 +5197,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: second,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the second ability");
 
@@ -8275,6 +8276,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
 
         let trusted = serde_json::to_value(&state).expect("serialize trusted state");

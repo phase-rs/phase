@@ -62,6 +62,7 @@ impl RootBinding {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => Some(Self::Activation {
                 source_id: *source_id,
                 ability_index: *ability_index,
@@ -1317,7 +1318,7 @@ mod tests {
                 &state,
                 &GameAction::ActivateAbility {
                     source_id: creature,
-                    ability_index: 0,
+                    ability_index: 0, payment_mode: CastPaymentMode::Auto
                 }
             ),
             "CR 613.1f: a pending layer-6 grant can add the shape after this read, so the guard must fall open"
@@ -2144,6 +2145,7 @@ mod tests {
         let activation = |ability_index: usize| GameAction::ActivateAbility {
             source_id: spell,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         };
         assert!(
             !root_may_yield_adverse_exchange(&state, &activation(0)),

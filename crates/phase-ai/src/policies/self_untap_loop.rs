@@ -100,6 +100,7 @@ impl TacticalPolicy for SelfUntapLoopPolicy {
         let GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } = &ctx.candidate.action
         else {
             return neutral("self_untap_loop_na");
@@ -333,6 +334,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

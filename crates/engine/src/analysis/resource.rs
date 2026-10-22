@@ -10037,6 +10037,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10142,6 +10143,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10252,6 +10254,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {

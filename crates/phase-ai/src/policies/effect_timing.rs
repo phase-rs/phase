@@ -805,6 +805,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -886,6 +887,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1051,6 +1053,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1416,6 +1419,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1535,6 +1539,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1594,6 +1599,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1685,6 +1691,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -1699,6 +1706,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1770,6 +1778,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
 
@@ -1885,6 +1894,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();

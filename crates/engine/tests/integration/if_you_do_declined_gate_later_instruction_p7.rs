@@ -492,6 +492,7 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: wyll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("specialize is activated");
     runner

@@ -566,6 +566,7 @@ fn colorless_requirement_case(
             .act(GameAction::ActivateAbility {
                 source_id: lands[0],
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("a Swamp taps for {B}");
         let pip_id = runner.state().players[0]
@@ -808,6 +809,7 @@ fn north_star_gap_grants_no_payment() {
     let activation = runner.act(GameAction::ActivateAbility {
         source_id: engine_artifact,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(!offered, "a {{C}} activation is not offered");
     assert!(activation.is_err(), "a {{C}} activation is refused");

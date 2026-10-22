@@ -1651,6 +1651,7 @@ mod aclazotz_attack_discard_multi_opponent;
 mod activation_cost_reduction_election;
 mod activation_cost_target_settlement;
 mod activation_cost_work_census;
+mod activation_manual_mana_payment;
 mod agency_coroner_suspected_cost_paid;
 mod alania_divergent_storm;
 mod angelic_field_marshal_lieutenant_2885;

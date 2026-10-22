@@ -7823,7 +7823,9 @@ fn default_copy_retarget_effect_kind() -> EffectKind {
 /// CR 601.2g-h: Whether the engine may auto-pay an unambiguous spell mana cost
 /// or must pause after announcement so the player can activate mana abilities
 /// manually before committing payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(tag = "type")]
 pub enum CastPaymentMode {
     #[default]
@@ -7833,6 +7835,13 @@ pub enum CastPaymentMode {
     /// that irreversible payment decision explicitly.
     AutoExceptSacrificialMana,
     Manual,
+}
+
+impl CastPaymentMode {
+    /// Whether this is the default mode, which wire formats omit.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, CastPaymentMode::Auto)
+    }
 }
 
 /// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
@@ -7898,6 +7907,63 @@ pub struct DeferredSacrificeSelection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CastingPermissionIndex(pub usize);
+
+/// CR 107.4f + CR 118.13a + CR 601.2b: how one Phyrexian-shaped symbol of an
+/// activation's mana cost is to be paid, keyed by its canonical identity: its
+/// index in the activation's ordered mana component and the raw printed symbol
+/// at that index. The index alone is not an identity — a cost can repeat a
+/// symbol — and the symbol alone is not either, so both are carried and both
+/// are validated against the locked cost before a record is honored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationShardChoice {
+    pub shard_index: usize,
+    pub shard: crate::types::mana::ManaCostShard,
+    pub choice: ShardChoice,
+}
+
+/// CR 107.4f + CR 118.13a + CR 601.2b + CR 601.2h: the two distinct Phyrexian
+/// payment authorities of a manually paid activation.
+///
+/// * `native_choices` — CR 118.13a + CR 601.2b: the player's announcement, made
+///   as the ability is proposed (after its modes and X, before its targets and
+///   before its total cost is determined, CR 601.2c + CR 601.2f), of whether
+///   each printed Phyrexian or hybrid Phyrexian symbol will be paid with 2 life
+///   or with the corresponding colored mana. It changes which total locks: a
+///   symbol announced as life is not mana in that cost. Bound once and never
+///   rewritten.
+/// * `payment_choices` — CR 601.2h: the selections made when the locked total
+///   is actually paid, after the CR 601.2g mana-ability opportunity. They may
+///   cover ordinary colored symbols a payment-only permission (K'rrik, Son of
+///   Yawgmoth) lets the player pay with life; such a permission never changes
+///   the cost, so these records never feed the cost lock. Absent until that
+///   payment is selected.
+///
+/// No permission is stored: a payment-only permission is read live at payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationPhyrexianIntent {
+    pub native_choices: Vec<ActivationShardChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_choices: Option<Vec<ActivationShardChoice>>,
+}
+
+impl ActivationPhyrexianIntent {
+    /// CR 118.13a + CR 601.2b: an announcement-only intent, before payment.
+    pub fn announced(native_choices: Vec<ActivationShardChoice>) -> Self {
+        Self {
+            native_choices,
+            payment_choices: None,
+        }
+    }
+
+    /// The announced choice for the symbol at `shard_index`, if it is one of the
+    /// activation's printed Phyrexian symbols.
+    pub fn native_choice_at(&self, shard_index: usize) -> Option<ShardChoice> {
+        self.native_choices
+            .iter()
+            .find(|record| record.shard_index == shard_index)
+            .map(|record| record.choice)
+    }
+}
 
 /// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -8195,6 +8261,14 @@ pub struct PendingCast {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) activation_trigger_collection:
         Option<Box<crate::game::triggers::PendingActivationTriggerCollection>>,
+    /// CR 107.4f + CR 118.13a + CR 601.2b + CR 601.2h: a manually paid
+    /// activation's Phyrexian announcement and, once selected, its actual
+    /// Phyrexian payment (see [`ActivationPhyrexianIntent`]). `None` for spells,
+    /// automatic activations, and a manual activation that has not yet reached
+    /// its announcement. Carried by the activation's own root through every
+    /// pause until its mana is paid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_phyrexian_intent: Option<ActivationPhyrexianIntent>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -8943,6 +9017,7 @@ impl PendingCast {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         }
     }
 
@@ -8954,17 +9029,21 @@ impl PendingCast {
     /// CR 602.2b: the root of an in-flight ACTIVATED ability. Every activation
     /// root is built here, so each one must name its cost-modifier carrier
     /// (`None` only for the mana-free loyalty fast path and legacy callers) —
-    /// the carrier cannot be silently dropped by a fresh root.
+    /// the carrier cannot be silently dropped by a fresh root. Likewise each
+    /// root names the activation's payment mode (CR 602.2b + CR 601.2g-h), so a
+    /// root rebuilt mid-activation cannot fall back to automatic payment.
     pub fn for_activation(
         source_id: ObjectId,
         ability: ResolvedAbility,
         cost: ManaCost,
         ability_index: usize,
         activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+        payment_mode: CastPaymentMode,
     ) -> Self {
         let mut pending = Self::new(source_id, CardId(0), ability, cost);
         pending.activation_ability_index = Some(ability_index);
         pending.activation_cost_snapshot = activation_cost_snapshot;
+        pending.payment_mode = payment_mode;
         pending
     }
 
@@ -16951,6 +17030,11 @@ pub enum WaitingFor {
         /// selection builds one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+        /// CR 602.2b + CR 601.2g-h: for activated abilities, the activation's
+        /// payment mode, carried like the cost-modifier carrier until mode
+        /// selection builds the `PendingCast`.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        activation_payment_mode: CastPaymentMode,
         /// Mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
         /// CR 700.2: Engine computes which modes have been previously chosen; frontend uses this to disable them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -18037,6 +18121,13 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counter_type: Option<CounterType>,
         available: Vec<(CounterType, u32)>,
+        /// CR 608.2d: the most counters, in total across every kind, the
+        /// controller may remove — "remove up to N counters" (Hex Parasite's
+        /// announced X, Glissa Sunslayer's three), already bounded by the
+        /// counters `available`. `None` is the uncapped "any number" choice
+        /// (CR 107.1c). Engine-computed so no client derives the limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_total: Option<u32>,
         pending_effect: Box<ResolvedAbility>,
     },
     /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — mid-resolution prompt.
@@ -45987,6 +46078,7 @@ mod tests {
                 activation_cost_committed: false,
                 alt_cost_grant_source: None,
                 activation_trigger_collection: None,
+                activation_phyrexian_intent: None,
             })
         }
 
@@ -46266,6 +46358,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: vec![],
+            activation_payment_mode: CastPaymentMode::Auto,
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -46535,6 +46628,7 @@ mod tests {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
@@ -46647,6 +46741,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: CastPaymentMode::Auto,
         };
         let members = [
             WaitingFor::ModalFaceChoice {
@@ -46817,6 +46912,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: CastPaymentMode::Auto,
         };
         assert!(!ability_modes.allows_cancel_cast());
 

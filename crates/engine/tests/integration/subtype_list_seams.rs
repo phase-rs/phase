@@ -6,6 +6,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -59,6 +60,7 @@ fn mary_discards(subtypes: Vec<&'static str>, land: bool) -> (GameRunner, Vec<Ob
         .act(GameAction::ActivateAbility {
             source_id: mary,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     for _ in 0..16 {

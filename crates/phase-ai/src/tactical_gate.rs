@@ -310,6 +310,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     if let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     {
         if let Some(object) = ctx.state.objects.get(source_id) {
@@ -1414,6 +1415,7 @@ fn assess_counter_announcement(ctx: &PolicyContext<'_>) -> Option<GateDecision> 
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => {
             let definition = ctx.effective_activated_ability()?;
             if !collect_definition_effects_with(&definition, ModeWalk::All)
@@ -1893,6 +1895,7 @@ fn activated_ueot_pump_source(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     else {
         return None;
@@ -2351,7 +2354,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id: candidate_source,
-                        ability_index: candidate_index,
+                        ability_index: candidate_index, ..
                     } if candidate_source == source_id && candidate_index == ability_index
                 )
             })
@@ -3603,7 +3606,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if source_id == source
                 )
             })
@@ -5991,7 +5994,7 @@ mod tests {
                     &candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if *source_id == untap_source
                 )
             })
@@ -8113,6 +8116,7 @@ mod tests {
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     },
                     Some(index),
                 ) => *source_id == source && *ability_index == index,
@@ -8660,6 +8664,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
             let target = candidate_actions(setup.state())
@@ -8848,6 +8853,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         let target = candidate_actions(setup.state())
@@ -9531,6 +9537,7 @@ mod tests {
                     .act(GameAction::ActivateAbility {
                         source_id: drawback,
                         ability_index: 0,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     })
                     .expect("the engine announces the harmful own ability");
                 assert!(runner.state().stack.iter().any(|entry| {
@@ -10730,6 +10737,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
         };

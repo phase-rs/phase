@@ -2967,6 +2967,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
@@ -3068,6 +3069,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
         };
@@ -3945,6 +3947,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
         }

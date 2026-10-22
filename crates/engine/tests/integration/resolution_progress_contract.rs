@@ -137,6 +137,7 @@ fn answered_mana_color_does_not_suspend_each_opponents_life_change() {
         r.act(GameAction::ActivateAbility {
             source_id: grove,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
         assert!(matches!(
@@ -275,6 +276,7 @@ fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
         r.act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
         assert!(matches!(

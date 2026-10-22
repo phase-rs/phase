@@ -42793,6 +42793,7 @@ pub mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
@@ -45220,6 +45221,7 @@ pub mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: konrad,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("activation {activation} failed: {e:?}"));
             resolve_stack_to_empty(&mut runner);

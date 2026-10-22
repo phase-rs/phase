@@ -162,6 +162,7 @@ fn announce_activation(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("ActivateAbility must be accepted");
     events.extend(result.events);
