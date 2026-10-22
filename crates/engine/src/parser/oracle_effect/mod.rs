@@ -21573,27 +21573,15 @@ fn try_parse_verb_and_target<'a>(
         return Some((TargetedImperativeAst::Airbend { target, cost }, rem));
     }
 
-    // Destroy: check "all"/"each" prefix for mass destruction
-    if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
-        value((), alt((tag("destroy all "), tag("destroy each ")))).parse(i)
-    }) {
-        let (target, rem) = parse_target_with_ctx(rest, ctx);
+    // The compound caller owns the connector; share the tentative target and
+    // attachment authority without invoking its terminal wrapper.
+    if let Some((ast, remainder, tentative)) =
+        imperative::parse_destroy_target_core(text, lower, ctx)
+    {
+        *ctx = tentative;
         return Some((
-            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
-                target,
-                all: true,
-            })),
-            rem,
-        ));
-    }
-    if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("destroy ")).parse(i)) {
-        let (target, rem) = parse_target_with_ctx(rest, ctx);
-        return Some((
-            TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
-                target,
-                all: false,
-            })),
-            rem,
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)),
+            remainder,
         ));
     }
 
@@ -22211,6 +22199,22 @@ fn try_parse_reanimate_self_and_target(
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
 fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    if tag::<_, _, OracleError<'_>>("destroy ")
+        .parse(text.to_lowercase().as_str())
+        .is_ok()
+    {
+        let mut tentative = ctx.clone();
+        let parsed = try_split_targeted_compound_inner(text, &mut tentative)?;
+        *ctx = tentative;
+        return Some(parsed);
+    }
+    try_split_targeted_compound_inner(text, ctx)
+}
+
+fn try_split_targeted_compound_inner(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     // CR 601.2c + CR 115.1: A chooser override belongs to the target phrase in
     // the current compound instruction. This parser can recurse after a prior
     // "of an opponent's choice" conjunct, so begin each new instruction with
@@ -22608,6 +22612,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // opponent and the inner effect drains the scoped player (not the source's
     // controller). See `lift_effect_player_class_to_scope`.
     sub_ability.player_scope = sub_player_scope;
+
+    // CR 608.2c: an immediate connector owns both instructions. A generic
+    // failed child cannot authorize publication of a broad destroy primary.
+    if matches!(
+        primary_effect,
+        Effect::Destroy { .. } | Effect::DestroyAll { .. }
+    ) && super::oracle::has_unimplemented(&sub_ability)
+    {
+        return None;
+    }
 
     // CR 115.1d: Recover the PRIMARY clause's "up to N" cardinality, which
     // `try_parse_verb_and_target` discards when it lowers a PutCounter to a

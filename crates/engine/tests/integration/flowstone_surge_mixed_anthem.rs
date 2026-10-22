@@ -28,6 +28,2230 @@ use nom::{combinator::all_consuming, Parser};
 
 const FLOWSTONE_SURGE: &str = "Creatures you control get +1/-1.";
 
+const U22_RETURN: &str = "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.";
+const U22_OTARIA: &str = "Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost. (Its owner may cast the card from their graveyard for its mana cost. Then they exile it.)\nWhenever chaos ensues, take an extra turn after this one.";
+const U22_TAZEEM: &str =
+    "Creatures can't block.\nWhenever chaos ensues, draw a card for each land you control.";
+const U22_DOOM: &str = "Destroy target nonblack creature.";
+const U22_DIVINATION: &str = "Draw two cards.";
+const U22_COUNTER: &str = "Counter target spell.";
+const U22_VISION: &str = "Suspend 4—{U} (Rather than cast this card from your hand, pay {U} and exile it with four time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)\nTarget player draws three cards.";
+const U22_PACT: &str = "Create a 4/4 red Giant creature token.\nAt the beginning of your next upkeep, pay {4}{R}. If you don't, you lose the game.";
+const U22_SPHERE: &str = "Spells cost {1} more to cast.";
+const U22_THINK: &str = "Draw a card.\nFlashback {2}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const U22_FIREBOLT: &str = "Firebolt deals 2 damage to any target.\nFlashback {4}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const U22_SCREECH: &str = "Create two 1/1 white Bird creature tokens with flying.\nFlashback—Tap three untapped white creatures you control. (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const U22_ANALYSIS: &str = "Target player draws two cards.\nFlashback—{1}{U}, Pay 3 life. (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const U22_INVOKE: &str = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+const U22_DISPERSE: &str = "Return target nonland permanent to its owner's hand.";
+const U22_DONATE: &str = "Target player gains control of target permanent you control.";
+const U22_LIER: &str = "Spells can't be countered.\nEach instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.";
+const U22_MURDER: &str = "Destroy target creature.";
+const U22_DEATHMARK: &str = "Destroy target green or white creature.";
+const U22_LIGHT: &str = "Light of Judgment deals 6 damage to target creature. Destroy up to one Equipment attached to that creature.";
+const U22_THEFT: &str =
+    "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)";
+const U22_AXE: &str = "Indestructible (Effects that say \"destroy\" don't destroy this Equipment.)\nEquipped creature gets +2/+0.\nEquip {2}";
+const U22_OTARIA_ATOMIC: &str = r##"{"name":"Otaria","text":"Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost. (Its owner may cast the card from their graveyard for its mana cost. Then they exile it.)\nWhenever chaos ensues, take an extra turn after this one.","manaValue":0.0,"layout":"planar","types":["Plane"],"type":"Plane — Dominaria","subtypes":["Dominaria"],"supertypes":[],"colors":[],"colorIdentity":[],"identifiers":{"scryfallOracleId":"29e3371d-aa41-46a9-921a-96565be47eff"},"rulings":[{"date":"2009-10-01","text":"A face-up plane card that's turned face down becomes a new object with no relation to its previous existence. In particular, it loses all counters it may have had."},{"date":"2009-10-01","text":"A plane card is treated as if its text box included \"When you roll {PW}, put this card on the bottom of its owner's planar deck face down, then move the top card of your planar deck off that planar deck and turn it face up.\" This is called the \"planeswalking ability.\""},{"date":"2009-10-01","text":"If an ability of a plane refers to \"you,\" it's referring to whoever the plane's controller is at the time, not to the player that started the game with that plane card in their deck. Many abilities of plane cards affect all players, while many others affect only the planar controller, so read each ability carefully."},{"date":"2009-10-01","text":"If you roll {CHAOS} multiple times in the same turn, you'll take that many extra turns after this one."},{"date":"2009-10-01","text":"The controller of a face-up plane card is the player designated as the \"planar controller.\" Normally, the planar controller is whoever the active player is. However, if the current planar controller would leave the game, instead the next player in turn order that wouldn't leave the game becomes the planar controller, then the old planar controller leaves the game. The new planar controller retains that designation until they leave the game or a different player becomes the active player, whichever comes first."},{"date":"2021-03-19","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2021-03-19","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2021-03-19","text":"If a card has multiple instances of flashback, you may choose any of its flashback costs to pay."},{"date":"2021-03-19","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2021-03-19","text":"If a card with no mana cost gains flashback, it has no flashback cost. It can't be cast this way."},{"date":"2021-03-19","text":"If a split card gains flashback, you pay only the cost of the half you're casting."},{"date":"2021-03-19","text":"If you cast a spell with flashback, you can't pay any alternative costs such as overload costs. You can pay additional costs such as kicker costs. If the spell has any mandatory additional costs, you must pay those to cast the spell with flashback."},{"date":"2021-03-19","text":"If you cast an instant or sorcery with {X} in its mana cost this way, you still choose the value of X as part of casting the spell and pay that cost."},{"date":"2021-03-19","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2021-03-19","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2021-03-19","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."}]}"##;
+const U22_TAZEEM_ATOMIC: &str = r##"{"name":"Tazeem","text":"Creatures can't block.\nWhenever chaos ensues, draw a card for each land you control.","manaValue":0.0,"layout":"planar","types":["Plane"],"type":"Plane — Zendikar","subtypes":["Zendikar"],"supertypes":[],"colors":[],"colorIdentity":[],"identifiers":{"scryfallOracleId":"97f708de-9271-4137-a9fe-dda25b922900"},"rulings":[{"date":"2009-10-01","text":"A face-up plane card that's turned face down becomes a new object with no relation to its previous existence. In particular, it loses all counters it may have had."},{"date":"2009-10-01","text":"A plane card is treated as if its text box included \"When you roll {PW}, put this card on the bottom of its owner's planar deck face down, then move the top card of your planar deck off that planar deck and turn it face up.\" This is called the \"planeswalking ability.\""},{"date":"2009-10-01","text":"If an ability of a plane refers to \"you,\" it's referring to whoever the plane's controller is at the time, not to the player that started the game with that plane card in their deck. Many abilities of plane cards affect all players, while many others affect only the planar controller, so read each ability carefully."},{"date":"2009-10-01","text":"The controller of a face-up plane card is the player designated as the \"planar controller.\" Normally, the planar controller is whoever the active player is. However, if the current planar controller would leave the game, instead the next player in turn order that wouldn't leave the game becomes the planar controller, then the old planar controller leaves the game. The new planar controller retains that designation until they leave the game or a different player becomes the active player, whichever comes first."}]}"##;
+
+fn u22_plane_face(name: &str) -> engine::types::card::CardFace {
+    let card: engine::database::mtgjson::AtomicCard = serde_json::from_str(match name {
+        "Otaria" => U22_OTARIA_ATOMIC,
+        "Tazeem" => U22_TAZEEM_ATOMIC,
+        _ => panic!("printed planar fixture"),
+    })
+    .unwrap();
+    assert_eq!(card.layout, "planar");
+    assert_eq!(card.types, vec!["Plane"]);
+    assert_eq!(
+        card.subtypes,
+        vec![if name == "Otaria" {
+            "Dominaria"
+        } else {
+            "Zendikar"
+        }]
+    );
+    assert_eq!(card.mana_cost, None);
+    let face = engine::database::synthesis::build_oracle_face(
+        &card,
+        card.identifiers.scryfall_oracle_id.clone(),
+    );
+    assert_eq!(face.oracle_text.as_deref(), card.text.as_deref());
+    assert_eq!(face.mana_cost, ManaCost::NoCost);
+    assert!(face
+        .card_type
+        .core_types
+        .contains(&engine::types::card_type::CoreType::Plane));
+    assert_eq!(face.card_type.subtypes, card.subtypes);
+    assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+    assert!(face.abilities.is_empty());
+    assert_eq!(face.static_abilities.len(), 1);
+    assert_eq!(face.triggers.len(), 1);
+    assert_eq!(face.static_abilities[0].active_zones, vec![Zone::Command]);
+    assert_eq!(face.triggers[0].trigger_zones, vec![Zone::Command]);
+    let chaos = face.triggers[0].execute.as_deref().unwrap();
+    if name == "Otaria" {
+        assert!(matches!(
+            *chaos.effect,
+            engine::types::ability::Effect::ExtraTurn { .. }
+        ));
+    } else {
+        assert_eq!(
+            face.static_abilities[0].mode,
+            engine::types::statics::StaticMode::CantBlock
+        );
+        let engine::types::ability::Effect::Draw {
+            count:
+                engine::types::ability::QuantityExpr::Ref {
+                    qty: engine::types::ability::QuantityRef::ObjectCount { filter, .. },
+                },
+            target,
+        } = &*chaos.effect
+        else {
+            panic!("Tazeem's complete land-count draw")
+        };
+        assert_eq!(*target, engine::types::ability::TargetFilter::Controller);
+        let engine::types::ability::TargetFilter::Typed(lands) = filter else {
+            panic!("typed land population")
+        };
+        assert!(lands
+            .type_filters
+            .contains(&engine::types::ability::TypeFilter::Land));
+        assert_eq!(
+            lands.controller,
+            Some(engine::types::ability::ControllerRef::You)
+        );
+    }
+    let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        engine::database::CardDatabase::from_json_str(&whole).unwrap(),
+        engine::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(database.get_face_by_name(name), Some(&face));
+    }
+    face
+}
+
+fn u22_starting_otaria(runner: &mut GameRunner) -> (ObjectId, ObjectId) {
+    let otaria = u22_plane_face("Otaria");
+    let tazeem = u22_plane_face("Tazeem");
+    let state = runner.state_mut();
+    state.format_config.format = engine::types::format::GameFormat::Planechase;
+    let mut ids = Vec::new();
+    for (index, face) in [&otaria, &tazeem].into_iter().enumerate() {
+        let id = engine::game::zones::create_object(
+            state,
+            engine::types::identifiers::CardId(22_100 + index as u64),
+            P0,
+            face.name.clone(),
+            Zone::Command,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        engine::game::printed_cards::apply_card_face_to_object(object, face);
+        object.face_down = true;
+        state.planar_deck.push_back(id);
+        ids.push(id);
+    }
+    // CR 901.5 + CR 311.4: reveal the real starting plane; only active membership functions.
+    engine::game::planechase::reveal_starting_plane(state);
+    assert_eq!(engine::game::planechase::active_plane(state), Some(ids[0]));
+    assert!(state.command_zone.contains(&ids[0]) && state.planar_deck.contains(&ids[1]));
+    assert_eq!(state.objects[&ids[0]].zone, Zone::Command);
+    assert_eq!(state.planar_controller, Some(P0));
+    assert!(!state.objects[&ids[0]].face_down);
+    (ids[0], ids[1])
+}
+
+fn u22_paid_return(runner: &mut GameRunner, source: ObjectId) {
+    assert!(runner.state().objects[&source]
+        .static_definitions
+        .iter_unchecked()
+        .any(|entry| entry.definition.description.as_deref() == Some(U22_RETURN)));
+    assert_eq!(
+        runner.state().objects[&source].mana_cost,
+        complete_publication_cost("{4}{R}{R}")
+    );
+    complete_publication_fund(runner, P0, 4, &[ManaType::Red, ManaType::Red]);
+    let committed = runner.cast(source).commit();
+    assert_eq!(committed.state().objects[&source].zone, Zone::Stack);
+    assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+    committed
+        .resolve()
+        .assert_zone(&[source], Zone::Battlefield);
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn u6_return_paid_graveyard_instant_and_sorcery_resolve_and_exile() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind};
+    for sorcery in [false, true] {
+        for countered in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(
+                P0,
+                &["First draw", "Second draw", "Spare draw", "More draw"],
+            );
+            let source = scenario
+                .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+                .as_enchantment()
+                .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+                .id();
+            let recipient = scenario
+                .add_spell_to_graveyard(
+                    P0,
+                    if sorcery { "Divination" } else { "Doom Blade" },
+                    !sorcery,
+                )
+                .from_oracle_text(if sorcery { U22_DIVINATION } else { U22_DOOM })
+                .with_mana_cost(complete_publication_cost(if sorcery {
+                    "{2}{U}"
+                } else {
+                    "{1}{B}"
+                }))
+                .id();
+            let first = scenario
+                .add_creature(P1, "First legal victim", 3, 3)
+                .with_color(vec![ManaColor::Green])
+                .id();
+            let chosen = scenario
+                .add_creature(P1, "Nondefault legal victim", 4, 4)
+                .with_color(vec![ManaColor::White])
+                .id();
+            let black = scenario
+                .add_creature(P1, "Black excluded", 5, 5)
+                .with_color(vec![ManaColor::Black])
+                .id();
+            let creature = scenario
+                .add_creature_to_graveyard(P0, "Creature excluded", 2, 2)
+                .id();
+            let foreign = scenario
+                .add_spell_to_graveyard(P1, "Doom Blade", true)
+                .from_oracle_text(U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let counter = scenario
+                .add_spell_to_hand_from_oracle(P1, "Counterspell", true, U22_COUNTER)
+                .with_mana_cost(complete_publication_cost("{U}{U}"))
+                .id();
+            let remove_source = scenario
+                .add_spell_to_hand_from_oracle(P1, "Disperse", true, U22_DISPERSE)
+                .with_mana_cost(complete_publication_cost("{1}{U}"))
+                .id();
+            let mut runner = scenario.build();
+            u22_paid_return(&mut runner, source);
+            assert!(!can_cast_object_now(runner.state(), P0, creature));
+            assert!(!can_cast_object_now(runner.state(), P0, foreign));
+            assert!(!can_cast_object_now(runner.state(), P1, foreign));
+            assert!(
+                current_casting_variant_choice_options(runner.state(), P0, recipient).is_empty(),
+                "unfunded paired with exact paid cast below"
+            );
+            complete_publication_fund(
+                &mut runner,
+                P0,
+                if sorcery { 2 } else { 1 },
+                &[if sorcery {
+                    ManaType::Blue
+                } else {
+                    ManaType::Black
+                }],
+            );
+            let options = current_casting_variant_choice_options(runner.state(), P0, recipient);
+            assert_eq!(options.len(), 1);
+            assert_eq!(options[0].variant, CastingVariant::Flashback);
+            assert_eq!(
+                options[0].mana_cost,
+                runner.state().objects[&recipient].mana_cost
+            );
+            assert!(can_cast_object_now(runner.state(), P0, recipient));
+            let hand_before = runner.state().players[0].hand.len();
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: recipient,
+                    card_id: runner.state().objects[&recipient].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            if !sorcery {
+                let WaitingFor::TargetSelection {
+                    player,
+                    pending_cast,
+                    target_slots,
+                    selection,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("actual target prompt")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(pending_cast.object_id, recipient);
+                assert_eq!(target_slots.len(), 1);
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                assert!(
+                    legal.contains(&TargetRef::Object(first))
+                        && legal.contains(&TargetRef::Object(chosen))
+                );
+                assert!(!legal.contains(&TargetRef::Object(black)));
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .unwrap();
+            }
+            assert_eq!(runner.state().objects[&recipient].zone, Zone::Stack);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().stack.len(), 1);
+            assert!(matches!(
+                runner.state().stack[0].kind,
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::Flashback,
+                    ..
+                }
+            ));
+            complete_publication_fund(&mut runner, P1, 1, &[ManaType::Blue]);
+            runner.act(GameAction::PassPriority).unwrap();
+            let response = runner.cast(remove_source).target_object(source).commit();
+            assert_eq!(response.state().stack.len(), 2);
+            assert_eq!(response.state().stack[0].source_id, recipient);
+            assert_eq!(response.state().stack[1].source_id, remove_source);
+            assert_eq!(response.state().players[1].mana_pool.total(), 0);
+            drop(response);
+            runner.pass_both_players();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&remove_source].zone, Zone::Graveyard);
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "the paid lower spell remains pending after its grantor leaves"
+            );
+            assert_eq!(runner.state().stack[0].source_id, recipient);
+            assert!(matches!(
+                runner.state().stack[0].kind,
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::Flashback,
+                    ..
+                }
+            ));
+            if countered {
+                complete_publication_fund(&mut runner, P1, 0, &[ManaType::Blue, ManaType::Blue]);
+                runner.act(GameAction::PassPriority).unwrap();
+                let committed = runner.cast(counter).target_object(recipient).commit();
+                assert_eq!(committed.state().stack.len(), 2);
+                assert_eq!(committed.state().stack[0].source_id, recipient);
+                assert_eq!(committed.state().stack[1].source_id, counter);
+                assert_eq!(committed.state().players[1].mana_pool.total(), 0);
+                committed.resolve();
+                assert_eq!(runner.state().objects[&counter].zone, Zone::Graveyard);
+            } else {
+                runner.advance_until_stack_empty();
+            }
+            assert_eq!(runner.state().objects[&recipient].zone, Zone::Exile);
+            assert_eq!(
+                runner.state().objects[&chosen].zone,
+                if !sorcery && !countered {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                hand_before + if sorcery && !countered { 2 } else { 0 }
+            );
+            assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&black].zone, Zone::Battlefield);
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn u6_derived_flashback_absent_cost_is_unpayable_but_zero_is_paid() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::types::game_state::{CastPaymentMode, CastingVariant};
+    use engine::types::keywords::{FlashbackCost, KeywordKind};
+    for planar in [false, true] {
+        for surcharge in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(
+                P0,
+                &[
+                    "Vision draw A",
+                    "Vision draw B",
+                    "Vision draw C",
+                    "Spare A",
+                    "Spare B",
+                ],
+            );
+            scenario.with_library_top(
+                P1,
+                &["Opponent draw A", "Opponent draw B", "Opponent draw C"],
+            );
+            let source = scenario
+                .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+                .as_enchantment()
+                .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+                .id();
+            let vision = scenario
+                .add_spell_to_graveyard(P0, "Ancestral Vision", false)
+                .from_oracle_text(U22_VISION)
+                .with_mana_cost(ManaCost::NoCost)
+                .with_color(vec![ManaColor::Blue])
+                .id();
+            let pact = scenario
+                .add_spell_to_graveyard(P0, "Pact of the Titan", true)
+                .from_oracle_text(U22_PACT)
+                .with_mana_cost(complete_publication_cost("{0}"))
+                .with_color(vec![ManaColor::Red])
+                .id();
+            let sphere = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Sphere of Resistance", U22_SPHERE)
+                .with_mana_cost(complete_publication_cost("{2}"))
+                .id();
+            let mut runner = scenario.build();
+            if planar {
+                u22_starting_otaria(&mut runner);
+            } else {
+                u22_paid_return(&mut runner, source);
+            }
+            if surcharge {
+                complete_publication_fund(&mut runner, P0, 2, &[]);
+                runner
+                    .cast(sphere)
+                    .resolve()
+                    .assert_zone(&[sphere], Zone::Battlefield);
+                assert_continuous_complete(runner.state());
+            }
+            assert_eq!(runner.state().phase, Phase::PreCombatMain);
+            assert_eq!(runner.state().active_player, P0);
+            assert_eq!(runner.state().objects[&vision].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&vision].owner, P0);
+            assert!(runner.state().objects[&vision]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Sorcery));
+            assert!(engine::game::keywords::object_has_effective_keyword_kind(
+                runner.state(),
+                vision,
+                KeywordKind::Flashback
+            ));
+            assert_eq!(
+                engine::game::keywords::effective_flashback_cost(runner.state(), vision),
+                Some(FlashbackCost::Mana(ManaCost::NoCost))
+            );
+            assert_eq!(runner.state().objects[&vision].mana_cost, ManaCost::NoCost);
+            assert_eq!(runner.state().objects[&pact].mana_cost, ManaCost::zero());
+            // CR 118.6 + CR 118.6a: the selected absent mana basis stays unpayable before increases.
+            assert!(
+                !current_casting_variant_choice_options(runner.state(), P0, vision)
+                    .iter()
+                    .any(|option| option.variant == CastingVariant::Flashback)
+            );
+            assert!(!can_cast_object_now(runner.state(), P0, vision));
+            assert!(!engine::ai_support::legal_actions(runner.state()).iter().any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == vision)));
+            let hand = runner.state().players[0].hand.clone();
+            let life = runner.state().players[0].life;
+            let mana = runner.state().players[0].mana_pool.total();
+            let attempt = runner.act(GameAction::CastSpell {
+                object_id: vision,
+                card_id: runner.state().objects[&vision].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            });
+            if attempt.is_ok() {
+                let WaitingFor::TargetSelection {
+                    player,
+                    pending_cast,
+                    target_slots,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("an admitted raw attempt must expose its real announced frame")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(pending_cast.object_id, vision);
+                assert!(target_slots
+                    .iter()
+                    .any(|slot| slot.legal_targets.contains(&TargetRef::Player(P0))));
+                let _ = runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P0)),
+                });
+                assert_ne!(
+                    runner.state().objects[&vision].zone,
+                    Zone::Stack,
+                    "a raw cast cannot complete payment of the absent Flashback basis"
+                );
+                assert!(!runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == vision));
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    runner.act(GameAction::CancelCast).unwrap();
+                }
+            }
+            assert_eq!(runner.state().players[0].hand, hand);
+            assert_eq!(runner.state().players[0].life, life);
+            assert_eq!(runner.state().players[0].mana_pool.total(), mana);
+            assert_eq!(runner.state().objects[&vision].zone, Zone::Graveyard);
+            assert_continuous_complete(runner.state());
+            if surcharge {
+                complete_publication_fund(&mut runner, P0, 1, &[]);
+            }
+            let options = current_casting_variant_choice_options(runner.state(), P0, pact);
+            assert!(options
+                .iter()
+                .any(|option| option.variant == CastingVariant::Flashback
+                    && option.mana_cost == ManaCost::generic(u32::from(surcharge))));
+            let committed = runner
+                .cast(pact)
+                .casting_variant(CastingVariant::Flashback)
+                .commit();
+            assert_eq!(committed.state().objects[&pact].zone, Zone::Stack);
+            assert_eq!(
+                committed.state().players[0].mana_pool.total(),
+                0,
+                "printed zero pays exactly the real Sphere increase"
+            );
+            committed.resolve().assert_zone(&[pact], Zone::Exile);
+            let giants = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.zone == Zone::Battlefield && object.is_token && object.name == "Giant"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(giants.len(), 1);
+            assert_eq!((giants[0].power, giants[0].toughness), (Some(4), Some(4)));
+            assert_eq!(giants[0].controller, P0);
+            assert_eq!(giants[0].color, vec![ManaColor::Red]);
+            assert!(runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == pact));
+            assert_continuous_complete(runner.state());
+            // Advance actual turns to the first own upkeep carrying Pact's real duty.
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            runner.pass_both_players();
+            runner.advance_to_upkeep();
+            if runner.state().active_player != P0 {
+                runner.advance_to_phase(Phase::PreCombatMain);
+                runner.advance_to_combat();
+                runner.declare_attackers(&[]).unwrap();
+                runner.advance_to_end_step();
+                runner.pass_both_players();
+                runner.advance_to_upkeep();
+            }
+            assert_eq!(runner.state().active_player, P0);
+            assert_eq!(runner.state().phase, Phase::Upkeep);
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == pact));
+            complete_publication_fund(&mut runner, P0, 4, &[ManaType::Red]);
+            runner.advance_until_stack_empty();
+            if let WaitingFor::UnlessPayment {
+                player,
+                cost,
+                pending_effect,
+                ..
+            } = &runner.state().waiting_for
+            {
+                assert_eq!(*player, P0);
+                assert_eq!(
+                    *cost,
+                    engine::types::ability::AbilityCost::Mana {
+                        cost: complete_publication_cost("{4}{R}")
+                    }
+                );
+                assert_eq!(pending_effect.source_id, pact);
+                runner.act(GameAction::PayUnlessCost { pay: true }).unwrap();
+                runner.advance_until_stack_empty();
+            }
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().players[0].life, life);
+            assert!(!runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == pact));
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn u6_independent_free_permission_survives_unpayable_derived_flashback() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::types::ability::{
+        CastingPermission, ExileGrantCostProvenance, SpellStackToGraveyardReplacement,
+    };
+    use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
+    for planar in [false, true] {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Vision A", "Vision B", "Vision C", "Spare"]);
+            let source = scenario
+                .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+                .as_enchantment()
+                .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+                .id();
+            let vision = scenario
+                .add_spell_to_graveyard(P0, "Ancestral Vision", false)
+                .from_oracle_text(U22_VISION)
+                .with_mana_cost(ManaCost::NoCost)
+                .with_color(vec![ManaColor::Blue])
+                .id();
+            let invoke = scenario
+                .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, U22_INVOKE)
+                .with_mana_cost(complete_publication_cost("{1}{R}{R}{R}{R}"))
+                .id();
+            let spare = scenario
+                .add_spell_to_hand_from_oracle(P0, "Divination", false, U22_DIVINATION)
+                .with_mana_cost(complete_publication_cost("{2}{U}"))
+                .id();
+            let foreign = scenario
+                .add_spell_to_graveyard(P1, "Ancestral Vision", false)
+                .from_oracle_text(U22_VISION)
+                .with_mana_cost(ManaCost::NoCost)
+                .id();
+            let mut runner = scenario.build();
+            if planar {
+                u22_starting_otaria(&mut runner);
+            } else {
+                u22_paid_return(&mut runner, source);
+            }
+            assert!(!can_cast_object_now(runner.state(), P0, vision));
+            assert!(
+                !current_casting_variant_choice_options(runner.state(), P0, vision)
+                    .iter()
+                    .any(|option| option.variant == CastingVariant::Flashback)
+            );
+            let hand_before = runner.state().players[0].hand.len();
+            complete_publication_fund(
+                &mut runner,
+                P0,
+                1,
+                &[ManaType::Red, ManaType::Red, ManaType::Red, ManaType::Red],
+            );
+            runner.cast(invoke).commit().stop_at_optional().resolve();
+            if let WaitingFor::OptionalEffectChoice { player, .. } = &runner.state().waiting_for {
+                assert_eq!(*player, P0);
+                assert!(!runner.state().resolution_stack.is_empty());
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            let WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        graveyard_replacement,
+                        ..
+                    },
+            } = &runner.state().waiting_for
+            else {
+                panic!("real Invoke free-cast window")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*remaining_casts, Some(2));
+            assert_eq!(*remaining_mv_budget, Some(6));
+            assert_eq!(
+                *graveyard_replacement,
+                Some(SpellStackToGraveyardReplacement::Exile)
+            );
+            assert!(candidates.contains(&vision) && candidates.contains(&spare));
+            assert!(!candidates.contains(&foreign));
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            let frame = runner
+                .state()
+                .resolution_stack
+                .active_ability_continuation()
+                .expect("Invoke parent parked");
+            assert_eq!(frame.pending.chain.source_id, invoke);
+            if accept {
+                runner
+                    .act(GameAction::FreeCastWindowChoice {
+                        selection: Some(vision),
+                    })
+                    .unwrap();
+                let WaitingFor::TargetSelection {
+                    player,
+                    pending_cast,
+                    target_slots,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("Vision's actual player-target announcement")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(pending_cast.object_id, vision);
+                assert_eq!(pending_cast.casting_variant, CastingVariant::Normal);
+                let index = pending_cast
+                    .casting_permission_index
+                    .expect("selected independent index");
+                assert!(
+                    matches!(&runner.state().objects[&vision].casting_permissions[index.0], CastingPermission::ExileWithAltCost { cost, cost_provenance: ExileGrantCostProvenance::Alternative, resolution_cleanup: Some(_), .. } if *cost == ManaCost::zero())
+                );
+                assert!(target_slots
+                    .iter()
+                    .any(|slot| slot.legal_targets.contains(&TargetRef::Player(P0))));
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P0)),
+                    })
+                    .unwrap();
+                assert_eq!(runner.state().objects[&vision].zone, Zone::Stack);
+                let child = runner
+                    .state()
+                    .stack
+                    .iter()
+                    .find(|entry| entry.source_id == vision)
+                    .unwrap();
+                assert!(matches!(
+                    child.kind,
+                    StackEntryKind::Spell {
+                        casting_variant: CastingVariant::Normal,
+                        ..
+                    }
+                ));
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+                let WaitingFor::CastOffer {
+                    player,
+                    kind:
+                        CastOfferKind::FreeCastWindow {
+                            candidates,
+                            remaining_casts,
+                            remaining_mv_budget,
+                            ..
+                        },
+                } = &runner.state().waiting_for
+                else {
+                    panic!("remaining window before child resolves")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(*remaining_casts, Some(1));
+                assert_eq!(*remaining_mv_budget, Some(6));
+                assert!(!candidates.contains(&vision) && candidates.contains(&spare));
+                assert_eq!(
+                    runner.state().players[0].hand.len(),
+                    hand_before - 1,
+                    "child has not drawn during parent resolution"
+                );
+            }
+            runner
+                .act(GameAction::FreeCastWindowChoice { selection: None })
+                .unwrap();
+            assert_eq!(runner.state().objects[&invoke].zone, Zone::Exile);
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                runner.state().objects[&vision].zone,
+                if accept { Zone::Exile } else { Zone::Graveyard }
+            );
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                hand_before - 1 + if accept { 3 } else { 0 }
+            );
+            assert_eq!(runner.state().objects[&spare].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&foreign].zone, Zone::Graveyard);
+            assert!(runner.state().objects[&vision]
+                .casting_permissions
+                .is_empty());
+            if !accept {
+                assert!(!can_cast_object_now(runner.state(), P0, vision));
+            }
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn ordinary_destroy_paid_murder_doom_blade_and_deathmark_keep_target_and_resolution_rules() {
+    use engine::types::game_state::CastPaymentMode;
+    for (name, oracle, cost, generic, colors) in [
+        (
+            "Murder",
+            U22_MURDER,
+            "{1}{B}{B}",
+            1,
+            vec![ManaType::Black, ManaType::Black],
+        ),
+        ("Doom Blade", U22_DOOM, "{1}{B}", 1, vec![ManaType::Black]),
+        ("Deathmark", U22_DEATHMARK, "{B}", 0, vec![ManaType::Black]),
+    ] {
+        for response in 0..3 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, name, name != "Deathmark", oracle)
+                .with_mana_cost(complete_publication_cost(cost))
+                .id();
+            let green = scenario
+                .add_creature(P1, "Green legal victim", 2, 3)
+                .with_color(vec![ManaColor::Green])
+                .id();
+            let white = scenario
+                .add_creature(P1, "White legal victim", 3, 4)
+                .with_color(vec![ManaColor::White])
+                .id();
+            let chosen = scenario
+                .add_creature(P1, "Green and white nondefault victim", 4, 5)
+                .with_color(vec![ManaColor::Green, ManaColor::White])
+                .id();
+            let black = scenario
+                .add_creature(P1, "Black target discriminator", 5, 6)
+                .with_color(vec![ManaColor::Black])
+                .id();
+            let artifact = scenario
+                .add_artifact_from_oracle(
+                    P1,
+                    "Bonesplitter",
+                    "Equipped creature gets +2/+0.\nEquip {1}",
+                )
+                .with_subtypes(vec!["Equipment"])
+                .with_mana_cost(complete_publication_cost("{1}"))
+                .id();
+            let bounce = scenario
+                .add_spell_to_hand_from_oracle(P1, "Disperse", true, U22_DISPERSE)
+                .with_mana_cost(complete_publication_cost("{1}{U}"))
+                .id();
+            let protect = scenario.add_spell_to_hand_from_oracle(P1, "Make a Stand", true,
+                "Creatures you control get +1/+0 and gain indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy them.)")
+                .with_mana_cost(complete_publication_cost("{2}{W}")).id();
+            let mut runner = scenario.build();
+            complete_publication_fund(&mut runner, P0, generic, &colors);
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id: runner.state().objects[&spell].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            let WaitingFor::TargetSelection {
+                player,
+                pending_cast,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("paid removal must announce its creature target")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(pending_cast.object_id, spell);
+            assert_eq!(target_slots.len(), 1);
+            let legal = &target_slots[selection.current_slot].legal_targets;
+            for object in [green, white, chosen] {
+                assert!(legal.contains(&TargetRef::Object(object)));
+            }
+            assert_eq!(
+                legal
+                    .iter()
+                    .filter(|target| **target == TargetRef::Object(chosen))
+                    .count(),
+                1,
+                "green-or-white is a union"
+            );
+            assert_eq!(legal.contains(&TargetRef::Object(black)), name == "Murder");
+            assert!(!legal.contains(&TargetRef::Object(artifact)));
+            assert!(runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(artifact))
+                })
+                .is_err());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(chosen)),
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().stack.len(), 1);
+            if response != 0 {
+                runner.act(GameAction::PassPriority).unwrap();
+                if response == 1 {
+                    complete_publication_fund(&mut runner, P1, 1, &[ManaType::Blue]);
+                    let paid = runner.cast(bounce).target_object(chosen).commit();
+                    assert_eq!(paid.state().stack.len(), 2);
+                    assert_eq!(paid.state().players[1].mana_pool.total(), 0);
+                    paid.resolve();
+                    assert_eq!(runner.state().objects[&bounce].zone, Zone::Graveyard);
+                } else {
+                    complete_publication_fund(&mut runner, P1, 2, &[ManaType::White]);
+                    let paid = runner.cast(protect).commit();
+                    assert_eq!(paid.state().stack.len(), 2);
+                    assert_eq!(paid.state().players[1].mana_pool.total(), 0);
+                    paid.resolve();
+                    assert!(runner.state().objects[&chosen]
+                        .keywords
+                        .contains(&Keyword::Indestructible));
+                    assert_eq!(runner.state().objects[&protect].zone, Zone::Graveyard);
+                }
+            } else {
+                runner.advance_until_stack_empty();
+            }
+            assert_eq!(
+                runner.state().objects[&chosen].zone,
+                match response {
+                    0 => Zone::Graveyard,
+                    1 => Zone::Hand,
+                    _ => Zone::Battlefield,
+                }
+            );
+            for object in [green, white, black, artifact] {
+                assert_eq!(runner.state().objects[&object].zone, Zone::Battlefield);
+            }
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn ordinary_destroy_funding_color_and_no_target_failures_pair_with_paid_casts() {
+    use engine::game::casting::can_cast_object_now;
+    use engine::types::game_state::CastPaymentMode;
+    for (name, text, cost, generic, blacks) in [
+        ("Murder", U22_MURDER, "{1}{B}{B}", 1, 2),
+        ("Doom Blade", U22_DOOM, "{1}{B}", 1, 1),
+        ("Deathmark", U22_DEATHMARK, "{B}", 0, 1),
+    ] {
+        for case in 0..5 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, name, name != "Deathmark", text)
+                .with_mana_cost(complete_publication_cost(cost))
+                .id();
+            let victim = if case == 3 && name == "Murder" {
+                None
+            } else {
+                Some(
+                    scenario
+                        .add_creature(P1, "Removal eligibility discriminator", 3, 4)
+                        .with_color(vec![if case == 3 {
+                            ManaColor::Black
+                        } else {
+                            ManaColor::White
+                        }])
+                        .id(),
+                )
+            };
+            scenario
+                .add_artifact_from_oracle(
+                    P1,
+                    "Bonesplitter",
+                    "Equipped creature gets +2/+0.\nEquip {1}",
+                )
+                .with_subtypes(vec!["Equipment"])
+                .with_mana_cost(complete_publication_cost("{1}"));
+            let mut runner = scenario.build();
+            match case {
+                0 => {}
+                1 => complete_publication_fund(
+                    &mut runner,
+                    P0,
+                    generic,
+                    &vec![ManaType::Blue; blacks],
+                ),
+                2 => complete_publication_fund(
+                    &mut runner,
+                    P0,
+                    0,
+                    &vec![ManaType::Black; if generic == 0 { blacks - 1 } else { blacks }],
+                ),
+                _ => complete_publication_fund(
+                    &mut runner,
+                    P0,
+                    generic,
+                    &vec![ManaType::Black; blacks],
+                ),
+            }
+            let mana = runner.state().players[0].mana_pool.total();
+            assert_eq!(can_cast_object_now(runner.state(), P0, spell), case == 4);
+            if case == 4 {
+                runner.cast(spell).target_object(victim.unwrap()).resolve();
+                assert_eq!(
+                    runner.state().objects[&victim.unwrap()].zone,
+                    Zone::Graveyard
+                );
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            } else {
+                let attempt = runner.act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id: runner.state().objects[&spell].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                });
+                if attempt.is_ok() {
+                    let WaitingFor::TargetSelection {
+                        player,
+                        pending_cast,
+                        ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!("real uncommitted removal announcement")
+                    };
+                    assert_eq!(*player, P0);
+                    assert_eq!(pending_cast.object_id, spell);
+                    runner.act(GameAction::CancelCast).unwrap();
+                }
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+                assert_eq!(runner.state().players[0].mana_pool.total(), mana);
+                if let Some(victim) = victim {
+                    assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+                }
+            }
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn ordinary_light_paid_resolution_choice_uses_current_equipment_and_public_responses() {
+    use engine::game::effects::attach::attach_to;
+    use engine::types::game_state::CastPaymentMode;
+    for case in 0..8 {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let light = scenario
+            .add_spell_to_hand_from_oracle(P0, "Light of Judgment", true, U22_LIGHT)
+            .with_mana_cost(complete_publication_cost("{4}{R}"))
+            .id();
+        let other = scenario.add_creature(P1, "Another creature", 2, 9).id();
+        let victim = scenario
+            .add_creature(
+                P1,
+                "Declared nondefault creature",
+                2,
+                if case == 4 { 3 } else { 9 },
+            )
+            .id();
+        let first = scenario
+            .add_artifact_from_oracle(
+                P1,
+                "Bonesplitter",
+                "Equipped creature gets +2/+0.\nEquip {1}",
+            )
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost("{1}"))
+            .id();
+        let second = scenario.add_artifact_from_oracle(P0, "Short Sword", "Equipped creature gets +1/+1.\nEquip {1} ({1}: Attach to target creature you control. Equip only as a sorcery.)")
+            .with_subtypes(vec!["Equipment"]).with_mana_cost(complete_publication_cost("{1}")).id();
+        let axe = scenario
+            .add_artifact_from_oracle(P1, "Darksteel Axe", U22_AXE)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost("{1}"))
+            .id();
+        let unattached = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Bonesplitter",
+                "Equipped creature gets +2/+0.\nEquip {1}",
+            )
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost("{1}"))
+            .id();
+        let aura = scenario
+            .add_enchantment_from_oracle(
+                P1,
+                "Holy Strength",
+                "Enchant creature\nEnchanted creature gets +1/+2.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(complete_publication_cost("{W}"))
+            .id();
+        let theft = scenario
+            .add_spell_to_hand_from_oracle(P1, "Magnetic Theft", true, U22_THEFT)
+            .with_mana_cost(complete_publication_cost("{R}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(P1, "Disperse", true, U22_DISPERSE)
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        // Initial attachment setup precedes the public cast and every response.
+        attach_to(runner.state_mut(), aura, victim);
+        if case != 2 {
+            attach_to(runner.state_mut(), first, victim);
+            attach_to(runner.state_mut(), second, victim);
+        }
+        attach_to(
+            runner.state_mut(),
+            axe,
+            if case == 5 { victim } else { other },
+        );
+        complete_publication_fund(&mut runner, P0, 4, &[ManaType::Red]);
+        runner
+            .act(GameAction::CastSpell {
+                object_id: light,
+                card_id: runner.state().objects[&light].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            pending_cast,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Light's actual declared-creature prompt")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(pending_cast.object_id, light);
+        assert_eq!(target_slots.len(), 1);
+        let legal = &target_slots[selection.current_slot].legal_targets;
+        assert!(
+            legal.contains(&TargetRef::Object(victim)) && legal.contains(&TargetRef::Object(other))
+        );
+        for object in [first, second, axe, aura] {
+            assert!(!legal.contains(&TargetRef::Object(object)));
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            })
+            .unwrap();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&light].zone, Zone::Stack);
+        if case == 3 || case == 6 || case == 7 {
+            runner.act(GameAction::PassPriority).unwrap();
+            if case == 3 || case == 7 {
+                complete_publication_fund(&mut runner, P1, 0, &[ManaType::Red]);
+                let (moved, destination) = if case == 3 {
+                    (first, other)
+                } else {
+                    (axe, victim)
+                };
+                let response = runner
+                    .cast(theft)
+                    .target_objects(&[moved, destination])
+                    .commit();
+                assert_eq!(response.state().stack.len(), 2);
+                assert_eq!(response.state().players[1].mana_pool.total(), 0);
+                drop(response);
+                runner.pass_both_players();
+                assert_eq!(runner.state().objects[&moved].controller, P1);
+                assert_eq!(
+                    runner.state().objects[&moved].attached_to,
+                    Some(engine::game::game_object::AttachTarget::Object(destination))
+                );
+                assert!(runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == light));
+            } else {
+                complete_publication_fund(&mut runner, P1, 1, &[ManaType::Blue]);
+                runner.cast(bounce).target_object(victim).resolve();
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Hand);
+                assert_eq!(runner.state().objects[&victim].damage_marked, 0);
+                assert_eq!(runner.state().objects[&light].zone, Zone::Graveyard);
+                for object in [first, second, axe, unattached] {
+                    assert_eq!(runner.state().objects[&object].zone, Zone::Battlefield);
+                }
+                assert_continuous_complete(runner.state());
+                continue;
+            }
+        }
+        runner.advance_until_stack_empty();
+        let WaitingFor::ChooseObjectsSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Light's real resolution-time Equipment choice")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*min, 0);
+        let expected = match case {
+            2 => vec![],
+            3 => vec![TargetRef::Object(second)],
+            5 | 7 => vec![
+                TargetRef::Object(first),
+                TargetRef::Object(second),
+                TargetRef::Object(axe),
+            ],
+            _ => vec![TargetRef::Object(first), TargetRef::Object(second)],
+        };
+        assert_eq!(eligible.len(), expected.len());
+        for target in &expected {
+            assert!(eligible.contains(target));
+        }
+        assert_eq!(*max, Some(if expected.is_empty() { 0 } else { 1 }));
+        assert_eq!(runner.state().objects[&victim].damage_marked, 6);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+        let frame = runner
+            .state()
+            .resolution_stack
+            .active_ability_continuation()
+            .expect("Light's actual parked frame");
+        assert_eq!(frame.pending.chain.source_id, light);
+        assert!(!eligible.contains(&TargetRef::Object(aura)));
+        assert!(!eligible.contains(&TargetRef::Object(unattached)));
+        for invalid in [
+            vec![TargetRef::Object(aura)],
+            vec![TargetRef::Object(unattached)],
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            vec![TargetRef::Object(second), TargetRef::Object(second)],
+        ] {
+            assert!(runner
+                .act(GameAction::SelectTargets { targets: invalid })
+                .is_err());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseObjectsSelection { .. }
+            ));
+            assert_eq!(
+                runner
+                    .state()
+                    .resolution_stack
+                    .active_ability_continuation()
+                    .unwrap()
+                    .pending
+                    .chain
+                    .source_id,
+                light
+            );
+        }
+        let selected = if case == 1 || case == 2 {
+            None
+        } else if case == 5 {
+            Some(axe)
+        } else {
+            Some(second)
+        };
+        runner
+            .act(GameAction::SelectTargets {
+                targets: selected.into_iter().map(TargetRef::Object).collect(),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&second].zone,
+            if selected == Some(second) {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&unattached].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&axe].zone,
+            Zone::Battlefield,
+            "the printed indestructible Equipment survives a lawful selection"
+        );
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if case == 4 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&aura].zone,
+            if case == 4 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(runner.state().objects[&light].zone, Zone::Graveyard);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn u6_native_flashback_fixed_nonmana_and_compound_costs_remain_paid() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::types::game_state::{CastingVariant, StackEntryKind};
+    for (name, text, printed, instant, generic, colors, draws) in [
+        (
+            "Think Twice",
+            U22_THINK,
+            "{1}{U}",
+            true,
+            2,
+            vec![ManaType::Blue],
+            1,
+        ),
+        (
+            "Firebolt",
+            U22_FIREBOLT,
+            "{R}",
+            false,
+            4,
+            vec![ManaType::Red],
+            0,
+        ),
+        (
+            "Battle Screech",
+            U22_SCREECH,
+            "{2}{W}{W}",
+            false,
+            0,
+            vec![],
+            0,
+        ),
+        (
+            "Deep Analysis",
+            U22_ANALYSIS,
+            "{3}{U}",
+            false,
+            1,
+            vec![ManaType::Blue],
+            2,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Native draw A", "Native draw B", "Native draw C"]);
+        let spell = scenario
+            .add_spell_to_graveyard(P0, name, instant)
+            .from_oracle_text(text)
+            .with_mana_cost(complete_publication_cost(printed))
+            .id();
+        let victim = scenario
+            .add_creature(P1, "Firebolt nondefault victim", 3, 2)
+            .id();
+        let whites = (0..3)
+            .map(|_| {
+                scenario
+                    .add_creature(P0, "White payment creature", 1, 3)
+                    .with_color(vec![ManaColor::White])
+                    .id()
+            })
+            .collect::<Vec<_>>();
+        let excluded = scenario
+            .add_creature(P1, "Foreign white payment exclusion", 1, 3)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(
+            runner.state().objects[&spell].mana_cost,
+            complete_publication_cost(printed)
+        );
+        if name != "Battle Screech" {
+            assert!(
+                !can_cast_object_now(runner.state(), P0, spell),
+                "a native fixed or compound cost still needs mana"
+            );
+        }
+        complete_publication_fund(&mut runner, P0, generic, &colors);
+        let options = current_casting_variant_choice_options(runner.state(), P0, spell);
+        assert!(options
+            .iter()
+            .any(|option| option.variant == CastingVariant::Flashback));
+        assert!(can_cast_object_now(runner.state(), P0, spell));
+        let hand = runner.state().players[0].hand.len();
+        let life = runner.state().players[0].life;
+        let cast = runner
+            .cast(spell)
+            .casting_variant(CastingVariant::Flashback);
+        let committed = if name == "Firebolt" {
+            cast.target_object(victim).commit()
+        } else if name == "Deep Analysis" {
+            cast.target_player(P0).commit()
+        } else if name == "Battle Screech" {
+            cast.pay_cost_with(&whites).commit()
+        } else {
+            cast.commit()
+        };
+        assert_eq!(committed.state().objects[&spell].zone, Zone::Stack);
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        assert!(matches!(
+            committed.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Flashback,
+                ..
+            }
+        ));
+        assert_eq!(
+            committed.state().players[0].life,
+            life - if name == "Deep Analysis" { 3 } else { 0 }
+        );
+        for object in &whites {
+            assert_eq!(
+                committed.state().objects[object].tapped,
+                name == "Battle Screech"
+            );
+        }
+        assert!(!committed.state().objects[&excluded].tapped);
+        committed.resolve();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+        assert_eq!(runner.state().players[0].hand.len(), hand + draws);
+        if name == "Firebolt" {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        }
+        if name == "Battle Screech" {
+            let birds = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.zone == Zone::Battlefield && object.is_token && object.name == "Bird"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(birds.len(), 2);
+            for bird in birds {
+                assert_eq!((bird.power, bird.toughness), (Some(1), Some(1)));
+                assert_eq!(bird.controller, P0);
+                assert!(bird.keywords.contains(&Keyword::Flying));
+            }
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn u6_full_producers_keep_zone_owner_color_generic_and_target_hostiles() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::game::keywords::effective_flashback_cost;
+    use engine::types::game_state::CastPaymentMode;
+    for planar in [false, true] {
+        for case in 0..4 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+                .as_enchantment()
+                .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+                .id();
+            let recipient = scenario
+                .add_spell_to_graveyard(P0, "Doom Blade", true)
+                .from_oracle_text(U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let foreign = scenario
+                .add_spell_to_graveyard(P1, "Doom Blade", true)
+                .from_oracle_text(U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let hand = scenario
+                .add_spell_to_hand_from_oracle(P0, "Doom Blade", true, U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let exile = scenario
+                .add_spell_to_exile(P0, "Doom Blade", true)
+                .from_oracle_text(U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let library = scenario
+                .add_spell_to_library_top(P0, "Doom Blade", true)
+                .from_oracle_text(U22_DOOM)
+                .with_mana_cost(complete_publication_cost("{1}{B}"))
+                .id();
+            let creature = scenario
+                .add_creature_to_graveyard(P0, "Creature card excluded", 2, 2)
+                .id();
+            let land = scenario
+                .add_land_to_graveyard(P0, "Land card excluded")
+                .id();
+            let victim = scenario
+                .add_creature(P1, "Color target discriminator", 3, 4)
+                .with_color(vec![if case == 2 {
+                    ManaColor::Black
+                } else {
+                    ManaColor::White
+                }])
+                .id();
+            let mut runner = scenario.build();
+            // A deliberately stale off-zone controller is initial fixture data;
+            // the grant and casting authority must still use the actual owner.
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&foreign)
+                .unwrap()
+                .controller = P0;
+            if planar {
+                u22_starting_otaria(&mut runner);
+            } else {
+                u22_paid_return(&mut runner, source);
+            }
+            assert!(effective_flashback_cost(runner.state(), recipient).is_some());
+            assert_eq!(
+                effective_flashback_cost(runner.state(), foreign).is_some(),
+                planar
+            );
+            for object in [hand, exile, library, creature, land] {
+                assert!(effective_flashback_cost(runner.state(), object).is_none());
+            }
+            assert!(!can_cast_object_now(runner.state(), P0, foreign));
+            assert!(
+                current_casting_variant_choice_options(runner.state(), P0, recipient).is_empty(),
+                "unfunded control"
+            );
+            match case {
+                0 => complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]),
+                1 => complete_publication_fund(&mut runner, P0, 0, &[ManaType::Black]),
+                _ => complete_publication_fund(&mut runner, P0, 1, &[ManaType::Black]),
+            }
+            let mana = runner.state().players[0].mana_pool.total();
+            if case == 3 {
+                assert!(can_cast_object_now(runner.state(), P0, recipient));
+                runner.cast(recipient).target_object(victim).resolve();
+                assert_eq!(runner.state().objects[&recipient].zone, Zone::Exile);
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            } else {
+                assert!(!can_cast_object_now(runner.state(), P0, recipient));
+                assert!(
+                    current_casting_variant_choice_options(runner.state(), P0, recipient)
+                        .is_empty()
+                );
+                let attempt = runner.act(GameAction::CastSpell {
+                    object_id: recipient,
+                    card_id: runner.state().objects[&recipient].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                });
+                if attempt.is_ok() {
+                    let WaitingFor::TargetSelection {
+                        player,
+                        pending_cast,
+                        ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!("the real uncommitted negative announcement")
+                    };
+                    assert_eq!(*player, P0);
+                    assert_eq!(pending_cast.object_id, recipient);
+                    runner.act(GameAction::CancelCast).unwrap();
+                }
+                assert_eq!(runner.state().players[0].mana_pool.total(), mana);
+                assert_eq!(runner.state().objects[&recipient].zone, Zone::Graveyard);
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+            }
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn u6_native_nonmana_public_payment_rejects_invalid_choices_and_finishes_the_real_cost() {
+    use engine::game::casting::current_casting_variant_choice_options;
+    use engine::types::game_state::{CastPaymentMode, CastingVariant};
+    for enough in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let screech = scenario
+            .add_spell_to_graveyard(P0, "Battle Screech", false)
+            .from_oracle_text(U22_SCREECH)
+            .with_mana_cost(complete_publication_cost("{2}{W}{W}"))
+            .id();
+        let whites = (0..if enough { 3 } else { 2 })
+            .map(|_| {
+                scenario
+                    .add_creature(P0, "White tap-cost recipient", 2, 3)
+                    .with_color(vec![ManaColor::White])
+                    .id()
+            })
+            .collect::<Vec<_>>();
+        let foreign = scenario
+            .add_creature(P1, "Foreign white excluded", 2, 3)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let blue = scenario
+            .add_creature(P0, "Own blue excluded", 2, 3)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let mut runner = scenario.build();
+        let options = current_casting_variant_choice_options(runner.state(), P0, screech);
+        assert_eq!(
+            options
+                .iter()
+                .any(|option| option.variant == CastingVariant::Flashback),
+            enough
+        );
+        if !enough {
+            let attempt = runner.act(GameAction::CastSpell {
+                object_id: screech,
+                card_id: runner.state().objects[&screech].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            });
+            if attempt.is_ok() {
+                runner.act(GameAction::CancelCast).unwrap();
+            }
+            assert_eq!(runner.state().objects[&screech].zone, Zone::Graveyard);
+            for object in &whites {
+                assert!(!runner.state().objects[object].tapped);
+            }
+            assert_continuous_complete(runner.state());
+            continue;
+        }
+        runner
+            .act(GameAction::CastSpell {
+                object_id: screech,
+                card_id: runner.state().objects[&screech].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the actual three-creature flashback payment")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 3);
+        assert_eq!(choices.len(), 3);
+        for object in &whites {
+            assert!(choices.contains(object));
+        }
+        assert!(!choices.contains(&foreign) && !choices.contains(&blue));
+        for invalid in [
+            vec![],
+            vec![whites[0], whites[1]],
+            vec![whites[0], whites[0], whites[1]],
+            vec![whites[0], whites[1], foreign],
+            vec![whites[0], whites[1], blue],
+        ] {
+            assert!(runner
+                .act(GameAction::SelectCards { cards: invalid })
+                .is_err());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::PayCost {
+                    player: P0,
+                    count: 3,
+                    ..
+                }
+            ));
+            for object in &whites {
+                assert!(!runner.state().objects[object].tapped);
+            }
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: whites.clone(),
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&screech].zone, Zone::Stack);
+        for object in &whites {
+            assert!(runner.state().objects[object].tapped);
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&screech].zone, Zone::Exile);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token
+                    && object.name == "Bird"
+                    && object.zone == Zone::Battlefield)
+                .count(),
+            2
+        );
+        assert_continuous_complete(runner.state());
+    }
+    let mut scenario = GameScenario::new();
+    scenario
+        .at_phase(Phase::PreCombatMain)
+        .with_life(P0, 2)
+        .with_library_top(P0, &["Compound draw A", "Compound draw B"]);
+    let analysis = scenario
+        .add_spell_to_graveyard(P0, "Deep Analysis", false)
+        .from_oracle_text(U22_ANALYSIS)
+        .with_mana_cost(complete_publication_cost("{3}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    assert!(
+        !current_casting_variant_choice_options(runner.state(), P0, analysis)
+            .iter()
+            .any(|option| option.variant == CastingVariant::Flashback)
+    );
+    let attempt = runner.act(GameAction::CastSpell {
+        object_id: analysis,
+        card_id: runner.state().objects[&analysis].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    if attempt.is_ok() {
+        let WaitingFor::TargetSelection {
+            player,
+            pending_cast,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("compound cost announcement")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(pending_cast.object_id, analysis);
+        let _ = runner.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        });
+        assert_ne!(runner.state().objects[&analysis].zone, Zone::Stack);
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.act(GameAction::CancelCast).unwrap();
+        }
+    }
+    assert_eq!(runner.state().players[0].life, 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+    assert_eq!(runner.state().objects[&analysis].zone, Zone::Graveyard);
+    assert!(runner.state().players[0].hand.is_empty());
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn u6_return_live_graveyard_entries_bounce_reentry_controller_and_multiple_sources() {
+    use engine::game::casting::{can_cast_object_now, current_casting_variant_choice_options};
+    use engine::game::keywords::effective_flashback_cost;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(
+            player,
+            &[
+                "Live draw A",
+                "Live draw B",
+                "Live draw C",
+                "Live draw D",
+                "Live draw E",
+            ],
+        );
+    }
+    let source = scenario
+        .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+        .as_enchantment()
+        .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+        .id();
+    let own = scenario
+        .add_spell_to_graveyard(P0, "Doom Blade", true)
+        .from_oracle_text(U22_DOOM)
+        .with_mana_cost(complete_publication_cost("{1}{B}"))
+        .id();
+    let foreign = scenario
+        .add_spell_to_graveyard(P1, "Doom Blade", true)
+        .from_oracle_text(U22_DOOM)
+        .with_mana_cost(complete_publication_cost("{1}{B}"))
+        .id();
+    let later = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, U22_DIVINATION)
+        .with_mana_cost(complete_publication_cost("{2}{U}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disperse", true, U22_DISPERSE)
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let donate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Donate", false, U22_DONATE)
+        .with_mana_cost(complete_publication_cost("{2}{U}"))
+        .id();
+    let lier = scenario
+        .add_creature_to_hand_from_oracle(P0, "Lier, Disciple of the Drowned", 3, 4, U22_LIER)
+        .with_mana_cost(complete_publication_cost("{3}{U}{U}"))
+        .id();
+    let bounce_again = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disperse", true, U22_DISPERSE)
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Legal nonblack hostile target", 4, 4)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let mut runner = scenario.build();
+    assert!(effective_flashback_cost(runner.state(), own).is_none());
+    u22_paid_return(&mut runner, source);
+    assert!(effective_flashback_cost(runner.state(), own).is_some());
+    assert!(effective_flashback_cost(runner.state(), foreign).is_none());
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    runner.cast(later).resolve();
+    assert_eq!(runner.state().objects[&later].zone, Zone::Graveyard);
+    assert!(
+        effective_flashback_cost(runner.state(), later).is_some(),
+        "a card entering after the source receives the live grant"
+    );
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    let incarnation = runner.state().objects[&source].incarnation;
+    runner.cast(bounce).target_object(source).resolve();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+    assert_ne!(runner.state().objects[&source].incarnation, incarnation);
+    for object in [own, later] {
+        assert!(effective_flashback_cost(runner.state(), object).is_none());
+        assert!(current_casting_variant_choice_options(runner.state(), P0, object).is_empty());
+    }
+    u22_paid_return(&mut runner, source);
+    assert!(effective_flashback_cost(runner.state(), own).is_some());
+    complete_publication_fund(&mut runner, P0, 3, &[ManaType::Blue, ManaType::Blue]);
+    runner.cast(lier).resolve();
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    runner
+        .cast(donate)
+        .target_player(P1)
+        .target_object(source)
+        .resolve();
+    assert_eq!(runner.state().objects[&source].owner, P0);
+    assert_eq!(runner.state().objects[&source].controller, P1);
+    assert!(
+        effective_flashback_cost(runner.state(), own).is_some(),
+        "the independent Lier authority remains"
+    );
+    assert!(
+        effective_flashback_cost(runner.state(), foreign).is_none(),
+        "Return's new controller is not the active player yet"
+    );
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    let hand_before_lier_cast = runner.state().players[0].hand.len();
+    runner.cast(later).resolve();
+    assert_eq!(runner.state().objects[&later].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before_lier_cast + 2
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce_again).target_object(lier).resolve();
+    assert!(
+        effective_flashback_cost(runner.state(), own).is_none(),
+        "removing the last applicable authority ends the grant"
+    );
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(effective_flashback_cost(runner.state(), foreign).is_some());
+    assert!(effective_flashback_cost(runner.state(), own).is_none());
+    complete_publication_fund(&mut runner, P1, 1, &[ManaType::Black]);
+    assert!(can_cast_object_now(runner.state(), P1, foreign));
+    runner.cast(foreign).target_object(victim).resolve();
+    assert_eq!(runner.state().objects[&foreign].zone, Zone::Exile);
+    assert_continuous_complete(runner.state());
+}
+
+fn u22_roll_planar_face(runner: &mut GameRunner, face: engine::game::planechase::PlanarDieFace) {
+    let seed = (0..512_u64).find(|seed| {
+        let mut probe = GameRunner::from_state(runner.state().clone());
+        probe.state_mut().rng = engine::types::game_state::GameRng::seed_from_u64(*seed);
+        probe.act(GameAction::RollPlanarDie).is_ok_and(|result| result.events.iter().any(|event|
+            matches!(event, engine::types::events::GameEvent::PlanarDieRolled { face: rolled, .. } if *rolled == face)))
+    }).expect("a deterministic seed for the public planar die action");
+    runner.state_mut().rng = engine::types::game_state::GameRng::seed_from_u64(seed);
+    let result = runner.act(GameAction::RollPlanarDie).unwrap();
+    assert!(result.events.iter().any(|event| matches!(event, engine::types::events::GameEvent::PlanarDieRolled { face: rolled, .. } if *rolled == face)));
+}
+
+#[test]
+fn u6_otaria_lawful_plane_grants_both_players_both_types_and_keeps_instant_timing() {
+    use engine::game::casting::can_cast_object_now;
+    use engine::types::game_state::CastingVariant;
+    for caster in [P0, P1] {
+        for sorcery in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            for player in [P0, P1] {
+                scenario.with_library_top(
+                    player,
+                    &[
+                        "Planar draw A",
+                        "Planar draw B",
+                        "Planar draw C",
+                        "Planar draw D",
+                    ],
+                );
+            }
+            let recipient = scenario
+                .add_spell_to_graveyard(
+                    caster,
+                    if sorcery { "Divination" } else { "Doom Blade" },
+                    !sorcery,
+                )
+                .from_oracle_text(if sorcery { U22_DIVINATION } else { U22_DOOM })
+                .with_mana_cost(complete_publication_cost(if sorcery {
+                    "{2}{U}"
+                } else {
+                    "{1}{B}"
+                }))
+                .id();
+            let victim = scenario
+                .add_creature(
+                    if caster == P0 { P1 } else { P0 },
+                    "Planar hostile victim",
+                    4,
+                    4,
+                )
+                .with_color(vec![ManaColor::White])
+                .id();
+            let creature = scenario
+                .add_creature_to_graveyard(caster, "Nonspell excluded from Otaria", 2, 2)
+                .id();
+            let mut runner = scenario.build();
+            let (otaria, _) = u22_starting_otaria(&mut runner);
+            if caster == P1 && sorcery {
+                complete_publication_fund(&mut runner, P1, 2, &[ManaType::Blue]);
+                runner.act(GameAction::PassPriority).unwrap();
+                assert!(
+                    !can_cast_object_now(runner.state(), P1, recipient),
+                    "universal Flashback preserves sorcery timing on the other player's turn"
+                );
+                runner.act(GameAction::PassPriority).unwrap();
+                runner.advance_to_combat();
+                runner.declare_attackers(&[]).unwrap();
+                runner.advance_to_end_step();
+                runner.pass_both_players();
+                runner.advance_to_phase(Phase::PreCombatMain);
+                assert_eq!(runner.state().active_player, P1);
+            } else if caster == P1 {
+                runner.act(GameAction::PassPriority).unwrap();
+                assert_eq!(
+                    runner.state().active_player,
+                    P0,
+                    "the other-turn instant reach guard"
+                );
+            }
+            complete_publication_fund(
+                &mut runner,
+                caster,
+                if sorcery { 2 } else { 1 },
+                &[if sorcery {
+                    ManaType::Blue
+                } else {
+                    ManaType::Black
+                }],
+            );
+            assert_eq!(runner.state().objects[&otaria].zone, Zone::Command);
+            assert!(can_cast_object_now(runner.state(), caster, recipient));
+            assert!(!can_cast_object_now(runner.state(), caster, creature));
+            assert!(!can_cast_object_now(
+                runner.state(),
+                if caster == P0 { P1 } else { P0 },
+                recipient
+            ));
+            let hand = runner.state().players[caster.0 as usize].hand.len();
+            let cast = runner
+                .cast(recipient)
+                .casting_variant(CastingVariant::Flashback);
+            let committed = if sorcery {
+                cast.commit()
+            } else {
+                cast.target_object(victim).commit()
+            };
+            assert_eq!(committed.state().objects[&recipient].zone, Zone::Stack);
+            assert_eq!(
+                committed.state().players[caster.0 as usize]
+                    .mana_pool
+                    .total(),
+                0
+            );
+            committed.resolve();
+            assert_eq!(runner.state().objects[&recipient].zone, Zone::Exile);
+            assert_eq!(
+                runner.state().players[caster.0 as usize].hand.len(),
+                hand + if sorcery { 2 } else { 0 }
+            );
+            assert_eq!(
+                runner.state().objects[&victim].zone,
+                if sorcery {
+                    Zone::Battlefield
+                } else {
+                    Zone::Graveyard
+                }
+            );
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn u6_otaria_public_planeswalk_away_back_and_chaos_preserve_command_membership() {
+    use engine::game::keywords::effective_flashback_cost;
+    use engine::game::planechase::{active_plane, PlanarDieFace};
+    for second_source in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1] {
+            scenario.with_library_top(
+                player,
+                &["Turn draw A", "Turn draw B", "Turn draw C", "Turn draw D"],
+            );
+        }
+        let own = scenario
+            .add_spell_to_graveyard(P0, "Divination", false)
+            .from_oracle_text(U22_DIVINATION)
+            .with_mana_cost(complete_publication_cost("{2}{U}"))
+            .id();
+        let foreign = scenario
+            .add_spell_to_graveyard(P1, "Doom Blade", true)
+            .from_oracle_text(U22_DOOM)
+            .with_mana_cost(complete_publication_cost("{1}{B}"))
+            .id();
+        let command_return = scenario
+            .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+            .as_enchantment()
+            .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+            .id();
+        let lier = scenario
+            .add_creature_to_hand_from_oracle(P0, "Lier, Disciple of the Drowned", 3, 4, U22_LIER)
+            .with_mana_cost(complete_publication_cost("{3}{U}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        // Initial Command placement is the inactive-zone control, before any producer.
+        runner.state_mut().players[0]
+            .hand
+            .retain(|id| *id != command_return);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&command_return)
+            .unwrap()
+            .zone = Zone::Command;
+        runner.state_mut().command_zone.push_back(command_return);
+        assert_eq!(
+            runner.state().objects[&command_return]
+                .static_definitions
+                .iter_unchecked()
+                .count(),
+            1
+        );
+        assert!(runner.state().objects[&command_return]
+            .static_definitions
+            .iter_unchecked()
+            .all(|entry| entry.definition.active_zones.is_empty()));
+        assert!(effective_flashback_cost(runner.state(), own).is_none());
+        let (otaria, tazeem) = u22_starting_otaria(&mut runner);
+        if second_source {
+            complete_publication_fund(&mut runner, P0, 3, &[ManaType::Blue, ManaType::Blue]);
+            runner.cast(lier).resolve();
+            assert_eq!(runner.state().objects[&lier].zone, Zone::Battlefield);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_continuous_complete(runner.state());
+        }
+        for object in [own, foreign] {
+            assert!(effective_flashback_cost(runner.state(), object).is_some());
+        }
+        u22_roll_planar_face(&mut runner, PlanarDieFace::Planeswalk);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == otaria));
+        runner.advance_until_stack_empty();
+        assert_eq!(active_plane(runner.state()), Some(tazeem));
+        assert_eq!(runner.state().objects[&otaria].zone, Zone::Command);
+        assert!(runner.state().objects[&otaria].face_down);
+        assert!(runner.state().planar_deck.contains(&otaria));
+        assert!(!runner.state().command_zone.contains(&otaria));
+        assert_eq!(
+            effective_flashback_cost(runner.state(), own).is_some(),
+            second_source,
+            "only the independent paid Lier can retain own permission while Otaria is face down"
+        );
+        assert!(
+            effective_flashback_cost(runner.state(), foreign).is_none(),
+            "a face-down plane in the planar deck has no universal grant"
+        );
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[]);
+        u22_roll_planar_face(&mut runner, PlanarDieFace::Planeswalk);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.advance_until_stack_empty();
+        assert_eq!(active_plane(runner.state()), Some(otaria));
+        assert!(runner.state().command_zone.contains(&otaria));
+        assert!(!runner.state().planar_deck.contains(&otaria));
+        assert!(!runner.state().objects[&otaria].face_down);
+        for object in [own, foreign] {
+            assert!(effective_flashback_cost(runner.state(), object).is_some());
+        }
+        complete_publication_fund(&mut runner, P0, 2, &[]);
+        u22_roll_planar_face(&mut runner, PlanarDieFace::Chaos);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == otaria));
+        assert!(runner.state().extra_turns.is_empty());
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().extra_turns.len(), 1);
+        assert_eq!(runner.state().extra_turns[0].player, P0);
+        assert_eq!(runner.state().extra_turns[0].anchor, P0);
+        assert_continuous_complete(runner.state());
+        let turn = runner.state().turn_number;
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(
+            runner.state().active_player,
+            P0,
+            "the printed Chaos ability produced the extra turn"
+        );
+        assert!(runner.state().turn_number > turn);
+        assert!(runner.state().extra_turns.is_empty());
+        assert_eq!(active_plane(runner.state()), Some(otaria));
+        assert_eq!(runner.state().planar_controller, Some(P0));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn u6_return_empty_graveyard_later_entry_and_turn_timing_are_live() {
+    use engine::game::casting::can_cast_object_now;
+    use engine::game::keywords::effective_flashback_cost;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(
+            player,
+            &[
+                "Timing draw A",
+                "Timing draw B",
+                "Timing draw C",
+                "Timing draw D",
+                "Timing draw E",
+                "Timing draw F",
+                "Timing draw G",
+                "Timing draw H",
+                "Timing draw I",
+                "Timing draw J",
+                "Timing draw K",
+                "Timing draw L",
+            ],
+        );
+    }
+    let source = scenario
+        .add_spell_to_hand_from_oracle(P0, "Return the Past", false, U22_RETURN)
+        .as_enchantment()
+        .with_mana_cost(complete_publication_cost("{4}{R}{R}"))
+        .id();
+    let later = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, U22_DIVINATION)
+        .with_mana_cost(complete_publication_cost("{2}{U}"))
+        .id();
+    let retained = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, U22_DIVINATION)
+        .with_mana_cost(complete_publication_cost("{2}{U}"))
+        .id();
+    let instant = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doom Blade", true, U22_DOOM)
+        .with_mana_cost(complete_publication_cost("{1}{B}"))
+        .id();
+    let victim = scenario
+        .add_creature(P1, "First legal timing victim", 3, 4)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let another = scenario
+        .add_creature(P1, "Second legal timing victim", 3, 4)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    let mut runner = scenario.build();
+    assert!(runner.state().players[0].graveyard.is_empty());
+    u22_paid_return(&mut runner, source);
+    assert!(runner.state().players[0].graveyard.is_empty());
+    assert!(effective_flashback_cost(runner.state(), later).is_none());
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    runner.cast(later).resolve();
+    assert_eq!(runner.state().objects[&later].zone, Zone::Graveyard);
+    assert!(effective_flashback_cost(runner.state(), later).is_some());
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    runner.cast(retained).resolve();
+    assert_eq!(runner.state().objects[&retained].zone, Zone::Graveyard);
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Black]);
+    runner.cast(instant).target_object(victim).resolve();
+    assert_eq!(runner.state().objects[&instant].zone, Zone::Graveyard);
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    let parked = runner.cast(later).commit();
+    assert_eq!(parked.state().stack.len(), 1);
+    drop(parked);
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    assert!(
+        !can_cast_object_now(runner.state(), P0, retained),
+        "a fully funded sorcery cannot be cast above a parked spell"
+    );
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Black]);
+    assert!(
+        can_cast_object_now(runner.state(), P0, instant),
+        "an instant remains legal above a parked spell"
+    );
+    runner.cast(instant).target_object(another).resolve();
+    assert_eq!(runner.state().objects[&instant].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&later].zone, Zone::Exile);
+    assert_continuous_complete(runner.state());
+    assert!(
+        engine::game::keywords::effective_flashback_cost(runner.state(), instant).is_none(),
+        "exile is outside the live population"
+    );
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    assert!(effective_flashback_cost(runner.state(), retained).is_some());
+    assert!(
+        !can_cast_object_now(runner.state(), P0, retained),
+        "a funded sorcery still needs main-phase timing"
+    );
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        effective_flashback_cost(runner.state(), retained).is_none(),
+        "Return turns off during the other player's turn"
+    );
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    assert!(effective_flashback_cost(runner.state(), retained).is_some());
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    assert!(can_cast_object_now(runner.state(), P0, retained));
+    runner.cast(retained).resolve();
+    assert_eq!(runner.state().objects[&retained].zone, Zone::Exile);
+    assert_continuous_complete(runner.state());
+}
+
 fn effective_pt(runner: &mut GameRunner, id: ObjectId) -> (i32, i32) {
     runner.state_mut().layers_dirty.mark_full();
     evaluate_layers(runner.state_mut());

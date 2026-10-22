@@ -837,6 +837,9 @@ pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
 ) -> Option<StaticDefinition> {
+    if let Some(result) = super::oracle::try_parse_graveyard_keyword_source_with_label(text) {
+        return result.ok();
+    }
     let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
     // CR 602.1 + CR 604.1: "[Cost]: [Effect]" is an activated ability, not a static

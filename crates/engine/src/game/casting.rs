@@ -9634,10 +9634,8 @@ fn prepare_spell_cast_announced(
     let (flashback_mana_cost, flashback_non_mana_cost) =
         split_flashback_cost_components(flashback_cost.as_ref());
 
-    // Precedence: Escape > Retrace > Harmonize > Mayhem > Flashback > Aftermath >
-    // Disturb > Jump-start > GraveyardPermission > Warp > Normal.
-    // No standard card has multiple graveyard-cast keywords; if one did, the card's own
-    // keyword overrides an external source's grant (GraveyardPermission).
+    // After the native exile methods, an elected independent free permission
+    // precedes graveyard keywords; otherwise retain keyword/permission precedence.
     //
     // CR 702.190a: Sneak is not auto-selected from the keyword-presence chain —
     // it is opted into explicitly via `variant_override` by the
@@ -9683,6 +9681,23 @@ fn prepare_spell_cast_announced(
     // falls back to a graveyard permission last, after every keyword route that
     // is its own authority. Resolved only when reached (see below).
     let mut default_graveyard_authority = None;
+    // CR 118.6a + CR 118.9a: the exact elected permission's genuine free
+    // alternative is its own casting method. A sibling grant or a normal-cost
+    // SelfManaCost that resolves to NoCost supplies no such authority.
+    let elected_independent_free_permission = casting_permission_index
+        .and_then(|index| obj.casting_permissions.get(index.0))
+        .is_some_and(|permission| match permission {
+            CastingPermission::ExileWithAltCost {
+                cost: crate::types::mana::ManaCost::Cost { generic: 0, shards },
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                ..
+            } => shards.is_empty(),
+            CastingPermission::PlayFromExile {
+                without_paying_mana_cost: true,
+                ..
+            } => true,
+            _ => false,
+        });
     let casting_variant = variant_override.unwrap_or_else(|| {
         if is_suspend_cast {
             CastingVariant::Suspend
@@ -9690,6 +9705,8 @@ fn prepare_spell_cast_announced(
             CastingVariant::Plot
         } else if is_foretell_cast {
             CastingVariant::Foretell
+        } else if elected_independent_free_permission {
+            CastingVariant::Normal
         } else if escape_cost.is_some() {
             CastingVariant::Escape
         } else if graveyard_keywords_open && has_retrace_keyword(state, object_id) {
@@ -9729,6 +9746,21 @@ fn prepare_spell_cast_announced(
             CastingVariant::Normal
         }
     });
+    // CR 118.6 + CR 118.6a + CR 601.2f + CR 702.34a: validate the elected
+    // Flashback basis before substitution, increases, reductions or payment.
+    // A present pure nonmana cost has no mana component; printed {0} has a
+    // real Cost component. Neither is the absent mana cost represented by NoCost.
+    if casting_variant == CastingVariant::Flashback
+        && (flashback_cost.is_none()
+            || matches!(
+                flashback_mana_cost,
+                Some(crate::types::mana::ManaCost::NoCost)
+            ))
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "The selected flashback cost is unpayable".to_string(),
+        ));
+    }
     // CR 601.2a + CR 601.2b + CR 118.9b: the graveyard permission this cast is
     // announced under. A `GraveyardPermission` cast is a printed-cost cast
     // committed to that permission: a stale or hand-built option naming a grant

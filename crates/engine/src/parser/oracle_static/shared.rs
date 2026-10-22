@@ -808,6 +808,80 @@ pub(crate) fn target_filter_is_your_zone(filter: &TargetFilter, zone: Zone) -> b
     }
 }
 
+/// CR 109.4 + CR 109.5 + CR 113.6b: establish the printed owner and functional
+/// zone of every off-zone recipient. Neither controller=None nor a final
+/// universal suffix can erase an earlier incompatible locative.
+pub(crate) fn target_filter_matches_granted_population(
+    filter: &TargetFilter,
+    subject: &str,
+    zone: Zone,
+) -> bool {
+    fn scope(input: &str) -> OracleResult<'_, (Zone, Option<ControllerRef>)> {
+        let (input, _) = tag("in ").parse(input)?;
+        let (input, controller) = alt((
+            value(Some(ControllerRef::You), tag("your ")),
+            value(None, nom::combinator::peek(tag("graveyards"))),
+        ))
+        .parse(input)?;
+        let (input, actual_zone) = super::super::oracle_target::parse_zone_word(input)?;
+        let (input, _) = nom::combinator::peek(alt((space1, eof))).parse(input)?;
+        Ok((input, (actual_zone, controller)))
+    }
+    let lower = subject.to_lowercase();
+    let mut cursor = lower.as_str();
+    let mut expected = None;
+    while let Some(locative) = nom_primitives::scan_at_word_boundaries(cursor, |input| {
+        let (_, _) = nom::combinator::peek(alt((
+            tag::<_, _, OracleError<'_>>("in "),
+            tag("from "),
+            tag("on "),
+        )))
+        .parse(input)?;
+        Ok((input, input))
+    }) {
+        let Ok((rest, (actual_zone, controller))) = scope(locative) else {
+            return false;
+        };
+        let Some((properties, parsed_controller, _)) =
+            super::super::oracle_target::parse_zone_suffix(locative)
+        else {
+            return false;
+        };
+        if actual_zone != zone || parsed_controller != controller
+            || (controller.is_none() && zone != Zone::Graveyard)
+            || properties.iter().any(|property| !matches!(property, FilterProp::InZone { zone: actual } if *actual == zone))
+        { return false; }
+        if expected.as_ref().is_some_and(|old| old != &controller) {
+            return false;
+        }
+        expected = Some(controller);
+        cursor = rest;
+    }
+    let Some(controller) = expected else {
+        return false;
+    };
+    fn every_leaf(filter: &TargetFilter, zone: Zone, controller: &Option<ControllerRef>) -> bool {
+        match filter {
+            TargetFilter::Typed(typed) => {
+                !typed.type_filters.is_empty()
+                    && !typed.type_filters.iter().any(|kind| matches!(kind, TypeFilter::Any))
+                    && &typed.controller == controller
+                    && typed.properties.iter().any(|property| matches!(property, FilterProp::InZone { zone: actual } if *actual == zone))
+                    && typed.properties.iter().all(|property| match property {
+                        FilterProp::InZone { zone: actual } => *actual == zone,
+                        FilterProp::InAnyZone { .. } => false,
+                        FilterProp::Owned { controller: owner } => controller.as_ref() == Some(owner),
+                        _ => true,
+                    })
+            }
+            TargetFilter::Or { filters } => !filters.is_empty()
+                && filters.iter().all(|leaf| every_leaf(leaf, zone, controller)),
+            _ => false,
+        }
+    }
+    every_leaf(filter, zone, &controller)
+}
+
 /// Thin wrapper preserving the graveyard-specific call sites (no churn) —
 /// delegates to the generalized `target_filter_is_your_zone`.
 pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
@@ -2604,6 +2678,9 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
 }
 
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
+    if let Some(result) = super::oracle::try_parse_graveyard_keyword_source_with_label(text) {
+        return result.into_iter().collect();
+    }
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);

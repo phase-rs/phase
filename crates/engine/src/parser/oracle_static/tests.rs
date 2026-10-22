@@ -1,6 +1,162 @@
 use super::anthem::*;
 
 #[test]
+fn u6_complete_grant_sources_preserve_population_turn_kind_and_cost() {
+    use crate::types::keywords::FlashbackCost;
+    let return_text = "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.";
+    let otaria_text = "Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost.";
+    for (source, controller, condition) in [
+        (
+            return_text,
+            Some(ControllerRef::You),
+            Some(StaticCondition::DuringYourTurn),
+        ),
+        (otaria_text, None, None),
+    ] {
+        let complete = super::keyword_grant::try_parse_graveyard_keyword_grant_source(source)
+            .expect("dedicated source")
+            .expect("whole source owned");
+        assert_eq!(complete.mode, StaticMode::Continuous);
+        assert_eq!(complete.condition, condition);
+        assert_eq!(complete.description.as_deref(), Some(source));
+        assert_eq!(
+            complete.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+            }]
+        );
+        let TargetFilter::Or { filters } = complete.affected.as_ref().unwrap() else {
+            panic!("instant OR sorcery, never SelfRef")
+        };
+        assert_eq!(filters.len(), 2);
+        for (branch, kind) in filters
+            .iter()
+            .zip([TypeFilter::Instant, TypeFilter::Sorcery])
+        {
+            let TargetFilter::Typed(typed) = branch else {
+                panic!("typed leaf")
+            };
+            assert_eq!(
+                typed
+                    .type_filters
+                    .iter()
+                    .filter(|kind| **kind != TypeFilter::Card)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![kind]
+            );
+            assert_eq!(typed.controller, controller);
+            assert_eq!(
+                typed.properties,
+                vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }]
+            );
+        }
+        assert_eq!(parse_static_line(source), Some(complete.clone()));
+        assert_eq!(parse_static_line_multi(source), vec![complete]);
+        assert!(super::keyword_grant::try_parse_graveyard_keyword_grant_static(source).is_none());
+    }
+    for subject in [
+        "Each instant and sorcery card in your graveyard",
+        "Instant and sorcery cards in your graveyard",
+        "Each instant and sorcery card in graveyards",
+    ] {
+        let source =
+            format!("{subject} have flashback. Its flashback cost is equal to its mana cost.");
+        assert!(
+            super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source)
+                .unwrap()
+                .is_ok(),
+            "{source}"
+        );
+    }
+    // Every refusal has the complete sources above through the same clients.
+    for source in [
+        "Each instant card in your hand has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in their graveyard has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in a player's graveyard in graveyards has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard in graveyards has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in their graveyard in graveyards has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard and sorcery card in your hand has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard and sorcery card in their graveyard has flashback. Its flashback cost is equal to its mana cost.",
+        "Each card in your graveyard has nonsense. Its flashback cost is equal to its mana cost.",
+        "Each card in your graveyard has . Its flashback cost is equal to its mana cost.",
+        "Each in your graveyard has flashback. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard has flashback {2} unknown. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard has flashback {2}. Its flashback cost is equal to its mana cost.",
+        "Each instant card in your graveyard has flashback. Its encore cost is equal to its mana cost.",
+        "Each instant card in your graveyard has flashback. Its flashback cost is equal to its mana cost until end of turn.",
+        "Each instant card in your graveyard has flashback {2} until end of turn.",
+        "Each instant card in your graveyard has flashback {2}..",
+        "Each instant card in your graveyard has flashback. Its flashback cost is equal to its mana cost..",
+    ] {
+        assert!(matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(source), Some(Err(fragment)) if fragment == source), "{source}");
+        assert!(parse_static_line(source).is_none(), "single retry: {source}");
+        assert!(parse_static_line_multi(source).is_empty(), "multi retry: {source}");
+    }
+    let inline =
+        "Each Sliver creature card in your graveyard has encore {X}, where X is its mana value.";
+    let definition =
+        super::keyword_grant::try_parse_graveyard_keyword_grant_static(inline).unwrap();
+    assert_eq!(
+        definition.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Encore(ManaCost::SelfManaValue)
+        }]
+    );
+}
+
+#[test]
+fn u6_all_eight_dedicated_kinds_and_inline_qualifiers_use_the_complete_front_door() {
+    use crate::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost};
+    for (source, keyword, zone) in [
+        ("Each instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.", Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)), Zone::Graveyard),
+        ("Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.", Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite { costs: vec![AbilityCost::Mana { cost: ManaCost::SelfManaCost }, AbilityCost::Exile { count: 3, zone: Some(Zone::Graveyard), filter: None }] })), Zone::Graveyard),
+        ("Each nonland card in your graveyard has mayhem. The mayhem cost is equal to its mana cost.", Keyword::Mayhem(ManaCost::SelfManaCost), Zone::Graveyard),
+        ("Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost.", Keyword::Scavenge(ManaCost::SelfManaCost), Zone::Graveyard),
+        ("Each artifact creature card in your graveyard has encore. Its encore cost is equal to its mana cost.", Keyword::Encore(ManaCost::SelfManaCost), Zone::Graveyard),
+        ("Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost.", Keyword::Embalm(EmbalmCost::Mana(ManaCost::SelfManaCost)), Zone::Graveyard),
+        ("Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.", Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }), Zone::Hand),
+        ("Each enchantment card in your hand has miracle. Its miracle cost is equal to its mana cost reduced by {4}.", Keyword::Miracle(ManaCost::SelfManaCostReduced { reduction: 4 }), Zone::Hand),
+    ] {
+        let definition = super::keyword_grant::try_parse_graveyard_keyword_grant_source(source).unwrap().unwrap();
+        assert_eq!(definition.description.as_deref(), Some(source));
+        assert_eq!(definition.modifications, vec![ContinuousModification::AddKeyword { keyword }]);
+        assert_eq!(definition.mode, StaticMode::Continuous);
+        assert_eq!(definition.condition, None);
+        let affected = definition.affected.as_ref().unwrap();
+        let leaves = match affected { TargetFilter::Or { filters } => filters.as_slice(), leaf => std::slice::from_ref(leaf) };
+        for leaf in leaves {
+            let TargetFilter::Typed(typed) = leaf else { panic!("complete typed population") };
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(typed.properties.contains(&FilterProp::InZone { zone }));
+        }
+        assert_eq!(parse_static_line(source), Some(definition.clone()));
+        assert_eq!(parse_static_line_multi(source), vec![definition]);
+        let bad = format!("{} until end of turn.", source.trim_end_matches('.'));
+        assert!(matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(&bad), Some(Err(fragment)) if fragment == bad));
+        assert!(parse_static_line(&bad).is_none());
+        assert!(parse_static_line_multi(&bad).is_empty());
+    }
+    for source in [
+        "Each non-Lesson instant and sorcery card in your graveyard has flashback {2}.",
+        "Each Sliver creature card in your graveyard has encore {X}, where X is its mana value.",
+        "Each creature card in your graveyard has scavenge {X}, where X is its mana value.",
+    ] {
+        let complete = super::keyword_grant::try_parse_graveyard_keyword_grant_source(source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::keyword_grant::try_parse_graveyard_keyword_grant_static(source),
+            Some(complete.clone())
+        );
+        assert_eq!(parse_static_line(source), Some(complete.clone()));
+        assert_eq!(parse_static_line_multi(source), vec![complete]);
+    }
+}
+
+#[test]
 fn u14_quality_static_grammar_preserves_scope() {
     for (subject, controller) in [
         ("Each creature", None),
@@ -12383,12 +12539,8 @@ fn static_anchor_controlled_creature_anthem_parses() {
 
 #[test]
 fn static_singing_towers_derived_cost_foretell_grant_parses() {
-    // CR 702.143d: "Each nonland card in your hand without foretell has foretell.
-    // Its foretell cost is equal to its mana cost reduced by {2}." → a continuous
-    // AddKeywordWithDerivedCost{Foretell, ManaCostReducedBy({2})} on nonland
-    // cards you own in hand.
-    use crate::types::ability::CostDerivation;
-    use crate::types::keywords::CostBearingKeywordKind;
+    // CR 702.143a + CR 601.2f: the complete dedicated source carries Foretell
+    // and the recipient's own mana cost reduced by exactly two generic mana.
     let def = parse_static_line(
         "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}.",
     )
@@ -12396,18 +12548,32 @@ fn static_singing_towers_derived_cost_foretell_grant_parses() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert_eq!(
         def.modifications,
-        vec![ContinuousModification::AddKeywordWithDerivedCost {
-            kind: CostBearingKeywordKind::Foretell,
-            derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }),
         }]
     );
     let TargetFilter::Typed(typed) = def.affected.as_ref().unwrap() else {
         panic!("expected a typed hand-card filter, got {:?}", def.affected);
     };
-    assert!(typed.properties.iter().any(|p| matches!(
-        p,
-        FilterProp::InAnyZone { zones } if zones == &vec![crate::types::zones::Zone::Hand]
-    )));
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert_eq!(
+        typed
+            .type_filters
+            .iter()
+            .filter(|kind| **kind != TypeFilter::Card)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![TypeFilter::Non(Box::new(TypeFilter::Land))]
+    );
+    assert_eq!(
+        typed.properties,
+        vec![
+            FilterProp::InZone { zone: Zone::Hand },
+            FilterProp::WithoutKeywordKind {
+                value: crate::types::keywords::KeywordKind::Foretell
+            },
+        ]
+    );
 }
 
 #[test]
@@ -16148,7 +16314,7 @@ fn graveyard_keyword_grant_static_rejects_continuation_sentence() {
             "Each artifact creature card in your graveyard has encore. Its encore cost is equal to its mana cost."
         )
         .is_none(),
-        "continuation-sentence grants must stay on the period-split parser"
+        "the inline-only wrapper declines a continuation owned by the complete source front door"
     );
 }
 

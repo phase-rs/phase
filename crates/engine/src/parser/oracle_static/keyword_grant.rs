@@ -56,19 +56,23 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
     .parse(input)
 }
 
-pub(crate) fn try_parse_graveyard_keyword_grant_clause(
-    text: &str,
-) -> Option<(TargetFilter, GrantedCastKeywordKind, String)> {
+fn parse_graveyard_keyword_grant_head(text: &str) -> Option<(String, String)> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
-    let rest = nom_tag_lower(&stripped, &lower, "each ")?;
+    let (_, rest) = nom_on_lower(&stripped, &lower, opt(tag("each ")))?;
     let rest_lower = rest.to_lowercase();
     let (subject, keyword_text) =
         super::oracle_nom::bridge::split_once_on_lower(rest, &rest_lower, " has ").or_else(
             || super::oracle_nom::bridge::split_once_on_lower(rest, &rest_lower, " have "),
         )?;
-    let subject = subject.trim();
-    let keyword_text = keyword_text.trim().trim_end_matches('.').to_string();
+    Some((subject.trim().to_owned(), keyword_text.trim().to_owned()))
+}
+
+pub(crate) fn try_parse_graveyard_keyword_grant_clause(
+    text: &str,
+) -> Option<(TargetFilter, GrantedCastKeywordKind, String)> {
+    let (subject, keyword_text) = parse_graveyard_keyword_grant_head(text)?;
+    let keyword_text = keyword_text.trim_end_matches('.').to_owned();
 
     let kind = nom_on_lower(
         &keyword_text,
@@ -77,11 +81,17 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     )?
     .0;
 
-    let (filter, remainder) = parse_type_phrase_folding(subject);
+    let (filter, remainder) = parse_type_phrase_folding(&subject);
     // CR 113.6b: the affected filter's zone must match the keyword's functional
     // zone (graveyard for flashback/escape/…, hand for foretell/miracle). A
     // mismatch (foretell-in-graveyard, flashback-in-hand) declines the grant.
-    if !remainder.trim().is_empty() || !target_filter_is_your_zone(&filter, kind.grant_zone()) {
+    if !remainder.trim().is_empty()
+        || !super::shared::target_filter_matches_granted_population(
+            &filter,
+            &subject,
+            kind.grant_zone(),
+        )
+    {
         return None;
     }
 
@@ -96,11 +106,109 @@ fn parse_graveyard_granted_keyword_phrase(
     keyword_text: &str,
     kind: GrantedCastKeywordKind,
 ) -> Option<Keyword> {
-    if let Some((keyword, where_x)) = parse_keyword_with_where_x(keyword_text) {
-        return normalize_graveyard_granted_keyword(keyword, where_x, kind);
+    let (_, keyword_text) = all_consuming(terminated(
+        take_while1::<_, _, OracleError<'_>>(|character: char| character != '.'),
+        (opt(tag(".")), space0),
+    ))
+    .parse(keyword_text.trim())
+    .ok()?;
+    let keyword_text = keyword_text.trim();
+    let lower = keyword_text.to_lowercase();
+    let (_, tail) = nom_on_lower(keyword_text, &lower, parse_graveyard_granted_keyword_kind)?;
+    if tail.trim().is_empty() {
+        return None;
     }
-    let keyword = super::oracle_keyword::parse_granted_keyword_fragment(keyword_text.trim())?;
-    normalize_graveyard_granted_keyword(keyword, None, kind)
+    let (phrase, where_x) =
+        super::oracle_nom::bridge::split_once_on_lower(keyword_text, &lower, ", where x is ")
+            .map_or(Some((keyword_text, None)), |(phrase, quantity)| {
+                let (_, quantity) =
+                    nom_quantity::parse_quantity_ref_complete(quantity.trim()).ok()?;
+                Some((phrase, Some(quantity)))
+            })?;
+    let keyword = super::oracle_keyword::parse_router_keyword_fragment(&phrase.to_lowercase())?;
+    normalize_graveyard_granted_keyword(keyword, where_x, kind)
+}
+
+/// CR 109.5 + CR 113.6b: prove the full population, live turn scope and cost
+/// before any dedicated off-zone grant can reach a permissive static fallback.
+/// `Some(Err(..))` owns a refusal of the complete semantic unit.
+pub(crate) fn try_parse_graveyard_keyword_grant_source(
+    line: &str,
+) -> Option<Result<StaticDefinition, &str>> {
+    // Ability-word conditions belong to the enclosing static/document owner.
+    if super::oracle_modal::strip_ability_word_with_name(line).is_some() {
+        return None;
+    }
+    let stripped = strip_reminder_text(line);
+    let lower = stripped.to_lowercase();
+    let (condition, body) = nom_on_lower(&stripped, &lower, opt(super::parse_leading_turn_scope))?;
+    let body_lower = body.to_lowercase();
+    let (grant, continuation) =
+        super::oracle_nom::bridge::split_once_on_lower(body, &body_lower, ". ")
+            .map_or((body, None), |(grant, cost)| (grant, Some(cost)));
+    let (subject, keyword_text) = parse_graveyard_keyword_grant_head(grant)?;
+    let subject_lower = subject.to_lowercase();
+    let keyword_lower = keyword_text.to_lowercase();
+    if parse_graveyard_granted_keyword_kind(&keyword_lower).is_err()
+        && super::oracle_keyword::parse_router_keyword_fragment(&keyword_lower)
+            .is_some_and(|keyword| !matches!(keyword, Keyword::Unknown(_)))
+    {
+        return None;
+    }
+    let has_card_noun = nom_primitives::scan_at_word_boundaries(&subject_lower, |input| {
+        terminated(
+            alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
+            nom::combinator::peek(alt((space1, eof))),
+        )
+        .parse(input)
+    })
+    .is_some();
+    if !has_card_noun && parse_graveyard_granted_keyword_kind(&keyword_lower).is_err() {
+        return None;
+    }
+    // Nominate off-zone card-grant syntax independently of noun/kind validity.
+    // This also captures empty or unknown payloads without claiming success.
+    nom_primitives::scan_at_word_boundaries(&subject_lower, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("in "),
+            tag("from "),
+            tag("on "),
+        ))
+        .parse(input)
+    })?;
+    let complete = || {
+        let (affected, kind, _) = try_parse_graveyard_keyword_grant_clause(grant)?;
+        let keyword = match continuation {
+            Some(cost) => {
+                let keyword_lower = keyword_text.to_lowercase();
+                let (_, first_kind) =
+                    all_consuming(terminated(parse_graveyard_granted_keyword_kind, space0))
+                        .parse(keyword_lower.as_str())
+                        .ok()?;
+                if first_kind != kind {
+                    return None;
+                }
+                let (_, cost) = all_consuming(terminated(
+                    take_while1::<_, _, OracleError<'_>>(|character: char| character != '.'),
+                    (opt(tag(".")), space0),
+                ))
+                .parse(cost.trim())
+                .ok()?;
+                super::oracle::parse_graveyard_keyword_continuation(cost.trim(), kind)?
+            }
+            None => parse_graveyard_granted_keyword_phrase(&keyword_text, kind)?,
+        };
+        if !kind.matches_keyword(&keyword) {
+            return None;
+        }
+        let mut definition = StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+            .description(line.to_owned());
+        definition.condition = condition.clone();
+        Some(definition)
+    };
+    Some(complete().ok_or(line))
 }
 
 /// CR 702.97a / CR 702.141a: When a graveyard grant binds X to the recipient
@@ -175,24 +283,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_static(line: &str) -> Option<Sta
         return None;
     }
 
-    let (turn_condition, grant_prefix) = nom_on_lower(&stripped, &lower, |input| {
-        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
-    })
-    .map_or((None, stripped.as_str()), |(condition, rest)| {
-        (Some(condition), rest)
-    });
-
-    let (affected, kind, keyword_text) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
-    let keyword = parse_graveyard_granted_keyword_phrase(&keyword_text, kind)?;
-
-    let mut def = StaticDefinition::continuous()
-        .affected(affected)
-        .modifications(vec![ContinuousModification::AddKeyword { keyword }])
-        .description(line.to_string());
-    if let Some(condition) = turn_condition {
-        def = def.condition(condition);
-    }
-    Some(def)
+    try_parse_graveyard_keyword_grant_source(line)?.ok()
 }
 
 pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {

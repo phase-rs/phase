@@ -10184,48 +10184,53 @@ fn mass_verb_clause_opens_attachment_qualifier(
     mass_object_opens_attachment_qualifier(object_text, after_verb, ctx)
 }
 
-pub(super) fn parse_destroy_ast(
-    text: &str,
+/// CR 701.8a + CR 608.2c: parse the target once, retaining its original-case
+/// remainder and tentative context for the caller that owns the instruction.
+pub(super) fn parse_destroy_target_core<'a>(
+    text: &'a str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<(ZoneCounterImperativeAst, &'a str, ParseContext)> {
+    let (_, rest) = nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))?;
+    let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+        .parse(&lower[lower.len() - rest.len()..])
+        .is_ok();
+    let mut tentative = ctx.clone();
+    // CR 608.2k: preserve the typed trigger/pronoun binding supplied by the caller.
+    let (target, rem) = parse_target_with_ctx(rest, &mut tentative);
+    let phrase = &rest[..rest.len() - rem.len()];
+    if phrase.trim().is_empty()
+        || matches!(&target, TargetFilter::Typed(typed) if !typed.has_meaningful_type_constraint())
+    {
+        return None;
+    }
+    let (target, rem) = bind_attachment_qualifier(target, phrase, rem, &tentative)?;
+    // CR 115.1a + CR 601.2c: targeted declared-slot attachments retain their
+    // existing strict failure; untargeted resolution choices remain supported.
+    if !all
+        && crate::game::filter::filter_reads_declared_slot(&target)
+        && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
+    {
+        return None;
+    }
+    Some((
+        ZoneCounterImperativeAst::Destroy { target, all },
+        rem,
+        tentative,
+    ))
+}
+
+pub(super) fn parse_destroy_ast<'a>(
+    text: &'a str,
     lower: &str,
     ctx: &mut ParseContext,
-) -> Option<ZoneCounterImperativeAst> {
-    if nom_on_lower(text, lower, |input| {
-        value((), alt((tag("destroy all "), tag("destroy each ")))).parse(input)
-    })
-    .is_some()
-    {
-        let (_, rest) = nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))?;
-        // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
-        // triggering subject ("Whenever a creature dies, destroy it" class).
-        let (target, rem) = parse_target_with_ctx(rest, ctx);
-        let phrase = &rest[..rest.len() - rem.len()];
-        let (target, _rem) = bind_attachment_qualifier(target, phrase, rem, ctx)?;
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
-        return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
+) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
+    let (ast, remainder, tentative) = parse_destroy_target_core(text, lower, ctx)?;
+    if !terminal_punctuation_only(remainder) {
+        return Some(Err(text));
     }
-    if let Some((_, rest)) =
-        nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))
-    {
-        // CR 608.2k: see comment above — anaphor binding via parse_target_with_ctx.
-        let (target, rem) = parse_target_with_ctx(rest, ctx);
-        let phrase = &rest[..rest.len() - rem.len()];
-        let (target, _rem) = bind_attachment_qualifier(target, phrase, rem, ctx)?;
-        // CR 115.1a + CR 601.2c: a targeted destroy of a declared-slot referent
-        // ("destroy target Equipment attached to that creature") has no
-        // supported lowering (the chain's anaphor rewrite collapses it to the
-        // creature) and no printed producer, so it keeps the strict gap. The
-        // untargeted resolution choice (Light of Judgment) passes through.
-        if crate::game::filter::filter_reads_declared_slot(&target)
-            && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
-        {
-            return None;
-        }
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
-        return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
-    }
-    None
+    *ctx = tentative;
+    Some(Ok(ast))
 }
 
 /// CR 701.3a + CR 601.2c: when a parsed target phrase leaves an " attached to
@@ -10492,6 +10497,83 @@ pub(super) fn terminal_punctuation_only(input: &str) -> bool {
     ))
     .parse(input)
     .is_ok()
+}
+
+#[cfg(test)]
+mod destroy_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn destroy_target_core_preserves_remainder_and_terminal_requires_ownership() {
+        for head in [
+            "Destroy target creature",
+            "Destroy all nonblack creatures",
+            "Destroy each green or white creature",
+            "Destroy target artifact or enchantment",
+            "Destroy all permanents you own and control",
+            "Destroy target permanent an opponent controls",
+            "Destroy target tapped creature",
+            "Destroy target nonartifact attacking creature",
+            "Destroy target creature that was dealt damage this turn",
+        ] {
+            let original = ParseContext {
+                card_name: Some("Synthetic ownership".into()),
+                ..Default::default()
+            };
+            let source = format!("{head} with an unexplained qualification");
+            let (ast, remainder, _) =
+                parse_destroy_target_core(&source, &source.to_lowercase(), &original)
+                    .expect("target core reached");
+            assert!(matches!(ast, ZoneCounterImperativeAst::Destroy { .. }));
+            assert_eq!(remainder, " with an unexplained qualification");
+            let mut context = original.clone();
+            assert!(
+                matches!(parse_destroy_ast(&source, &source.to_lowercase(), &mut context), Some(Err(fragment)) if fragment == source)
+            );
+            assert_eq!(context, original);
+            for punctuation in ["", ".", ";", " . ", " ; "] {
+                let complete = format!("{head}{punctuation}");
+                assert!(
+                    matches!(
+                        parse_destroy_ast(&complete, &complete.to_lowercase(), &mut context),
+                        Some(Ok(ZoneCounterImperativeAst::Destroy { .. }))
+                    ),
+                    "{complete}"
+                );
+            }
+            for tail in [" and ", " with unknown text and draw a card", " ?", ".."] {
+                let source = format!("{head}{tail}");
+                let mut context = original.clone();
+                assert!(
+                    matches!(parse_destroy_ast(&source, &source.to_lowercase(), &mut context), Some(Err(fragment)) if fragment == source),
+                    "{source}"
+                );
+                assert_eq!(context, original);
+            }
+        }
+        for source in ["Destroy target", "Destroy target unclassified word"] {
+            let mut context = ParseContext::default();
+            assert!(parse_destroy_ast(source, &source.to_lowercase(), &mut context).is_none());
+        }
+        let context = ParseContext {
+            in_trigger: true,
+            subject: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+            ..Default::default()
+        };
+        let source = "Destroy it and draw a card";
+        let (ast, remainder, tentative) =
+            parse_destroy_target_core(source, &source.to_lowercase(), &context).unwrap();
+        assert!(matches!(
+            ast,
+            ZoneCounterImperativeAst::Destroy {
+                target: TargetFilter::TriggeringSource,
+                all: false
+            }
+        ));
+        assert_eq!(remainder, " and draw a card");
+        assert_eq!(tentative.object_pronoun_ref, context.object_pronoun_ref);
+    }
 }
 
 /// CR 608.2c: Resolve the count expression of a dynamic-count top-of-library
@@ -12474,18 +12556,15 @@ fn parse_empower_jace(lower: &str) -> Option<Effect> {
 /// The one real parse decides the route: it runs on a tentative context that
 /// is merged back only when it succeeds, so the gap route leaves `ctx`
 /// untouched.
-fn parse_mass_destroy_attached_to_declared_slot(
-    text: &str,
+fn parse_mass_destroy_attached_to_declared_slot<'a>(
+    text: &'a str,
     lower: &str,
     ctx: &mut ParseContext,
-) -> Option<ZoneCounterImperativeAst> {
+) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
     nom_on_lower(text, lower, |input| {
         value((), alt((tag("destroy all "), tag("destroy each ")))).parse(input)
     })?;
-    let mut tentative_ctx = ctx.clone();
-    let ast = parse_destroy_ast(text, lower, &mut tentative_ctx)?;
-    *ctx = tentative_ctx;
-    Some(ast)
+    parse_destroy_ast(text, lower, ctx)
 }
 
 pub(super) fn parse_imperative_family_ast(
@@ -12500,7 +12579,11 @@ pub(super) fn parse_imperative_family_ast(
     if mass_verb_clause_opens_attachment_qualifier(text, lower, ctx) {
         return Some(
             match parse_mass_destroy_attached_to_declared_slot(text, lower, ctx) {
-                Some(ast) => ImperativeFamilyAst::ZoneCounter(ast),
+                Some(Ok(ast)) => ImperativeFamilyAst::ZoneCounter(ast),
+                Some(Err(fragment)) => ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented {
+                    gap: "destroy_target_tail",
+                    fragment: fragment.to_owned(),
+                }),
                 None => ImperativeFamilyAst::GainKeyword(Effect::unimplemented(
                     ATTACHED_TO_QUALIFIER_GAP,
                     text,
@@ -16418,7 +16501,14 @@ fn parse_zone_counter_family_ast(
     parse_zone_counter_ast(text, lower, ctx).map(|result| match result {
         Ok(ast) => ImperativeFamilyAst::ZoneCounter(ast),
         Err(fragment) => ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented {
-            gap: "put_counter_tail",
+            gap: if tag::<_, _, OracleError<'_>>("destroy ")
+                .parse(lower)
+                .is_ok()
+            {
+                "destroy_target_tail"
+            } else {
+                "put_counter_tail"
+            },
             fragment: fragment.to_owned(),
         }),
     })
@@ -16430,7 +16520,7 @@ pub(super) fn parse_zone_counter_ast<'a>(
     ctx: &mut ParseContext,
 ) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
     if let Some(ast) = parse_destroy_ast(text, lower, ctx) {
-        return Some(Ok(ast));
+        return Some(ast);
     }
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(Ok(ast));

@@ -1,5 +1,571 @@
 use super::*;
 
+// SHAPE: strict clothing qualification is an exact unsupported semantic unit.
+#[test]
+fn ordinary_destroy_prismatic_whole_source_native_and_loaders_remain_honest() {
+    fn no_destroy(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                assert!(!matches!(
+                    fields.get("type").and_then(serde_json::Value::as_str),
+                    Some("Destroy" | "DestroyAll")
+                ));
+                for child in fields.values() {
+                    no_destroy(child);
+                }
+            }
+            serde_json::Value::Array(children) => {
+                for child in children {
+                    no_destroy(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let source = "Destroy target nonartifact, nonland permanent that doesn't share a color with clothing worn by its controller.";
+    let types = vec!["Sorcery".into()];
+    let mut doc = parse_oracle_ir(source, "Prismatic Wardrobe", &[], &types, &[]);
+    assert_eq!(doc.source_text, source);
+    assert_eq!(doc.items.len(), 1);
+    let item = &doc.items[0];
+    assert!(item.source.span.is_exact());
+    assert_eq!(
+        (
+            item.source.span.first_line,
+            item.source.span.last_line,
+            item.source.span.start_byte,
+            item.source.span.end_byte,
+            item.source.span.ordinal_within_span
+        ),
+        (0, 0, 0, source.len(), 0)
+    );
+    assert_eq!(item.source.fragment(), Some(source));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.statics.is_empty());
+    let value = serde_json::to_value(&parsed).unwrap();
+    no_destroy(&value);
+    let mut payloads = Vec::new();
+    complete_publication_gap_payloads(&value, &mut payloads);
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].0, "destroy_target_tail");
+    assert_eq!(
+        payloads[0].1.trim_end_matches('.'),
+        source.trim_end_matches('.')
+    );
+    assert_eq!(parsed.abilities[0].description.as_deref(), Some(source));
+    let face = complete_publication_native_face("Prismatic Wardrobe", source, &types, &[]);
+    assert_eq!(face.mana_cost, parse_mana_symbols("{W}").unwrap().0);
+    assert_eq!(face.abilities, parsed.abilities);
+    assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+    let whole = serde_json::to_string(&serde_json::json!({"prismatic wardrobe": face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(database.get_face_by_name("Prismatic Wardrobe"), Some(&face));
+    }
+    assert_eq!(
+        serde_json::from_str::<crate::types::card::CardFace>(
+            &serde_json::to_string(&face).unwrap()
+        )
+        .unwrap(),
+        face
+    );
+    let combined = format!("{source}\nDraw a card.");
+    let mut good_sibling = parse_oracle_ir(&combined, "Synthetic strict sibling", &[], &types, &[]);
+    assert_eq!(good_sibling.items.len(), 2);
+    assert_ne!(good_sibling.items[0].id, good_sibling.items[1].id);
+    assert_eq!(
+        good_sibling.items[1].source.fragment(),
+        Some("Draw a card.")
+    );
+    let parsed = lower_oracle_ir(&mut good_sibling);
+    assert_eq!(parsed.abilities.len(), 2);
+    assert!(matches!(*parsed.abilities[1].effect, Effect::Draw { .. }));
+    let mut own = Vec::new();
+    complete_publication_gap_payloads(&serde_json::to_value(parsed).unwrap(), &mut own);
+    assert_eq!(own, payloads);
+    for (name, source, mana, instant) in [
+        ("Murder", "Destroy target creature.", "{1}{B}{B}", true),
+        (
+            "Doom Blade",
+            "Destroy target nonblack creature.",
+            "{1}{B}",
+            true,
+        ),
+        (
+            "Deathmark",
+            "Destroy target green or white creature.",
+            "{B}",
+            false,
+        ),
+    ] {
+        let types = vec![if instant {
+            "Instant".into()
+        } else {
+            "Sorcery".into()
+        }];
+        let face = complete_publication_native_face(name, source, &types, &[]);
+        assert_eq!(face.mana_cost, parse_mana_symbols(mana).unwrap().0);
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        assert!(matches!(*face.abilities[0].effect, Effect::Destroy { .. }));
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&face));
+        }
+    }
+}
+
+const U22_RETURN: &str = "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.";
+const U22_OTARIA: &str = "Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost. (Its owner may cast the card from their graveyard for its mana cost. Then they exile it.)\nWhenever chaos ensues, take an extra turn after this one.";
+
+// SHAPE: full pinned sources, exact document geometry, native synthesis and loaders.
+#[test]
+fn ordinary_destroy_full_native_broken_and_historical_attachment_rider_keep_their_dispositions() {
+    let spoilers = "Destroy target nonblack creature. It can't be regenerated. You gain control of all Equipment that were attached to it. (This effect lasts indefinitely.)";
+    for (name, text, mana) in [
+        ("Broken Visage", FULL_BROKEN, "{4}{B}"),
+        ("Murderous Spoils", spoilers, "{5}{B}"),
+    ] {
+        let types = vec!["Instant".into()];
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &[]);
+        assert_eq!(doc.source_text, text);
+        assert_eq!(doc.items.len(), 1);
+        assert_eq!(doc.items[0].source.fragment(), Some(text));
+        assert!(doc.items[0].source.span.is_exact());
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(parsed.statics.is_empty());
+        assert!(matches!(
+            *parsed.abilities[0].effect,
+            Effect::Destroy {
+                cant_regenerate: true,
+                ..
+            }
+        ));
+        let face = complete_publication_native_face(name, text, &types, &[]);
+        assert_eq!(face.mana_cost, parse_mana_symbols(mana).unwrap().0);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.abilities, parsed.abilities);
+        if name == "Broken Visage" {
+            assert_ordinary_spirit_shape(&parsed, 1);
+            let chain = scope_chain(&parsed.abilities[0]);
+            assert_eq!(chain.len(), 3);
+            assert!(matches!(*chain[1].effect, Effect::Token { .. }));
+            assert!(
+                matches!(&*chain[2].effect, Effect::CreateDelayedTrigger { condition: DelayedTriggerCondition::AtNextPhase { phase: crate::types::phase::Phase::End }, effect, .. } if matches!(*effect.effect, Effect::Sacrifice { target: TargetFilter::LastCreated, .. }))
+            );
+            assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        } else {
+            let rider = parsed.abilities[0]
+                .sub_ability
+                .as_deref()
+                .expect("whole historical rider retained");
+            assert!(
+                matches!(&*rider.effect, Effect::Unimplemented { name, description: Some(fragment) } if name == "attached_to_qualifier" && fragment.trim_end_matches('.').trim_start_matches("You ").trim_start_matches("you ") == "gain control of all Equipment that were attached to it")
+            );
+            assert!(rider.sub_ability.is_none());
+            assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+                &face
+            ));
+            let mut payloads = Vec::new();
+            complete_publication_gap_payloads(&serde_json::to_value(&face).unwrap(), &mut payloads);
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(payloads[0].0, "attached_to_qualifier");
+        }
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&face));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+    }
+}
+
+#[test]
+fn u6_full_documents_preserve_complete_grants_plane_and_both_loaders() {
+    use crate::types::keywords::FlashbackCost;
+    for (name, text, types, subtypes, controller, condition, mana) in [
+        (
+            "Return the Past",
+            U22_RETURN,
+            vec!["Enchantment".into()],
+            vec![],
+            Some(ControllerRef::You),
+            Some(StaticCondition::DuringYourTurn),
+            parse_mana_symbols("{4}{R}{R}").unwrap().0,
+        ),
+        (
+            "Otaria",
+            U22_OTARIA,
+            vec!["Plane".into()],
+            vec!["Dominaria".into()],
+            None,
+            None,
+            ManaCost::NoCost,
+        ),
+    ] {
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, text);
+        assert_eq!(doc.items.len(), if name == "Otaria" { 2 } else { 1 });
+        let grant = &doc.items[0];
+        let OracleNodeIr::Static(ir) = &grant.node else {
+            panic!("dedicated static")
+        };
+        assert!(grant.source.span.is_exact());
+        assert_eq!(grant.source.span.first_line, 0);
+        assert_eq!(grant.source.span.last_line, 0);
+        assert_eq!(grant.source.span.ordinal_within_span, 0);
+        assert_eq!(grant.source.fragment(), text.lines().next());
+        assert_eq!(ir.source_text, text.lines().next().unwrap());
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.statics.len(), 1);
+        let definition = &parsed.statics[0];
+        assert_eq!(definition.condition, condition);
+        assert_eq!(definition.mode, StaticMode::Continuous);
+        assert_eq!(definition.description.as_deref(), text.lines().next());
+        assert_eq!(
+            definition.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost))
+            }]
+        );
+        let TargetFilter::Or { filters } = definition.affected.as_ref().unwrap() else {
+            panic!("typed OR")
+        };
+        assert_eq!(filters.len(), 2);
+        for (leaf, kind) in filters
+            .iter()
+            .zip([TypeFilter::Instant, TypeFilter::Sorcery])
+        {
+            let TargetFilter::Typed(filter) = leaf else {
+                panic!("typed leaf")
+            };
+            assert!(filter.type_filters.contains(&kind));
+            assert_eq!(filter.controller, controller);
+            assert_eq!(
+                filter.properties,
+                vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }]
+            );
+        }
+        assert!(parsed.abilities.is_empty());
+        let face = complete_publication_native_face(name, text, &types, &subtypes);
+        assert_eq!(face.mana_cost, mana);
+        assert_eq!(face.static_abilities[0].affected, definition.affected);
+        assert_eq!(
+            face.static_abilities[0].modifications,
+            definition.modifications
+        );
+        assert_eq!(face.static_abilities[0].condition, definition.condition);
+        if name == "Otaria" {
+            assert_eq!(parsed.triggers.len(), 1);
+            assert!(matches!(
+                *parsed.triggers[0].execute.as_ref().unwrap().effect,
+                Effect::ExtraTurn { .. }
+            ));
+            assert_eq!(face.static_abilities[0].active_zones, vec![Zone::Command]);
+            assert_eq!(face.triggers.len(), 1);
+            assert_eq!(face.triggers[0].trigger_zones, vec![Zone::Command]);
+            assert_ne!(doc.items[0].id, doc.items[1].id);
+            assert_eq!(doc.items[1].source.fragment(), text.lines().nth(1));
+        } else {
+            assert!(parsed.triggers.is_empty());
+        }
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&face));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+    }
+    let first = "During your turn, each instant and sorcery card in your graveyard has flashback.";
+    let cost = "Its flashback cost is equal to its mana cost.";
+    let independent = "Creatures you control have flying.";
+    let text = format!("{first}\n{cost}\n{independent}");
+    let mut doc = parse_oracle_ir(
+        &text,
+        "Synthetic physical grant",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(doc.items.len(), 2);
+    let owned = format!("{first}\n{cost}");
+    let grant = &doc.items[0];
+    assert_eq!(grant.source.span.first_line, 0);
+    assert_eq!(grant.source.span.last_line, 1);
+    assert_eq!(grant.source.span.start_byte, 0);
+    assert_eq!(grant.source.span.end_byte, owned.len());
+    assert_eq!(grant.source.fragment(), Some(owned.as_str()));
+    assert_eq!(
+        &text[grant.source.span.start_byte..grant.source.span.end_byte],
+        owned
+    );
+    assert_eq!(doc.items[1].source.span.first_line, 2);
+    assert_eq!(doc.items[1].source.fragment(), Some(independent));
+    assert_ne!(doc.items[0].id, doc.items[1].id);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.statics.len(), 2);
+    assert_eq!(
+        parsed.statics[0].description.as_deref(),
+        Some(owned.as_str())
+    );
+    assert_eq!(
+        parsed.statics[1].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+}
+
+#[test]
+fn u6_native_absent_zero_fixed_nonmana_compound_and_independent_free_cards_keep_full_bodies() {
+    for (name, text, mana, instant) in [
+        ("Ancestral Vision", "Suspend 4—{U} (Rather than cast this card from your hand, pay {U} and exile it with four time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)\nTarget player draws three cards.", None, false),
+        ("Pact of the Titan", "Create a 4/4 red Giant creature token.\nAt the beginning of your next upkeep, pay {4}{R}. If you don't, you lose the game.", Some("{0}"), true),
+        ("Think Twice", "Draw a card.\nFlashback {2}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)", Some("{1}{U}"), true),
+        ("Firebolt", "Firebolt deals 2 damage to any target.\nFlashback {4}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)", Some("{R}"), false),
+        ("Battle Screech", "Create two 1/1 white Bird creature tokens with flying.\nFlashback—Tap three untapped white creatures you control. (You may cast this card from your graveyard for its flashback cost. Then exile it.)", Some("{2}{W}{W}"), false),
+        ("Deep Analysis", "Target player draws two cards.\nFlashback—{1}{U}, Pay 3 life. (You may cast this card from your graveyard for its flashback cost. Then exile it.)", Some("{3}{U}"), false),
+        ("Invoke Calamity", "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.", Some("{1}{R}{R}{R}{R}"), true),
+        ("Light of Judgment", "Light of Judgment deals 6 damage to target creature. Destroy up to one Equipment attached to that creature.", Some("{4}{R}"), true),
+    ] {
+        let types = vec![if instant { "Instant".into() } else { "Sorcery".into() }];
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &[]);
+        assert_eq!(doc.source_text, text);
+        assert_eq!(doc.items.iter().map(|item| item.id).collect::<std::collections::HashSet<_>>().len(), doc.items.len());
+        assert!(doc.items.iter().all(|item| item.source.fragment().is_some() && item.source.span.is_exact()));
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(!parsed.abilities.is_empty(), "the full independent spell body: {name}");
+        assert!(!parsed_has_unimplemented(&parsed), "{name}: {parsed:#?}");
+        let face = complete_publication_native_face(name, text, &types, &[]);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.mana_cost, mana.map_or(ManaCost::NoCost, |cost| parse_mana_symbols(cost).unwrap().0));
+        if name == "Ancestral Vision" {
+            assert_eq!(face.abilities.len(), parsed.abilities.len() + 1);
+            assert_eq!(&face.abilities[..parsed.abilities.len()], parsed.abilities.as_slice());
+            let suspend = face.abilities.last().unwrap();
+            assert_eq!(suspend.kind, AbilityKind::Activated);
+            assert_eq!(suspend.activation_zone, Some(Zone::Hand));
+            assert_eq!(suspend.cost, Some(AbilityCost::Composite { costs: vec![
+                AbilityCost::Mana { cost: parse_mana_symbols("{U}").unwrap().0 },
+                AbilityCost::Exile { count: 1, zone: Some(Zone::Hand), filter: Some(TargetFilter::SelfRef) },
+            ] }));
+            assert!(matches!(*suspend.effect, Effect::PutCounter { counter_type: CounterType::Time, count: QuantityExpr::Fixed { value: 4 }, .. }));
+            assert_eq!(face.triggers.len(), 2);
+            assert!(face.triggers.iter().all(|trigger| trigger.trigger_zones == vec![Zone::Exile]));
+        } else {
+            assert_eq!(face.abilities, parsed.abilities);
+            assert_eq!(face.triggers, parsed.triggers);
+        }
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        let effects = face.abilities.iter().flat_map(|root| std::iter::successors(Some(root), |node| node.sub_ability.as_deref())).collect::<Vec<_>>();
+        match name {
+            "Ancestral Vision" => { assert!(matches!(*effects[0].effect, Effect::Draw { count: QuantityExpr::Fixed { value: 3 }, .. })); assert!(face.keywords.iter().any(|keyword| matches!(keyword, Keyword::Suspend { .. }))); }
+            "Pact of the Titan" => { assert!(matches!(*effects[0].effect, Effect::Token { .. })); assert!(effects.iter().any(|node| matches!(*node.effect, Effect::CreateDelayedTrigger { .. }))); assert_eq!(face.mana_cost, ManaCost::zero()); }
+            "Think Twice" => assert!(face.keywords.contains(&Keyword::Flashback(FlashbackCost::Mana(parse_mana_symbols("{2}{U}").unwrap().0)))),
+            "Firebolt" => assert!(face.keywords.contains(&Keyword::Flashback(FlashbackCost::Mana(parse_mana_symbols("{4}{R}").unwrap().0)))),
+            "Battle Screech" | "Deep Analysis" => assert!(face.keywords.iter().any(|keyword| matches!(keyword, Keyword::Flashback(FlashbackCost::NonMana(_))))),
+            "Light of Judgment" => {
+                assert_eq!(effects.len(), 3);
+                assert!(matches!(*effects[0].effect, Effect::DealDamage { amount: QuantityExpr::Fixed { value: 6 }, .. }));
+                let Effect::ChooseObjectsIntoTrackedSet { chooser, filter, min: 0, max: Some(1), cardinality: None, eligibility: None } = &*effects[1].effect else { panic!("exact untargeted Equipment selection") };
+                assert_eq!(*chooser, TargetFilter::Controller);
+                let TargetFilter::Typed(typed) = filter else { panic!("typed Equipment filter") };
+                assert!(typed.type_filters.contains(&TypeFilter::Subtype("Equipment".into())));
+                assert!(typed.properties.contains(&FilterProp::AttachedTo { to: crate::types::ability::AttachmentReferent::DeclaredTarget { slot: 0 } }));
+                assert!(matches!(*effects[2].effect, Effect::DestroyAll { target: TargetFilter::TrackedSet { .. }, .. }));
+                assert_eq!(effects[0].target_chooser, None);
+                assert_eq!(effects[1].target_chooser, None);
+            }
+            "Invoke Calamity" => assert!(effects.len() >= 2, "the independent self-Exile body remains"),
+            _ => unreachable!(),
+        }
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap(); std::fs::write(file.path(), &whole).unwrap();
+        for database in [crate::database::CardDatabase::from_json_str(&whole).unwrap(), crate::database::CardDatabase::from_export(file.path()).unwrap()] { assert_eq!(database.get_face_by_name(name), Some(&face)); }
+        assert_eq!(serde_json::from_str::<crate::types::card::CardFace>(&serde_json::to_string(&face).unwrap()).unwrap(), face);
+    }
+}
+
+#[test]
+fn u6_native_cost_modifiers_keep_printed_costs_full_scope_and_both_loaders() {
+    for (name, text, types, subtypes, printed, direction) in [
+        (
+            "Sphere of Resistance",
+            "Spells cost {1} more to cast.",
+            vec!["Artifact".into()],
+            vec![],
+            "{2}",
+            crate::types::statics::CostModifyMode::Raise,
+        ),
+        (
+            "Goblin Electromancer",
+            "Instant and sorcery spells you cast cost {1} less to cast.",
+            vec!["Creature".into()],
+            vec!["Goblin".into(), "Wizard".into()],
+            "{U}{R}",
+            crate::types::statics::CostModifyMode::Reduce,
+        ),
+    ] {
+        let face = complete_publication_native_face(name, text, &types, &subtypes);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.mana_cost, parse_mana_symbols(printed).unwrap().0);
+        assert!(face.abilities.is_empty() && face.triggers.is_empty());
+        assert_eq!(face.static_abilities.len(), 1);
+        let definition = &face.static_abilities[0];
+        assert!(
+            matches!(&definition.mode, StaticMode::ModifyCost { mode, amount, dynamic_count: None, .. } if *mode == direction && *amount == ManaCost::generic(1))
+        );
+        assert_eq!(definition.description.as_deref(), Some(text));
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        if name == "Goblin Electromancer" {
+            assert_eq!(face.power, Some(crate::types::ability::PtValue::Fixed(2)));
+            assert_eq!(
+                face.toughness,
+                Some(crate::types::ability::PtValue::Fixed(2))
+            );
+        }
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&face));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+    }
+}
+
+#[test]
+fn u6_public_refusals_preserve_whole_grant_cost_and_independent_lines() {
+    let independent = "Creatures you control have flying.";
+    for first in [
+        "Each instant card in their graveyard has flashback.",
+        "Each instant card in a player's graveyard in graveyards has flashback.",
+        "Each instant card in your graveyard has flashback {2} unknown.",
+        "Each instant card in your graveyard has flashback {2}.",
+        "Each instant card in your graveyard has an unknown keyword.",
+        "Each in your graveyard has flashback.",
+    ] {
+        let cost = "Its flashback cost is equal to its mana cost.";
+        let source = format!("{first} {cost}");
+        let text = format!("{source}\n{independent}");
+        let mut doc = parse_oracle_ir(
+            &text,
+            "Synthetic refused source",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(doc.items.len(), 2, "{doc:#?}");
+        assert!(
+            matches!(&doc.items[0].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == source)
+        );
+        assert_eq!(doc.items[0].source.fragment(), Some(source.as_str()));
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.statics.len(), 1, "no generic partial source");
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }]
+        );
+        assert!(has_unimplemented(&parsed.abilities[0]));
+    }
+    let first = "Each instant card in your graveyard has flashback.";
+    for cost in [
+        "Its flashback cost is an unknown cost.",
+        "Its flashback cost is equal to its mana cost until end of turn.",
+    ] {
+        let text = format!("{first}\n{cost}\n{independent}");
+        let mut doc = parse_oracle_ir(
+            &text,
+            "Synthetic refused pair",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(doc.items.len(), 2);
+        let owned = format!("{first}\n{cost}");
+        assert!(
+            matches!(&doc.items[0].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == owned)
+        );
+        assert_eq!(doc.items[0].source.fragment(), Some(owned.as_str()));
+        assert_eq!(doc.items[0].source.span.last_line, 1);
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(
+            parsed.statics[0].modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }]
+        );
+    }
+    let text = format!("Threshold — {U22_RETURN}\n{independent}");
+    let mut doc = parse_oracle_ir(
+        &text,
+        "Synthetic gated grant",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.statics.len(), 2);
+    let gate = ability_word_to_condition("threshold").unwrap();
+    assert_eq!(
+        parsed.statics[0].condition,
+        Some(StaticCondition::And {
+            conditions: vec![gate, StaticCondition::DuringYourTurn]
+        })
+    );
+    assert_eq!(
+        parsed.statics[0].description.as_deref(),
+        text.lines().next()
+    );
+}
+
 const U21_GRIMGRIN: &str = "Grimgrin enters tapped and doesn't untap during your untap step.\nSacrifice another creature: Untap Grimgrin and put a +1/+1 counter on it.\nWhenever Grimgrin attacks, destroy target creature defending player controls, then put a +1/+1 counter on Grimgrin.";
 const U21_LEVIATHAN: &str = "Trample\nThis creature enters tapped and doesn't untap during your untap step.\nAt the beginning of your upkeep, you may sacrifice two Islands. If you do, untap this creature.\nThis creature can't attack unless you sacrifice two Islands. (This cost is paid as attackers are declared.)";
 const U21_TRAXOS: &str = "Trample\nTraxos enters tapped and doesn't untap during your untap step.\nWhenever you cast a historic spell, untap Traxos. (Artifacts, legendaries, and Sagas are historic.)";
@@ -38556,6 +39122,60 @@ fn complete_publication_native_face(
     subtypes: &[String],
 ) -> crate::types::card::CardFace {
     let metadata = match name {
+        "Return the Past" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"be2b3954-e4d7-438c-a549-252bd7f4a9bd"},"layout":"normal","manaCost":"{4}{R}{R}","manaValue":6.0,"name":"Return the Past","rulings":[{"date":"2023-10-13","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2023-10-13","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2023-10-13","text":"If a card has multiple instances of flashback, you may choose any of its flashback costs to pay."},{"date":"2023-10-13","text":"If a card is put into your graveyard during your turn, you can cast it with flashback if it's legal to do so before any other player can take any actions."},{"date":"2023-10-13","text":"If a card with no mana cost gains flashback, it has no flashback cost. It can't be cast this way."},{"date":"2023-10-13","text":"If a split card gains flashback, you pay only the cost of the half you're casting."},{"date":"2023-10-13","text":"If you cast a spell with flashback, you can't pay any alternative costs such as overload costs. You can pay additional costs such as kicker costs. If the spell has any mandatory additional costs, you must pay those to cast the spell with flashback."},{"date":"2023-10-13","text":"If you cast an instant or sorcery with {X} in its mana cost this way, you still choose the value of X as part of casting the spell and pay that cost."},{"date":"2023-10-13","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2023-10-13","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2023-10-13","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."}],"types":["Enchantment"],"type":"Enchantment","subtypes":[],"supertypes":[]}"##
+        }
+        "Otaria" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"29e3371d-aa41-46a9-921a-96565be47eff"},"layout":"planar","manaValue":0.0,"name":"Otaria","rulings":[{"date":"2009-10-01","text":"A face-up plane card that's turned face down becomes a new object with no relation to its previous existence. In particular, it loses all counters it may have had."},{"date":"2009-10-01","text":"A plane card is treated as if its text box included \"When you roll {PW}, put this card on the bottom of its owner's planar deck face down, then move the top card of your planar deck off that planar deck and turn it face up.\" This is called the \"planeswalking ability.\""},{"date":"2009-10-01","text":"If an ability of a plane refers to \"you,\" it's referring to whoever the plane's controller is at the time, not to the player that started the game with that plane card in their deck. Many abilities of plane cards affect all players, while many others affect only the planar controller, so read each ability carefully."},{"date":"2009-10-01","text":"If you roll {CHAOS} multiple times in the same turn, you'll take that many extra turns after this one."},{"date":"2009-10-01","text":"The controller of a face-up plane card is the player designated as the \"planar controller.\" Normally, the planar controller is whoever the active player is. However, if the current planar controller would leave the game, instead the next player in turn order that wouldn't leave the game becomes the planar controller, then the old planar controller leaves the game. The new planar controller retains that designation until they leave the game or a different player becomes the active player, whichever comes first."},{"date":"2021-03-19","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2021-03-19","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2021-03-19","text":"If a card has multiple instances of flashback, you may choose any of its flashback costs to pay."},{"date":"2021-03-19","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2021-03-19","text":"If a card with no mana cost gains flashback, it has no flashback cost. It can't be cast this way."},{"date":"2021-03-19","text":"If a split card gains flashback, you pay only the cost of the half you're casting."},{"date":"2021-03-19","text":"If you cast a spell with flashback, you can't pay any alternative costs such as overload costs. You can pay additional costs such as kicker costs. If the spell has any mandatory additional costs, you must pay those to cast the spell with flashback."},{"date":"2021-03-19","text":"If you cast an instant or sorcery with {X} in its mana cost this way, you still choose the value of X as part of casting the spell and pay that cost."},{"date":"2021-03-19","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2021-03-19","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2021-03-19","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."}],"types":["Plane"],"type":"Plane — Dominaria","subtypes":["Dominaria"],"supertypes":[]}"##
+        }
+        "Prismatic Wardrobe" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"8eb737d7-0be2-4e80-801f-0562d41e8b67"},"layout":"normal","manaCost":"{W}","manaValue":1.0,"name":"Prismatic Wardrobe","types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Murder" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"938b4e2c-88d9-4637-bc00-e228920c9a78"},"layout":"normal","manaCost":"{1}{B}{B}","manaValue":3.0,"name":"Murder","types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Doom Blade" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"59e7f2ae-4535-4191-98be-3e65b6b2befa"},"layout":"normal","manaCost":"{1}{B}","manaValue":2.0,"name":"Doom Blade","types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Deathmark" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"cf09b0af-3cf1-4486-8f65-8cfd2410314a"},"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Deathmark","types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Broken Visage" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"8e1d750e-44a7-47b1-8e0a-5f8b15d48b41"},"layout":"normal","manaCost":"{4}{B}","manaValue":5.0,"name":"Broken Visage","rulings":[{"date":"2004-10-04","text":"The token creature enters under your control regardless of who controlled the targeted creature."},{"date":"2008-10-01","text":"The Spirit token has the power and toughness of the attacking creature as it last existed on the battlefield."}],"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Light of Judgment" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"932177b8-70f8-4908-a48f-fe03204daddc"},"layout":"normal","manaCost":"{4}{R}","manaValue":5.0,"name":"Light of Judgment","rulings":[{"date":"2025-06-06","text":"If the target creature is an illegal target when Light of Judgment tries to resolve, it won't resolve and none of its effects will happen. You won't destroy any Equipment."},{"date":"2025-06-06","text":"Light of Judgment can target a creature that has no Equipment attached to it."},{"date":"2025-06-06","text":"You don't choose the Equipment to destroy until Light of Judgment is resolving."}],"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Murderous Spoils" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"e911f9d9-da04-4997-a8d7-449b566cd1ce"},"layout":"normal","manaCost":"{5}{B}","manaValue":6.0,"name":"Murderous Spoils","types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Ancestral Vision" => {
+            r##"{"colorIdentity":["U"],"colorIndicator":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"9728dec9-d482-4c7a-8cdc-44d010dc878d"},"layout":"normal","manaValue":0.0,"name":"Ancestral Vision","keywords":["Suspend"],"rulings":[{"date":"2013-06-07","text":"Although originally printed with a characteristic-defining ability that defined its color, this card now has a color indicator. This color indicator can't be affected by text-changing effects (such as the one created by Crystal Spray), although color-changing effects can still overwrite it."},{"date":"2024-02-02","text":"A card with no mana cost can't be cast normally; you'll need a way to cast it for an alternative cost or without paying its mana cost, such as by suspending it."},{"date":"2024-02-02","text":"Cards exiled with suspend are exiled face up."},{"date":"2024-02-02","text":"Due to a recent rules change to suspend, you are no longer required to cast the suspended card as the second triggered ability of suspend resolves. Instead, as the second triggered ability resolves, you may cast the card. Timing permissions based on the card's type are ignored. If you don't cast the card, it remains exiled with no time counters on it, and it's no longer suspended."},{"date":"2024-02-02","text":"Exiling a card with suspend isn't casting that card. This action doesn't use the stack and can't be responded to."},{"date":"2024-02-02","text":"If a card with no mana cost is given an alternative cost equal to its mana cost (by Snapcaster Mage, for example), that cost cannot be paid and the card cannot be cast this way."},{"date":"2024-02-02","text":"If an effect refers to a \"suspended card,\" that means a card that (1) has suspend, (2) is in exile, and (3) has one or more time counters on it."},{"date":"2024-02-02","text":"If the card has {X} in its mana cost, you must choose 0 as the value of X when casting it without paying its mana cost."},{"date":"2024-02-02","text":"If the first triggered ability of suspend (the one that removes time counters) is countered, no time counter is removed. The ability will trigger again at the beginning of the card's owner's next upkeep."},{"date":"2024-02-02","text":"If the second triggered ability is countered, the card can't be cast. It remains exiled with no time counters on it, and it's no longer suspended."},{"date":"2024-02-02","text":"If the spell requires any targets, those targets are chosen when the spell is finally cast, not when it's exiled."},{"date":"2024-02-02","text":"If you cast a card \"without paying its mana cost,\" such as with suspend, you can't choose to cast it for any alternative costs. You can, however, pay additional costs. If the card has any mandatory additional costs, you must pay those if you want to cast the card."},{"date":"2024-02-02","text":"Suspend is a keyword that represents three abilities. The first is a static ability that allows you to exile the card from your hand with the specified number of time counters (the number before the dash) on it by paying its suspend cost (listed after the dash). The second is a triggered ability that removes a time counter from the suspended card at the beginning of each of your upkeeps. The third is a triggered ability that gives you the option to cast the card when the last time counter is removed."},{"date":"2024-02-02","text":"The mana value of a spell cast without paying its mana cost is determined by its mana cost, even though that cost wasn't paid."},{"date":"2024-02-02","text":"When the last time counter is removed, the second triggered ability of suspend (the one that lets you cast the card) triggers. It doesn't matter why the last time counter was removed or what effect removed it."},{"date":"2024-02-02","text":"You can exile a card in your hand using suspend any time you could cast that card. Consider its card type, any effects that modify when you could cast it (such as flash) and any other effects that stop you from casting it (such as from Meddling Mage's ability) to determine if and when you can do this. Whether you could actually complete all steps in casting the card is irrelevant. For example, you can exile a card with suspend that has no mana cost or that requires a target even if no legal targets are available at that time."}],"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Pact of the Titan" => {
+            r##"{"colorIdentity":["R"],"colorIndicator":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"cf4959bf-92ae-4c9b-b631-724ce100cbb8"},"layout":"normal","manaCost":"{0}","manaValue":0.0,"name":"Pact of the Titan","rulings":[{"date":"2013-06-07","text":"Although originally printed with a characteristic-defining ability that defined its color, this card now has a color indicator. This color indicator can't be affected by text-changing effects (such as the one created by Crystal Spray), although color-changing effects can still overwrite it."},{"date":"2021-03-19","text":"If Pact of the Titan is countered, the delayed triggered ability that threatens you with a game loss won't trigger at the beginning of your next upkeep."},{"date":"2021-03-19","text":"You have to pay Pact of the Titan's cost during your next upkeep even if the Giant token doesn't survive that long. Okay, you don't have to, but it's a fairly good idea."}],"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Think Twice" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"fa85c5a2-8e83-4624-a35a-a0bbf17ecbb4"},"layout":"normal","manaCost":"{1}{U}","manaValue":2.0,"name":"Think Twice","keywords":["Flashback"],"rulings":[{"date":"2024-11-08","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2024-11-08","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2024-11-08","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2024-11-08","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2024-11-08","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2024-11-08","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."}],"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Firebolt" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"7aa31280-12c3-479d-a6dd-f1c669043083"},"layout":"normal","manaCost":"{R}","manaValue":1.0,"name":"Firebolt","keywords":["Flashback"],"rulings":[{"date":"2021-03-19","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2021-03-19","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it’s legal to do so before any other player can take any actions."},{"date":"2021-03-19","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you’re paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2021-03-19","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2021-03-19","text":"You must still follow any timing restrictions and permissions, including those based on the card’s type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."},{"date":"2021-03-19","text":"“Flashback [cost]” means “You may cast this card from your graveyard by paying [cost] rather than paying its mana cost” and “If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.”"}],"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Battle Screech" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"e73131cd-b454-405b-9539-9d777e232b9e"},"layout":"normal","manaCost":"{2}{W}{W}","manaValue":4.0,"name":"Battle Screech","keywords":["Flashback"],"rulings":[{"date":"2021-03-19","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2021-03-19","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2021-03-19","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2021-03-19","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2021-03-19","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."},{"date":"2021-03-19","text":"“Flashback [cost]” means “You may cast this card from your graveyard by paying [cost] rather than paying its mana cost” and “If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.”"},{"date":"2022-12-08","text":"You can tap any untapped white creatures you control to pay for Battle Screech’s flashback cost, even ones you haven’t controlled continuously since the beginning of your most recent turn."}],"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Deep Analysis" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"579cbd92-797f-4cdf-91ed-fca7a523eae5"},"layout":"normal","manaCost":"{3}{U}","manaValue":4.0,"name":"Deep Analysis","keywords":["Flashback"],"rulings":[{"date":"2024-11-08","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2024-11-08","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2024-11-08","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2024-11-08","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2024-11-08","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2024-11-08","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."}],"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[]}"##
+        }
+        "Invoke Calamity" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"5b3f041e-ad4a-47ea-bdc4-1be2353f2e18"},"layout":"normal","manaCost":"{1}{R}{R}{R}{R}","manaValue":5.0,"name":"Invoke Calamity","rulings":[{"date":"2022-02-18","text":"If the spell has {X} in its mana cost, you must choose 0 as the value of X when casting it without paying its mana cost."},{"date":"2022-02-18","text":"If you cast a spell without paying its mana cost, you can't choose to cast it for any alternative costs. You can, however, pay any additional costs. If the spell has any mandatory additional costs, you must pay those."},{"date":"2022-02-18","text":"Invoke Calamity looks for the mana values and types of the spells on the stack, not the mana values and types of the cards in your graveyard. Notably, this means that you may cast the back face of a modal double-faced card or either face of a split card as long as the spells you are casting are either instants or sorceries and together have a total mana value of 6 or less."},{"date":"2022-02-18","text":"The spells are cast one after the other during the resolution of Invoke Calamity. The one you cast second will be the first one to resolve."}],"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[]}"##
+        }
+        "Sphere of Resistance" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"09c96077-3804-4f12-a613-5bebc5e0413f"},"layout":"normal","manaCost":"{2}","manaValue":2.0,"name":"Sphere of Resistance","rulings":[{"date":"2004-10-04","text":"It affects all players, including you."}],"types":["Artifact"],"type":"Artifact","subtypes":[],"supertypes":[]}"##
+        }
+        "Goblin Electromancer" => {
+            r##"{"colorIdentity":["R","U"],"colors":["R","U"],"identifiers":{"scryfallOracleId":"81f06f84-1580-43c0-89d5-08d34541a519"},"layout":"normal","manaCost":"{U}{R}","manaValue":2.0,"name":"Goblin Electromancer","power":"2","toughness":"2","rulings":[{"date":"2017-03-14","text":"Two Goblin Electromancers will make instant and sorcery spells you cast cost {2} less to cast, and so on."},{"date":"2018-10-05","text":"Goblin Electromancer's effect reduces only generic mana in the spell's total cost."},{"date":"2018-10-05","text":"To determine the total cost of a spell, start with the mana cost or alternative cost you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell remains unchanged, no matter what the total cost to cast it was."}],"types":["Creature"],"type":"Creature — Goblin Wizard","subtypes":["Goblin","Wizard"],"supertypes":[]}"##
+        }
         "Grimgrin, Corpse-Born" => {
             r##"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"a2aa2c8f-7058-4020-9881-663b104ea051"},"layout":"normal","manaCost":"{3}{U}{B}","manaValue":5.0,"name":"Grimgrin, Corpse-Born","power":"5","toughness":"5","rulings":[{"date":"2011-09-22","text":"If the defending player controls no creatures when Grimgrin attacks, the last ability will be removed from the stack and have no effect."},{"date":"2011-09-22","text":"If the targeted creature is an illegal target by the time Grimgrin's last ability resolves, the entire ability doesn't resolve and none of its effects will occur. You won't put a +1/+1 counter on Grimgrin."},{"date":"2013-07-01","text":"If Grimgrin's last ability resolves, but the targeted creature isn't destroyed (perhaps because it regenerated or has indestructible), you'll still put a +1/+1 on Grimgrin."}],"subtypes":["Zombie","Warrior"],"supertypes":["Legendary"],"type":"Legendary Creature — Zombie Warrior","types":["Creature"]}"##
         }

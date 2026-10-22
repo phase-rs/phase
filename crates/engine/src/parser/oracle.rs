@@ -138,7 +138,7 @@ use super::oracle_static::{
     parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
     parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
     parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    try_parse_graveyard_keyword_grant_source, try_parse_top_of_library_cast_permission,
     GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
@@ -882,7 +882,14 @@ pub(crate) fn parse_graveyard_keyword_continuation(
     match kind {
         GrantedCastKeywordKind::Flashback => {
             let (_, rest) = nom_on_lower(text, &lower, |i| {
-                value((), tag("the flashback cost is equal to ")).parse(i)
+                value(
+                    (),
+                    (
+                        alt((tag("the "), tag("its "))),
+                        tag("flashback cost is equal to "),
+                    ),
+                )
+                .parse(i)
             })?;
             let rest = parse_self_mana_cost_suffix(rest)?;
             if !continuation_fully_consumed(rest) {
@@ -1108,27 +1115,29 @@ fn parse_self_entry_tapped_cant_untap(line: &str) -> Option<(ReplacementIr, Stat
     Some((replacement, StaticIr::from_definition(line, restriction)))
 }
 
-fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<StaticDefinition> {
-    let lower = line.to_lowercase();
-    let (prefix, continuation) = split_once_on_lower(line, &lower, ". ")?;
-    let prefix_lower = prefix.to_lowercase();
-    let (turn_condition, grant_prefix) = nom_on_lower(prefix, &prefix_lower, |input| {
-        value(StaticCondition::DuringYourTurn, tag("during your turn, ")).parse(input)
-    })
-    .map_or((None, prefix), |(condition, rest)| (Some(condition), rest));
-    let (affected, kind, _) = try_parse_graveyard_keyword_grant_clause(grant_prefix)?;
-    let keyword = parse_graveyard_keyword_continuation(continuation, kind)?;
-    if !kind.matches_keyword(&keyword) {
-        return None;
+pub(crate) fn try_parse_graveyard_keyword_source_with_label(
+    line: &str,
+) -> Option<Result<StaticDefinition, &str>> {
+    if let Some((label, body)) = strip_ability_word_with_name(line) {
+        if !super::oracle_modal::is_known_ability_word(&label) {
+            return None;
+        }
+        return try_parse_graveyard_keyword_grant_source(&body).map(|result| {
+            result.map_err(|_| line).map(|mut definition| {
+                if let Some(gate) = ability_word_to_condition(&label) {
+                    definition.condition = Some(match definition.condition.take() {
+                        Some(existing) => StaticCondition::And {
+                            conditions: vec![gate, existing],
+                        },
+                        None => gate,
+                    });
+                }
+                definition.description = Some(line.to_owned());
+                definition
+            })
+        });
     }
-    let mut def = StaticDefinition::continuous()
-        .affected(affected)
-        .modifications(vec![ContinuousModification::AddKeyword { keyword }])
-        .description(line.to_string());
-    if let Some(condition) = turn_condition {
-        def = def.condition(condition);
-    }
-    Some(def)
+    try_parse_graveyard_keyword_grant_source(line)
 }
 
 /// Returns every `StaticDefinition` produced by `line`, with the
@@ -1161,10 +1170,8 @@ fn parse_static_line_with_graveyard_keyword_continuation(
         });
     let mut defs = if let Some(def) = raw_conditional_type_grant {
         vec![def]
-    } else if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
-        vec![def]
-    } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
-        vec![def]
+    } else if let Some(result) = try_parse_graveyard_keyword_source_with_label(line) {
+        result.into_iter().collect()
     } else if let Some(def) = crate::parser::oracle_static::try_parse_counts_as_named_static(line) {
         vec![def]
     } else {
@@ -5382,16 +5389,23 @@ impl<'a> DocEmitter<'a> {
         node: OracleNodeIr,
         route: OuterRoute,
     ) -> OracleItemId {
+        self.emit_span_with_fragment(first_line, last_line, node, route, self.lines[first_line])
+    }
+
+    fn emit_span_with_fragment(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+        node: OracleNodeIr,
+        route: OuterRoute,
+        fragment: &str,
+    ) -> OracleItemId {
         let ordinal = self.builder.next_ordinal_for_line(first_line);
         let (start, _) = self.byte_range(first_line);
         let (_, end) = self.byte_range(last_line);
         let span = OracleSourceSpan::exact(first_line, last_line, start, end, ordinal);
-        // Fragment must be the verbatim covered slice for an Exact span; the
-        // caller passes contiguous lines, so the byte range is honest.
         let visibility = visibility_for_node(&node);
-        let slot = self
-            .builder
-            .begin_item(span.clone(), Some(self.lines[first_line]));
+        let slot = self.builder.begin_item(span.clone(), Some(fragment));
         let id = self
             .builder
             .emit(slot, node)
@@ -5400,6 +5414,35 @@ impl<'a> DocEmitter<'a> {
             observer.record(id, span, route, visibility);
         }
         id
+    }
+
+    fn dedicated_static_span(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+        source_text: &str,
+        result: Result<StaticDefinition, &str>,
+    ) {
+        let fragment = self.lines[first_line..=last_line].join("\n");
+        let (node, route) = match result {
+            Ok(definition) => {
+                let ir = StaticIr::from_definition(source_text, definition);
+                self.last_static = Some(lower_static_ir(&ir));
+                (OracleNodeIr::Static(ir), OuterRoute::Static)
+            }
+            Err(_) => (
+                OracleNodeIr::Unsupported {
+                    unsupported: UnsupportedAbilityIr::new(
+                        super::oracle_ir::doc::UnsupportedAbilityCategory::StaticStructure,
+                        source_text,
+                        source_text,
+                    ),
+                    min_x_value: 0,
+                },
+                OuterRoute::Unsupported,
+            ),
+        };
+        self.emit_span_with_fragment(first_line, last_line, node, route, &fragment);
     }
 
     fn ability_at(&mut self, line: usize, def: AbilityDefinition) -> OracleItemId {
@@ -6489,18 +6532,67 @@ fn parse_normalized_oracle_ir(
                 if !next_line.is_empty() {
                     let next_static_line = normalize_self_refs_for_static(&next_line, card_name);
                     let combined_static_line = format!("{static_line} {next_static_line}");
-                    if let Some(static_def) =
-                        try_parse_graveyard_keyword_static_with_continuation(&combined_static_line)
-                    {
-                        emitter.static_ir_at(
-                            item_line,
-                            StaticIr::from_definition(&combined_static_line, static_def),
-                        );
-                        i += 2;
-                        continue;
+                    let grant_body = strip_ability_word_with_name(&static_line)
+                        .filter(|(label, _)| super::oracle_modal::is_known_ability_word(label))
+                        .map_or_else(|| static_line.clone(), |(_, body)| body);
+                    let grant_lower = grant_body.to_lowercase();
+                    let grant_prefix = nom_on_lower(
+                        &grant_body,
+                        &grant_lower,
+                        opt(super::oracle_static::parse_leading_turn_scope),
+                    )
+                    .map_or(grant_body.as_str(), |(_, rest)| rest);
+                    let first_kind = try_parse_graveyard_keyword_grant_clause(grant_prefix)
+                        .map(|(_, kind, _)| kind);
+                    let next_lower = next_static_line.to_lowercase();
+                    let cost_kind = nom_on_lower(&next_static_line, &next_lower, |input| {
+                        let (input, _) = alt((tag("the "), tag("its "))).parse(input)?;
+                        let (input, kind) =
+                            super::oracle_static::parse_graveyard_granted_keyword_kind(input)?;
+                        let (input, _) = tag(" cost ").parse(input)?;
+                        Ok((input, kind))
+                    })
+                    .map(|(kind, _)| kind);
+                    if first_kind.is_some() && first_kind == cost_kind {
+                        if let Some(result) =
+                            try_parse_graveyard_keyword_source_with_label(&combined_static_line)
+                        {
+                            let source = original_oracle_text
+                                .lines()
+                                .skip(item_line)
+                                .take(2)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let result = result.map(|mut definition| {
+                                definition.description = Some(source.clone());
+                                definition
+                            });
+                            emitter.dedicated_static_span(
+                                item_line,
+                                item_line + 1,
+                                &source,
+                                result,
+                            );
+                            i += 2;
+                            continue;
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(result) = try_parse_graveyard_keyword_source_with_label(&static_line) {
+            let source = original_oracle_text
+                .lines()
+                .nth(item_line)
+                .unwrap_or(raw_line);
+            let result = result.map(|mut definition| {
+                definition.description = Some(source.to_owned());
+                definition
+            });
+            emitter.dedicated_static_span(item_line, item_line, source, result);
+            i += 1;
+            continue;
         }
 
         // CR 604.3 + CR 604.3a + CR 105.2c: Some instants/sorceries carry

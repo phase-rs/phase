@@ -4,6 +4,256 @@ use super::lower::{
 };
 use super::sequence::split_clause_sequence;
 use super::*;
+use crate::parser::oracle::has_unimplemented;
+
+#[test]
+fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
+    for head in [
+        "Destroy target creature",
+        "Destroy all creatures",
+        "Destroy each green or white creature",
+        "Destroy target artifact or enchantment",
+        "Destroy all permanents you own and control",
+        "Destroy target permanent an opponent controls",
+        "Destroy target tapped creature",
+        "Destroy target nonartifact attacking creature",
+        "Destroy target creature that was dealt damage this turn",
+    ] {
+        let complete = format!("{head} and draw a card");
+        let mut context = ParseContext::default();
+        let compound = try_split_targeted_compound(&complete, &mut context)
+            .expect("immediate owned continuation");
+        assert!(matches!(
+            compound.effect,
+            Effect::Destroy { .. } | Effect::DestroyAll { .. }
+        ));
+        let child = compound.sub_ability.as_deref().unwrap();
+        assert!(matches!(*child.effect, Effect::Draw { .. }));
+        assert!(child.sub_ability.is_none(), "exactly one child");
+        for source in [
+            format!("{head} with an unknown qualification and draw a card"),
+            format!("{head} and an unknown instruction"),
+            format!("{head} and "),
+        ] {
+            let original = ParseContext {
+                target_chooser: Some(ControllerRef::Opponent),
+                ..Default::default()
+            };
+            let mut context = original.clone();
+            assert!(
+                try_split_targeted_compound(&source, &mut context).is_none(),
+                "{source}"
+            );
+            assert_eq!(context, original, "failed compound is transactional");
+            let ability = parse_effect_chain(&source, AbilityKind::Spell);
+            assert!(has_unimplemented(&ability), "{source}");
+            assert!(
+                !matches!(
+                    *ability.effect,
+                    Effect::Destroy { .. } | Effect::DestroyAll { .. }
+                ),
+                "unowned child cannot license a broad primary: {ability:#?}"
+            );
+        }
+        let mut context = ParseContext::default();
+        let with_context =
+            parse_effect_chain_with_context(&complete, AbilityKind::Spell, &mut context);
+        let plain = parse_effect_chain(&complete, AbilityKind::Spell);
+        assert_eq!(with_context, plain);
+        assert!(!has_unimplemented(&plain), "{plain:#?}");
+        let ir = parse_effect_chain_ir(&complete, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(!ir.clauses.is_empty());
+        assert!(ir
+            .clauses
+            .iter()
+            .all(|clause| clause.source.fragment().is_some()));
+        assert_eq!(
+            ir.clauses
+                .iter()
+                .map(|clause| clause.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            ir.clauses.len()
+        );
+        let source = format!("{complete}.");
+        let mut document = crate::parser::oracle::parse_oracle_ir(
+            &source,
+            "Synthetic complete destroy compound",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(document.items.len(), 1);
+        assert_eq!(document.items[0].source.fragment(), Some(source.as_str()));
+        let lowered = crate::parser::oracle::lower_oracle_ir(&mut document);
+        assert_eq!(lowered.abilities.len(), 1);
+        let root = &lowered.abilities[0];
+        assert!(matches!(
+            *root.effect,
+            Effect::Destroy { .. } | Effect::DestroyAll { .. }
+        ));
+        let child = root.sub_ability.as_deref().unwrap();
+        assert!(matches!(
+            *child.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller
+            }
+        ));
+        assert!(child.sub_ability.is_none());
+        assert_eq!(root.description.as_deref(), Some(source.as_str()));
+        assert_eq!(root.target_chooser, None);
+        assert_eq!(child.target_chooser, None);
+        assert!(!root.optional && !child.optional);
+        assert!(root.condition.is_none() && child.condition.is_none());
+    }
+    let chooser = parse_effect_chain(
+        "Destroy target creature of an opponent's choice and draw a card.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(chooser.target_chooser, Some(ControllerRef::Opponent));
+    assert_eq!(chooser.sub_ability.as_deref().unwrap().target_chooser, None);
+    assert!(!has_unimplemented(&chooser));
+}
+
+#[test]
+fn destroy_terminal_public_chains_keep_exact_tail_and_sibling_failure_classes() {
+    let source = "Destroy target nonartifact, nonland permanent that doesn't share a color with clothing worn by its controller.";
+    for contextual in [false, true] {
+        let mut context = ParseContext::default();
+        let parsed = if contextual {
+            parse_effect_chain_with_context(source, AbilityKind::Spell, &mut context)
+        } else {
+            parse_effect_chain(source, AbilityKind::Spell)
+        };
+        assert!(
+            matches!(&*parsed.effect, Effect::Unimplemented { name, description } if name == "destroy_target_tail" && description.as_deref().is_some_and(|fragment| fragment.trim_end_matches('.') == source.trim_end_matches('.'))),
+            "{parsed:#?}"
+        );
+        assert!(!matches!(
+            *parsed.effect,
+            Effect::Destroy { .. } | Effect::DestroyAll { .. }
+        ));
+        assert_eq!(context, ParseContext::default());
+    }
+    for (source, all) in [
+        ("Destroy target creature.", false),
+        ("Destroy target nonblack creature.", false),
+        ("Destroy target green or white creature.", false),
+        ("Destroy all nonblack creatures.", true),
+        ("Destroy each artifact or enchantment.", true),
+    ] {
+        let parsed = parse_effect_chain(source, AbilityKind::Spell);
+        assert!(!has_unimplemented(&parsed), "{parsed:#?}");
+        assert_eq!(matches!(*parsed.effect, Effect::DestroyAll { .. }), all);
+        assert!(matches!(
+            *parsed.effect,
+            Effect::Destroy { .. } | Effect::DestroyAll { .. }
+        ));
+    }
+    let no_regen = parse_effect_chain(
+        "Destroy target nonartifact attacking creature. It can't be regenerated.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *no_regen.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    let spoiled = "Destroy target nonblack creature. It can't be regenerated. You gain control of all Equipment that were attached to it. (This effect lasts indefinitely.)";
+    let parsed = parse_effect_chain(spoiled, AbilityKind::Spell);
+    assert!(matches!(
+        *parsed.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    ));
+    let rider = parsed
+        .sub_ability
+        .as_deref()
+        .expect("the independent historical-attachment instruction survives");
+    assert!(
+        matches!(&*rider.effect, Effect::Unimplemented { name, description: Some(fragment) }
+        if name == "attached_to_qualifier" && fragment.trim_end_matches('.').trim_start_matches("You ").trim_start_matches("you ") == "gain control of all Equipment that were attached to it"),
+        "the exact historical relation stays strict: {rider:#?}"
+    );
+    let counter = parse_effect_chain(
+        "Counter target spell unless its controller pays {2}.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*counter.effect, Effect::Counter { .. }));
+    assert!(!has_unimplemented(&counter));
+    let exile = parse_effect_chain(
+        "Exile target creature card from your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        *exile.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert!(!has_unimplemented(&exile));
+}
+
+#[test]
+fn destroy_public_failure_classes_and_typed_event_context_remain_distinct() {
+    for (source, reason, offending) in [
+        ("Destroy target unclassified word.", "unparsed_verb_arguments", "Destroy target unclassified word"),
+        ("~ deals 6 damage to target creature. Destroy target Equipment attached to that creature.", "unparsed_verb_arguments", "Destroy target Equipment attached to that creature"),
+        ("~ deals 6 damage to target creature. Destroy all Equipment attached to those players.", "attached_to_qualifier", "Destroy all Equipment attached to those players"),
+        ("Put a +1/+1 counter on this creature and frobnicate.", "put_counter_tail", "Put a +1/+1 counter on this creature and frobnicate"),
+    ] {
+        for contextual in [false, true] {
+            let mut context = ParseContext::default();
+            let chain = if contextual { parse_effect_chain_with_context(source, AbilityKind::Spell, &mut context) } else { parse_effect_chain(source, AbilityKind::Spell) };
+            let nodes = std::iter::successors(Some(&chain), |node| node.sub_ability.as_deref()).collect::<Vec<_>>();
+            assert!(nodes.iter().any(|node| matches!(&*node.effect, Effect::Unimplemented { name, description: Some(fragment) } if name == reason && fragment.trim_end_matches('.') == offending)), "owning failure class: {source}: {chain:#?}");
+            if reason != "put_counter_tail" { assert!(!serde_json::to_string(&chain).unwrap().contains("DeclaredTarget")); }
+        }
+    }
+    let mut context = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+        object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+        ..Default::default()
+    };
+    let trigger = parse_effect_chain_with_context(
+        "Destroy it and draw a card.",
+        AbilityKind::Database,
+        &mut context,
+    );
+    assert!(matches!(
+        *trigger.effect,
+        Effect::Destroy {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+    assert!(matches!(
+        *trigger.sub_ability.as_deref().unwrap().effect,
+        Effect::Draw { .. }
+    ));
+    assert!(!has_unimplemented(&trigger));
+    let modeled = parse_effect_chain(
+        "~ deals 6 damage to target creature. Destroy all Equipment attached to that creature.",
+        AbilityKind::Spell,
+    );
+    assert!(!has_unimplemented(&modeled));
+    let tail = modeled.sub_ability.as_deref().unwrap();
+    assert!(matches!(*tail.effect, Effect::DestroyAll { .. }));
+    assert!(serde_json::to_string(&tail)
+        .unwrap()
+        .contains("DeclaredTarget"));
+    assert!(!has_unimplemented(&parse_effect_chain(
+        "Put a +1/+1 counter on this creature.",
+        AbilityKind::Spell
+    )));
+}
 
 #[test]
 fn complete_no_max_and_quoted_perpetual_scope_is_transactional() {
