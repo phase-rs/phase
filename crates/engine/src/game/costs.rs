@@ -737,13 +737,12 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         state,
         player,
         source_id,
-        cost,
+        (cost, None),
         events,
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_index,
         },
-        None,
         resolved,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
@@ -843,10 +842,9 @@ fn pay_ability_cost_inner(
         state,
         player,
         source_id,
-        cost,
+        (cost, resume_cost),
         events,
         scope,
-        resume_cost,
         None,
     )
 }
@@ -855,10 +853,9 @@ fn pay_ability_cost_inner_with_resolved(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
-    cost: &AbilityCost,
+    (cost, resume_cost): (&AbilityCost, Option<&AbilityCost>),
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
-    resume_cost: Option<&AbilityCost>,
     mut resolved: Option<&mut ResolvedAbility>,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
@@ -1085,10 +1082,12 @@ fn pay_ability_cost_inner_with_resolved(
                     state,
                     player,
                     source_id,
-                    sub_cost,
+                    (
+                        sub_cost,
+                        matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                    ),
                     events,
                     scope,
-                    matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
                     resolved.as_deref_mut(),
                 )?;
                 match outcome {
@@ -2013,7 +2012,7 @@ fn pay_ability_cost_inner_with_resolved(
                 unreachable!("self-referential return costs are not payable at resolution")
             };
             if let Some(outcome) =
-                move_self_activation_cost(state, player, source_id, Zone::Hand, resolved.as_deref_mut(), events)
+                move_self_activation_cost(state, player, source_id, Zone::Hand, resolved, events)
             {
                 return Ok(outcome);
             }

@@ -164,8 +164,7 @@ fn run_flip_branch(
     branch: Option<&AbilityDefinition>,
     source_id: ObjectId,
     controller: PlayerId,
-    targets: &[TargetRef],
-    chain_root_targets: &[TargetRef],
+    (targets, chain_root_targets): (&[TargetRef], &[TargetRef]),
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -271,8 +270,7 @@ pub fn resolve(
         branch,
         ability.source_id,
         ability.controller,
-        &ability.targets,
-        &ability.context.chain_root_targets,
+        (&ability.targets, &ability.context.chain_root_targets),
         ability.return_result_process,
         events,
     )?;
@@ -373,8 +371,7 @@ pub fn resolve_flip_coins(
             branch,
             ability.source_id,
             ability.controller,
-            &ability.targets,
-            &ability.context.chain_root_targets,
+            (&ability.targets, &ability.context.chain_root_targets),
             ability.return_result_process,
             events,
         )?;
@@ -520,8 +517,7 @@ fn finish_until_lose(
             Some(win_effect),
             source_id,
             controller,
-            targets,
-            chain_root_targets,
+            (targets, chain_root_targets),
             expected_return_result_process,
             events,
         )?;
@@ -662,8 +658,7 @@ fn resume_after_keep_in_occurrence(
                 branch,
                 source_id,
                 controller,
-                &targets,
-                &chain_root_targets,
+                (&targets, &chain_root_targets),
                 expected_return_result_process,
                 events,
             )?;
@@ -689,8 +684,7 @@ fn resume_after_keep_in_occurrence(
                 branch,
                 source_id,
                 controller,
-                &targets,
-                &chain_root_targets,
+                (&targets, &chain_root_targets),
                 expected_return_result_process,
                 events,
             )?;
@@ -712,8 +706,7 @@ fn resume_after_keep_in_occurrence(
                             branch,
                             source_id,
                             controller,
-                            &targets,
-                            &chain_root_targets,
+                            (&targets, &chain_root_targets),
                             expected_return_result_process,
                             events,
                         )?;

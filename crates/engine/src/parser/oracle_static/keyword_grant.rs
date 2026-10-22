@@ -277,6 +277,7 @@ fn normalize_graveyard_granted_keyword(
 /// keyword (and optional inline "where X is its mana value" binding) lives on
 /// the same line — Sliver Gravemother's "encore {X}, where X is its mana value".
 /// Continuation-sentence grants (Wire Surgeons / Varolz) return `None`.
+#[cfg(test)]
 pub(crate) fn try_parse_graveyard_keyword_grant_static(line: &str) -> Option<StaticDefinition> {
     let stripped = strip_reminder_text(line);
     let lower = stripped.to_lowercase();

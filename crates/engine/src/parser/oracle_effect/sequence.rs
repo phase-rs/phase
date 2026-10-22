@@ -9748,6 +9748,7 @@ mod departure_counter_context_tests {
     }
 }
 
+#[cfg(test)]
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
     try_parse_token_enters_with_counters_with_context(lower, &mut ParseContext::default())
 }
@@ -9880,6 +9881,7 @@ fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
     rest.trim().trim_start_matches(['.', ' ']).is_empty()
 }
 
+#[cfg(test)]
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     try_parse_put_counters_on_token_followup_with_context(lower, &mut ParseContext::default())
 }

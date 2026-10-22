@@ -11606,6 +11606,7 @@ impl QuantityRef {
 }
 
 impl AbilityDefinition {
+    #[cfg(test)]
     pub(crate) fn for_each_own_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
         use crate::types::ability_visit::{nodes, DefinitionNode, ResolutionScope};
         let _ = nodes::visit_ability_def_scoped(
@@ -11619,6 +11620,7 @@ impl AbilityDefinition {
             },
         );
     }
+    #[cfg(test)]
     pub(crate) fn for_each_own_quantity_ref_mut(&mut self, f: &mut dyn FnMut(&mut QuantityRef)) {
         use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut, ResolutionScope};
         let _ = nodes_mut::visit_ability_def_scoped(
@@ -12312,14 +12314,13 @@ impl StaticCondition {
             | Self::RecipientMatchesFilter { filter } => {
                 filter.clear_typed_return_result_processes(&mut |_| {})
             }
-            Self::UnlessPay { scaling, .. } => match scaling {
-                UnlessPayScaling::PerQuantityRef { quantity }
-                | UnlessPayScaling::PerAffectedAndQuantityRef { quantity }
-                | UnlessPayScaling::PerAffectedWithRef { quantity } => {
-                    quantity.clear_typed_return_result_processes(&mut |_| {})
-                }
-                _ => {}
-            },
+            Self::UnlessPay {
+                scaling:
+                    UnlessPayScaling::PerQuantityRef { quantity }
+                    | UnlessPayScaling::PerAffectedAndQuantityRef { quantity }
+                    | UnlessPayScaling::PerAffectedWithRef { quantity },
+                ..
+            } => quantity.clear_typed_return_result_processes(&mut |_| {}),
             Self::Not { condition } => condition.clear_embedded_return_result_processes(),
             Self::And { conditions } | Self::Or { conditions } => {
                 for condition in conditions {
@@ -15993,6 +15994,7 @@ impl QuantityExpr {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn instruction_result_ids(&self) -> Vec<ReturnResultId> {
         let mut ids = Vec::new();
         self.for_each_ref(&mut |reference| {

@@ -16812,7 +16812,7 @@ fn start_player_scope_sacrifice_choices(
                 state.pending_player_scope_sacrifice_choice =
                     Some(PendingPlayerScopeSacrificeChoice {
                         return_result_occurrence: retained_return_result_occurrence(
-                            state, &template,
+                            state, template,
                         )?,
                         ability: Box::new(template.clone()),
                         remaining_players: matching_players[i + 1..].to_vec(),
