@@ -14481,8 +14481,6 @@ mod tests {
     /// proving the visitor reached both members).
     #[test]
     fn distinct_subtypes_restrict_narrows_to_one_category() {
-        use crate::types::card_type::SubtypeSet;
-
         let mut state = GameState::new_two_player(42);
         state.all_creature_types = vec!["Bear".to_string()];
         add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Creature", &["Jace"]);
@@ -14547,8 +14545,6 @@ mod tests {
     /// HashSet→counter regression reads 3). Reach-guard: three distinct → 3.
     #[test]
     fn distinct_subtypes_restrict_dedupes_shared_values() {
-        use crate::types::card_type::SubtypeSet;
-
         let mut state = GameState::new_two_player(42);
         add_creature_with_subtypes(&mut state, PlayerId(0), "Jace One", &["Jace"]);
         add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Two", &["Jace"]);
@@ -14582,8 +14578,6 @@ mod tests {
     /// Creature-restricted over a creature-subtyped population → 0.
     #[test]
     fn distinct_subtypes_exclude_and_restrict_conjoin() {
-        use crate::types::card_type::SubtypeSet;
-
         let mut state = GameState::new_two_player(42);
         state.all_creature_types = vec!["Bear".to_string()];
         add_creature_with_subtypes(&mut state, PlayerId(0), "Grizzly Bears", &["Bear"]);
