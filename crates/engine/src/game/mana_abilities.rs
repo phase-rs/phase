@@ -5752,7 +5752,7 @@ pub(crate) fn resume_waiting_for(
             effect_description,
             remaining,
         } => WaitingFor::UnlessPayment {
-            return_result_occurrence: return_result_occurrence,
+            return_result_occurrence,
             player: outer_player.unwrap_or(mana_source_controller),
             cost: *cost,
             pending_effect,
