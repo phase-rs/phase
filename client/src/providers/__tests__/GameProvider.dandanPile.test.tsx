@@ -2,7 +2,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CommanderBracketTier } from "../../types/bracketEstimate";
 
-type Deck = { main_deck: string[]; bracket_tier?: CommanderBracketTier };
+type Deck = { main_deck: string[]; bracket_tier?: CommanderBracketTier | null };
 type DeckList = { player: Deck; opponent: Deck; ai_decks: Deck[] };
 
 const {
@@ -297,7 +297,7 @@ describe("GameProvider host-supplied pile routes", () => {
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
       expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
-      expect(recorded.ws[0].deck.bracket_tier).toBe("core");
+      expect(recorded.ws[0].deck.bracket_tier).toBeNull();
     });
 
     it("an online guest preserves its active deck's declared bracket", async () => {

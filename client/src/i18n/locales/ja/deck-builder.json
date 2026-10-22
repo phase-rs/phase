@@ -265,16 +265,96 @@
     "clearOverride": "アート上書きを解除"
   },
   "bracket": {
+    "card": {
+      "estimatedLabel": "推定ブラケット",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "申告: なし",
+      "declared": "申告: B{{tier}} {{label}}",
+      "youMarker": "あなた",
+      "belowFloor": "B{{declared}} を申告しましたが、このデッキは B{{floor}} より下げられません。AI は申告された B{{declared}} でプレイします。",
+      "partialCoverage_one": "{{count}} 件のカード名が見つかりませんでした。集計が少なめの可能性があります",
+      "partialCoverage_few": "{{count}} 件のカード名が見つかりませんでした。集計が少なめの可能性があります",
+      "partialCoverage_many": "{{count}} 件のカード名が見つかりませんでした。集計が少なめの可能性があります",
+      "partialCoverage_other": "{{count}} 件のカード名が見つかりませんでした。集計が少なめの可能性があります",
+      "combosUnchecked": "このビルドでは2枚コンボを確認していません。含めるには、上のコンボの質問に回答してください。",
+      "tabsLabel": "ブラケットの詳細",
+      "tabWhy": "B{{tier}} の理由",
+      "tabBringDown": "下げるには",
+      "commanderTag": "統率者",
+      "listComma": "、",
+      "listOr": " または ",
+      "why": {
+        "nothingRaises": "このデッキには、すべての推定の出発点である B2 を上回る要因はありません。",
+        "rulesOutB1": "次の理由により B1 は申告できません:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "2枚コンボ",
+        "comboEarly": "序盤の2枚コンボ",
+        "ownerAnswer": "あなたのコンボの回答",
+        "ownerIntended": "このデッキには意図的な2枚コンボがあると回答されました。",
+        "ownerIntendedEarly": "このデッキには序盤に揃う2枚コンボがあると回答されました。",
+        "ownerIntendedLate": "このデッキには終盤に揃う2枚コンボがあると回答されました。",
+        "comboFromTable": "（コンボ）"
+      },
+      "combo": {
+        "assembles": "マナ{{cost}}で揃う"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} では最大 {{allowed}} まで許可されます。このデッキは {{observed}} です。",
+        "cardRuleNone": "B{{tier}} では許可されません。このデッキは {{observed}} です。",
+        "comboStandalone": "B1 と B2 では、意図的な2枚の無限コンボは認められません。",
+        "comboEarly": "B3 では、終盤に揃う（マナ{{ceiling}}超）場合に限り2枚コンボが認められます。",
+        "ownerAnswer": "phase はこの回答を確認できないため、あなたの回答をそのまま使います。上のコンボの質問で変更できます。"
+      },
+      "source": "{{document}}、{{published}} ↗",
+      "ladder": {
+        "removeAll_one": "これを抜く:",
+        "removeAll_few": "{{count}} 枚すべてを抜く:",
+        "removeAll_many": "{{count}} 枚すべてを抜く:",
+        "removeAll_other": "{{count}} 枚すべてを抜く:",
+        "removeSome_one": "次のうち {{count}} 枚を抜く:",
+        "removeSome_few": "次のうち {{count}} 枚を抜く:",
+        "removeSome_many": "次のうち {{count}} 枚を抜く:",
+        "removeSome_other": "次のうち {{count}} 枚を抜く:",
+        "breakCombo": "コンボを崩す",
+        "removeOneOf": "次のうち1枚を抜く:",
+        "removeThis": "抜く:",
+        "replaceCommander_one": "さらに下げるには、別の統率者も必要です:",
+        "replaceCommander_few": "さらに下げるには、別の統率者（{{count}} 体）も必要です:",
+        "replaceCommander_many": "さらに下げるには、別の統率者（{{count}} 体）も必要です:",
+        "replaceCommander_other": "さらに下げるには、別の統率者（{{count}} 体）も必要です:",
+        "changeComboAnswer": "上の質問でコンボの回答を変更してください。",
+        "footnote": "推定の下限は B2 です。B1 はデッキのテーマで決まります。"
+      }
+    },
     "unavailable": "このビルドではブラケットを推定できません。",
     "addCommander": "ブラケット推定を見るには統率者を追加してください。",
-    "estimated": "推定: B{{tier}} {{label}}",
-    "manual": "手動: B{{tier}} {{label}}",
-    "mismatch": " ⚠ 不一致",
-    "hideBreakdown": "内訳を隠す",
-    "showBreakdown": "内訳を表示",
-    "hideBreakdownButton": "▲ 内訳を隠す",
-    "showBreakdownButton": "▼ 内訳を表示",
-    "forced": "（強制 B{{tier}}）",
+    "axis": {
+      "gameChangers": "ゲームチェンジャー",
+      "massLandDenial": "大量土地破壊",
+      "extraTurns": "追加ターン",
+      "efficientTutors": "効率的なサーチ"
+    },
+    "combo": {
+      "attribution": "コンボデータ: {{attribution}}、スナップショット {{date}}",
+      "outcome": {
+        "wins": "ゲームに勝利",
+        "unbounded": "無限の{{resource}}"
+      },
+      "resource": {
+        "mana": "マナ",
+        "damage": "ダメージ",
+        "lifeLoss": "ライフ減少",
+        "lifegain": "ライフ獲得",
+        "mill": "切削",
+        "draw": "カードを引く",
+        "tokens": "トークン",
+        "combat": "戦闘フェイズ",
+        "turns": "ターン"
+      }
+    },
     "dataVersion": "データ: {{version}}",
     "aboutBrackets": "ブラケットについて ↗",
     "estimatedChip": "推定: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "デッキブラケット",
     "unrated": "未評価"
+  },
+  "signals": {
+    "title": "デッキ指標",
+    "disclaimer": "デッキのカードテキストを解析した記述統計です。ブラケットの基準ではなく、推定を変えることはありません。",
+    "avgManaValue": "平均マナ総量（土地以外）: {{value}}",
+    "notMeasurable": "測定不可",
+    "noCommander": "デッキ指標を見るには統率者を追加してください。",
+    "unavailable": "デッキ指標にはカードデータが必要ですが、まだ読み込まれていません。",
+    "unresolved": "{{n}} 件のカード名がカードデータに見つかりませんでした。",
+    "kind": {
+      "counterspells": "打ち消し呪文",
+      "spot_removal": "単体除去",
+      "sweepers": "全体除去",
+      "card_advantage": "カード・アドバンテージ",
+      "free_interaction": "無料の妨害",
+      "mana_producers": "マナ生成",
+      "land_fetch": "土地サーチ",
+      "rituals": "儀式",
+      "extra_land_drops": "追加の土地プレイ"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "2枚の無限コンボ",
+    "question": "意図的な2枚の無限コンボはありますか？",
+    "undeclared": "未回答",
+    "noneIntended": "意図していない",
+    "intended": "意図している",
+    "windowAriaLabel": "いつ揃えられますか？",
+    "windowUnstated": "未指定",
+    "windowEarly": "序盤",
+    "windowLate": "終盤のみ"
   },
   "warnings": {
     "commanderCount": "デッキは{{count}}枚です（{{expected}}枚ちょうど必要）",

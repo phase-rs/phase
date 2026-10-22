@@ -321,3 +321,117 @@ fn single_game_measurement_env_prints_measurement_marker() {
 {out}"
     );
 }
+
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn batched_game_pod_report_matches_the_same_game_run_alone() {
+    let pid = std::process::id();
+    let target_seed = "9403";
+    let solo_report = std::env::temp_dir().join(format!("pod_solo_{pid}.json"));
+    let batch_report = std::env::temp_dir().join(format!("pod_batch_{pid}.json"));
+    let games_file = std::env::temp_dir().join(format!("pod_games_{pid}.txt"));
+    std::fs::write(&games_file, "9401,Easy\n9402,Easy\n9403,Easy\n").expect("write games");
+
+    run_ai_commander(&[
+        "--seed",
+        target_seed,
+        "--difficulty",
+        "Easy",
+        "--action-cap",
+        TEST_ACTION_CAP,
+        "--pod-report",
+        solo_report.to_str().unwrap(),
+    ]);
+    run_ai_commander(&[
+        "--games-file",
+        games_file.to_str().unwrap(),
+        "--action-cap",
+        TEST_ACTION_CAP,
+        "--pod-report",
+        batch_report.to_str().unwrap(),
+    ]);
+
+    let solo: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&solo_report).expect("read solo report"))
+            .expect("parse solo report");
+    let batch: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&batch_report).expect("read batch report"))
+            .expect("parse batch report");
+    let row_for = |report: &serde_json::Value| {
+        report["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["seed"] == 9403)
+            .cloned()
+            .expect("target row")
+    };
+    assert_eq!(row_for(&solo), row_for(&batch));
+    let _ = std::fs::remove_file(solo_report);
+    let _ = std::fs::remove_file(batch_report);
+    let _ = std::fs::remove_file(games_file);
+}
+
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn per_seat_bracket_echo_reflects_the_flags() {
+    let output = run_ai_commander(&[
+        "--seed",
+        "9501",
+        "--action-cap",
+        TEST_ACTION_CAP,
+        "--bracket-p0",
+        "Cedh",
+        "--bracket-p1",
+        "Optimized",
+    ]);
+    assert!(output
+        .lines()
+        .any(|line| line.contains("P0") && line.contains("bracket=Cedh")));
+    assert!(output
+        .lines()
+        .any(|line| line.contains("P1") && line.contains("bracket=Optimized")));
+}
+
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn pinned_preamble_survives_the_bracket_echo() {
+    let seed = "9502";
+    let output = run_ai_commander(&[
+        "--seed",
+        seed,
+        "--action-cap",
+        TEST_ACTION_CAP,
+        "--bracket-p0",
+        "Cedh",
+    ]);
+    let expected = format!(
+        "=== 4-player Commander AI test ===\nFeed: feeds/mtggoldfish-commander.json\nSeed: {seed}   Difficulty: Easy\n\n"
+    );
+    assert!(output.starts_with(&expected));
+}
+
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn cedh_tier_changes_the_run() {
+    let common = ["--seed", "9503", "--action-cap", TEST_ACTION_CAP];
+    let core = run_ai_commander(&common);
+    let cedh = run_ai_commander(&[
+        "--seed",
+        "9503",
+        "--action-cap",
+        TEST_ACTION_CAP,
+        "--bracket-p0",
+        "Cedh",
+        "--bracket-p1",
+        "Cedh",
+        "--bracket-p2",
+        "Cedh",
+        "--bracket-p3",
+        "Cedh",
+    ]);
+    assert_ne!(
+        normalized_result_block(game_blocks(&core)[0]),
+        normalized_result_block(game_blocks(&cedh)[0])
+    );
+}

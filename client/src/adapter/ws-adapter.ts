@@ -30,7 +30,7 @@ import type {
 } from "./generated/interaction";
 import { SubmissionSlot } from "./submissionSlot";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, isCustomGameFormat, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -48,7 +48,7 @@ import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
-  bracket_tier?: CommanderBracketTier;
+  bracket_tier?: CommanderBracketTier | null;
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
@@ -2189,14 +2189,6 @@ export class WebSocketAdapter implements EngineAdapter {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",
-      false,
-    );
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in WebSocket sessions.",
       false,
     );
   }

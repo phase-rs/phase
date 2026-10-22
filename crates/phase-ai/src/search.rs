@@ -10153,6 +10153,7 @@ mod tests {
             .collect();
         resolve_deck_list(
             db,
+            &engine::database::ComboTable::default(),
             &DeckList {
                 player: PlayerDeckList {
                     main_deck,

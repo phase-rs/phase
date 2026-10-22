@@ -10598,12 +10598,29 @@ pub struct PlayerDeckPool {
     pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
-    /// The declared bracket tier for this player's deck. Used by the AI to
-    /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
-    /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
-    /// compatibility with saved states and test fixtures that omit the field.
+    /// The bracket this player's deck owner declared; `None` means undeclared.
+    /// The AI reads [`Self::effective_bracket_tier`] instead of this declaration
+    /// directly. Saved states and fixtures that omit the field deserialize to `None`.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// The AI must never read `bracket_tier` directly; it reads
+    /// [`Self::effective_bracket_tier`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
+}
+
+impl PlayerDeckPool {
+    /// The tier the AI acts on. The only read of bracket data any AI path may
+    /// perform: `bracket_tier` alone is the player's declaration and remains for
+    /// legality and display.
+    pub fn effective_bracket_tier(&self) -> crate::game::bracket_estimate::EffectiveBracketTier {
+        crate::game::bracket_estimate::effective_tier(
+            self.bracket_tier,
+            self.estimated_bracket_tier,
+        )
+    }
 }
 
 /// The authoritative source of a companion offered during pre-game setup.
@@ -47263,6 +47280,35 @@ mod tests {
         let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
         assert!(pool.registered_companion.is_empty());
         assert!(pool.current_companion.is_empty());
+    }
+
+    #[test]
+    fn deck_pool_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.estimated_bracket_tier, None);
+        assert_eq!(pool.bracket_tier, None);
+        assert_eq!(
+            pool.effective_bracket_tier().tier(),
+            crate::game::bracket_estimate::CommanderBracketTier::Core,
+            "a legacy pool with neither a declaration nor an estimate plays at Core"
+        );
+    }
+
+    /// An undeclared pool goes out on the full-game and P2P wire as an explicit
+    /// `null`, which a peer from before the nullable-bracket protocol bump cannot
+    /// decode. Current peers must read it back as undeclared.
+    #[test]
+    fn undeclared_deck_pool_round_trips_through_an_explicit_null() {
+        let json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        assert!(json["bracket_tier"].is_null());
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.bracket_tier, None);
     }
 
     #[test]

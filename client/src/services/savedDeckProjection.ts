@@ -1,5 +1,5 @@
 import type { GameFormat } from "../adapter/types";
-import type { CommanderBracket } from "../types/bracket";
+import type { CommanderBracket, ComboDeclaration } from "../types/bracket";
 import { formatMetadata } from "../data/formatRegistry";
 import type { ParsedDeck } from "./deckParser";
 
@@ -13,11 +13,17 @@ function removeOneCopy(entries: ParsedDeck["sideboard"], name: string): ParsedDe
 }
 
 /** The persisted JSON of a saved deck. */
-export function serializeSavedDeck(deck: ParsedDeck, format: GameFormat, bracket: CommanderBracket | null): string {
+export function serializeSavedDeck(
+  deck: ParsedDeck,
+  format: GameFormat,
+  bracket: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration,
+): string {
   return JSON.stringify({
     ...projectSignatureSpellForFormat(deck, format),
     format,
     ...(bracket !== null ? { bracket } : {}),
+    ...(comboDeclaration.kind !== "undeclared" ? { combo_declaration: comboDeclaration } : {}),
   });
 }
 

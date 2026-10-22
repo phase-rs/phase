@@ -67,7 +67,7 @@ const {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions:
       | {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[]; bracket_tier?: string | null } }>;
           formatConfig?: { starting_life: number };
         }
       | undefined;
@@ -90,7 +90,7 @@ const {
       _displayName?: string,
       options?: {
         nativeAi?: {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[]; bracket_tier?: string | null } }>;
           formatConfig?: { starting_life: number };
         };
         nativePregame?: NativePregameReconnect;
@@ -371,6 +371,7 @@ function aiCandidate(id: string, main: string[], bracket: CommanderBracket | nul
     coveragePct: 100,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
   };
 }
 
@@ -1599,6 +1600,28 @@ describe("GameProvider native AI routing", () => {
     // pickRandomDeckCandidate is mocked to take the first candidate, so an
     // unfiltered draw would hand the AI the bracket-4 deck listed first.
     expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
+  });
+
+  it.each([
+    ["an untagged deck the pool filtered on its estimate", null, null],
+    ["a declared deck", 4, "optimized"],
+  ] as const)("sends %s to the engine as its declaration only", async (_label, declaredBracket, sentTier) => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    // `bracket` is the value the pool filters on; for an untagged deck it is the estimate.
+    const pick = { ...aiCandidate("saved:Pick", ["Pick-Card"], 3), declaredBracket };
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [pick], allCandidates: [pick] });
+
+    render(
+      <GameProvider gameId={`declared-tier-${sentTier}`} mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["Pick-Card"]);
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.bracket_tier).toBe(sentTier);
   });
 
   it("starts each AI seat from the game's seat snapshot instead of single-player preferences", async () => {

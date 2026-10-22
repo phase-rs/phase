@@ -122,6 +122,7 @@ function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
   };
 }
 
@@ -134,6 +135,7 @@ function preconCandidate(deckId: string, name: string): AiDeckCandidate {
     coveragePct: null,
     archetype: null,
     bracket: null,
+    declaredBracket: null,
     knownFormat: "Commander",
   };
 }

@@ -10,7 +10,7 @@
 //! Ordinary-pack controls install a synthetic product. Cube regressions load
 //! the persisted source through DeckList and database hydration before casting.
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::boosters;
 use engine::game::card_subset::{game_requires_full_card_db, FullDbReason};
 use engine::game::deck_loading::{load_and_hydrate_decks, resolve_deck_list, DeckList};
@@ -409,7 +409,7 @@ fn loaded_cube_game(
     runner.state_mut().booster_shelf = Arc::new(test_shelf());
     load_and_hydrate_decks(
         runner.state_mut(),
-        &resolve_deck_list(&db, &list),
+        &resolve_deck_list(&db, &ComboTable::default(), &list),
         Some(&db),
     );
     assert_eq!(runner.state().booster_pack_pool.as_deref(), pool.as_ref());

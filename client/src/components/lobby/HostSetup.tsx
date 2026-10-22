@@ -868,7 +868,7 @@ export function HostSetup({
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].declaredBracket) },
       },
     }));
   };

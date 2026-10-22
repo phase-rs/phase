@@ -265,16 +265,96 @@
     "clearOverride": "Cancella sostituzione illustrazione"
   },
   "bracket": {
-    "unavailable": "La stima del bracket non è disponibile in questa build.",
+    "card": {
+      "estimatedLabel": "Bracket stimato",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "Dichiarato: nessuno",
+      "declared": "Dichiarato: B{{tier}} {{label}}",
+      "youMarker": "Tu",
+      "belowFloor": "Hai dichiarato B{{declared}}, ma questo mazzo non può essere inferiore a B{{floor}}. L'IA gioca il tuo B{{declared}} dichiarato.",
+      "partialCoverage_one": "{{count}} nome di carta non è stato trovato; i conteggi potrebbero essere bassi",
+      "partialCoverage_few": "{{count}} nomi di carte non sono stati trovati; i conteggi potrebbero essere bassi",
+      "partialCoverage_many": "{{count}} nomi di carte non sono stati trovati; i conteggi potrebbero essere bassi",
+      "partialCoverage_other": "{{count}} nomi di carte non sono stati trovati; i conteggi potrebbero essere bassi",
+      "combosUnchecked": "Le combo di due carte non sono state controllate in questa build. Rispondi alla domanda sulle combo qui sopra per includerle.",
+      "tabsLabel": "Dettagli del bracket",
+      "tabWhy": "Perché B{{tier}}",
+      "tabBringDown": "Abbassalo",
+      "commanderTag": "Comandante",
+      "listComma": ", ",
+      "listOr": " o ",
+      "why": {
+        "nothingRaises": "Niente in questo mazzo lo porta sopra B2, da cui parte ogni stima.",
+        "rulesOutB1": "Questi escludono la dichiarazione di B1:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "Combo di due carte",
+        "comboEarly": "Combo rapida di due carte",
+        "ownerAnswer": "La tua risposta sulle combo",
+        "ownerIntended": "Hai indicato che questo mazzo ha una combo di due carte intenzionale.",
+        "ownerIntendedEarly": "Hai indicato che questo mazzo ha una combo di due carte nelle prime fasi della partita.",
+        "ownerIntendedLate": "Hai indicato che questo mazzo ha una combo di due carte che si completa tardi.",
+        "comboFromTable": "(combo)"
+      },
+      "combo": {
+        "assembles": "si assembla con {{cost}} mana"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} ne consente fino a {{allowed}}; questo mazzo ne ha {{observed}}.",
+        "cardRuleNone": "B{{tier}} non ne consente; questo mazzo ne ha {{observed}}.",
+        "comboStandalone": "B1 e B2 non consentono combo infinite di due carte intenzionali.",
+        "comboEarly": "B3 consente combo di due carte solo se si completano tardi (più di {{ceiling}} mana).",
+        "ownerAnswer": "phase non può verificare questa risposta; usa ciò che hai indicato. Modificala nella domanda sulle combo qui sopra."
+      },
+      "source": "{{document}}, {{published}} ↗",
+      "ladder": {
+        "removeAll_one": "Rimuovila:",
+        "removeAll_few": "Rimuovile tutte e {{count}}:",
+        "removeAll_many": "Rimuovile tutte e {{count}}:",
+        "removeAll_other": "Rimuovile tutte e {{count}}:",
+        "removeSome_one": "Rimuovi {{count}} tra:",
+        "removeSome_few": "Rimuovi {{count}} tra:",
+        "removeSome_many": "Rimuovi {{count}} tra:",
+        "removeSome_other": "Rimuovi {{count}} tra:",
+        "breakCombo": "Spezza la combo",
+        "removeOneOf": "Rimuovi una tra:",
+        "removeThis": "Rimuovi:",
+        "replaceCommander_one": "Per scendere ancora serve anche un altro comandante:",
+        "replaceCommander_few": "Per scendere ancora servono anche {{count}} comandanti diversi:",
+        "replaceCommander_many": "Per scendere ancora servono anche {{count}} comandanti diversi:",
+        "replaceCommander_other": "Per scendere ancora servono anche {{count}} comandanti diversi:",
+        "changeComboAnswer": "Modifica la tua risposta sulle combo nella domanda qui sopra.",
+        "footnote": "B2 è il minimo della stima; B1 dipende dal tema del mazzo."
+      }
+    },
+    "unavailable": "La stima del bracket richiede dati delle carte che non sono ancora stati caricati.",
     "addCommander": "Aggiungi un comandante per vedere la stima del tuo bracket.",
-    "estimated": "Stimato: B{{tier}} {{label}}",
-    "manual": "Manuale: B{{tier}} {{label}}",
-    "mismatch": " ⚠ discordanza",
-    "hideBreakdown": "Nascondi dettagli",
-    "showBreakdown": "Mostra dettagli",
-    "hideBreakdownButton": "▲ Nascondi dettagli",
-    "showBreakdownButton": "▼ Mostra dettagli",
-    "forced": "(forzato B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negazione di massa delle terre",
+      "extraTurns": "Turni extra",
+      "efficientTutors": "Tutori efficienti"
+    },
+    "combo": {
+      "attribution": "Dati combo: {{attribution}}, istantanea del {{date}}",
+      "outcome": {
+        "wins": "Vince la partita",
+        "unbounded": "{{resource}} senza limiti"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "danni",
+        "lifeLoss": "perdita di punti vita",
+        "lifegain": "guadagno di punti vita",
+        "mill": "macina",
+        "draw": "pesca di carte",
+        "tokens": "pedine",
+        "combat": "fasi di combattimento",
+        "turns": "turni"
+      }
+    },
     "dataVersion": "Dati: {{version}}",
     "aboutBrackets": "Informazioni sui bracket ↗",
     "estimatedChip": "Stimato: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "Bracket del mazzo",
     "unrated": "Senza valutazione"
+  },
+  "signals": {
+    "title": "Segnali del mazzo",
+    "disclaimer": "Statistiche descrittive ricavate dal testo analizzato delle carte del mazzo. Non sono criteri di bracket e non modificano mai la stima.",
+    "avgManaValue": "Valore di mana medio (non terra): {{value}}",
+    "notMeasurable": "non misurabile",
+    "noCommander": "Aggiungi un comandante per vedere i segnali del mazzo.",
+    "unavailable": "I segnali del mazzo richiedono dati delle carte, che non sono ancora stati caricati.",
+    "unresolved": "{{n}} nomi di carte non sono stati trovati nei dati delle carte.",
+    "kind": {
+      "counterspells": "Contromagie",
+      "spot_removal": "Rimozioni mirate",
+      "sweepers": "Rimozioni globali",
+      "card_advantage": "Vantaggio carte",
+      "free_interaction": "Interazione gratuita",
+      "mana_producers": "Produttori di mana",
+      "land_fetch": "Ricerca di terre",
+      "rituals": "Rituali",
+      "extra_land_drops": "Terre aggiuntive per turno"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinita di due carte",
+    "question": "Combo infinita intenzionale di due carte?",
+    "undeclared": "Senza risposta",
+    "noneIntended": "Nessuna intenzionale",
+    "intended": "Intenzionale",
+    "windowAriaLabel": "Quando può essere assemblata?",
+    "windowUnstated": "Non specificato",
+    "windowEarly": "Inizio partita",
+    "windowLate": "Solo a partita avanzata"
   },
   "warnings": {
     "commanderCount": "Il mazzo ha {{count}} carte (ne servono esattamente {{expected}})",

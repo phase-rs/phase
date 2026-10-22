@@ -175,7 +175,7 @@ function asDeckPayload(deck: HostingDeck): {
   commander: string[];
   planar_deck: string[];
   scheme_deck: string[];
-  bracket_tier?: CommanderBracketTier;
+  bracket_tier?: CommanderBracketTier | null;
 } {
   return {
     main_deck: deck.main_deck,
@@ -1488,8 +1488,8 @@ export interface HostingDeck {
   commander: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
-  /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
-  bracket_tier?: CommanderBracketTier;
+  /** Declared Commander bracket tier; omitted or `null` is undeclared and plays at the engine's estimate. */
+  bracket_tier?: CommanderBracketTier | null;
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the

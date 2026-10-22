@@ -48,6 +48,8 @@ export function DeckBuilder({
     searchResults,
     deckName,
     bracket,
+    comboDeclaration,
+    handleComboDeclarationChange,
     savedDecks,
     justSaved,
     setJustSaved,
@@ -71,6 +73,8 @@ export function DeckBuilder({
     deckSizeRule,
     estimate,
     auditEmptyReason,
+    signals,
+    signalsEmptyReason,
     cmcValues,
     colorDistribution,
     cardCounts,
@@ -569,7 +573,11 @@ export function DeckBuilder({
               estimate={estimate}
               manualBracket={bracket}
               onBracketChange={handleBracketChange}
+              comboDeclaration={comboDeclaration}
+              onComboDeclarationChange={handleComboDeclarationChange}
               auditEmptyReason={auditEmptyReason}
+              signals={signals}
+              signalsEmptyReason={signalsEmptyReason}
               onCardClick={handleScrollToCard}
             />
           </div>

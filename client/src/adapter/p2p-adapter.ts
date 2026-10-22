@@ -26,7 +26,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -182,7 +182,7 @@ interface DeckSeatPayload {
   signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
-  bracket_tier?: CommanderBracketTier;
+  bracket_tier?: CommanderBracketTier | null;
 }
 
 interface DeckListPayload {
@@ -3458,14 +3458,6 @@ export class P2PHostAdapter implements EngineAdapter {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in P2P sessions.",
-      false,
-    );
-  }
-
   async sendConcede(): Promise<void> {
     if (!this.ownsAuthority()) return;
     const outcome = await this.concedePlayer(0, "Host conceded", "conceded");
@@ -4786,14 +4778,6 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in P2P sessions.",
-      false,
-    );
   }
 
   sendConcede(): void {

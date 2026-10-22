@@ -80,7 +80,7 @@ impl NativeTable {
                 main_deck: vec!["Network Test Land".to_string(); 60],
                 ..Default::default()
             };
-            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
             let mut manager = app.sessions.lock().await;
             let (code, token) = manager
                 .create_game_n_players_with_code(

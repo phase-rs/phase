@@ -3034,6 +3034,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
         }
+        // CR 400.2: library and hand are hidden zones. The estimate is computed from the
+        // seat's complete submitted deck, so it reveals that deck's strength to anyone but
+        // its owner. Only the owner's projection keeps it; the declared `bracket_tier` is
+        // the owner's own public statement and stays for every viewer. AI sessions and
+        // saved games read the unfiltered state, so they keep the estimate.
+        if Some(pool.player) != viewer {
+            pool.estimated_bracket_tier = None;
+        }
     }
 
     // CR 702.139a: A companion is outside the game and stays private until

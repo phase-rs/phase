@@ -3,11 +3,18 @@ import { useTranslation } from "react-i18next";
 import type { DeckColorDistributionEntry, DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
-import type { BracketEstimate, CommanderBracket } from "../../types/bracket";
+import type {
+  BracketEstimate,
+  ComboDeclaration,
+  CommanderBracket,
+} from "../../types/bracket";
+import type { DeckSignals } from "../../types/deckSignals";
 import { ColorDistribution } from "./ColorDistribution";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
+import { DeckSignalsPanel } from "./DeckSignalsPanel";
 import { BracketPicker } from "./BracketPicker";
+import { ComboDeclarationPicker } from "./ComboDeclarationPicker";
 
 const LEGALITY_STYLES: Record<string, string> = {
   legal: "bg-emerald-600/70 text-emerald-100",
@@ -44,7 +51,11 @@ interface StatsPanelProps {
   estimate: BracketEstimate | null;
   manualBracket: CommanderBracket | null;
   onBracketChange: (bracket: CommanderBracket | null) => void;
-  auditEmptyReason?: "not-commander" | "no-commander" | "unsupported";
+  comboDeclaration: ComboDeclaration;
+  onComboDeclarationChange: (declaration: ComboDeclaration) => void;
+  auditEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
+  signals: DeckSignals | null;
+  signalsEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
   onCardClick: (cardName: string) => void;
 }
 
@@ -56,7 +67,11 @@ export function StatsPanel({
   estimate,
   manualBracket,
   onBracketChange,
+  comboDeclaration,
+  onComboDeclarationChange,
   auditEmptyReason,
+  signals,
+  signalsEmptyReason,
   onCardClick,
 }: StatsPanelProps) {
   const { t } = useTranslation("deck-builder");
@@ -70,21 +85,25 @@ export function StatsPanel({
     <div data-stats-panel-analysis className="flex flex-col gap-3">
       {isCommander && (
         <div className="space-y-2">
-          {/* The bracket picker lives beside the audit it's compared against, so
-              setting a bracket and seeing the deck's estimated tier (and any
-              mismatch) read as one unit. Both are Commander-only. */}
+          {/* The bracket picker lives beside the audit so the player's declaration
+              and the engine's estimate read as one unit. Both are Commander-only. */}
           <div className="space-y-1.5">
             <span className="text-[10px] uppercase tracking-wider text-gray-500">
               {t("toolbar.bracket")}
             </span>
             <BracketPicker value={manualBracket} onChange={onBracketChange} />
           </div>
+          <ComboDeclarationPicker
+            value={comboDeclaration}
+            onChange={onComboDeclarationChange}
+          />
           <BracketAuditPanel
             estimate={estimate}
             manualBracket={manualBracket}
             emptyReason={auditEmptyReason}
             onCardClick={onCardClick}
           />
+          <DeckSignalsPanel signals={signals} emptyReason={signalsEmptyReason} />
         </div>
       )}
 
