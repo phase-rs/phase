@@ -221,6 +221,7 @@ pub fn roll_to_visit_attractions(
         declared_targets_recorded: false,
         local_target_pins: Vec::new(),
         keyed_target_incarnations: Vec::new(),
+        declared_player: None,
     }));
     let proposal = roll_die::propose_roll(state, player, 1, 6, events);
     if !matches!(proposal, roll_die::RollProposal::Suspended) {

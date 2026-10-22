@@ -22137,9 +22137,9 @@ mod tests {
 
     /// B2 — STALE-ORIGIN totality: an origin naming an incarnation with no
     /// snapshot anywhere (legacy save, pruned history) must not panic
-    /// canonicalization — the union-rank remap assigns the rank the stamp
-    /// would have were it pooled — and reads fall back to legacy behavior
-    /// (live 2 here), since no snapshot sits at that rank.
+    /// canonicalization — origin references join the identity pool, so the
+    /// stamp takes its own exact rank — and reads fall back to legacy
+    /// behavior (live 2 here), since no snapshot sits at that rank.
     #[test]
     fn loop_normalization_tolerates_stale_departure_origins() {
         use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
@@ -22150,7 +22150,7 @@ mod tests {
             let set = TrackedSetId(state.next_tracked_set_id - 1);
             let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
             // A decoy snapshot under incarnation 7 plus an origin naming the
-            // record-less incarnation 99: without the union-rank remap, the
+            // record-less incarnation 99: without origin pooling, the exact
             // rank lookup panics on the unpooled 99.
             state.lki_by_incarnation.clear();
             let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
@@ -22199,6 +22199,130 @@ mod tests {
             resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
             2,
             "the record-less origin must fall back to legacy live power 2"
+        );
+    }
+
+    /// B2 — MISSING-BEFORE-RETAINED aliasing: two otherwise identical states
+    /// each hold a retained power-5 snapshot at incarnation 7 — kept through
+    /// pruning by a `ZoneChanged` carrier on the stack that still names 7 —
+    /// with live power 2, but A's origin names the missing incarnation 1
+    /// while B's names 7. CR 608.2h: A's aggregate reads 2 (legacy fallback),
+    /// B's reads 5 (snapshot) — states whose reads differ must NOT compare
+    /// equal after normalization, and normalization must preserve each side's
+    /// read. A would-be-rank remap aliases A's origin onto the retained rank
+    /// 1, so A reads 5 and the normalized states coincide.
+    #[test]
+    fn loop_normalization_keeps_missing_before_retained_distinct() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        fn staged_with_origin(origin_incarnation: u64) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            state.lki_by_incarnation.clear();
+            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+            assert_eq!(pumped.power, Some(5), "staged pump shape");
+            state
+                .lki_by_incarnation
+                .entry(oak)
+                .or_default()
+                .insert(7, pumped);
+            // A ZoneChanged carrier still names incarnation 7, so the
+            // snapshot survives pruning in BOTH states even when no origin
+            // names it — the retained record the missing origin must not
+            // alias. Fixed ids keep the two states symmetric.
+            let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+                oak,
+                Some(Zone::Exile),
+                Zone::Battlefield,
+            );
+            record.entered_incarnation = Some(7);
+            let ability = crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id: ObjectId(20),
+                source_id: ObjectId(5),
+                controller: PlayerId(0),
+                kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                    source_id: ObjectId(5),
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: Some(crate::types::events::GameEvent::ZoneChanged {
+                        object_id: oak,
+                        from: Some(Zone::Exile),
+                        to: Zone::Battlefield,
+                        record: Box::new(record),
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    oak,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: origin_incarnation,
+                    },
+                );
+            (state, source)
+        }
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = staged_with_origin(1);
+        let (b, source_b) = staged_with_origin(7);
+        assert_eq!(
+            resolve_quantity(&a, &power_sum(), PlayerId(0), source_a),
+            2,
+            "reach-guard: the missing origin reads legacy live power 2"
+        );
+        assert_eq!(
+            resolve_quantity(&b, &power_sum(), PlayerId(0), source_b),
+            5,
+            "reach-guard: the retained origin reads snapshot power 5"
+        );
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            2,
+            "normalization must preserve the missing origin's legacy read"
+        );
+        assert_eq!(
+            resolve_quantity(&nb, &power_sum(), PlayerId(0), source_b),
+            5,
+            "normalization must preserve the retained origin's snapshot read"
+        );
+        assert!(
+            !loop_states_equal(&na, &nb),
+            "states whose tracked reads differ (2 vs 5) must not compare loop-equal"
         );
     }
 
@@ -22374,6 +22498,7 @@ mod tests {
             declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
         };
         let mut events = Vec::new();
         crate::game::effects::roll_die::resume_after_ignore(
@@ -22565,6 +22690,7 @@ mod tests {
             declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
         };
         let mut events = Vec::new();
         crate::game::effects::roll_die::resume_after_ignore(
@@ -22720,6 +22846,7 @@ mod tests {
                 declared_targets_recorded: true,
                 local_target_pins: captured.local_pins.clone(),
                 keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+                declared_player: Some(captured.declared_player),
             };
             let mut events = Vec::new();
             crate::game::effects::roll_die::resume_after_ignore(
@@ -22831,6 +22958,7 @@ mod tests {
                 declared_targets_recorded: true,
                 local_target_pins: captured.local_pins.clone(),
                 keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+                declared_player: Some(captured.declared_player),
             };
             let mut events = Vec::new();
             crate::game::effects::roll_die::resume_after_ignore(
@@ -23002,6 +23130,7 @@ mod tests {
             declared_targets_recorded: true,
             local_target_pins: captured.local_pins,
             keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
         };
         let mut events = Vec::new();
         crate::game::effects::roll_die::resume_after_ignore(
@@ -27757,6 +27886,7 @@ mod tests {
             declared_targets_recorded: false,
             local_target_pins: Vec::new(),
             keyed_target_incarnations: Vec::new(),
+            declared_player: None,
         };
 
         let mut events = Vec::new();

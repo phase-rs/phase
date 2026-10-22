@@ -390,6 +390,15 @@ pub struct PendingDieRoll {
     /// before this field existed.
     #[serde(default)]
     pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict
+    /// (`filter::declared_target_player`), captured at park time so a
+    /// resumed player-axis read answers exactly what the live path would.
+    /// Carried separately from the mode-relative declared list, which
+    /// cannot see an earlier mode's player. `None` (pre-capture frames and
+    /// in-flight states serialized before this field existed) resumes
+    /// through the legacy reconstruction.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -493,6 +502,11 @@ pub struct PendingDieRollInstruction {
     /// serialized before this field existed.
     #[serde(default)]
     pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict, carried across the
+    /// CR 616.1 choice so it survives into the `PendingDieRoll` this
+    /// instruction produces. `None` for frames built without a capture.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1

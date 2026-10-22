@@ -2104,7 +2104,7 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
 ///
 /// "the amount of {E} paid this way" is a quantity-position anaphor the
 /// quantity grammar binds to the payment channel (`QuantityRef::EventContextAmount`
-/// via `parse_paid_energy_this_way_ref`, CR 106 vs CR 122) — it is consumed,
+/// via `parse_paid_energy_this_way_ref`, CR 107.14) — it is consumed,
 /// not dropped, so it must not trip the refusal (Wrath of the Skies' destroy
 /// threshold). So is "the number of [kind] counter(s) removed this way"
 /// (`QuantityRef::PreviousEffectAmount` via

@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
@@ -1499,6 +1501,10 @@ pub struct ParkedTargets<'a> {
     /// shared keyed predicate — the same guard the live slot authority
     /// applies — evaluated live at resume.
     pub keyed_target_incarnations: &'a [ObjectIncarnationRef],
+    /// The live declared-player verdict captured at park time. `Some`
+    /// answers directly; `None` (pre-capture frames and frames written
+    /// before the field existed) reconstructs from the lists below.
+    pub declared_player: Option<DeclaredPlayerTarget>,
 }
 
 /// Context bundle passed into filter evaluation.
@@ -2431,8 +2437,13 @@ fn declared_player(
 
 /// CR 115.1 + CR 608.2b: what an ability's first declared player target names
 /// as the ability resolves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeclaredPlayerTarget {
+///
+/// Serialized onto the parked die-roll frames inside an `Option`, so the
+/// capture authority can carry the live verdict across a suspension while
+/// frames written before the field existed (`None`) keep resuming through
+/// the legacy reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeclaredPlayerTarget {
     /// A declared player target not recorded as illegal: the node's first
     /// remaining player target, else the root's first declared player slot.
     Legal(PlayerId),
@@ -2517,17 +2528,23 @@ pub(crate) fn target_player_from_ability_or_root(
 }
 
 /// CR 608.2c + CR 608.2b: the parked twin of [`declared_target_player`] —
-/// the first declared player target on the parked frame. Priority mirrors
-/// the live authority EXACTLY: the node's own targets first with no stamp
-/// check (validation compacts the node before the park, exactly like the
-/// live fast path), then the captured declared chain — the parked form of
-/// the live root-chain fallback — with the resolution stamp in root
-/// numbering (so the base offset applies), else the legacy chain-root list
-/// when no capture was recorded. A roll node usually carries no targets of
-/// its own, so production frames resolve through the captured chain. Players
-/// carry no incarnation, so there is no pin check (the live path passes
-/// player slots through unchanged).
+/// the first declared player target on the parked frame. A captured verdict
+/// answers directly — local-first, root-fallback, stamp included — because
+/// the captured slot list is mode-relative while the live fallback searches
+/// the whole root; re-deriving from that list would read the current mode's
+/// player instead of an earlier mode's. Without one (`None`: pre-capture
+/// frames and frames written before the field existed), reconstruct exactly
+/// like the live authority: the node's own targets first with no stamp check
+/// (validation compacts the node before the park, exactly like the live fast
+/// path), then the captured declared chain — the parked form of the live
+/// root-chain fallback — with the resolution stamp in root numbering (so the
+/// base offset applies), else the legacy chain-root list when no capture was
+/// recorded. Players carry no incarnation, so there is no pin check (the live
+/// path passes player slots through unchanged).
 pub(crate) fn parked_declared_player_target(parked: ParkedTargets<'_>) -> DeclaredPlayerTarget {
+    if let Some(verdict) = parked.declared_player {
+        return verdict;
+    }
     if let Some(player) = parked.local.iter().find_map(|target| match target {
         TargetRef::Player(player) => Some(*player),
         TargetRef::Object(_) => None,

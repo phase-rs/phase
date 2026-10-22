@@ -1581,12 +1581,19 @@ pub(crate) fn carrier_illegal_slots(state: &GameState, ability: &ResolvedAbility
 /// - `keyed_target_incarnations`: the node's keyed delayed-referent pins
 ///   (`ResolvedAbility::target_incarnations`), so resume applies the same
 ///   eligibility guard the live slot authority would.
+/// - `declared_player`: the live [`super::filter::declared_target_player`]
+///   verdict, captured separately from the indexed-slot context. The slot
+///   list above is mode-relative by construction (the parser numbers slots
+///   within one mode), but the declared-player fallback searches the whole
+///   resolving root — an earlier mode's player is invisible to the captured
+///   list, so resume must not re-derive the verdict from it.
 pub(crate) struct ParkedSlotCapture {
     pub declared_targets: Vec<TargetRef>,
     pub declared_pins: Vec<Option<ObjectIncarnationRef>>,
     pub declared_ahead: usize,
     pub local_pins: Vec<Option<ObjectIncarnationRef>>,
     pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    pub declared_player: super::filter::DeclaredPlayerTarget,
 }
 
 /// Capture the slot context for `ability` suspending mid-resolution. With no
@@ -1609,6 +1616,10 @@ pub(crate) fn capture_parked_slot_context(
         declared_ahead: super::ability_utils::declared_slots_ahead_of(root, base),
         local_pins: ability.aligned_target_pins(),
         keyed_target_incarnations: ability.target_incarnations.clone(),
+        // CR 608.2c: a resumed instruction reads the same player it would
+        // have read without the pause — capture the live verdict itself,
+        // not the inputs to re-derive it from a mode-relative list.
+        declared_player: super::filter::declared_target_player(state, Some(ability)),
     }
 }
 

@@ -33840,11 +33840,12 @@ impl GameState {
     }
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
-    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys and
+    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys,
     /// the incarnations trigger events name (`ZoneChanged` entries and stamped
-    /// `PermanentTapped` taps), so two positions minted at different times
-    /// compare equal while which incarnation each event names — and its
-    /// snapshot — is preserved.
+    /// `PermanentTapped` taps), and the incarnations tracked-set member
+    /// origins name — so two positions minted at different times compare
+    /// equal while which incarnation each reference names, and whether a
+    /// snapshot sits behind it, is preserved.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -34024,6 +34025,17 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
             }
         });
+        // CR 608.2h: origin-named incarnations join the identity pool, so a
+        // reference to a missing departure takes its own rank instead of
+        // aliasing a retained snapshot's rank below.
+        for members in self.tracked_set_member_origins.values() {
+            for (member, origin) in members.iter() {
+                present
+                    .entry(*member)
+                    .or_default()
+                    .push(origin.departure_incarnation);
+            }
+        }
         for incarnations in present.values_mut() {
             incarnations.sort_unstable();
             incarnations.dedup();
@@ -34060,26 +34072,13 @@ impl GameState {
                 *incarnation = canonical(object_id, *incarnation);
             }
         });
-        // CR 608.2c: remap origin-named incarnations with the same ranks,
-        // so two positions minted at different times keep reading the same
-        // snapshots through structurally identical origins. The rank counts
-        // the pool below the incarnation whether or not the pool holds it —
-        // the rank it WOULD have — so a superseded older-set stamp remaps
-        // exactly like the live stamp naming the same departure on the other
-        // side (the origins field then converges below the window, while the
-        // retained snapshots' content still judges material change), and a
-        // stale record-less stamp still remaps totally instead of panicking.
-        // (`canonical` above keeps panicking for history keys and carriers,
-        // which are pooled by construction; only origins take the union-rank
-        // path. Reads through normalized older-set stamps may alias a
-        // retained rank; only resolved-set reads are exact, which is all the
-        // loop comparison consumes.)
-        let remap_origin = |member: ObjectId, incarnation: u64| {
-            present
-                .get(&member)
-                .map(|incarnations| incarnations.partition_point(|&x| x < incarnation) as u64 + 1)
-                .unwrap_or(1)
-        };
+        // CR 608.2c: remap origin-named incarnations with the same exact
+        // ranks, so two positions minted at different times keep reading the
+        // same snapshots through structurally identical origins. Origins
+        // joined the pool above, so a stale record-less stamp remaps to its
+        // own rank — total, like history keys and carriers — instead of
+        // aliasing a retained snapshot's rank and changing what the
+        // normalized state reads.
         self.tracked_set_member_origins = std::mem::take(&mut self.tracked_set_member_origins)
             .into_iter()
             .map(|(set_id, members)| {
@@ -34087,7 +34086,7 @@ impl GameState {
                     .into_iter()
                     .map(|(member, mut origin)| {
                         origin.departure_incarnation =
-                            remap_origin(member, origin.departure_incarnation);
+                            canonical(member, origin.departure_incarnation);
                         (member, origin)
                     })
                     .collect();

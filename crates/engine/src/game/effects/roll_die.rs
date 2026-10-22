@@ -282,6 +282,7 @@ pub(crate) fn resolve_step(
         declared_targets_recorded: true,
         local_target_pins: parked.local_pins,
         keyed_target_incarnations: parked.keyed_target_incarnations,
+        declared_player: Some(parked.declared_player),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -397,6 +398,7 @@ fn execute_roll(
         declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
+        declared_player,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -428,6 +430,7 @@ fn execute_roll(
         declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
+        declared_player,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -670,6 +673,7 @@ pub(crate) fn resume_after_ignore(
         declared_targets_recorded,
         local_target_pins,
         keyed_target_incarnations,
+        declared_player,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -723,6 +727,7 @@ pub(crate) fn resume_after_ignore(
                 ahead: declared_ahead,
                 declared_recorded: declared_targets_recorded,
                 keyed_target_incarnations: &keyed_target_incarnations,
+                declared_player,
             },
         );
 
@@ -815,6 +820,7 @@ pub(crate) fn resume_after_ignore(
                     declared_targets_recorded,
                     local_target_pins: local_target_pins.clone(),
                     keyed_target_incarnations: keyed_target_incarnations.clone(),
+                    declared_player,
                 };
                 // CR 706.3a + CR 608.2c: the die owner waits outside the
                 // branch's entire child stack, not merely its top frame.
@@ -1718,6 +1724,7 @@ mod tests {
             declared_targets_recorded: false,
             local_target_pins: vec![],
             keyed_target_incarnations: vec![],
+            declared_player: None,
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();

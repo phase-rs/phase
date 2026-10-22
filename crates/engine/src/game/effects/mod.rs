@@ -61170,6 +61170,17 @@ mod entry_observation_settlement_tests {
                     forced_ignored: Vec::new(),
                     chain_root_targets: Vec::new(),
                     trigger_context: None,
+                    // MED2 parked-slot context the branch struct carries;
+                    // neutral here — this fixture pins `deferred`, not resume.
+                    illegal_target_slots: Vec::new(),
+                    chain_root_target_pins: Vec::new(),
+                    declared_targets: Vec::new(),
+                    declared_target_pins: Vec::new(),
+                    declared_ahead: 0,
+                    declared_targets_recorded: false,
+                    local_target_pins: Vec::new(),
+                    keyed_target_incarnations: Vec::new(),
+                    declared_player: None,
                 })));
             state
         };

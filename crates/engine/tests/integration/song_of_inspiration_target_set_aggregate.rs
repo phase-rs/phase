@@ -622,6 +622,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,
@@ -728,6 +729,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -800,6 +802,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -900,6 +903,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -999,6 +1003,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1070,6 +1075,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1146,6 +1152,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1247,6 +1254,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1357,6 +1365,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         declared_targets_recorded: false,
         local_target_pins: vec![Some(pin)],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1433,6 +1442,9 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Legal(
+            engine::game::scenario::P1,
+        )),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1502,7 +1514,9 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
         source_id: roller,
         controller: P0,
         roller: P0,
-        targets: vec![TargetRef::Player(P1)],
+        // No local player: the recorded verdict below is the only thing
+        // naming P1, so list reconstruction would answer Undeclared (1).
+        targets: vec![],
         sides: 20,
         results: vec![1],
         ignore_rules: vec![],
@@ -1522,6 +1536,7 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Legal(P1)),
     };
     let mut events = Vec::new();
     resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
@@ -1543,11 +1558,12 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
     );
 }
 
-/// B1a — PAUSE (local-first priority). The live authority reads the node's
-/// own player target before the root fallback; the parked twin must match:
-/// with P1 local and P0 on the root (and the recorded mode-base list showing
-/// P0), the resumed TargetOpponent axis resolves P1 (1 + 5 = 6). Preferring
-/// the recorded base list would emit 10 (P0's 9).
+/// B1a — PAUSE (local-first priority, pre-field frame). The live authority
+/// reads the node's own player target before the root fallback; a frame
+/// without a captured verdict reconstructs the same order: with P1 local
+/// and P0 on the root (and the recorded mode-base list showing P0), the
+/// resumed TargetOpponent axis resolves P1 (1 + 5 = 6). Preferring the
+/// recorded base list would emit 11 (P0's 9 + 1).
 #[test]
 fn parked_declared_player_prefers_local_over_root() {
     use engine::game::scenario::P1;
@@ -1582,9 +1598,12 @@ fn parked_declared_player_prefers_local_over_root() {
         declared_targets: vec![TargetRef::Player(P0)],
         declared_target_pins: vec![None],
         declared_ahead: 0,
+        // Pre-field frame: no captured verdict, so the legacy path
+        // reconstructs local-first from these lists.
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     };
     assert_eq!(
         resumed_die_totals(&mut state, pending),
@@ -1593,11 +1612,11 @@ fn parked_declared_player_prefers_local_over_root() {
     );
 }
 
-/// B1a — PAUSE (chain stamp). With no local player, the twin falls back to
-/// the captured declared chain and honors the CR 608.2b stamp: declared P1
-/// at stamped slot 0 names nobody (1 + 0 = 1) even though the legacy root
-/// list shows unstamped P0 at its slot 1. Reading the legacy list would
-/// emit 11.
+/// B1a — PAUSE (chain stamp, pre-field frame). With no local player, a
+/// frame without a captured verdict falls back to the recorded declared
+/// chain and honors the CR 608.2b stamp: declared P1 at stamped slot 0
+/// names nobody (1 + 0 = 1) even though the legacy root list shows
+/// unstamped P0 at its slot 1. Reading the legacy list would emit 11.
 #[test]
 fn parked_declared_player_honors_chain_illegal_stamp() {
     use engine::game::scenario::P1;
@@ -1630,9 +1649,12 @@ fn parked_declared_player_honors_chain_illegal_stamp() {
         declared_targets: vec![TargetRef::Player(P1)],
         declared_target_pins: vec![None],
         declared_ahead: 0,
+        // Pre-field frame: no captured verdict, so the legacy path
+        // reconstructs the stamp check from the declared chain.
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     };
     assert_eq!(
         resumed_die_totals(&mut state, pending),
@@ -1641,12 +1663,15 @@ fn parked_declared_player_honors_chain_illegal_stamp() {
     );
 }
 
-/// B1a — PAUSE (base offset). The stamp is root-numbered while the captured
-/// chain counts from the slot base: with ahead 1, declared slot 0 is root
-/// slot 1, so a stamp at 1 marks declared P1 illegal (1 + 0 = 1). Ignoring
-/// the offset would emit 6.
+/// B1a — PAUSE (recorded Illegal verdict). A recorded frame answers its
+/// captured verdict without consulting any list: with Illegal recorded,
+/// the resumed axis matches nothing (1 + 0 = 1) even though the legacy
+/// root list shows unstamped P1. List reconstruction would emit 6 — and so
+/// would an Undeclared verdict, through the trigger-event fallback the
+/// staged `LifeChanged` arms, so this also pins Illegal against a dropped
+/// verdict.
 #[test]
-fn parked_declared_player_applies_base_offset_to_stamp() {
+fn parked_declared_player_recorded_illegal_ignores_lists() {
     use engine::game::scenario::P1;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1654,6 +1679,11 @@ fn parked_declared_player_applies_base_offset_to_stamp() {
     let roller = scenario.add_creature(P0, "Roller", 1, 1).id();
     let runner = scenario.build();
     let mut state = runner.state().clone();
+    state.current_trigger_event = Some(GameEvent::LifeChanged {
+        player_id: P1,
+        amount: 0,
+        new_total: engine::types::events::LifeTotalReading::default(),
+    });
 
     let pending = PendingDieRoll {
         source_id: roller,
@@ -1670,20 +1700,21 @@ fn parked_declared_player_applies_base_offset_to_stamp() {
         running_total: 0,
         rolled_any: false,
         forced_ignored: vec![],
-        chain_root_targets: vec![],
-        illegal_target_slots: vec![1],
-        chain_root_target_pins: vec![],
-        declared_targets: vec![TargetRef::Player(P1)],
-        declared_target_pins: vec![None],
-        declared_ahead: 1,
+        chain_root_targets: vec![TargetRef::Player(P1)],
+        illegal_target_slots: vec![],
+        chain_root_target_pins: vec![None],
+        declared_targets: vec![],
+        declared_target_pins: vec![],
+        declared_ahead: 0,
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Illegal),
     };
     assert_eq!(
         resumed_die_totals(&mut state, pending),
         vec![1],
-        "ahead 1 puts declared slot 0 at stamped root slot 1 (1 + 0)"
+        "the recorded Illegal verdict names nobody (1 + 0); list reconstruction or a dropped verdict would emit 6"
     );
 }
 
@@ -1725,6 +1756,7 @@ fn parked_declared_player_ignores_root_numbered_stamp_on_local() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Legal(P1)),
     };
     assert_eq!(
         resumed_die_totals(&mut state, pending),
@@ -1770,6 +1802,7 @@ fn parked_declared_player_absent_matches_nothing() {
         declared_targets_recorded: true,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
     assert_eq!(
         resumed_die_totals(&mut state, pending),
@@ -1962,6 +1995,227 @@ fn rebind_census_roll_to_target_axis(state: &mut GameState, spell: ObjectId) {
             .expect("the direct target-player axis admits"),
         ),
     };
+}
+
+/// Rebind a modal census roll's added aggregate population from the
+/// parser's caster default to the declared-player axis. Walks every mode
+/// definition's sub chain for the RollDie node (mode 0 has no roll); the
+/// shape assertions fail loudly if the parse drifts, and the count pins
+/// that exactly one census roll exists.
+fn rebind_modal_census_roll_to_target_axis(state: &mut GameState, spell: ObjectId) {
+    use std::sync::Arc;
+    let spell_obj = state.objects.get_mut(&spell).expect("spell in hand");
+    let defs = Arc::get_mut(&mut spell_obj.abilities).expect("uniquely owned defs");
+    let mut rebound = 0;
+    for def in defs.iter_mut() {
+        let mut node = Some(def);
+        while let Some(current) = node {
+            if let Effect::RollDie {
+                modifier: Some(DieRollModifier::Add { value }),
+                ..
+            } = current.effect.as_mut()
+            {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(existing),
+                } = value
+                else {
+                    panic!("modal census roll parses an aggregate modifier");
+                };
+                assert_eq!(
+                    existing.function(),
+                    AggregateFunction::Sum,
+                    "parse-stability guard: still a power sum"
+                );
+                *value = QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        engine::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::Objects {
+                                filter: TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Creature],
+                                    controller: Some(ControllerRef::TargetPlayer),
+                                    properties: vec![],
+                                }),
+                            },
+                        )
+                        .expect("the direct target-player axis admits"),
+                    ),
+                };
+                rebound += 1;
+            }
+            node = current.sub_ability.as_mut().map(|boxed| boxed.as_mut());
+        }
+    }
+    assert_eq!(
+        rebound, 1,
+        "exactly one census roll across the modal spell's modes"
+    );
+}
+
+/// B1-production — MEDIUM 1. CR 608.2c: a resumed instruction reads the same
+/// player it would have read without the pause. Mode 0 declares P0 and mode
+/// 1 declares P1 plus the pumped foe; the roll node inherits only the foe,
+/// so live reads root-first P0 while a mode-relative re-derivation would
+/// read P1. The keep pause plus `SelectDieRolls` must resolve the resumed
+/// total with P0's 10 (9 + 1), exactly like the inline control below — a
+/// mode-relative misread adds P1's 5 instead (6 after the pump).
+#[test]
+fn modal_pause_resolves_root_player_not_mode_player() {
+    const MODAL_CENSUS_ROLL: &str = "Choose two \u{2014}\n\u{2022} Target player gains 1 life.\n\u{2022} Choose target player. Target creature gets +1/+1 until end of turn. Roll a d20 and add the total power of creatures they control.";
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    let foe = scenario.add_creature(P1, "Foe Brute", 5, 5).id();
+    scenario.add_creature(P0, "Roller", 1, 1);
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Modal Census Roll", true, MODAL_CENSUS_ROLL)
+        .id();
+    let mut runner = scenario.build();
+    rebind_modal_census_roll_to_target_axis(runner.state_mut(), spell);
+
+    runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_players(&[P0, P1])
+        .target_object(foe)
+        .commit();
+    let mut chain_targets = Vec::new();
+    let mut node = runner
+        .state()
+        .stack
+        .back()
+        .and_then(|entry| entry.ability());
+    while let Some(current) = node {
+        chain_targets.extend(current.targets.iter().cloned());
+        node = current.sub_ability.as_deref();
+    }
+    assert_eq!(
+        chain_targets,
+        vec![
+            TargetRef::Player(P0),
+            TargetRef::Player(P1),
+            TargetRef::Object(foe),
+        ],
+        "reach-guard: mode 0 declares P0, mode 1 declares P1 and the foe, in written order"
+    );
+    runner.resolve_top();
+
+    let WaitingFor::DieKeepChoice {
+        player,
+        results,
+        ignorable_indices,
+        ignore_count,
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach-guard: the raised d20s must open a real CR 706.6 ignore choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "the roller answers the keep choice");
+    assert_eq!(*ignore_count, 1, "Barbarian ignores one lowest roll");
+    assert_eq!(
+        ignorable_indices.len(),
+        2,
+        "both raised dice are offered, got {results:?}"
+    );
+
+    let survivor = *results.iter().max().expect("two raised dice");
+    let ignore = if results[0] <= results[1] { 0 } else { 1 };
+    let result = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![ignore],
+        })
+        .expect("submit the keep choice");
+    let rolls: Vec<u8> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                sides: 20,
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![survivor + 10],
+        "the survivor adds the root-first player's power (P0's 9 + 1); a mode-relative misread adds P1's pumped 6"
+    );
+    assert_eq!(
+        runner.state().objects[&foe].power,
+        Some(6),
+        "reach-guard: mode 1's pump bound the foe, so the roll node holds only objects"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the modal spell finishes after the resumed roll"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: priority resumes, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// B1-production — INLINE control for the paused modal test above: the same
+/// rebound spell cast WITHOUT Barbarian resolves its modifier live (no
+/// suspension), so the total must carry the same root-first addend. The
+/// pinned total is seed-49's natural plus P0's 10; the two tests agree if
+/// and only if pause and live read the same player.
+#[test]
+fn modal_inline_roll_reads_root_player() {
+    const MODAL_CENSUS_ROLL: &str = "Choose two \u{2014}\n\u{2022} Target player gains 1 life.\n\u{2022} Choose target player. Target creature gets +1/+1 until end of turn. Roll a d20 and add the total power of creatures they control.";
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own Brute", 9, 9);
+    let foe = scenario.add_creature(P1, "Foe Brute", 5, 5).id();
+    scenario.add_creature(P0, "Roller", 1, 1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Modal Census Roll", true, MODAL_CENSUS_ROLL)
+        .id();
+    let mut runner = scenario.build();
+    rebind_modal_census_roll_to_target_axis(runner.state_mut(), spell);
+
+    runner
+        .cast(spell)
+        .modes(&[0, 1])
+        .target_players(&[P0, P1])
+        .target_object(foe)
+        .commit();
+    let initial_stack_len = runner.state().stack.len();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.len() < initial_stack_len {
+            break;
+        }
+        match runner.act(GameAction::PassPriority) {
+            Ok(result) => events.extend(result.events),
+            Err(_) => break,
+        }
+    }
+    let rolls: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRolled {
+                result: Some(total),
+                sides: 20,
+                ..
+            } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rolls,
+        vec![15],
+        "seed 49 rolls a natural 5 and adds the root-first player's 10; a mode-relative misread adds 6"
+    );
 }
 
 /// Sum of power over creatures the target opponent controls — the shared
@@ -2331,6 +2585,7 @@ fn legacy_frame_without_capture_still_falls_back_to_local() {
         declared_targets_recorded: false,
         local_target_pins: vec![],
         keyed_target_incarnations: vec![],
+        declared_player: None,
     });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,
