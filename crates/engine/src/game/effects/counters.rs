@@ -886,6 +886,17 @@ fn apply_pending_counter_post_action(
                 state, object_id, *tail, events,
             )
         }
+        PendingCounterPostAction::ContinueNonLiminalCopyTokenAfterEntryPayment {
+            object_id,
+            tail,
+        } => {
+            // CR 614.12a + CR 707.2: the copied entry payment is answered and
+            // latched; journal the birth with the answer, run the rest of this
+            // token's entry, plus the rest of the batch.
+            super::token_copy::continue_copy_token_after_entry_payment(
+                state, object_id, *tail, events,
+            )
+        }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
             name,
@@ -893,6 +904,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
             object_id,
@@ -901,6 +913,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
             events,
         ),
         action @ PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry { .. } => {
@@ -8648,6 +8661,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
                 Route::LiminalEntryEmit => {
@@ -8913,6 +8927,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
             };

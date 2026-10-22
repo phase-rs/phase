@@ -41,6 +41,7 @@ const VIZIER_ORACLE: &str = "You may have this creature enter as a copy of any c
 const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
 const RITE_ORACLE: &str = "Kicker {5} (You may pay an additional {5} as you cast this spell.)\nCreate a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.";
 const ANOINTED_PROCESSION_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
+const SAW_ORACLE: &str = "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.";
 
 fn add_mana_for(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usize) {
     let idx = runner
@@ -911,8 +912,6 @@ fn lone_optional_inner_decline_loses_full_amount() {
 /// is what exercises the stash arm; the decline case above covers decline.)
 #[test]
 fn mandatory_pausing_substitute_defers_then_completes() {
-    use engine::types::ability::{AbilityKind, TargetFilter as TF};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
@@ -929,7 +928,7 @@ fn mandatory_pausing_substitute_defers_then_completes() {
             AbilityKind::Spell,
             Effect::Scry {
                 count: QuantityExpr::Fixed { value: 2 },
-                target: TF::Controller,
+                target: TargetFilter::Controller,
             },
         ))
         .description("test: scry instead of losing life".to_string());
@@ -2626,4 +2625,359 @@ fn nameless_determined_zero_token_replays_number_zero() {
         (Some(1), Some(1)),
         "replayed 0/0 base + anthem"
     );
+}
+
+/// N1 (round 4, V1+V3+V6): Saw in Half copying Minion of the Wastes routes
+/// each token's copied payment through the NON-LIMINAL copy-token path (CR
+/// 707.2: the copies acquire the payment text) — two sequential prompts, two
+/// independent latches — while each token's P/T reads the Saw halving
+/// exception, not its payment (CR 707.9d prunes the copied P/T CDA). Each
+/// birth journals exactly its own answer (V3, journal-content only).
+#[test]
+fn saw_in_half_minion_copies_each_pay_for_entry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let saw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 2))
+        .id();
+    let mut runner = scenario.build();
+    // Minion {3}{B}{B}{B} + Saw {2}{B}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 4);
+
+    // Original Minion enters first and latches 5 → 5/5.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+    let orig = runner.state().objects.get(&minion).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(5), Some(5)),
+        "original Minion reads its own latch"
+    );
+
+    // Saw destroys the Minion; the copy batch parks on the first token's
+    // payment (CR 614.12a: the choice precedes the entry it modifies).
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    runner.cast(saw).target_object(minion).resolve();
+
+    // FIRST prompt (positive reach-guard): the first token owes its payment.
+    let waiting = runner.state().waiting_for.clone();
+    let first_source = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the first copy payment, got {other:?}"),
+    };
+    assert_pay_prompt(&waiting, P0, 0, 15, first_source);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 4 })
+        .expect("answer the first copy payment");
+
+    // SECOND prompt: a distinct entrant whose max reflects the first payment.
+    let waiting = runner.state().waiting_for.clone();
+    let second_source = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the second copy payment, got {other:?}"),
+    };
+    assert_ne!(
+        first_source, second_source,
+        "the two payments come from distinct entrants"
+    );
+    assert_pay_prompt(&waiting, P0, 0, 11, second_source);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 2 })
+        .expect("answer the second copy payment");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary (V6): Priority, empty stack, no stranded pause.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "no parked entry payment remains"
+    );
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "no stranded continuation"
+    );
+    assert_eq!(runner.life(P0), 9, "15 - 4 - 2 across the two tokens");
+
+    // Per-token pins: two Minion tokens on the battlefield, latches 4/2 —
+    // and P/T (3,3) BOTH (half of the 5/5 last-known values, rounded up). The
+    // 707.9d negative (P/T ≠ payments) is guarded by the latch positives.
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "Saw mints two copy tokens");
+    assert!(
+        tokens.contains(&first_source) && tokens.contains(&second_source),
+        "both payment sources entered: {tokens:?}"
+    );
+    for id in &tokens {
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Minion of the Wastes");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(3), Some(3)),
+            "token {id:?} reads the Saw halving, not its payment (CR 707.9d)"
+        );
+    }
+    assert_eq!(chosen_number_of(&runner, first_source), Some(4));
+    assert_eq!(chosen_number_of(&runner, second_source), Some(2));
+
+    // Journal (V3): each birth carries exactly its own answer.
+    let first_birth = token_birth_for(&runner, journal_start, first_source);
+    let second_birth = token_birth_for(&runner, journal_start, second_source);
+    assert_eq!(
+        first_birth.entry_choices,
+        vec![ChosenAttribute::Number(4)],
+        "first token journals its own payment"
+    );
+    assert_eq!(
+        second_birth.entry_choices,
+        vec![ChosenAttribute::Number(2)],
+        "second token journals its own payment"
+    );
+}
+
+/// N2 (round 4, V2+V3+V6): Saw in Half copying Nameless Race clamps EACH
+/// copy's prompt to the live cap (2 white nontoken perms + 1 white yard card
+/// = 3) despite higher life totals; an over-cap submit fails closed; P/T
+/// read the halving; each birth journals its own answer.
+#[test]
+fn saw_in_half_nameless_cap_clamps_each_copy() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Opponent's board: 2 white nontoken creatures. Our board stays non-white
+    // so the cap provably counts opponents' white only.
+    scenario
+        .add_creature(P1, "White Bear A", 2, 2)
+        .with_color(vec![ManaColor::White]);
+    scenario
+        .add_creature(P1, "White Bear B", 2, 2)
+        .with_color(vec![ManaColor::White]);
+    // Opponent's graveyard: 1 white card.
+    scenario
+        .add_creature_to_graveyard(P1, "White Remains", 2, 2)
+        .with_color(vec![ManaColor::White]);
+    let nameless = scenario
+        .add_creature_to_hand_from_oracle(P0, "Nameless Race", 0, 0, NAMELESS_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 3))
+        .id();
+    let saw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 2))
+        .id();
+    let mut runner = scenario.build();
+    // Nameless {3}{B} + Saw {2}{B}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 2);
+
+    // Pre-cast: the prompt max is already 3 with life 20 — first clamp proof.
+    let outcome = runner.cast(nameless).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 3, nameless);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 3 })
+        .expect("Nameless answers at the cap");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 17);
+    let orig = runner.state().objects.get(&nameless).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(3), Some(3)),
+        "original Nameless reads its own latch"
+    );
+
+    // Saw destroys Nameless; each copy's prompt re-evaluates the live cap.
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    runner.cast(saw).target_object(nameless).resolve();
+
+    // FIRST prompt: max 3 despite life 17 — per-token live evaluation.
+    let waiting = runner.state().waiting_for.clone();
+    let first_source = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the first copy payment, got {other:?}"),
+    };
+    assert_pay_prompt(&waiting, P0, 0, 3, first_source);
+    let over = runner.act(GameAction::SubmitPayAmount { amount: 4 });
+    assert!(
+        over.is_err(),
+        "over-cap submission fails closed at the shared guard"
+    );
+    // The prompt is still up after the rejected submit.
+    assert_pay_prompt(&runner.state().waiting_for.clone(), P0, 0, 3, first_source);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 3 })
+        .expect("answer at the cap");
+
+    // SECOND prompt: max still 3 despite life 14; a distinct entrant.
+    let waiting = runner.state().waiting_for.clone();
+    let second_source = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the second copy payment, got {other:?}"),
+    };
+    assert_ne!(
+        first_source, second_source,
+        "the two payments come from distinct entrants"
+    );
+    assert_pay_prompt(&waiting, P0, 0, 3, second_source);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 1 })
+        .expect("answer below the cap");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary (V6): Priority, empty stack, no stranded pause.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "no parked entry payment remains"
+    );
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "no stranded continuation"
+    );
+    assert_eq!(runner.life(P0), 13, "17 - 3 - 1 across the two tokens");
+
+    // P/T (2,2) BOTH — half of the 3/3 last-known values, rounded up (CR
+    // 707.9d); latches 3/1 prove the payments happened.
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "Saw mints two copy tokens");
+    assert!(
+        tokens.contains(&first_source) && tokens.contains(&second_source),
+        "both payment sources entered: {tokens:?}"
+    );
+    for id in &tokens {
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Nameless Race");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(2), Some(2)),
+            "token {id:?} reads the Saw halving, not its payment (CR 707.9d)"
+        );
+    }
+    assert_eq!(chosen_number_of(&runner, first_source), Some(3));
+    assert_eq!(chosen_number_of(&runner, second_source), Some(1));
+
+    // Journal (V3): each birth carries exactly its own answer.
+    let first_birth = token_birth_for(&runner, journal_start, first_source);
+    let second_birth = token_birth_for(&runner, journal_start, second_source);
+    assert_eq!(
+        first_birth.entry_choices,
+        vec![ChosenAttribute::Number(3)],
+        "first token journals its own payment"
+    );
+    assert_eq!(
+        second_birth.entry_choices,
+        vec![ChosenAttribute::Number(1)],
+        "second token journals its own payment"
+    );
+}
+
+/// N3 (round 4, V4): Saw in Half copying Nameless Race at cap 0 routes both
+/// token entries through the determined-0 funnel — no prompts anywhere in
+/// the window, inline `Number(0)` latches, entries complete. Glorious Anthem
+/// keeps the 0/0 original (and the tokens) alive; our anthem doesn't count
+/// toward the cap (opponents' white only).
+#[test]
+fn saw_in_half_nameless_cap_zero_auto_commits() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM_ORACLE);
+    let nameless = scenario
+        .add_creature_to_hand_from_oracle(P0, "Nameless Race", 0, 0, NAMELESS_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 3))
+        .id();
+    let saw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 2))
+        .id();
+    let mut runner = scenario.build();
+    // Nameless {3}{B} + Saw {2}{B}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 2);
+
+    // Pre-cast auto-commits: no prompt, latch 0, 1/1 via the anthem — a legal
+    // Saw target.
+    let outcome = runner.cast(nameless).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "cap-0 pre-cast auto-commits with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.life(P0), 20, "nothing paid");
+    assert_eq!(chosen_number_of(&runner, nameless), Some(0));
+    let orig = runner.state().objects.get(&nameless).unwrap();
+    assert_eq!(orig.zone, Zone::Battlefield);
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(1), Some(1)),
+        "0/0 base + anthem"
+    );
+
+    // Saw: both copy entries auto-commit SILENTLY through the determined-0
+    // funnel — the resolve runs to Priority with no prompt anywhere.
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let outcome = runner.cast(saw).target_object(nameless).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "determined-0 copy entries auto-commit with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(runner.life(P0), 20, "the Saw paid nothing");
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "no parked entry payment remains"
+    );
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "no stranded continuation"
+    );
+
+    // Exactly 2 tokens: 2/2 each (Saw halves the 1/1 last-known values to a
+    // 1/1 base, +anthem), each with the `Number(0)` latch journaled.
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "exactly two tokens entered");
+    for id in &tokens {
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Nameless Race");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(2), Some(2)),
+            "1/1 Saw-halved base + anthem"
+        );
+        assert_eq!(
+            chosen_number_of(&runner, *id),
+            Some(0),
+            "determined-0 latch"
+        );
+        let birth = token_birth_for(&runner, journal_start, *id);
+        assert_eq!(
+            birth.entry_choices,
+            vec![ChosenAttribute::Number(0)],
+            "token {id:?} journals its determined-0 answer"
+        );
+    }
 }

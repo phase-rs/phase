@@ -8374,6 +8374,8 @@ fn seed_representative_fodder(
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: owner,
+            // Source-less fodder mint from a captured profile; empty mods are stamp-proof.
+            donor: None,
         }),
     };
     crate::game::effects::token_copy::drive_copy_token_batches(

@@ -8629,6 +8629,8 @@ mod tests {
                     sacrifice_at: Some(Duration::UntilEndOfCombat),
                     source_id,
                     controller: PlayerId(0),
+                    // Liminal resume carries values only; empty mods are stamp-proof.
+                    donor: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

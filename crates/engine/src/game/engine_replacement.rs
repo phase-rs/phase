@@ -8445,6 +8445,8 @@ mod tests {
                 sacrifice_at: None,
                 source_id: entering_aura,
                 controller: PlayerId(0),
+                // Test-only Treasure tail stages no donor; empty mods are stamp-proof.
+                donor: None,
             }),
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),

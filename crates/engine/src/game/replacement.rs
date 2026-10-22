@@ -5078,6 +5078,9 @@ fn create_entry_copy_spec_for_replacement(
         sacrifice_at: duration.clone(),
         source_id: replacement_source,
         controller,
+        // Forwards BecomeCopy mods, but no BecomeCopy+halving card exists, so the
+        // None fallback (today's token-id read) preserves behavior on this route.
+        donor: None,
     })
 }
 

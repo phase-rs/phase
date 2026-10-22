@@ -3467,6 +3467,8 @@ pub(super) fn handle_resolution_choice(
                                         sacrifice_at: None,
                                         source_id: ObjectId(0),
                                         controller: player,
+                                        // Source-less growth mint from a fodder profile; empty mods are stamp-proof.
+                                        donor: None,
                                     }),
                                 };
                                 crate::game::effects::token_copy::drive_copy_token_batches(

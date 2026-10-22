@@ -498,6 +498,14 @@ pub struct CopyTokenSpec {
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 608.2h + CR 707.9b: the copy donor whose live (or last-known)
+    /// characteristics donor-referential copy exceptions read. Dynamic P/T
+    /// exceptions ("half that creature's power", Saw in Half) resolve their
+    /// `Source`-scoped quantity against this incarnation at the stamp, so a
+    /// departed donor reads LKI rather than the token's own copied base.
+    /// `None` where no donor is in scope; consumers fall back to the token id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor: Option<ObjectIncarnationRef>,
 }
 
 /// CR 701.31 + CR 901.9c + CR 701.31c: Which rules path is proposing a

@@ -24554,6 +24554,8 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
+                // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
+                donor: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {

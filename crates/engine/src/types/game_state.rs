@@ -7503,6 +7503,10 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
+        /// CR 608.2h + CR 707.9b: donor incarnation carried across the
+        /// counter pause so resumed dynamic-P/T stamps halve donor values.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        donor: Option<ObjectIncarnationRef>,
     },
     /// CR 303.4f: finish a NON-liminal copy-token entry whose CR 303.4f Aura-host
     /// choice paused it between the body's materialization and the rest of its
@@ -7514,6 +7518,21 @@ pub enum PendingCounterPostAction {
     /// them — reusing it would silently drop a copied planeswalker's CR 306.5b
     /// loyalty and every CR 614.1c "enters with counters" self-replacement.
     ContinueCopyTokenEntryAfterAuraHost {
+        object_id: ObjectId,
+        tail: Box<CopyTokenEntryTail>,
+    },
+    /// CR 614.12a + CR 707.2: finish a NON-liminal copy-token entry whose
+    /// copied as-enters life payment (Minion of the Wastes / Nameless Race
+    /// via Saw in Half) paused it between the body's materialization and its
+    /// CR 733 birth record.
+    ///
+    /// Deliberately NOT `ContinueCopyTokenEntryAfterAuraHost`: that pause
+    /// happens AFTER the birth is journaled and resumes straight at the aura
+    /// attach, while this pause happens BEFORE it — the resume must journal
+    /// the birth with the answered amount (`entry_choices`) first, or the
+    /// record would permanently miss the payment. Reusing the aura variant
+    /// would either double-record or record without the answer.
+    ContinueNonLiminalCopyTokenAfterEntryPayment {
         object_id: ObjectId,
         tail: Box<CopyTokenEntryTail>,
     },
