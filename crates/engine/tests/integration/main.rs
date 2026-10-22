@@ -1071,6 +1071,7 @@ mod issue_9775_non_controller_activation_offered;
 mod issue_9884_recipient_classifier;
 mod issue_9991_floating_entry_counter_authority;
 mod issue_9991_floating_entry_counter_timing;
+mod issue_9991_torgal_first_human_spell;
 mod issue_bound_by_moonsilver_sacrifice_attach;
 mod issue_circle_of_protection_source_choice;
 mod issue_desperate_gambit_choose_damage_source;
