@@ -2494,6 +2494,14 @@ fn redirect_damage_event(
 
     match redirect_amount {
         PreventionAmount::All => {
+            let redirected = new_recipient.is_some();
+            let event = ProposedEvent::Damage {
+                source_id,
+                target: new_recipient.unwrap_or(target),
+                amount: damage_amount,
+                is_combat,
+                applied,
+            };
             // CR 614.5: The one-shot opportunity is spent on this event whether
             // or not the redirection succeeds — consume the shield in both the
             // success and the "does nothing" (illegal recipient per CR 614.9)
@@ -2503,19 +2511,23 @@ fn redirect_damage_event(
             // re-fire for every damage event within their lifetime.
             if consume_after_redirect {
                 consume_prevention_shield(state, rid, None);
+                // CR 510.2 + CR 700.1 + CR 614.9: A successful redirection
+                // covers this source's whole simultaneous combat instance.
+                // Zero-damage events returned above; illegal recipients do nothing.
+                if redirected {
+                    record_combat_one_shot_application(
+                        state,
+                        AppliedReplacementKey::for_event(&event, rid),
+                        source_id,
+                    );
+                }
             }
 
             // CR 614.9: A legal recipient takes the damage instead; an illegal
             // one (left the battlefield, no longer a battle/creature/
             // planeswalker, or a player who left the game) makes the redirection
             // do nothing, so the damage stays on the original recipient.
-            ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount: damage_amount,
-                is_combat,
-                applied,
-            })
+            ApplyResult::Modified(event)
         }
         PreventionAmount::AllBut(_) => {
             // CR 615.1a vs CR 614.9: `AllBut` is exclusively a *prevention*
@@ -3159,12 +3171,20 @@ fn consumed_replacement_applies_in_combat_batch(
 }
 
 /// CR 609.7b + CR 700.1: Record only successful one-shot damage applications;
-/// finite Next(N) depletion never calls this helper.
+/// CR 615.7: finite Next(N) depletion never records.
 fn record_combat_one_shot_application(
     state: &mut GameState,
     key: AppliedReplacementKey,
     damage_source: ObjectId,
 ) {
+    if matches!(
+        shield_kind_for_rid(state, key.as_replacement_id()),
+        Some(ShieldKind::Prevention {
+            amount: PreventionAmount::Next(_)
+        })
+    ) {
+        return;
+    }
     if let Some(applications) = state.combat_one_shot_applications.as_mut() {
         let application = (key, damage_source);
         if !applications.contains(&application) {
@@ -12382,12 +12402,12 @@ pub(crate) fn replace_combat_damage_batch(
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
     let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
-    // AppliedReplacementKey is registry-index based, like combat_prevention_tally;
-    // consumption marks entries in place, and turns.rs prunes pending entries outside this batch.
-    // A layer pass can rebuild object lists: game_object.rs's reseed_replacements_carrying_resolution_effects
-    // carries resolution entries after the baseline in stable relative order. A mid-batch shift would
-    // need a layer flush changing the derived-grant count between portions; this batch does not rebuild lists.
-    // Independent follow-ups drain with the ledger taken out; it is restored before the next portion.
+    // AppliedReplacementKey is registry-index based, exactly as combat_prevention_tally's keys are.
+    // Absolute indices stay valid only while the replacement lists are unchanged between portions:
+    // consumption marks entries in place, but a follow-up drain can rebuild or prune lists (layer flush;
+    // layers.rs prune_controller_controls_source_on_leave; turns.rs prunes the pending registry outside
+    // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
+    // such a mutation. Printed cards in this class run no such follow-up between portions.
 
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
@@ -12395,8 +12415,8 @@ pub(crate) fn replace_combat_damage_batch(
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);
         // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
-        // by the applier (the `Prevention::All` batch path suppresses its stash
-        // and fires once post-batch instead). Resolve any such per-event
+        // by the applier (the all-damage and one-shot prevention batch paths
+        // suppress their stash and fire once post-batch instead). Resolve any such per-event
         // continuation inline — for both full prevention (`Prevented`) and
         // partial prevention (`Modified` → `Execute`) — so a depletion-shield
         // rider fires "immediately afterward" and never leaks past the batch.

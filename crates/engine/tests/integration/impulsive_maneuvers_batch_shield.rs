@@ -24,6 +24,7 @@ use engine::types::zones::Zone;
 const IMPULSIVE_MANEUVERS: &str = "Whenever a creature attacks, flip a coin. If you win the flip, the next time that creature would deal combat damage this turn, it deals double that damage instead. If you lose the flip, the next time that creature would deal combat damage this turn, prevent that damage.";
 const SHIELDMATES_BLESSING: &str =
     "Prevent the next 3 damage that would be dealt to any target this turn.";
+const GOBLIN_PSYCHOPATH: &str = "Whenever this creature attacks or blocks, flip a coin. If you lose the flip, the next time it would deal combat damage this turn, it deals that damage to you instead.";
 
 fn add_maneuvers(scenario: &mut GameScenario, controller: PlayerId) {
     scenario.add_enchantment_from_oracle(controller, "Impulsive Maneuvers", IMPULSIVE_MANEUVERS);
@@ -238,6 +239,49 @@ pub(super) fn assign_trample(
             controller_damage: 0,
         })
         .expect("submit the explicit damage split")
+        .events
+}
+
+fn assign_blocked_damage(
+    runner: &mut GameRunner,
+    attacker: ObjectId,
+    assignments: &[(ObjectId, u32)],
+) -> Vec<GameEvent> {
+    let WaitingFor::AssignCombatDamage {
+        player,
+        attacker_id,
+        total_damage,
+        blockers,
+        trample,
+        defending_player,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected multiple-blocker assignment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*attacker_id, attacker);
+    assert_eq!(*defending_player, P1);
+    assert!(trample.is_none());
+    assert_eq!(
+        *total_damage,
+        assignments.iter().map(|(_, amount)| *amount).sum::<u32>()
+    );
+    assert_eq!(blockers.len(), assignments.len());
+    for (blocker, _) in assignments {
+        assert!(blockers.iter().any(|slot| slot.blocker_id == *blocker));
+    }
+    runner
+        .act(GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments: assignments.to_vec(),
+            trample_damage: 0,
+            controller_damage: 0,
+        })
+        .expect("submit the multiple-blocker damage split")
         .events
 }
 
@@ -470,6 +514,72 @@ fn impulsive_maneuvers_win_doubles_both_blockers_and_trample() {
 #[test]
 fn impulsive_maneuvers_loss_prevents_both_blockers_and_trample() {
     multiple_blockers_case(false);
+}
+
+#[test]
+fn goblin_psychopath_loss_redirects_every_blocked_portion_to_its_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature_from_oracle(P0, "Goblin Psychopath", 5, 5, GOBLIN_PSYCHOPATH)
+        .id();
+    let first = scenario.add_creature(P1, "First blocker", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second blocker", 2, 2).id();
+    let mut runner = scenario.build();
+    let mut events = declare_attacks(&mut runner, &[attacker]);
+    events.extend(resolve_one_attack_flip(&mut runner, P0, false));
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().objects[&attacker]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|shield| {
+                !shield.is_consumed
+                    && matches!(
+                        shield.shield_kind,
+                        ShieldKind::Redirection {
+                            amount: PreventionAmount::All,
+                            lifetime: RedirectionLifetime::OneOpportunity,
+                            ..
+                        }
+                    )
+            }),
+        "the actual lost flip must install a live one-shot redirection shield"
+    );
+    events.extend(reach_combat_damage(
+        &mut runner,
+        &[(first, attacker), (second, attacker)],
+    ));
+    events.extend(assign_blocked_damage(
+        &mut runner,
+        attacker,
+        &[(first, 2), (second, 3)],
+    ));
+    assert_damage_complete(&runner);
+    // CR 510.2 + CR 700.1 + CR 614.9: both portions of the source's next
+    // simultaneous combat damage instance go to its controller instead.
+    assert_eq!(runner.life(P0), 15);
+    assert_eq!(runner.life(P1), 20);
+    let mut redirected = damage_amounts(&events, attacker, TargetRef::Player(P0));
+    redirected.sort_unstable();
+    assert_eq!(redirected, vec![2, 3]);
+    assert!(damage_amounts(&events, attacker, TargetRef::Player(P1)).is_empty());
+    assert_eq!(runner.state().objects[&attacker].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&attacker].damage_marked,
+        4,
+        "reach guard: both blockers must still deal their independent combat damage"
+    );
+    for blocker in [first, second] {
+        assert_eq!(
+            damage_amounts(&events, blocker, TargetRef::Object(attacker)),
+            vec![2]
+        );
+        assert_eq!(runner.state().objects[&blocker].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&blocker].damage_marked, 0);
+        assert!(damage_amounts(&events, attacker, TargetRef::Object(blocker)).is_empty());
+    }
 }
 
 fn unblocked_case(won: bool, double_strike: bool) {
