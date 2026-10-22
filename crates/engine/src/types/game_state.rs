@@ -13085,14 +13085,12 @@ pub(crate) fn live_return_result_occurrences(
             | WaitingFor::SeparatePilesChoice {
                 return_result_occurrence,
                 ..
-            } => {
-                if crate::game::effects::validate_definition_waiting_for_result_owner(
-                    state, waiting,
-                )
-                .is_ok()
-                {
-                    live.extend(*return_result_occurrence);
-                }
+            } if crate::game::effects::validate_definition_waiting_for_result_owner(
+                state, waiting,
+            )
+            .is_ok() =>
+            {
+                live.extend(*return_result_occurrence);
             }
             _ => {}
         }
@@ -13161,15 +13159,13 @@ pub(crate) fn live_return_result_occurrences(
         | WaitingFor::SeparatePilesChoice {
             return_result_occurrence,
             ..
-        } => {
-            if crate::game::effects::validate_definition_waiting_for_result_owner(
-                state,
-                &state.waiting_for,
-            )
-            .is_ok()
-            {
-                live.extend(*return_result_occurrence);
-            }
+        } if crate::game::effects::validate_definition_waiting_for_result_owner(
+            state,
+            &state.waiting_for,
+        )
+        .is_ok() =>
+        {
+            live.extend(*return_result_occurrence);
         }
         _ => {}
     }
