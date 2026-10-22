@@ -7547,6 +7547,30 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
+    /// CR 614.12 + CR 616.1: finish an ordinary interactive enter-as-copy
+    /// entry after its merged counter placement settles. Never minted by Meld
+    /// or liminal entry. The incarnation pin prevents work on a later object.
+    ///
+    /// The fallible engine consumer pops this action before running the entry
+    /// tail; a nested pause parks only the remaining post-actions. It runs in
+    /// list order, before the completion's EffectResolved and player action.
+    ///
+    /// `add-engine-variant` gate:
+    /// * Stage 1 DOES_NOT_EXIST — no post-action finishes this ordinary entry.
+    /// * Stage 2 EXTEND_OK — FinishMeldEntry, EmitCommittedCopyTokenEntry,
+    ///   ContinueCopyTokenCreation, and FinalizeCommittedLiminalTokenEntry
+    ///   carry distinct suspended operations, not a shared parameter axis.
+    /// * Stage 3 WITHIN_SECTION — entry replacement resumption, CR 614.12
+    ///   + CR 616.1; this is not a leaf-reference layer.
+    ///
+    /// Serialized surface: PendingEffectResolved::post_actions on the existing
+    /// resolution-state frame wire, exactly like ContinueProliferateActions
+    /// and ContinuePlayerScopeSacrifice. Backward compatible, not forward
+    /// compatible: older builds cannot load a save containing this new tag.
+    /// Same one-way contract; no game protocol or resolution-state wire bump.
+    FinishCopyTargetChoiceEntry {
+        entrant: ObjectIncarnationRef,
+    },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
     FinishMeldEntry {
