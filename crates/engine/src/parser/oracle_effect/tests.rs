@@ -4,7 +4,7 @@ use super::lower::{
 };
 use super::sequence::split_clause_sequence;
 use super::*;
-use crate::parser::oracle::has_unimplemented;
+use crate::parser::oracle::has_unimplemented as has_unimplemented_ability;
 
 #[test]
 fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
@@ -36,7 +36,7 @@ fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
             format!("{head} and "),
         ] {
             let original = ParseContext {
-                target_chooser: Some(ControllerRef::Opponent),
+                target_chooser: Some(TargetFilter::Opponent),
                 ..Default::default()
             };
             let mut context = original.clone();
@@ -46,7 +46,7 @@ fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
             );
             assert_eq!(context, original, "failed compound is transactional");
             let ability = parse_effect_chain(&source, AbilityKind::Spell);
-            assert!(has_unimplemented(&ability), "{source}");
+            assert!(has_unimplemented_ability(&ability), "{source}");
             assert!(
                 !matches!(
                     *ability.effect,
@@ -60,7 +60,7 @@ fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
             parse_effect_chain_with_context(&complete, AbilityKind::Spell, &mut context);
         let plain = parse_effect_chain(&complete, AbilityKind::Spell);
         assert_eq!(with_context, plain);
-        assert!(!has_unimplemented(&plain), "{plain:#?}");
+        assert!(!has_unimplemented_ability(&plain), "{plain:#?}");
         let ir = parse_effect_chain_ir(&complete, AbilityKind::Spell, &mut ParseContext::default());
         assert!(!ir.clauses.is_empty());
         assert!(ir
@@ -111,9 +111,9 @@ fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
         "Destroy target creature of an opponent's choice and draw a card.",
         AbilityKind::Spell,
     );
-    assert_eq!(chooser.target_chooser, Some(ControllerRef::Opponent));
+    assert_eq!(chooser.target_chooser, Some(TargetFilter::Opponent));
     assert_eq!(chooser.sub_ability.as_deref().unwrap().target_chooser, None);
-    assert!(!has_unimplemented(&chooser));
+    assert!(!has_unimplemented_ability(&chooser));
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn destroy_terminal_public_chains_keep_exact_tail_and_sibling_failure_classes() 
         ("Destroy each artifact or enchantment.", true),
     ] {
         let parsed = parse_effect_chain(source, AbilityKind::Spell);
-        assert!(!has_unimplemented(&parsed), "{parsed:#?}");
+        assert!(!has_unimplemented_ability(&parsed), "{parsed:#?}");
         assert_eq!(matches!(*parsed.effect, Effect::DestroyAll { .. }), all);
         assert!(matches!(
             *parsed.effect,
@@ -185,7 +185,7 @@ fn destroy_terminal_public_chains_keep_exact_tail_and_sibling_failure_classes() 
         AbilityKind::Spell,
     );
     assert!(matches!(*counter.effect, Effect::Counter { .. }));
-    assert!(!has_unimplemented(&counter));
+    assert!(!has_unimplemented_ability(&counter));
     let exile = parse_effect_chain(
         "Exile target creature card from your graveyard.",
         AbilityKind::Spell,
@@ -197,7 +197,7 @@ fn destroy_terminal_public_chains_keep_exact_tail_and_sibling_failure_classes() 
             ..
         }
     ));
-    assert!(!has_unimplemented(&exile));
+    assert!(!has_unimplemented_ability(&exile));
 }
 
 #[test]
@@ -238,18 +238,18 @@ fn destroy_public_failure_classes_and_typed_event_context_remain_distinct() {
         *trigger.sub_ability.as_deref().unwrap().effect,
         Effect::Draw { .. }
     ));
-    assert!(!has_unimplemented(&trigger));
+    assert!(!has_unimplemented_ability(&trigger));
     let modeled = parse_effect_chain(
         "~ deals 6 damage to target creature. Destroy all Equipment attached to that creature.",
         AbilityKind::Spell,
     );
-    assert!(!has_unimplemented(&modeled));
+    assert!(!has_unimplemented_ability(&modeled));
     let tail = modeled.sub_ability.as_deref().unwrap();
     assert!(matches!(*tail.effect, Effect::DestroyAll { .. }));
     assert!(serde_json::to_string(&tail)
         .unwrap()
         .contains("DeclaredTarget"));
-    assert!(!has_unimplemented(&parse_effect_chain(
+    assert!(!has_unimplemented_ability(&parse_effect_chain(
         "Put a +1/+1 counter on this creature.",
         AbilityKind::Spell
     )));

@@ -37493,9 +37493,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state
             .resolution_stack
-            .push_copy_token(PendingCopyTokenResolution {
-                created_ids: vec![],
-                remaining: VecDeque::from([PendingCopyTokenBatch {
+            .push_copy_token(PendingCopyTokenResolution::legacy(
+                VecDeque::from([PendingCopyTokenBatch {
                     owner: PlayerId(0),
                     count: 1,
                     copy: Box::new(CopyTokenSpec {
@@ -37510,9 +37509,9 @@ mod tests {
                         controller: PlayerId(0),
                     }),
                 }]),
-                effect_kind: EffectKind::CopyTokenOf,
-                source_id: ObjectId(42),
-            });
+                EffectKind::CopyTokenOf,
+                ObjectId(42),
+            ));
         state
     }
 

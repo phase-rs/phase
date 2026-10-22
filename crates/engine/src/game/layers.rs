@@ -34276,7 +34276,7 @@ mod numeric_cda_all_zone_tests {
                 },
             };
             if zone == Zone::Stack {
-                state.stack.push(stack_entry.clone());
+                state.stack.push_back(stack_entry.clone());
             }
             let definition =
                 numeric_definition(vec![ContinuousModification::SetPower { value: 4 }]);
@@ -34352,7 +34352,7 @@ mod numeric_cda_all_zone_tests {
             .is_empty());
             add_to_zone(&mut state, id, zone, P0);
             if zone == Zone::Stack {
-                state.stack.push(stack_entry);
+                state.stack.push_back(stack_entry);
             }
             assert_eq!(
                 continuous_effect_candidate_ids(

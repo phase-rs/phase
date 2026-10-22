@@ -2193,6 +2193,7 @@ fn valid_sought_cost_reader(ir: &EffectChainIr, reader: &ClauseIr) -> bool {
 #[cfg(test)]
 mod sought_reader_assembly_tests {
     use super::*;
+    use crate::types::ability::ReturnResultReadSpec;
 
     #[test]
     fn sought_assembly_proves_constant_source_even_with_a_stored_relation() {

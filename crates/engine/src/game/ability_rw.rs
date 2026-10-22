@@ -10295,7 +10295,7 @@ mod u13_counter_condition_rw_tests {
 mod departure_source_profile_tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
+        AggregateFunction, Comparator, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
     };
 
     fn quantity(source: ZoneChangeRecordSource, filter: TargetFilter) -> QuantityRef {

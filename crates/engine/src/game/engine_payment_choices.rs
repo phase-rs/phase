@@ -3780,6 +3780,7 @@ mod tests {
         root.sub_ability = Some(Box::new(child));
         let mut state = payment_state(root.clone(), zero_payment(), vec![]);
         state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            return_result_occurrence: None,
             player: PlayerId(0),
             costs: vec![zero_payment()],
             pending_effect: Box::new(root),

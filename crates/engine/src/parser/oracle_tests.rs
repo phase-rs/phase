@@ -28,14 +28,14 @@ fn ordinary_destroy_prismatic_whole_source_native_and_loaders_remain_honest() {
     assert_eq!(doc.source_text, source);
     assert_eq!(doc.items.len(), 1);
     let item = &doc.items[0];
-    assert!(item.source.span.is_exact());
+    assert!(item.source.span().is_exact());
     assert_eq!(
         (
-            item.source.span.first_line,
-            item.source.span.last_line,
-            item.source.span.start_byte,
-            item.source.span.end_byte,
-            item.source.span.ordinal_within_span
+            item.source.span().first_line,
+            item.source.span().last_line,
+            item.source.span().start_byte,
+            item.source.span().end_byte,
+            item.source.span().ordinal_within_span
         ),
         (0, 0, 0, source.len(), 0)
     );
@@ -142,7 +142,7 @@ fn ordinary_destroy_full_native_broken_and_historical_attachment_rider_keep_thei
         assert_eq!(doc.source_text, text);
         assert_eq!(doc.items.len(), 1);
         assert_eq!(doc.items[0].source.fragment(), Some(text));
-        assert!(doc.items[0].source.span.is_exact());
+        assert!(doc.items[0].source.span().is_exact());
         let parsed = lower_oracle_ir(&mut doc);
         assert_eq!(parsed.abilities.len(), 1);
         assert!(parsed.statics.is_empty());
@@ -232,10 +232,10 @@ fn u6_full_documents_preserve_complete_grants_plane_and_both_loaders() {
         let OracleNodeIr::Static(ir) = &grant.node else {
             panic!("dedicated static")
         };
-        assert!(grant.source.span.is_exact());
-        assert_eq!(grant.source.span.first_line, 0);
-        assert_eq!(grant.source.span.last_line, 0);
-        assert_eq!(grant.source.span.ordinal_within_span, 0);
+        assert!(grant.source.span().is_exact());
+        assert_eq!(grant.source.span().first_line, 0);
+        assert_eq!(grant.source.span().last_line, 0);
+        assert_eq!(grant.source.span().ordinal_within_span, 0);
         assert_eq!(grant.source.fragment(), text.lines().next());
         assert_eq!(ir.source_text, text.lines().next().unwrap());
         let parsed = lower_oracle_ir(&mut doc);
@@ -325,16 +325,16 @@ fn u6_full_documents_preserve_complete_grants_plane_and_both_loaders() {
     assert_eq!(doc.items.len(), 2);
     let owned = format!("{first}\n{cost}");
     let grant = &doc.items[0];
-    assert_eq!(grant.source.span.first_line, 0);
-    assert_eq!(grant.source.span.last_line, 1);
-    assert_eq!(grant.source.span.start_byte, 0);
-    assert_eq!(grant.source.span.end_byte, owned.len());
+    assert_eq!(grant.source.span().first_line, 0);
+    assert_eq!(grant.source.span().last_line, 1);
+    assert_eq!(grant.source.span().start_byte, 0);
+    assert_eq!(grant.source.span().end_byte, owned.len());
     assert_eq!(grant.source.fragment(), Some(owned.as_str()));
     assert_eq!(
-        &text[grant.source.span.start_byte..grant.source.span.end_byte],
+        &text[grant.source.span().start_byte..grant.source.span().end_byte],
         owned
     );
-    assert_eq!(doc.items[1].source.span.first_line, 2);
+    assert_eq!(doc.items[1].source.span().first_line, 2);
     assert_eq!(doc.items[1].source.fragment(), Some(independent));
     assert_ne!(doc.items[0].id, doc.items[1].id);
     let parsed = lower_oracle_ir(&mut doc);
@@ -367,7 +367,7 @@ fn u6_native_absent_zero_fixed_nonmana_compound_and_independent_free_cards_keep_
         let mut doc = parse_oracle_ir(text, name, &[], &types, &[]);
         assert_eq!(doc.source_text, text);
         assert_eq!(doc.items.iter().map(|item| item.id).collect::<std::collections::HashSet<_>>().len(), doc.items.len());
-        assert!(doc.items.iter().all(|item| item.source.fragment().is_some() && item.source.span.is_exact()));
+        assert!(doc.items.iter().all(|item| item.source.fragment().is_some() && item.source.span().is_exact()));
         let parsed = lower_oracle_ir(&mut doc);
         assert!(!parsed.abilities.is_empty(), "the full independent spell body: {name}");
         assert!(!parsed_has_unimplemented(&parsed), "{name}: {parsed:#?}");
@@ -537,7 +537,7 @@ fn u6_public_refusals_preserve_whole_grant_cost_and_independent_lines() {
             matches!(&doc.items[0].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == owned)
         );
         assert_eq!(doc.items[0].source.fragment(), Some(owned.as_str()));
-        assert_eq!(doc.items[0].source.span.last_line, 1);
+        assert_eq!(doc.items[0].source.span().last_line, 1);
         let parsed = lower_oracle_ir(&mut doc);
         assert_eq!(parsed.statics.len(), 1);
         assert_eq!(
@@ -614,12 +614,12 @@ fn u5_full_documents_publish_both_halves_at_the_original_source() {
         let units = doc
             .items
             .iter()
-            .filter(|item| item.source.span.first_line == entry_line)
+            .filter(|item| item.source.span().first_line == entry_line)
             .collect::<Vec<_>>();
         assert_eq!(units.len(), 2, "{name}");
         assert_ne!(units[0].id, units[1].id);
         for (ordinal, item) in units.iter().enumerate() {
-            let span = &item.source.span;
+            let span = item.source.span();
             assert!(span.is_exact());
             assert_eq!(span.first_line, entry_line);
             assert_eq!(span.last_line, entry_line);
@@ -821,7 +821,7 @@ fn u5_atomic_compound_refusals_keep_exact_source_and_independent_sibling() {
         let units = doc
             .items
             .iter()
-            .filter(|item| item.source.span.first_line == 0)
+            .filter(|item| item.source.span().first_line == 0)
             .collect::<Vec<_>>();
         assert_eq!(units.len(), 1, "{bad}");
         assert!(
@@ -23519,9 +23519,10 @@ fn green_goblin_goblin_formula_line_grants_mayhem() {
 
 #[test]
 fn helper_parses_same_line_escape_grant_continuation() {
-    let static_def = try_parse_graveyard_keyword_static_with_continuation(
+    let static_def = try_parse_graveyard_keyword_source_with_label(
             "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
         )
+        .expect("helper should recognize same-line escape source")
         .expect("helper should parse same-line escape continuation");
     assert!(
         static_def
@@ -39116,7 +39117,7 @@ fn complete_publication_full_native_companion_population() {
             assert_eq!(cost.requirement, crate::types::ability::SacrificeRequirement::Count { count: 1 });
             assert_eq!(cost.target, TargetFilter::Typed(TypedFilter::creature()));
             let Effect::PutCounter { target, counter_type, count, .. } = grants[0].effect.as_ref() else { panic!("knife counter") };
-            assert_eq!(*target, TargetFilter::GrantingObject); assert_eq!(*counter_type, CounterType::Generic("blood".into()));
+            assert_eq!(*target, TargetFilter::GrantingObject { bound: None }); assert_eq!(*counter_type, CounterType::Generic("blood".into()));
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 }); assert!(grants[0].sub_ability.is_none());
         } else { assert!(grants.is_empty(), "no unexplained granted body: {name}"); }
         actual.retain(|modification| !matches!(modification, ContinuousModification::GrantAbility { .. }));
@@ -39549,7 +39550,7 @@ fn complete_publication_avatar_and_safewright_preserve_the_whole_type_choice_cha
         let choice = if name == "Mirror Entity Avatar" {
             assert!(parsed.extracted_keywords.is_empty()); assert!(parsed.triggers.is_empty());
             assert_eq!(parsed.abilities.len(), 1);
-            assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Mana(crate::parser::oracle_nom::primitives::parse_mana_cost("{X}").unwrap().1)));
+            assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Mana { cost: crate::parser::oracle_nom::primitives::parse_mana_cost("{X}").unwrap().1 }));
             &parsed.abilities[0]
         } else {
             assert_eq!(parsed.extracted_keywords, vec![Keyword::Flash, Keyword::Convoke]);

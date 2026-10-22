@@ -53498,7 +53498,7 @@ mod cost_source_binding_tests {
                 },
             };
             if zone == Zone::Stack {
-                state.stack.push(stack_entry.clone());
+                state.stack.push_back(stack_entry.clone());
             }
             ability.settle_cost_paid_provenance_recursive(
                 &state,
@@ -53533,7 +53533,7 @@ mod cost_source_binding_tests {
             );
             add_to_zone(&mut state, id, zone, PlayerId(0));
             if zone == Zone::Stack {
-                state.stack.push(stack_entry);
+                state.stack.push_back(stack_entry);
             }
             assert_eq!(ability.cost_paid_source_binding(&state), expected);
             let mut absent = state.clone();

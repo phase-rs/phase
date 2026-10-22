@@ -29573,6 +29573,7 @@ mod cost_move_drain_priority_boundary_tests {
         });
         state.push_counter_removals(PendingCounterRemovalQueue {
             remaining: vec![removal],
+            result_binding: None,
             effect_kind: EffectKind::RemoveCounter,
             source_ability_id: ObjectId(62),
             total: 1,

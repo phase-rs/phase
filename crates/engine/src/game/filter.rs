@@ -14483,6 +14483,7 @@ mod tests {
                         &state,
                         &state.objects[&candidate],
                         candidate,
+                        HeldObject::Live,
                         &source_context
                     ),
                     expected.unwrap_or(false)
@@ -14836,6 +14837,7 @@ mod tests {
                     &state,
                     &state.objects[&candidate],
                     candidate,
+                    HeldObject::Live,
                     &context
                 ),
                 expected
@@ -14924,6 +14926,7 @@ mod tests {
             &state,
             &state.objects[&candidate],
             candidate,
+            HeldObject::Live,
             &context
         ));
         state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
@@ -14966,6 +14969,7 @@ mod tests {
             &state,
             &state.objects[&candidate],
             candidate,
+            HeldObject::Live,
             &old
         ));
         assert!(zone_change_record_matches_property(
@@ -14978,6 +14982,7 @@ mod tests {
             &state,
             &state.objects[&candidate],
             candidate,
+            HeldObject::Live,
             &live
         ));
         state.last_named_choice = Some(ChoiceValue::OddOrEven(Parity::Odd));
@@ -14991,6 +14996,7 @@ mod tests {
                 &state,
                 &state.objects[&candidate],
                 candidate,
+                HeldObject::Live,
                 &missing
             ));
             assert!(!zone_change_record_matches_property(

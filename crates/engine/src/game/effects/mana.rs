@@ -2705,6 +2705,7 @@ mod tests {
             let types = chosen_mana_types_for_prompt(
                 &state,
                 &ability,
+                &ability,
                 &produced,
                 &prompt,
                 ManaChoice::SingleColor(chosen),
@@ -4568,7 +4569,7 @@ mod tests {
             let before = runner.state().players[0].mana_pool.total();
             runner
                 .act(GameAction::ActivateAbility {
-                    payment_mode: crate::types::actions::CastPaymentMode::Auto,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })

@@ -450,6 +450,7 @@ pub fn handle_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::engine;
     use crate::game::zones::create_object;
     use crate::types::ability::{

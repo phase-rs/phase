@@ -25457,6 +25457,8 @@ mod tests {
             repl.mode(ReplacementMode::Optional { decline: None })
         }
         let create_two = || ProposedEvent::CreateToken {
+            creation_frame: None,
+            instructions: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,

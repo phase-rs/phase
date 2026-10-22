@@ -2826,9 +2826,8 @@ mod complete_publication_quantity_tests {
                 " plus something unknown",
                 " plus the number of Bears they control",
             ] {
-                assert!(all_consuming(parse_quantity)
-                    .parse(&format!("{text}{tail}"))
-                    .is_err());
+                let source = format!("{text}{tail}");
+                assert!(all_consuming(parse_quantity).parse(&source).is_err());
             }
         }
         for (text, expected) in [

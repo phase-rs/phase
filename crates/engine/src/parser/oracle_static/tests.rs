@@ -42452,7 +42452,7 @@ fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_tran
     assert!(matches!(
         definition.effect.as_ref(),
         Effect::PutCounter {
-            target: TargetFilter::GrantingObject,
+            target: TargetFilter::GrantingObject { bound: None },
             ..
         }
     ));

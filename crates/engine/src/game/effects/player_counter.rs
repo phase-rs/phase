@@ -456,6 +456,7 @@ mod tests {
             reads_chosen_group: None,
             declares_return_result: None,
             reads_return_result: None,
+            return_result_process: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::GivePlayerCounter {
                 counter_kind,
@@ -677,6 +678,7 @@ mod tests {
             reads_chosen_group: None,
             declares_return_result: None,
             reads_return_result: None,
+            return_result_process: None,
             detached_remainder: crate::types::ability::DetachedRemainder::NoProducer,
             effect: Effect::LoseAllPlayerCounters { target },
             controller,

@@ -29352,6 +29352,7 @@ mod tests {
                         to: None,
                     },
                     QuantityRef::ZoneChangeAggregate {
+                        source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
                         filter: filter.clone(),
                         from: None,
                         to: None,
@@ -45982,7 +45983,7 @@ mod tests {
         let _outcome = crate::game::engine_resolution_choices::handle_resolution_choice(
             &mut state,
             WaitingFor::EffectZoneChoice {
-                return_result_occurrence,
+                return_result_occurrence: None,
                 return_result_process: None,
                 player: PlayerId(0),
                 cards: vec![first, second],
@@ -60988,6 +60989,7 @@ mod entry_observation_settlement_tests {
 
         // RepeatFor frame.
         let repeat = |effect: Effect| PendingRepeatIteration {
+            return_result_occurrence: None,
             ability: Box::new(node(effect)),
             tracked_members: Vec::new(),
             iterated_counter_kinds: Vec::new(),
@@ -61014,6 +61016,8 @@ mod entry_observation_settlement_tests {
 
         // ChooseOneOf frame whose branches hold an Animate.
         let choose = |effect: Effect| PendingChooseOneOf {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
             controller: PlayerId(0),
             source_id: ObjectId(100),
             branches: vec![AbilityDefinition::new(AbilityKind::Spell, effect)],
@@ -61127,6 +61131,7 @@ mod entry_observation_settlement_tests {
                 library_placement: None,
                 completion: Some(BatchCompletion::LibrarySearchDeliverySettled {
                     resume: LibrarySearchDeliveryResume::Scoped {
+                        return_result_occurrence: None,
                         player: PlayerId(0),
                         source_id: ObjectId(100),
                         search_keys: Vec::new(),
@@ -63299,7 +63304,7 @@ mod departure_existing_receipt_process_tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::ReturnResultId;
-    use crate::types::counter::CounterMatch;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::InstructionResult;
 
     #[test]
@@ -63395,7 +63400,7 @@ mod departure_existing_receipt_process_tests {
             Some(ResolutionProgress::Complete)
         );
         assert_eq!(state.deferred_triggers.len(), 1);
-        assert_eq!(state.deferred_triggers[0].ability.return_result_process, None, "the creating receipt view authenticates actual parent P, while its new stack child owns no old process");
+        assert_eq!(state.deferred_triggers[0].pending.ability.return_result_process, None, "the creating receipt view authenticates actual parent P, while its new stack child owns no old process");
         let mut foreign_parent = parent.clone();
         foreign_parent.return_result_process = Some(
             crate::types::game_state::ReturnResultProcessId(process.0 + 1),

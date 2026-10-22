@@ -2895,7 +2895,7 @@ mod departure_result_tests {
                     let clause = imported.last_mut().unwrap();
                     clause.parsed.effect = Effect::NoOp;
                     clause.player_scope = Some(player(0));
-                    clause.target_chooser = Some(player(0));
+                    clause.target_chooser = Some(payer(0));
                     clause.unless_pay = Some(UnlessPayModifier {
                         cost: AbilityCost::PayLife {
                             amount: QuantityExpr::Fixed { value: 0 },
@@ -2972,7 +2972,7 @@ mod departure_result_tests {
                     assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
                     let clause = relocated.last().unwrap();
                     assert_eq!(clause.player_scope, Some(player(expected)));
-                    assert_eq!(clause.target_chooser, Some(player(expected)));
+                    assert_eq!(clause.target_chooser, Some(payer(expected)));
                     assert_eq!(clause.unless_pay.as_ref().unwrap().payer, payer(expected));
                     assert_eq!(
                         clause.parsed.unless_pay.as_ref().unwrap().payer,

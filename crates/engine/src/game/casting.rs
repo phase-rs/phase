@@ -37815,7 +37815,8 @@ mod numeric_source_announcement_tests {
                 shards: vec![ManaCostShard::X],
             },
         ] {
-            let mut pending = PendingCast::for_activation(id, root.clone(), cost, 0, None);
+            let mut pending =
+                PendingCast::for_activation(id, root.clone(), cost, 0, None, CastPaymentMode::Auto);
             let saved = serde_json::to_string(&pending).unwrap();
             pending = serde_json::from_str(&saved).unwrap();
             runner.state_mut().objects.get_mut(&id).unwrap().incarnation = 8;
@@ -37842,7 +37843,14 @@ mod numeric_source_announcement_tests {
         }
         let mut legacy = root;
         legacy.set_source_incarnation_recursive(None);
-        let mut pending = PendingCast::for_activation(id, legacy, ManaCost::NoCost, 0, None);
+        let mut pending = PendingCast::for_activation(
+            id,
+            legacy,
+            ManaCost::NoCost,
+            0,
+            None,
+            CastPaymentMode::Auto,
+        );
         capture_settled_targets(runner.state(), P0, &mut pending);
         assert_eq!(pending.ability.source_incarnation, Some(8));
         assert_eq!(

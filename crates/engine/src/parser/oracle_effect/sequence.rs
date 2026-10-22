@@ -15659,6 +15659,7 @@ mod tests {
             },
             AbilityKind::Spell,
             &env,
+            "Put three +1/+1 counters on it.",
         );
         assert_eq!(defs.len(), 2);
         assert_eq!(*defs[0].effect, draw);
