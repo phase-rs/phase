@@ -1,8 +1,13 @@
+use crate::game::quantity::{
+    quantity_expr_contains_scope, quantity_expr_uses_recipient, resolve_quantity_with_targets,
+};
+use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
-    AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
-    EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
-    SourceExclusion, TargetFilter, TargetRef,
+    AbilityDefinition, CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Duration,
+    Effect, EffectError, EffectKind, ObjectScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -478,6 +483,167 @@ fn freeze_damage_modification_x(
     }
 }
 
+/// CR 614.1c: preserve quantities that need the entering permanent's context.
+/// Any deferred leaf keeps its entire arithmetic expression dynamic.
+fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef> {
+    match expr {
+        QuantityExpr::Fixed { .. } => None,
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => entry_counter_deferred_reference(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().find_map(entry_counter_deferred_reference)
+        }
+        QuantityExpr::UpTo { max } => entry_counter_deferred_reference(max),
+        QuantityExpr::Power { exponent, .. } => entry_counter_deferred_reference(exponent),
+        QuantityExpr::Difference { left, right } => entry_counter_deferred_reference(left)
+            .or_else(|| entry_counter_deferred_reference(right)),
+        QuantityExpr::Ref { qty } => match qty {
+            // Payment facts belong to the entering spell. Preserved limitations:
+            // CostXPaid still reads source/trigger context, not ctx.entering;
+            // SharedCardTypes needs ctx.spell, which entry extraction lacks.
+            QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::SharedCardTypes { .. } => Some(qty),
+            QuantityRef::ManaSpentToCast { scope, .. } => match scope {
+                CastManaObjectScope::SelfObject => Some(qty),
+                CastManaObjectScope::TriggeringSpell | CastManaObjectScope::AbilityTarget => None,
+            },
+            QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::NameStickerLetterCount { .. } => {
+                quantity_expr_contains_scope(expr, ObjectScope::Recipient).then_some(qty)
+            }
+            // Delegate player/filter recipient analysis to its existing authority.
+            QuantityRef::HandSize { .. }
+            | QuantityRef::LifeTotal { .. }
+            | QuantityRef::GraveyardSize { .. }
+            | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::PartySize { .. }
+            | QuantityRef::Speed { .. }
+            | QuantityRef::LifeGainedThisTurn { .. }
+            | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::LandsPlayedThisTurn { .. }
+            | QuantityRef::PlayerChosenNumber { .. }
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+            | QuantityRef::CardsDiscardedThisTurn { .. }
+            | QuantityRef::TokensCreatedThisTurn { .. }
+            | QuantityRef::PlayerActionsThisTurn { .. }
+            | QuantityRef::SacrificedThisTurn { .. }
+            | QuantityRef::BattlefieldEntriesThisTurn { .. }
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::PropertyAggregate(..)
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::PlayerCount { .. } => quantity_expr_uses_recipient(expr).then_some(qty),
+            // CR 608.2h: resolution-owned source/controller/event reads are fixed
+            // now. In particular, EventSource/EventTarget and trigger-spell mana
+            // reads lose current_trigger_event when stack resolution completes.
+            QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::LifeAboveStarting
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ChosenNumber
+            | QuantityRef::NotedNumber
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::VoteCount { .. } => None,
+        },
+    }
+}
+
+/// CR 611.2d + CR 608.2h: a resolving ability determines the variable in its
+/// continuous effect once, on resolution, rather than when the creature enters.
+/// CR 109.5 + CR 113.7a: use the resolving ability's controller and source context,
+/// including its carried source information if the source has left.
+fn freeze_entry_counter_quantities(
+    replacement: &mut ReplacementDefinition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) {
+    if replacement.event != ReplacementEvent::ChangeZone
+        || replacement.destination_zone != Some(Zone::Battlefield)
+    {
+        return;
+    }
+    let mut current = replacement.execute.as_deref_mut();
+    while let Some(execute) = current {
+        // CR 614.1c: only the event-modifier prefix changes how the object enters.
+        // Choice branches and post-entry instructions retain their own timing.
+        if !EventModifiers::is_event_modifier_effect(&execute.effect) {
+            break;
+        }
+        if let Effect::PutCounter { count, .. } = execute.effect.as_mut() {
+            if !matches!(count, QuantityExpr::Fixed { .. })
+                && entry_counter_deferred_reference(count).is_none()
+            {
+                *count = QuantityExpr::Fixed {
+                    value: resolve_quantity_with_targets(state, count, ability),
+                };
+            }
+        }
+        current = execute.sub_ability.as_deref_mut();
+    }
+}
+
 fn replacement_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -577,13 +743,13 @@ pub fn resolve(
     if matches!(target, TargetFilter::None) {
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
+        freeze_entry_counter_quantities(&mut replacement, state, ability);
         // CR 113.7a + CR 608.2h: the floating rider still refers to its source
         // ("this enchantment"); anchor that host so the pending scan's host-relative
-        // gates and the entry-modifier quantities (via `replacement_source_host`)
+        // gates and deferred entry-modifier quantities (via `replacement_source_host`)
         // read the installing source, not the ObjectId(0) storage sentinel.
-        // Battlefield only: a source not on the battlefield at resolution keeps
-        // the sentinel; CR 608.2h last-known information for that case is not
-        // implemented here.
+        // Source-independent counts were already frozen with the resolving
+        // ability's source information; deferred entering-object reads stay live.
         super::install_floating_damage_replacement(
             state,
             replacement,

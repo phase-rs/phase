@@ -9239,13 +9239,12 @@ enum ReplacementBranch {
 /// Extract ETB counter data from a replacement ability's effect.
 /// Handles `PutCounter` and `AddCounter` effects, returning (counter_type, count) pairs.
 ///
-/// `event` scopes the quantity resolution: for a `ZoneChange` to the battlefield
-/// the entering object is threaded through `QuantityContext::entering`, so
-/// self-scoped spell refs (`ManaSpentToCast` with self/trigger scopes
-/// lookups) resolve against the spell that is ETB'ing rather than the static
-/// replacement source. CR 614.1c treats these as replacement effects; CR 601.2h
-/// guarantees `colors_spent_to_cast` is still populated at this point (the clear
-/// happens later in `process_triggers`).
+/// Floating riders' resolution-owned quantities are already fixed at install
+/// (CR 611.2d: continuous-effect variables are determined on resolution).
+/// For quantities left dynamic, `event` supplies `QuantityContext::entering`:
+/// recipient-scoped object reads and self-scoped `ManaSpentToCast` then use the
+/// entering spell rather than the installing source (CR 614.1c: enters-with
+/// effects modify entry). Trigger/event scopes are not entering-object scopes.
 ///
 /// `scoped_player` is the entrant's as-enters choice (e.g. "choose an opponent")
 /// carried on `event.enter_with_choices` as `ChosenAttribute::Player`. Binding it
@@ -9314,11 +9313,12 @@ fn extract_etb_counters_from_effect(
             count,
             ..
         } => {
-            // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
-            // object for ETB replacements. `CostXPaid` reads the spell's paid X
-            // (stashed by `finalize_cast`); self-scoped spent-mana refs read the spell's
-            // per-color mana tally; other dynamic refs resolve against current
-            // state.
+            // CR 614.1c: resolve the remaining dynamic entering-object reads
+            // while modifying entry. Floating resolution-owned counts have
+            // already been fixed at install (CR 611.2d). Self-scoped spent-mana
+            // refs use the entering spell's payment tally. CostXPaid remains a
+            // known limitation: its resolver reads source/trigger context,
+            // not ctx.entering.
             let entering = match event {
                 ProposedEvent::ZoneChange {
                     object_id,
@@ -9401,7 +9401,7 @@ pub(super) struct EnterReplacementModifiers {
 impl EventModifiers {
     /// True if this single effect (ignoring sub_ability chain) is purely a
     /// ProposedEvent modifier with no additional resolution work.
-    fn is_event_modifier_effect(effect: &Effect) -> bool {
+    pub(super) fn is_event_modifier_effect(effect: &Effect) -> bool {
         match effect {
             // CR 701.26a/b: a SelfRef single tap/untap is purely an enters-tapped
             // event modifier (either polarity).

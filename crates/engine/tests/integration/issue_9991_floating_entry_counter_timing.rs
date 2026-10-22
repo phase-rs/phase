@@ -1,0 +1,360 @@
+//! Synthetic typed riders isolate the install/entry boundary without depending
+//! on Torgal's parser. Every trigger is produced by an actual creature cast.
+//! CR 611.2d + CR 608.2h: resolution-owned quantities are determined once.
+//! CR 614.1c: entering-object quantities remain entry replacement work.
+
+use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric, ChoiceType,
+    ControllerRef, Effect, EffectScope, ObjectScope, QuantityExpr, QuantityRef, TapStateChange,
+    TargetFilter, TargetSelectionMode, TypedFilter,
+};
+use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
+
+fn quantity(qty: QuantityRef) -> QuantityExpr {
+    QuantityExpr::Ref { qty }
+}
+
+fn population() -> QuantityExpr {
+    quantity(QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    })
+}
+
+fn counter(count: QuantityExpr) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count,
+            target: TargetFilter::SelfRef,
+        },
+    )
+}
+
+fn source(scenario: &mut GameScenario, execute: AbilityDefinition) -> ObjectId {
+    // Use the production parser for the spell-binding placeholder and lifecycle;
+    // only the counter expression/chain is synthetic.
+    const BREWING: &str = "When this enchantment enters, any number of target opponents each draw a card. Put an ingredient counter on this enchantment, then put an ingredient counter on it for each card drawn this way.\nWhenever you cast a creature spell, that creature enters with X additional +1/+1 counters on it, where X is the number of ingredient counters on this enchantment.";
+    let mut trigger = engine::parser::parse_oracle_text(BREWING, "Communal Brewing", &[], &[], &[])
+        .triggers
+        .into_iter()
+        .find(|trigger| trigger.mode == TriggerMode::SpellCast)
+        .expect("Brewing must parse its cast trigger");
+    let Effect::AddTargetReplacement {
+        replacement,
+        target: TargetFilter::None,
+    } = trigger
+        .execute
+        .as_mut()
+        .expect("trigger must install a rider")
+        .effect
+        .as_mut()
+    else {
+        panic!("Brewing must install a floating rider");
+    };
+    replacement.execute = Some(Box::new(execute));
+    scenario
+        .add_creature(P0, "Synthetic rider source", 2, 2)
+        .with_subtypes(vec!["Dog"])
+        .with_mana_cost(ManaCost::generic(1))
+        .with_trigger_definition(trigger)
+        .id()
+}
+
+fn entrant(scenario: &mut GameScenario) -> ObjectId {
+    let id = scenario
+        .add_creature_to_hand(P0, "Timing entrant", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 6,
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Green, ManaType::Blue]
+            .into_iter()
+            .chain((0..6).map(|_| ManaType::Colorless))
+            .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    id
+}
+
+fn install(runner: &mut GameRunner, spell: ObjectId) {
+    runner.cast(spell).commit();
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "cast produced its rider trigger"
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1, "only the creature remains");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert!(runner.state().current_trigger_event.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn finish(runner: &mut GameRunner, spell: ObjectId, expected: u32) {
+    runner.advance_until_stack_empty();
+    let object = &runner.state().objects[&spell];
+    assert_eq!(
+        object.zone,
+        Zone::Battlefield,
+        "reach guard: entrant resolved"
+    );
+    assert_eq!(
+        object
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        expected,
+    );
+    assert_eq!(runner.state().stack.len(), 0);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().pending_damage_replacements[0].is_consumed);
+}
+
+fn removal(scenario: &mut GameScenario, victim: ObjectId) -> ObjectId {
+    scenario
+        .add_spell_to_hand(P0, "Synthetic population response", true)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability(Effect::Destroy {
+            target: TargetFilter::SpecificObject { id: victim },
+            cant_regenerate: false,
+        })
+        .id()
+}
+
+fn remove_after_install(runner: &mut GameRunner, response: ObjectId, victim: ObjectId) {
+    runner.cast(response).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+}
+
+#[test]
+fn resolution_only_event_mana_value_survives_cleared_trigger_context() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::ObjectManaValue {
+            scope: ObjectScope::EventSource,
+        })),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 608.2h: read the triggering spell's MV8, not source MV1 or absent context.
+    finish(&mut runner, spell, 8);
+}
+
+#[test]
+fn resolution_only_triggering_spell_mana_spent_survives_cleared_context() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::ManaSpentToCast {
+            scope: CastManaObjectScope::TriggeringSpell,
+            metric: CastManaSpentMetric::DistinctColors,
+        })),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 608.2h: the trigger's spell payment is read during resolution.
+    finish(&mut runner, spell, 2);
+}
+
+#[test]
+fn tapped_then_dynamic_counter_prefix_freezes_population_before_response() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )
+        .sub_ability(counter(population())),
+    );
+    let victim = scenario.add_creature(P0, "Counted creature", 2, 2).id();
+    let response = removal(&mut scenario, victim);
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    remove_after_install(&mut runner, response, victim);
+    // CR 611.2d: the two-creature population was determined at install.
+    finish(&mut runner, spell, 2);
+    assert!(runner.state().objects[&spell].tapped);
+}
+
+#[test]
+fn mixed_arithmetic_with_recipient_leaf_stays_dynamic_as_a_whole() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(QuantityExpr::Sum {
+            exprs: vec![
+                population(),
+                quantity(QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                }),
+            ],
+        }),
+    );
+    let victim = scenario.add_creature(P0, "Counted creature", 2, 2).id();
+    let response = removal(&mut scenario, victim);
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    remove_after_install(&mut runner, response, victim);
+    // CR 614.1c: recipient MV8 plus the remaining source, not source MV1.
+    finish(&mut runner, spell, 9);
+}
+
+#[test]
+fn source_arithmetic_is_frozen_before_source_counters_change() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = source(
+        &mut scenario,
+        counter(QuantityExpr::Offset {
+            inner: Box::new(quantity(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            })),
+            offset: -1,
+        }),
+    );
+    scenario.with_counter(source, CounterType::Plus1Plus1, 4);
+    let response = scenario
+        .add_spell_to_hand(P0, "Synthetic counter response", true)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability(Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::SpecificObject { id: source },
+        })
+        .id();
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    runner.cast(response).commit();
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&source].counters[&CounterType::Plus1Plus1],
+        6
+    );
+    // CR 611.2d: preserve signed arithmetic's resolution-time result (4 - 1).
+    finish(&mut runner, spell, 3);
+}
+
+#[test]
+fn choice_boundary_leaves_post_entry_dynamic_work_unfrozen() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let choose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type: ChoiceType::CreatureType {
+                options: vec!["Dog".into(), "Wolf".into()],
+            },
+            persist: true,
+            selection: TargetSelectionMode::Chosen,
+        },
+    )
+    .sub_ability(counter(quantity(QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Dog".into())
+                .controller(ControllerRef::You),
+        ),
+    })));
+    let source = source(
+        &mut scenario,
+        counter(QuantityExpr::Fixed { value: 1 }).sub_ability(choose),
+    );
+    let victim = scenario
+        .add_creature(P0, "Counted creature", 2, 2)
+        .with_subtypes(vec!["Dog"])
+        .id();
+    let response = removal(&mut scenario, victim);
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    remove_after_install(&mut runner, response, victim);
+    runner.advance_until_stack_empty();
+    let WaitingFor::NamedChoice {
+        player, options, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "post-entry choice must be reached: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(options, &["Dog".to_string(), "Wolf".to_string()]);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&spell].counters[&CounterType::Plus1Plus1],
+        1
+    );
+    // The prefix applied, but the dynamic tail is not evaluated until the choice.
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Wolf".into(),
+        })
+        .expect("choose Wolf");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    // CR 608.2h: the tail now sees one Dog, not the two present at install.
+    finish(&mut runner, spell, 2);
+}
+
+#[test]
+fn fixed_counter_types_in_the_modifier_prefix_each_apply_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let charge = CounterType::Generic("charge".into());
+    source(
+        &mut scenario,
+        counter(QuantityExpr::Fixed { value: 3 }).sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: charge.clone(),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::SelfRef,
+            },
+        )),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 614.1c: both fixed modifications belong to the same entry event.
+    finish(&mut runner, spell, 3);
+    assert_eq!(runner.state().objects[&spell].counters[&charge], 2);
+}
