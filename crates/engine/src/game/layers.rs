@@ -4722,7 +4722,11 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -33368,6 +33372,20 @@ mod numeric_cda_all_zone_tests {
         ] {
             let mut state = GameState::new_two_player(42);
             let id = create_object(&mut state, CardId(1), P0, "Numeric fixture".into(), zone);
+            let stack_entry = crate::types::game_state::StackEntry {
+                id,
+                source_id: id,
+                controller: P0,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: crate::types::game_state::CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            };
+            if zone == Zone::Stack {
+                state.stack.push(stack_entry.clone());
+            }
             let definition =
                 numeric_definition(vec![ContinuousModification::SetPower { value: 4 }]);
             let object = state.objects.get_mut(&id).unwrap();
@@ -33441,6 +33459,9 @@ mod numeric_cda_all_zone_tests {
             )
             .is_empty());
             add_to_zone(&mut state, id, zone, P0);
+            if zone == Zone::Stack {
+                state.stack.push(stack_entry);
+            }
             assert_eq!(
                 continuous_effect_candidate_ids(
                     &state,

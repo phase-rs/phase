@@ -1978,7 +1978,25 @@ fn parse_linked_reference_mana_value_suffix<'a>(
     input: &'a str,
     reference: &TargetFilter,
 ) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
-    let Some(scope) = object_scope_for_linked_reference(reference) else {
+    let qty = if matches!(
+        reference,
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source
+        }
+    ) {
+        QuantityRef::PropertyAggregate(
+            crate::types::ability::PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::ManaValue,
+                crate::types::ability::CardTypeSetSource::Objects {
+                    filter: reference.clone(),
+                },
+            )
+            .expect("singleton mana-value aggregate"),
+        )
+    } else if let Some(scope) = object_scope_for_linked_reference(reference) {
+        QuantityRef::ObjectManaValue { scope }
+    } else {
         return Err(nom::Err::Error(OracleError::new(
             input,
             nom::error::ErrorKind::Fail,
@@ -1999,14 +2017,10 @@ fn parse_linked_reference_mana_value_suffix<'a>(
     ))
     .parse(rest)?;
     let value = if offset == 0 {
-        QuantityExpr::Ref {
-            qty: QuantityRef::ObjectManaValue { scope },
-        }
+        QuantityExpr::Ref { qty }
     } else {
         QuantityExpr::Offset {
-            inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::ObjectManaValue { scope },
-            }),
+            inner: Box::new(QuantityExpr::Ref { qty }),
             offset,
         }
     };
@@ -2172,7 +2186,9 @@ fn parse_card_with_highest_mana_value_library_filter(
 
 fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
     match reference {
-        TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected,
+        } => Some(ObjectScope::CostPaidObject),
         TargetFilter::ParentTarget => Some(ObjectScope::Target),
         TargetFilter::TriggeringSource => Some(ObjectScope::EventSource),
         // CR 701.47c: "shares a creature type with the amassed Army" — bridge
@@ -2866,7 +2882,12 @@ mod tests {
             ..Default::default()
         };
         for (reference, expected) in [
-            ("the exiled card", TargetFilter::CostPaidObject),
+            (
+                "the exiled card",
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
+            ),
             ("it", TargetFilter::TriggeringSource),
         ] {
             let text = format!("seek a card that shares a color with {reference}");
@@ -4319,7 +4340,7 @@ mod tests {
                 quality: SharedQuality::Name,
                 reference: Some(reference),
                 relation: SharedQualityRelation::Shares,
-            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected })
         )));
     }
 
@@ -4387,7 +4408,7 @@ mod tests {
                 quality: SharedQuality::CreatureType,
                 reference: Some(reference),
                 relation: SharedQualityRelation::Shares,
-            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected })
         )));
         assert!(filter.properties.iter().any(|property| matches!(
             property,
@@ -5919,5 +5940,34 @@ mod tests {
                 "CR 202.3: the {label} leg must inherit the mana value suffix: {typed:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cost_source_reference_bridge_tests {
+    use super::*;
+    #[test]
+    fn explicit_cost_source_mana_value_bridge_keeps_its_singleton_filter() {
+        let source = TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        };
+        assert!(object_scope_for_linked_reference(&source).is_none());
+        for phrase in [
+            "has mana value equal to that card's mana value",
+            "has mana value equal to 1 plus that card's mana value",
+        ] {
+            let (rest, prop) = parse_linked_reference_mana_value_suffix(phrase, &source).unwrap();
+            assert!(rest.is_empty());
+            let FilterProp::Cmc { value, .. } = prop else {
+                panic!("mana value comparison")
+            };
+            assert!(value.any_ref(&mut |reference| matches!(reference, QuantityRef::PropertyAggregate(aggregate) if matches!(aggregate.source(), crate::types::ability::CardTypeSetSource::Objects { filter } if filter == &source))));
+        }
+        assert_eq!(
+            object_scope_for_linked_reference(&TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+            }),
+            Some(ObjectScope::CostPaidObject)
+        );
     }
 }

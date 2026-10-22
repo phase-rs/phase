@@ -8330,6 +8330,7 @@ mod tests {
         mana.ability_snapshot = Some(AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp));
         mana.ability_snapshot.as_mut().unwrap().cost = Some(cost.clone());
         mana.cost_paid_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: source,
             lki: state.objects[&source].snapshot_for_mana_spent(),
             incarnation: 0,
@@ -12547,6 +12548,7 @@ mod tests {
         pending.chosen_discards = vec![hidden];
         pending.chosen_exiled = vec![hidden];
         pending.cost_paid_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: hidden,
             lki: state.objects[&hidden].snapshot_for_mana_spent(),
             incarnation: 0,

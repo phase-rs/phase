@@ -8327,7 +8327,10 @@ pub enum TargetFilter {
     /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
-    CostPaidObject,
+    CostPaidObject {
+        #[serde(default, skip_serializing_if = "CostPaidObjectRef::is_selected")]
+        reference: CostPaidObjectRef,
+    },
     /// CR 701.47c + CR 608.2c: "the amassed Army" / "the Army you amassed" —
     /// the Army creature chosen by the current amass instruction, whether or
     /// not it received counters. A resolution-local, non-targeted object
@@ -11144,7 +11147,7 @@ TargetFilter::AttachedTo |
 TargetFilter::LastCreated |
 TargetFilter::LastRevealed |
 TargetFilter::LastZoneChanged |
-TargetFilter::CostPaidObject |
+TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source } |
 TargetFilter::AmassedArmy |
 TargetFilter::ChosenCard |
 TargetFilter::TrackedSet { .. } |
@@ -14521,6 +14524,36 @@ pub struct CostPaidObjectSnapshot {
     /// stale (fail-closed) rather than silently naming a new object.
     #[serde(default = "legacy_incarnation")]
     pub incarnation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<CostPaidObjectBinding>,
+}
+
+/// CR 400.7j + CR 608.2k: which cost operand the effect explicitly names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostPaidObjectRef {
+    #[default]
+    Selected,
+    Source,
+}
+
+impl CostPaidObjectRef {
+    pub fn is_selected(&self) -> bool {
+        *self == Self::Selected
+    }
+}
+
+/// CR 400.7j: a cost component settles once; its announced origin never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostPaidObjectBinding {
+    Captured {
+        origin: crate::types::identifiers::ObjectIncarnationRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<CostMoveOutcome>,
+    },
+    Settled {
+        origin: crate::types::identifiers::ObjectIncarnationRef,
+    },
 }
 
 /// Serde default for [`CostPaidObjectSnapshot::incarnation`] and
@@ -14542,6 +14575,13 @@ impl CostPaidObjectSnapshot {
             object_id: object.id,
             lki,
             incarnation: object.incarnation,
+            binding: Some(CostPaidObjectBinding::Captured {
+                origin: crate::types::identifiers::ObjectIncarnationRef::of(
+                    object.id,
+                    object.incarnation,
+                ),
+                outcome: None,
+            }),
         }
     }
 
@@ -14570,6 +14610,7 @@ impl CostPaidObjectSnapshot {
             object_id,
             lki,
             incarnation,
+            binding: None,
         }
     }
 
@@ -14644,8 +14685,31 @@ impl CostPaidObjectSnapshot {
     /// A no-op for a vanished row: the recorded characteristics are then
     /// already the last thing the game knew.
     pub fn refresh_capture_from_live(&mut self, state: &crate::types::game_state::GameState) {
+        if matches!(self.binding, Some(CostPaidObjectBinding::Settled { .. })) {
+            return;
+        }
         if let Some(refreshed) = Self::recapture_from_live(state, self.object_id) {
+            let binding = match self.binding {
+                Some(CostPaidObjectBinding::Captured { origin, outcome })
+                    if self.is_current(state) =>
+                {
+                    Some(CostPaidObjectBinding::Captured { origin, outcome })
+                }
+                Some(CostPaidObjectBinding::Captured { outcome, .. }) => {
+                    refreshed.binding.map(|binding| match binding {
+                        CostPaidObjectBinding::Captured { origin, .. } => {
+                            CostPaidObjectBinding::Captured { origin, outcome }
+                        }
+                        CostPaidObjectBinding::Settled { origin } => {
+                            CostPaidObjectBinding::Settled { origin }
+                        }
+                    })
+                }
+                None => None,
+                Some(CostPaidObjectBinding::Settled { .. }) => unreachable!(),
+            };
             *self = refreshed;
+            self.binding = binding;
         }
     }
 
@@ -14778,7 +14842,7 @@ pub enum CostPaidObjectRecord {
 /// discard-scoped by its own text that never reached it — and destroy the LKI
 /// CR 608.2h preserves. That seam is live in code today and cold only because
 /// no printed card pairs a deferred sacrifice with a random discard cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CostMoveOutcome {
     /// CR 701.9a / CR 701.9b: the cost DISCARDED these objects, so CR 701.9c's
     /// undefined-characteristics rule applies if one of them landed in an
@@ -14894,9 +14958,21 @@ impl CostPaidObjectRecord {
         state: &crate::types::game_state::GameState,
         outcome: CostMoveOutcome,
     ) {
-        let Some(object_id) = self.snapshot().map(|snapshot| snapshot.object_id) else {
+        let Some(snapshot) = self.snapshot() else {
             return;
         };
+        let object_id = snapshot.object_id;
+        let (origin, outcome) = match snapshot.binding {
+            Some(CostPaidObjectBinding::Settled { .. }) => return,
+            Some(CostPaidObjectBinding::Captured {
+                origin,
+                outcome: captured,
+            }) => (Some(origin), captured.unwrap_or(outcome)),
+            None => (None, outcome),
+        };
+        if let Some(origin) = origin {
+            self.snapshot_mut().unwrap().binding = Some(CostPaidObjectBinding::Settled { origin });
+        }
         let delivered_to_public_zone = state
             .objects
             .get(&object_id)
@@ -26167,7 +26243,9 @@ impl TargetFilter {
     /// whole is a context-ref for target-slot purposes.
     pub fn references_cost_paid_object(&self) -> bool {
         match self {
-            TargetFilter::CostPaidObject => true,
+            TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Selected | CostPaidObjectRef::Source,
+            } => true,
             TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
                 .iter()
                 .any(TargetFilter::references_cost_paid_object),
@@ -26331,7 +26409,7 @@ impl TargetFilter {
                 // chosen target slot — so it is a context ref.
                 | TargetFilter::Neighbor { .. }
                 | TargetFilter::AttachedTo
-                | TargetFilter::CostPaidObject
+                | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
                 // CR 701.47c: "the amassed Army" / "the Army you amassed" is
                 // resolved from `ResolvedAbility.amassed_army_object` after
                 // the current amass instruction runs — never declared as a
@@ -41928,6 +42006,74 @@ impl ResolvedAbility {
         ))
     }
 
+    /// CR 400.7j + CR 608.2k: authenticate the explicitly cost-moved source
+    /// card, independently of ordinary SelfRef and numeric Source identity.
+    pub fn cost_paid_source_binding(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        let captured = self.source_incarnation?;
+        if self.trigger_source.is_some() {
+            return None;
+        }
+        let origin = crate::types::identifiers::ObjectIncarnationRef::of(self.source_id, captured);
+        let live = state.objects.get(&self.source_id)?;
+        if !live.zone.is_public() {
+            return None;
+        }
+        let represented = if live.zone == Zone::Stack {
+            crate::game::targeting::targetable_stack_spell_entries(state)
+                .any(|entry| entry.id == live.id)
+        } else {
+            crate::game::targeting::zone_object_ids(state, live.zone).contains(&live.id)
+        };
+        if !represented {
+            return None;
+        }
+        self.cost_paid_objects
+            .iter()
+            .filter_map(CostPaidObjectRecord::snapshot)
+            .find_map(|snapshot| {
+                if snapshot.object_id != self.source_id
+                    || snapshot.binding != Some(CostPaidObjectBinding::Settled { origin })
+                {
+                    return None;
+                }
+                let relatches = matches!(state.resolution_source_relatch, Some(relatch)
+                if relatch.object_id == self.source_id
+                    && relatch.original_stamp == captured
+                    && relatch.current_incarnation == live.incarnation);
+                (snapshot.is_current(state) || relatches).then(|| {
+                    crate::types::identifiers::ObjectIncarnationRef::of(live.id, live.incarnation)
+                })
+            })
+    }
+
+    /// CR 400.7j: the resolving entry's first own move may start from the
+    /// exact public successor its own cost produced. Called after the bump,
+    /// with the authoritative departing pair, rather than reading a later pin.
+    pub(crate) fn is_cost_paid_source_predecessor_in(
+        &self,
+        from: Zone,
+        pre_move_incarnation: u64,
+    ) -> bool {
+        let Some(captured) = self.source_incarnation else {
+            return false;
+        };
+        if self.trigger_source.is_some() || !from.is_public() {
+            return false;
+        }
+        let origin = crate::types::identifiers::ObjectIncarnationRef::of(self.source_id, captured);
+        self.cost_paid_objects
+            .iter()
+            .filter_map(CostPaidObjectRecord::snapshot)
+            .any(|snapshot| {
+                snapshot.object_id == self.source_id
+                    && snapshot.incarnation == pre_move_incarnation
+                    && snapshot.binding == Some(CostPaidObjectBinding::Settled { origin })
+            })
+    }
+
     /// CR 400.7: True if the ability's source is still the same object instance it
     /// was when the ability was created. Full triggered-source provenance takes
     /// precedence; activated and delayed self-transform abilities fall back to
@@ -42332,7 +42478,16 @@ impl ResolvedAbility {
         outcome: CostMoveOutcome,
     ) {
         if let Some(snapshot) = self.cost_paid_object.as_mut() {
-            snapshot.repin_to_current_incarnation(state);
+            if moved.contains(&snapshot.object_id) {
+                if snapshot.binding.is_none() {
+                    // Historical singular references retain their compatibility behavior.
+                    snapshot.repin_to_current_incarnation(state);
+                } else {
+                    let mut record = CostPaidObjectRecord::Captured(snapshot.clone());
+                    record.settle_after_cost_move(state, outcome);
+                    self.cost_paid_object = record.snapshot().cloned();
+                }
+            }
         }
         for record in self.cost_paid_objects.iter_mut() {
             if moved.contains(&record.object_id()) {
@@ -52458,6 +52613,313 @@ mod departure_raw_runtime_replacement_tests {
             let original = serde_json::to_value(&condition).unwrap();
             condition.clear_typed_return_result_processes(&mut |_| {});
             assert_redacted(&original, &serde_json::to_value(&condition).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod cost_source_binding_tests {
+    use super::*;
+    use crate::game::zones::{add_to_zone, create_object, move_to_zone, remove_from_zone};
+    use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+
+    #[test]
+    fn cost_source_selectors_and_binding_states_are_legacy_canonical_and_strict() {
+        let legacy = r#"{"type":"CostPaidObject"}"#;
+        let selected: TargetFilter = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            selected,
+            TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Selected
+            }
+        );
+        assert_eq!(serde_json::to_string(&selected).unwrap(), legacy);
+        let source = TargetFilter::CostPaidObject {
+            reference: CostPaidObjectRef::Source,
+        };
+        let encoded = serde_json::to_string(&source).unwrap();
+        assert!(encoded.contains(r#""reference":"Source""#));
+        assert_eq!(
+            serde_json::from_str::<TargetFilter>(&encoded).unwrap(),
+            source
+        );
+        assert!(serde_json::from_str::<TargetFilter>(
+            r#"{"type":"CostPaidObject","reference":"Latest"}"#
+        )
+        .is_err());
+        let origin = ObjectIncarnationRef::of(ObjectId(8), 5);
+        for binding in [
+            CostPaidObjectBinding::Captured {
+                origin,
+                outcome: None,
+            },
+            CostPaidObjectBinding::Captured {
+                origin,
+                outcome: Some(CostMoveOutcome::Discard),
+            },
+            CostPaidObjectBinding::Settled { origin },
+        ] {
+            let encoded = serde_json::to_string(&binding).unwrap();
+            assert_eq!(
+                serde_json::from_str::<CostPaidObjectBinding>(&encoded).unwrap(),
+                binding
+            );
+        }
+        assert!(serde_json::from_str::<CostPaidObjectBinding>(r#"{"type":"Unknown"}"#).is_err());
+        assert!(serde_json::from_str::<CostMoveOutcome>(r#""Unknown""#).is_err());
+    }
+
+    #[test]
+    fn cost_source_requires_settled_origin_and_real_public_membership_in_every_zone() {
+        for zone in [
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Command,
+            Zone::Stack,
+            Zone::Hand,
+            Zone::Library,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source fixture".into(),
+                Zone::Hand,
+            );
+            let object = &state.objects[&id];
+            let g = object.incarnation;
+            let snapshot =
+                CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent());
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+            ability.set_source_incarnation_recursive(Some(g));
+            ability.add_cost_paid_objects_recursive(&[snapshot]);
+            assert!(
+                ability.cost_paid_source_binding(&state).is_none(),
+                "captured is not settled"
+            );
+            move_to_zone(&mut state, id, zone, &mut vec![]);
+            let stack_entry = StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            };
+            if zone == Zone::Stack {
+                state.stack.push(stack_entry.clone());
+            }
+            ability.settle_cost_paid_provenance_recursive(
+                &state,
+                &[id],
+                CostMoveOutcome::Relocation,
+            );
+            let expected = zone
+                .is_public()
+                .then_some(ObjectIncarnationRef::of(id, state.objects[&id].incarnation));
+            assert_eq!(
+                ability.cost_paid_source_binding(&state),
+                expected,
+                "{zone:?}"
+            );
+            if !zone.is_public() {
+                state.revealed_cards.insert(id);
+                assert!(
+                    ability.cost_paid_source_binding(&state).is_none(),
+                    "revelation does not change zone authority"
+                );
+                assert!(ability.cost_paid_objects[0]
+                    .snapshot()
+                    .unwrap()
+                    .binding
+                    .is_some());
+                continue;
+            }
+            remove_from_zone(&mut state, id, zone, PlayerId(0));
+            assert!(
+                ability.cost_paid_source_binding(&state).is_none(),
+                "a zone field is not membership"
+            );
+            add_to_zone(&mut state, id, zone, PlayerId(0));
+            if zone == Zone::Stack {
+                state.stack.push(stack_entry);
+            }
+            assert_eq!(ability.cost_paid_source_binding(&state), expected);
+            let mut absent = state.clone();
+            absent.objects.remove(&id);
+            assert!(ability.cost_paid_source_binding(&absent).is_none());
+            let mut legacy = ability.clone();
+            legacy.set_trigger_source_recursive(
+                crate::game::triggers::trigger_source_context_for_latch(
+                    &state,
+                    &state.objects[&id],
+                ),
+            );
+            assert!(
+                legacy.cost_paid_source_binding(&state).is_none(),
+                "full trigger provenance cannot borrow activation cost currency"
+            );
+            legacy = ability.clone();
+            legacy.cost_paid_objects[0]
+                .snapshot_mut()
+                .unwrap()
+                .object_id = ObjectId(id.0 + 1000);
+            assert!(legacy.cost_paid_source_binding(&state).is_none());
+            legacy = ability.clone();
+            legacy.cost_paid_objects[0].snapshot_mut().unwrap().binding = None;
+            assert!(legacy.cost_paid_source_binding(&state).is_none());
+            legacy = ability.clone();
+            legacy.source_incarnation = None;
+            assert!(legacy.cost_paid_source_binding(&state).is_none());
+            legacy = ability.clone();
+            legacy.cost_paid_objects[0] = CostPaidObjectRecord::MembershipOnly(id);
+            assert!(legacy.cost_paid_source_binding(&state).is_none());
+            legacy = ability.clone();
+            legacy.cost_paid_objects[0].snapshot_mut().unwrap().binding =
+                Some(CostPaidObjectBinding::Settled {
+                    origin: ObjectIncarnationRef::of(id, g + 100),
+                });
+            assert!(legacy.cost_paid_source_binding(&state).is_none());
+            move_to_zone(
+                &mut state,
+                id,
+                if zone == Zone::Hand {
+                    Zone::Library
+                } else {
+                    Zone::Hand
+                },
+                &mut vec![],
+            );
+            move_to_zone(&mut state, id, zone, &mut vec![]);
+            assert!(
+                ability.cost_paid_source_binding(&state).is_none(),
+                "unrelated same-id return"
+            );
+        }
+    }
+
+    #[test]
+    fn later_same_id_cost_component_cannot_refresh_or_resettle_an_older_origin() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source fixture".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().power = Some(4);
+        let g = state.objects[&id].incarnation;
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        ability.set_source_incarnation_recursive(Some(g));
+        ability.add_cost_paid_objects_recursive(&[CostPaidObjectSnapshot::capture(
+            &state.objects[&id],
+            state.objects[&id].snapshot_for_mana_spent(),
+        )]);
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut vec![]);
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Relocation);
+        let old = ability.cost_paid_objects[0].clone();
+        assert!(ability.cost_paid_source_binding(&state).is_some());
+        move_to_zone(&mut state, id, Zone::Hand, &mut vec![]);
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut vec![]);
+        let h = state.objects[&id].incarnation;
+        assert_ne!(g, h);
+        let next = CostPaidObjectSnapshot::capture(
+            &state.objects[&id],
+            state.objects[&id].snapshot_for_mana_spent(),
+        );
+        ability.set_cost_paid_object_recursive(next.clone());
+        ability.add_cost_paid_objects_recursive(&[next]);
+        ability.refresh_cost_paid_capture_recursive(&state, &[id]);
+        assert_eq!(ability.cost_paid_objects[0], old);
+        let encoded = serde_json::to_string(&(state.clone(), ability.clone())).unwrap();
+        let (mut state, mut ability): (GameState, ResolvedAbility) =
+            serde_json::from_str(&encoded).unwrap();
+        move_to_zone(&mut state, id, Zone::Exile, &mut vec![]);
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Relocation);
+        assert_eq!(
+            ability.cost_paid_objects[0], old,
+            "settled g never becomes the later h component"
+        );
+        assert_eq!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .unwrap()
+                .live_object_id(&state),
+            Some(id)
+        );
+        assert_eq!(
+            ability.cost_paid_objects[1].live_object_id(&state),
+            Some(id),
+            "new component genuinely settled"
+        );
+        assert_eq!(
+            ability.cost_paid_objects[1].snapshot().unwrap().binding,
+            Some(CostPaidObjectBinding::Settled {
+                origin: ObjectIncarnationRef::of(id, h)
+            })
+        );
+        assert!(ability.cost_paid_source_binding(&state).is_none());
+        assert_eq!(
+            ability.cost_paid_objects[0].snapshot().unwrap().lki.power,
+            Some(4)
+        );
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Discard);
+        assert_eq!(
+            ability.cost_paid_objects[0], old,
+            "later settlement cannot demote old g either"
+        );
+    }
+
+    #[test]
+    fn carried_actual_discard_outcome_survives_generic_relocation_resume() {
+        for outcome in [CostMoveOutcome::Discard, CostMoveOutcome::Relocation] {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Hidden delivery".into(),
+                Zone::Hand,
+            );
+            let mut snapshot = CostPaidObjectSnapshot::capture(
+                &state.objects[&id],
+                state.objects[&id].snapshot_for_mana_spent(),
+            );
+            let origin = ObjectIncarnationRef::of(id, state.objects[&id].incarnation);
+            snapshot.binding = Some(CostPaidObjectBinding::Captured {
+                origin,
+                outcome: Some(outcome),
+            });
+            let mut record = CostPaidObjectRecord::Captured(snapshot);
+            move_to_zone(&mut state, id, Zone::Library, &mut vec![]);
+            let saved = serde_json::to_string(&record).unwrap();
+            record = serde_json::from_str(&saved).unwrap();
+            record.settle_after_cost_move(&state, CostMoveOutcome::Relocation);
+            match outcome {
+                CostMoveOutcome::Discard => assert!(
+                    matches!(record, CostPaidObjectRecord::MembershipOnly(value) if value == id)
+                ),
+                CostMoveOutcome::Relocation => {
+                    assert_eq!(
+                        record.snapshot().unwrap().binding,
+                        Some(CostPaidObjectBinding::Settled { origin })
+                    );
+                    assert!(record.live_object_id(&state).is_none());
+                    let settled = record.clone();
+                    move_to_zone(&mut state, id, Zone::Graveyard, &mut vec![]);
+                    record.settle_after_cost_move(&state, CostMoveOutcome::Discard);
+                    record.refresh_capture_from_live(&state);
+                    assert_eq!(record, settled);
+                }
+            }
         }
     }
 }

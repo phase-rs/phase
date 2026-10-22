@@ -4293,6 +4293,7 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
             subject: Some(subject),
             ..
         } => Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: subject.identity.object_id,
             lki: LKISnapshot {
                 name: subject.name.clone(),
@@ -8289,7 +8290,11 @@ fn referent_exists_without_gated_action(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -27720,7 +27725,9 @@ mod tests {
         for filter in [
             TargetFilter::SelfRef,
             TargetFilter::TriggeringSource,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
             TargetFilter::SpecificObject { id: ObjectId(7) },
             TargetFilter::TrackedSet {
                 id: TrackedSetId(7),
@@ -28678,7 +28685,7 @@ mod tests {
             TargetFilter::SelfRef,
             TargetFilter::TriggeringSource,
             TargetFilter::LastCreated,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected },
             TargetFilter::ChosenCard,
             TargetFilter::ExiledBySource,
             TargetFilter::ParentTargetController,
@@ -36192,7 +36199,12 @@ mod tests {
 
     #[test]
     fn forwarded_generic_self_ref_preserves_inherited_application_authority() {
-        for affected in [TargetFilter::CostPaidObject, TargetFilter::TriggeringSource] {
+        for affected in [
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+            TargetFilter::TriggeringSource,
+        ] {
             let (mut state, source, returned, other) = forwarded_test_objects();
             crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut Vec::new());
             state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
@@ -36226,7 +36238,10 @@ mod tests {
             let mut events = Vec::new();
             resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
             assert_outer_forwarded_result(&events, returned);
-            let recipient = if affected == TargetFilter::CostPaidObject {
+            let recipient = if affected
+                == (TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                }) {
                 source
             } else {
                 other
@@ -36600,7 +36615,9 @@ mod tests {
                 TargetFilter::Not {
                     filter: Box::new(TargetFilter::SelfRef),
                 },
-                TargetFilter::CostPaidObject,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 TargetFilter::TriggeringSource,
             ];
             let keywords = [

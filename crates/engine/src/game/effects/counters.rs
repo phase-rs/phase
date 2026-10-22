@@ -2486,6 +2486,14 @@ pub(super) fn resolve_defined_or_targets(
     // targets via chain propagation in `effects::mod.rs::resolve_ability_chain`.
     // CR 400.7: `self_ref_binding` is empty when the source left and returned
     // before resolution.
+    if let Some(
+        filter @ TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        },
+    ) = target_spec
+    {
+        return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+    }
     if let Some(TargetFilter::SelfRef) = target_spec {
         return ability.self_ref_binding(state).into_iter().collect();
     }
@@ -2578,7 +2586,10 @@ pub(super) fn resolve_defined_or_targets(
     // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
     // counters on the exiled card"). Resolved from the recursively-stamped
     // `cost_paid_object`; mirrors the `resolved_targets` chokepoint arm.
-    if let Some(TargetFilter::CostPaidObject) = target_spec {
+    if let Some(TargetFilter::CostPaidObject {
+        reference: crate::types::ability::CostPaidObjectRef::Selected,
+    }) = target_spec
+    {
         // CR 400.7: the shared live-reference guard — a departed/returned
         // referent yields nothing rather than a same-id object.
         return ability
@@ -9263,7 +9274,9 @@ mod tests {
             Effect::PutCounter {
                 counter_type: crate::types::counter::CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::CostPaidObject,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
             },
             // A live inherited parent target is present, per the review spec.
             vec![TargetRef::Object(parent_target)],
@@ -9355,7 +9368,9 @@ mod tests {
             Effect::PutCounter {
                 counter_type: crate::types::counter::CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::CostPaidObject,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
             },
             vec![TargetRef::Object(parent_target)],
             source,

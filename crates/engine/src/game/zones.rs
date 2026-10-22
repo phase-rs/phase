@@ -902,7 +902,8 @@ pub(crate) fn record_resolution_source_relatch(
             (
                 a.source_id,
                 a.trigger_source_incarnation().or(a.source_incarnation),
-                a.is_own_departure_successor_in(state, from, Some(pre_move_incarnation)),
+                a.is_own_departure_successor_in(state, from, Some(pre_move_incarnation))
+                    || a.is_cost_paid_source_predecessor_in(from, pre_move_incarnation),
             )
         })
     else {

@@ -354,7 +354,10 @@ pub fn resolve(
                 | TargetFilter::TriggeringSource
                 | TargetFilter::LastCreated
                 | TargetFilter::AttachedTo
-                | TargetFilter::CostPaidObject
+                | TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                        | crate::types::ability::CostPaidObjectRef::Source
+                }
         )
     });
 

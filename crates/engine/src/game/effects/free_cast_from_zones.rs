@@ -419,7 +419,11 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }

@@ -25618,6 +25618,7 @@ mod tests {
         let gone_id = ObjectId(77);
         let mut ability = make_simple_ability(vec![], ObjectId(0));
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: gone_id,
             lki: LKISnapshot {
                 name: "Exiled Creature".to_string(),

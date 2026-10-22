@@ -360,6 +360,9 @@ const SWORDS: &str = "Exile target creature. Its controller gains life equal to 
 const GOOD: &str = "Sacrifice a creature: Draw cards equal to the sacrificed creature's power, then discard three cards.";
 const WIPE: &str = "Exile all creatures. Each player creates a 0/0 green and blue Fractal creature token and puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way.";
 const GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+const SEARCH: &str = "Search your library for a basic land card, put it onto the battlefield, then shuffle.\nSuspend 2—{G} (Rather than cast this card from your hand, you may pay {G} and exile it with two time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)";
+const HIGHWAY: &str = "You may discard a card or sacrifice a land. If you do, draw two cards.\nPlot {1}{R} (You may pay {1}{R} and exile this card from your hand. Cast it as a sorcery on a later turn without paying its mana cost. Plot only as a sorcery.)";
+const FBLTHP: &str = "Ward {2}\nYou may look at the top card of your library any time.\nThe top card of your library has plot. The plot cost is equal to its mana cost.\nYou may plot nonland cards from the top of your library.";
 const RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)";
 const EXCHANGE: &str = "Exchange control of two target creatures.";
 const JINNIE: &str = "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.";
@@ -908,10 +911,14 @@ fn cda_scavenge_uses_last_graveyard_source_incarnation() {
     assert_eq!(*player, P0);
     assert_eq!(pending_cast.ability.source_incarnation, Some(before));
     assert!(!target_slots.is_empty());
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(recipient)));
+    assert!(target_slots[0].legal_targets.len() > 1);
     assert_eq!(runner.state().objects[&lord].zone, Zone::Graveyard);
     runner
         .act(GameAction::ChooseTarget {
-            target: TargetRef::Object(recipient),
+            target: Some(TargetRef::Object(recipient)),
         })
         .unwrap();
     assert_eq!(runner.state().objects[&lord].zone, Zone::Exile);
@@ -1705,7 +1712,7 @@ fn cda_scavenge_cost_replacement_reload_and_same_id_reentry_preserve_the_old_sou
         assert!(target_slots[0].legal_targets.len() > 1);
         runner
             .act(GameAction::ChooseTarget {
-                target: TargetRef::Object(recipient),
+                target: Some(TargetRef::Object(recipient)),
             })
             .unwrap();
         let WaitingFor::ReplacementChoice {
@@ -2259,4 +2266,2176 @@ fn cda_oversimplify_redirected_departure_is_excluded_while_current_card_recomput
     assert_eq!(departure.owner, P1);
     assert_eq!(result.state().players[0].mana_pool.total(), 0);
     cda_complete(result.state());
+}
+
+// Typed supplemental ability, not a printed ability of Lord of Extinction.
+// CR 400.7j: the cost successor can begin this ability's own resolution move;
+// CR 608.2h: numeric Source still reads the original graveyard object's facts.
+#[test]
+fn cost_successor_can_start_only_its_own_resolution_relatch() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ObjectScope,
+    };
+    use engine::types::game_state::StackEntryKind;
+    use engine::types::identifiers::ObjectIncarnationRef;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_graveyard(P0, &["Own graveyard witness"]);
+    scenario.with_graveyard(P1, &["Foreign witness A", "Foreign witness B"]);
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::ChangeZone {
+            origin: Some(Zone::Exile),
+            destination: Zone::Battlefield,
+            target: TargetFilter::CostPaidObject {
+                reference: engine::types::ability::CostPaidObjectRef::Source,
+            },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: Default::default(),
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+            target: TargetFilter::CostPaidObject {
+                reference: engine::types::ability::CostPaidObjectRef::Source,
+            },
+        },
+    ));
+    ability.activation_zone = Some(Zone::Graveyard);
+    ability.cost = Some(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: cda_cost(0, vec![ManaCostShard::Green]),
+            },
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: Some(TargetFilter::SelfRef),
+            },
+        ],
+    });
+    assert!(!ability.forward_result);
+    let lord = scenario
+        .add_creature_to_graveyard(P0, "Lord of Extinction", 0, 0)
+        .from_oracle_text(LORD)
+        .with_subtypes(vec!["Elemental"])
+        .with_mana_cost(cda_cost(
+            3,
+            vec![ManaCostShard::Black, ManaCostShard::Green],
+        ))
+        .with_ability_definition(ability)
+        .id();
+    let decoy = scenario
+        .add_creature_to_exile(P1, "Lord of Extinction", 0, 0)
+        .from_oracle_text(LORD)
+        .with_subtypes(vec!["Elemental"])
+        .with_mana_cost(cda_cost(
+            3,
+            vec![ManaCostShard::Black, ManaCostShard::Green],
+        ))
+        .id();
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    cda_full_source(runner.state(), lord);
+    cda_pt(runner.state(), lord, 4);
+    let g = runner.state().objects[&lord].incarnation;
+    let index = engine::game::casting::activated_ability_definitions(runner.state(), lord)
+        .into_iter()
+        .find(|(_, definition)| matches!(definition.effect.as_ref(), Effect::ChangeZone { .. }))
+        .unwrap()
+        .0;
+    cda_fund(&mut runner, P0, &[ManaType::Green]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: lord,
+            ability_index: index,
+        })
+        .unwrap();
+    let e = runner.state().objects[&lord].incarnation;
+    assert_ne!(g, e);
+    assert_eq!(runner.state().objects[&lord].zone, Zone::Exile);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(runner.state().resolution_source_relatch.is_none());
+    let entry = runner
+        .state()
+        .stack
+        .last()
+        .expect("actual activated stack entry");
+    assert!(matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    let root = entry.ability().unwrap();
+    let child = root.sub_ability.as_ref().unwrap();
+    for node in [root, child.as_ref()] {
+        assert_eq!(node.source_incarnation, Some(g));
+        assert_eq!(
+            node.source_ref(runner.state()),
+            Some(ObjectIncarnationRef::of(lord, g))
+        );
+        assert_eq!(node.cost_paid_objects.len(), 1);
+        let captured = node.cost_paid_objects[0]
+            .snapshot()
+            .expect("automatic real cost capture");
+        assert_eq!(captured.object_id, lord);
+        assert_eq!(captured.incarnation, e);
+        assert_eq!(
+            captured.binding,
+            Some(engine::types::ability::CostPaidObjectBinding::Settled {
+                origin: ObjectIncarnationRef::of(lord, g)
+            })
+        );
+        assert_eq!(captured.lki.power, Some(4));
+        assert_eq!(
+            node.cost_paid_objects[0].live_object_id(runner.state()),
+            Some(lord)
+        );
+        assert!(
+            node.cost_paid_object.is_none(),
+            "automatic self capture preserves singular slot"
+        );
+    }
+    cda_pt(runner.state(), lord, 3);
+    cda_pt(runner.state(), decoy, 3);
+    runner.resolve_top();
+    let b = runner.state().objects[&lord].incarnation;
+    assert_ne!(b, e);
+    assert_eq!(
+        runner.state().objects[&lord].zone,
+        Zone::Battlefield,
+        "head consumed actual cost successor"
+    );
+    assert_eq!(
+        runner.state().objects[&lord]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&4),
+        "decision15-only revert moves the head but loses this child recipient"
+    );
+    assert_eq!(runner.state().objects[&lord].layer_base_power, Some(3));
+    assert_eq!(runner.state().objects[&lord].power, Some(7));
+    assert_eq!(runner.state().objects[&lord].toughness, Some(7));
+    assert_eq!(runner.state().objects[&lord].base_power, Some(0));
+    assert!(runner.state().objects[&decoy].counters.is_empty());
+    assert!(runner.state().resolution_source_relatch.is_none());
+    cda_complete(runner.state());
+}
+
+// CR 702.62a + CR 400.7j: ordinary paid full Suspend must still find the
+// exact object its cost produced, independently of its pre-cost numeric stamp.
+#[test]
+fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    for paused in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let search = scenario
+            .add_spell_to_hand_from_oracle(P0, "Search for Tomorrow", false, SEARCH)
+            .with_mana_cost(cda_cost(2, vec![ManaCostShard::Green]))
+            .id();
+        let decoy = scenario
+            .add_spell_to_hand_from_oracle(P0, "Search for Tomorrow", false, SEARCH)
+            .with_mana_cost(cda_cost(2, vec![ManaCostShard::Green]))
+            .id();
+        let mut runner = scenario.build();
+        cda_full_source(runner.state(), search);
+        let index = engine::game::casting::activated_ability_definitions(runner.state(), search)
+            .into_iter()
+            .find(|(_, definition)| {
+                matches!(
+                    definition.effect.as_ref(),
+                    Effect::PutCounter {
+                        counter_type: CounterType::Time,
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .0;
+        let g = runner.state().objects[&search].incarnation;
+        assert!(runner
+            .act(GameAction::ActivateAbility {
+                source_id: search,
+                ability_index: index
+            })
+            .is_err());
+        assert_eq!(runner.state().objects[&search].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&search].incarnation, g);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        cda_complete(runner.state());
+        if paused {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .active_zones(vec![Zone::Hand])
+                .destination_zone(Zone::Exile)
+                .mode(ReplacementMode::MayCost {
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    decline: Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    ))),
+                });
+            let object = runner.state_mut().objects.get_mut(&search).unwrap();
+            object.replacement_definitions.push(replacement.clone());
+            std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+        }
+        // Funded twins reach the full printed producer's timing/color checks.
+        for hostile in 0..4 {
+            let mut twin = GameRunner::from_state(runner.state().clone());
+            twin.state_mut().players[0].mana_pool.clear();
+            cda_fund(&mut twin, P0, &[ManaType::Green]);
+            match hostile {
+                0 => {
+                    twin.state_mut().players[0].mana_pool.clear();
+                    cda_fund(
+                        &mut twin,
+                        P0,
+                        &[ManaType::White, ManaType::White, ManaType::White],
+                    );
+                }
+                1 => twin.state_mut().active_player = P1,
+                2 => twin.state_mut().phase = Phase::Upkeep,
+                3 => {
+                    engine::game::zones::move_to_zone(
+                        twin.state_mut(),
+                        decoy,
+                        Zone::Stack,
+                        &mut vec![],
+                    );
+                    let card_id = twin.state().objects[&decoy].card_id;
+                    twin.state_mut()
+                        .stack
+                        .push(engine::types::game_state::StackEntry {
+                            id: decoy,
+                            source_id: decoy,
+                            controller: P0,
+                            kind: engine::types::game_state::StackEntryKind::Spell {
+                                card_id,
+                                ability: None,
+                                casting_variant: engine::types::game_state::CastingVariant::Normal,
+                                actual_mana_spent: 0,
+                            },
+                        });
+                }
+                _ => unreachable!(),
+            }
+            let before = twin.state().objects[&search].incarnation;
+            assert!(
+                twin.act(GameAction::ActivateAbility {
+                    source_id: search,
+                    ability_index: index
+                })
+                .is_err(),
+                "printed producer hostile {hostile}"
+            );
+            assert_eq!(twin.state().objects[&search].incarnation, before);
+            assert!(twin.state().objects[&search].counters.is_empty());
+            assert!(twin.state().resolution_stack.is_empty());
+        }
+        cda_fund(&mut runner, P0, &[ManaType::Green]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: search,
+                ability_index: index,
+            })
+            .unwrap();
+        if paused {
+            let WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("actual Suspend cost replacement pause")
+            };
+            assert_eq!(player, P0);
+            assert_eq!(candidate_count, 2);
+            assert!(runner.state().pending_cost_move_resume.is_some());
+            let cursor = serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap();
+            assert!(cursor.contains("Captured") && cursor.contains("binding"));
+            for viewer in [Some(P0), Some(P1), None] {
+                let filtered = match viewer {
+                    Some(player) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                assert!(filtered.pending_cost_move_resume.is_none());
+                let wire = serde_json::to_value(
+                    engine::game::derived_views::ClientGameStateRef::wrap(runner.state(), viewer),
+                )
+                .unwrap();
+                for key in ["pendingCostMoveResume", "pending_cost_move_resume"] {
+                    assert!(wire.get(key).is_none_or(serde_json::Value::is_null));
+                }
+            }
+            assert_eq!(
+                serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap(),
+                cursor
+            );
+            let saved = serde_json::to_string(runner.state()).unwrap();
+            *runner.state_mut() = serde_json::from_str(&saved).unwrap();
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+        }
+        assert_eq!(runner.state().objects[&search].zone, Zone::Exile);
+        let e = runner.state().objects[&search].incarnation;
+        assert_ne!(g, e);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        let root = runner.state().stack.last().unwrap().ability().unwrap();
+        assert_eq!(root.source_incarnation, Some(g));
+        assert_eq!(root.cost_paid_objects[0].snapshot().unwrap().incarnation, e);
+        assert_eq!(
+            root.cost_paid_objects[0].live_object_id(runner.state()),
+            Some(search)
+        );
+        let delivered_raw = serde_json::to_string(runner.state()).unwrap();
+        for viewer in [Some(P0), Some(P1), None] {
+            let filtered = match viewer {
+                Some(player) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            assert!(filtered.pending_cost_move_resume.is_none());
+            serde_json::to_value(
+                engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                    runner.state(),
+                    &filtered,
+                    viewer,
+                ),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            serde_json::to_string(runner.state()).unwrap(),
+            delivered_raw
+        );
+        assert!(runner.state().resolution_source_relatch.is_none());
+        let saved = serde_json::to_string(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_str(&saved).unwrap();
+        let mut unrelated_return = GameRunner::from_state(runner.state().clone());
+        engine::game::zones::move_to_zone(
+            unrelated_return.state_mut(),
+            search,
+            Zone::Hand,
+            &mut vec![],
+        );
+        engine::game::zones::move_to_zone(
+            unrelated_return.state_mut(),
+            search,
+            Zone::Exile,
+            &mut vec![],
+        );
+        unrelated_return.resolve_top();
+        assert!(
+            unrelated_return.state().objects[&search]
+                .counters
+                .is_empty(),
+            "old Suspend cannot counter an unrelated same-id return"
+        );
+        cda_complete(unrelated_return.state());
+        runner.resolve_top();
+        assert_eq!(
+            runner.state().objects[&search]
+                .counters
+                .get(&CounterType::Time),
+            Some(&2)
+        );
+        assert!(runner.state().objects[&decoy].counters.is_empty());
+        assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        cda_complete(runner.state());
+    }
+}
+
+// CR 702.170a/b/d/f + CR 400.7j: full printed and granted Plot share exact
+// cost currency, including the immediate resumed special-action intercept.
+#[test]
+fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, CastingPermission, Effect,
+        ReplacementDefinition, ReplacementMode,
+    };
+    use engine::types::events::GameEvent;
+    use engine::types::replacements::ReplacementEvent;
+    for granted in [false, true] {
+        for paused in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C", "Draw D", "Draw E"]);
+            scenario.with_library_top(P1, &["Foreign A", "Foreign B", "Foreign C"]);
+            let land_a = scenario.add_basic_land(P0, ManaColor::Green);
+            let land_b = scenario.add_basic_land(P0, ManaColor::Blue);
+            // Tap these so exact pool payments and unfunded negatives cannot
+            // silently auto-tap a spare mana source.
+            let authorizer = scenario
+                .add_creature(P0, "Fblthp, Lost on the Range", 1, 1)
+                .from_oracle_text_with_keywords(&["Ward", "Plot"], FBLTHP)
+                .as_legendary()
+                .with_subtypes(vec!["Homunculus"])
+                .with_mana_cost(cda_cost(1, vec![ManaCostShard::Blue, ManaCostShard::Blue]))
+                .id();
+            let foreign_authorizer = scenario
+                .add_creature(P1, "Fblthp, Lost on the Range", 1, 1)
+                .from_oracle_text_with_keywords(&["Ward", "Plot"], FBLTHP)
+                .as_legendary()
+                .with_subtypes(vec!["Homunculus"])
+                .with_mana_cost(cda_cost(1, vec![ManaCostShard::Blue, ManaCostShard::Blue]))
+                .id();
+            let foreign_card = scenario
+                .add_spell_to_library_top(P1, "Divination", false)
+                .from_oracle_text("Draw two cards.")
+                .with_mana_cost(cda_cost(2, vec![ManaCostShard::Blue]))
+                .id();
+            let own_printed_top = if granted {
+                Some(
+                    scenario
+                        .add_spell_to_library_top(P0, "Highway Robbery", false)
+                        .from_oracle_text_with_keywords(&["Plot"], HIGHWAY)
+                        .with_mana_cost(cda_cost(1, vec![ManaCostShard::Red]))
+                        .id(),
+                )
+            } else {
+                None
+            };
+            let card = if granted {
+                scenario
+                    .add_spell_to_library_top(P0, "Divination", false)
+                    .from_oracle_text("Draw two cards.")
+                    .with_mana_cost(cda_cost(2, vec![ManaCostShard::Blue]))
+                    .id()
+            } else {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, "Highway Robbery", false, HIGHWAY)
+                    .from_oracle_text_with_keywords(&["Plot"], HIGHWAY)
+                    .with_mana_cost(cda_cost(1, vec![ManaCostShard::Red]))
+                    .id()
+            };
+            let mut runner = scenario.build();
+            runner.state_mut().objects.get_mut(&land_a).unwrap().tapped = true;
+            runner.state_mut().objects.get_mut(&land_b).unwrap().tapped = true;
+            cda_full_source(runner.state(), card);
+            cda_full_source(runner.state(), authorizer);
+            let index = engine::game::casting::activated_ability_definitions(runner.state(), card)
+                .into_iter()
+                .find(|(_, definition)| {
+                    matches!(
+                        definition.effect.as_ref(),
+                        Effect::GrantCastingPermission {
+                            permission: CastingPermission::Plotted { .. },
+                            ..
+                        }
+                    )
+                })
+                .expect("full printed producer offers Plot")
+                .0;
+            let original_zone = runner.state().objects[&card].zone;
+            let original = runner.state().objects[&card].incarnation;
+            assert!(runner
+                .act(GameAction::ActivateAbility {
+                    source_id: card,
+                    ability_index: index
+                })
+                .is_err());
+            assert_eq!(runner.state().objects[&card].zone, original_zone);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            cda_complete(runner.state());
+            if granted {
+                let mut authorities = GameRunner::from_state(runner.state().clone());
+                cda_fund(
+                    &mut authorities,
+                    P0,
+                    &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
+                );
+                let offered =
+                    engine::game::casting::activated_ability_definitions(authorities.state(), card);
+                assert!(!offered.is_empty());
+                assert!(engine::game::casting::activated_ability_definitions(
+                    authorities.state(),
+                    foreign_card
+                )
+                .iter()
+                .all(|(_, def)| def.activation_zone == Some(Zone::Library)));
+                assert!(
+                    authorities
+                        .act(GameAction::ActivateAbility {
+                            source_id: foreign_card,
+                            ability_index: 0
+                        })
+                        .is_err(),
+                    "the opponent's library and grant authority cannot pay ours"
+                );
+                assert_eq!(
+                    authorities.state().objects[&foreign_authorizer].zone,
+                    Zone::Battlefield
+                );
+                let printed = own_printed_top.unwrap();
+                let mut unequal = GameRunner::from_state(authorities.state().clone());
+                engine::game::zones::move_to_zone(
+                    unequal.state_mut(),
+                    card,
+                    Zone::Hand,
+                    &mut vec![],
+                );
+                assert_eq!(unequal.state().players[0].library.front(), Some(&printed));
+                cda_full_source(unequal.state(), printed);
+                let granted_index =
+                    engine::game::casting::activated_ability_definitions(unequal.state(), printed)
+                        .into_iter()
+                        .find(|(_, def)| def.activation_zone == Some(Zone::Library))
+                        .unwrap()
+                        .0;
+                unequal.state_mut().players[0].mana_pool.clear();
+                cda_fund(&mut unequal, P0, &[ManaType::Red, ManaType::Colorless]);
+                assert!(unequal.act(GameAction::ActivateAbility { source_id: printed, ability_index: granted_index }).is_err(), "printed Hand Plot 1R cannot pay the independently granted top-Library Plot cost");
+                unequal.state_mut().players[0].mana_pool.clear();
+                cda_fund(
+                    &mut unequal,
+                    P0,
+                    &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
+                );
+                unequal
+                    .act(GameAction::ActivateAbility {
+                        source_id: printed,
+                        ability_index: granted_index,
+                    })
+                    .unwrap();
+                assert_eq!(unequal.state().players[0].mana_pool.total(), 0);
+                assert!(unequal.state().objects[&printed]
+                    .casting_permissions
+                    .iter()
+                    .any(|p| matches!(p, CastingPermission::Plotted { .. })));
+                assert!(unequal.state().objects[&card]
+                    .casting_permissions
+                    .is_empty());
+                cda_complete(unequal.state());
+                let mut non_top = authorities.state().clone();
+                let top = engine::game::zones::create_object(
+                    &mut non_top,
+                    CardId(9001),
+                    P0,
+                    "Other top spell".into(),
+                    Zone::Library,
+                );
+                non_top.players[0].library.retain(|id| *id != top);
+                non_top.players[0].library.push_front(top);
+                assert!(
+                    engine::game::casting::activated_ability_definitions(&non_top, card).is_empty(),
+                    "the former top card loses its grant"
+                );
+                // Same full grant positive below guards the absent-authorizer,
+                // foreign-library, land-top and non-top offer refusals.
+                let mut missing = authorities.state().clone();
+                engine::game::zones::move_to_zone(
+                    &mut missing,
+                    authorizer,
+                    Zone::Exile,
+                    &mut vec![],
+                );
+                assert!(!engine::ai_support::legal_actions(&missing).iter().any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == card)));
+                let mut land_top = authorities.state().clone();
+                let top = engine::game::zones::create_object(
+                    &mut land_top,
+                    CardId(9000),
+                    P0,
+                    "Top land".into(),
+                    Zone::Library,
+                );
+                land_top
+                    .objects
+                    .get_mut(&top)
+                    .unwrap()
+                    .card_types
+                    .core_types = vec![CoreType::Land];
+                land_top.players[0].library.retain(|id| *id != top);
+                land_top.players[0].library.push_front(top);
+                assert!(!engine::ai_support::legal_actions(&land_top).iter().any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == top || *source_id == card)));
+            }
+            if paused {
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .active_zones(vec![original_zone])
+                    .destination_zone(Zone::Exile)
+                    .mode(ReplacementMode::MayCost {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        decline: Some(Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::NoOp,
+                        ))),
+                    });
+                let object = runner.state_mut().objects.get_mut(&card).unwrap();
+                object.replacement_definitions.push(replacement.clone());
+                std::sync::Arc::make_mut(&mut object.base_replacement_definitions)
+                    .push(replacement);
+            }
+            cda_fund(
+                &mut runner,
+                P0,
+                if granted {
+                    &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless]
+                } else {
+                    &[ManaType::Red, ManaType::Colorless]
+                },
+            );
+            // Funded twins reach the full printed producer's timing/color checks.
+            for hostile in 0..4 {
+                let mut twin = GameRunner::from_state(runner.state().clone());
+                twin.state_mut().players[0].mana_pool.clear();
+                cda_fund(
+                    &mut twin,
+                    P0,
+                    if granted {
+                        &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless][..]
+                    } else {
+                        &[ManaType::Red, ManaType::Colorless][..]
+                    },
+                );
+                match hostile {
+                    0 => {
+                        twin.state_mut().players[0].mana_pool.clear();
+                        cda_fund(
+                            &mut twin,
+                            P0,
+                            &[ManaType::White, ManaType::White, ManaType::White],
+                        );
+                    }
+                    1 => twin.state_mut().active_player = P1,
+                    2 => twin.state_mut().phase = Phase::Upkeep,
+                    3 => {
+                        engine::game::zones::move_to_zone(
+                            twin.state_mut(),
+                            land_a,
+                            Zone::Stack,
+                            &mut vec![],
+                        );
+                        let card_id = twin.state().objects[&land_a].card_id;
+                        twin.state_mut()
+                            .stack
+                            .push(engine::types::game_state::StackEntry {
+                                id: land_a,
+                                source_id: land_a,
+                                controller: P0,
+                                kind: engine::types::game_state::StackEntryKind::Spell {
+                                    card_id,
+                                    ability: None,
+                                    casting_variant:
+                                        engine::types::game_state::CastingVariant::Normal,
+                                    actual_mana_spent: 0,
+                                },
+                            });
+                    }
+                    _ => unreachable!(),
+                }
+                let before = twin.state().objects[&card].incarnation;
+                assert!(
+                    twin.act(GameAction::ActivateAbility {
+                        source_id: card,
+                        ability_index: index
+                    })
+                    .is_err(),
+                    "printed producer hostile {hostile}"
+                );
+                assert_eq!(twin.state().objects[&card].incarnation, before);
+                assert!(twin.state().objects[&card].counters.is_empty());
+                assert!(twin.state().resolution_stack.is_empty());
+            }
+            let turn = runner.state().turn_number;
+            let first = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: card,
+                    ability_index: index,
+                })
+                .unwrap();
+            assert!(!first
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::AbilityActivated { .. })));
+            if paused {
+                let WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("actual Plot cost replacement pause")
+                };
+                assert_eq!(player, P0);
+                assert_eq!(candidate_count, 2);
+                assert!(runner.state().pending_cost_move_resume.is_some());
+                let cursor =
+                    serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap();
+                assert!(cursor.contains("Captured") && cursor.contains("binding"));
+                for viewer in [Some(P0), Some(P1), None] {
+                    let filtered = match viewer {
+                        Some(player) => engine::game::visibility::filter_state_for_viewer(
+                            runner.state(),
+                            player,
+                        ),
+                        None => engine::game::visibility::filter_state_for_unseated_viewer(
+                            runner.state(),
+                        ),
+                    };
+                    assert!(filtered.pending_cost_move_resume.is_none());
+                    let wire = serde_json::to_value(
+                        engine::game::derived_views::ClientGameStateRef::wrap(
+                            runner.state(),
+                            viewer,
+                        ),
+                    )
+                    .unwrap();
+                    for key in ["pendingCostMoveResume", "pending_cost_move_resume"] {
+                        assert!(wire.get(key).is_none_or(serde_json::Value::is_null));
+                    }
+                }
+                assert_eq!(
+                    serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap(),
+                    cursor
+                );
+                let saved = serde_json::to_string(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_str(&saved).unwrap();
+                let response = runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                assert!(!response
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::AbilityActivated { .. })));
+            }
+            assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+            assert_ne!(runner.state().objects[&card].incarnation, original);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().objects[&card].casting_permissions.iter().filter(|permission| matches!(permission, CastingPermission::Plotted { turn_plotted } if *turn_plotted == turn)).count(), 1);
+            cda_complete(runner.state());
+            let mut returned = runner.state().clone();
+            engine::game::zones::move_to_zone(&mut returned, card, Zone::Hand, &mut vec![]);
+            engine::game::zones::move_to_zone(&mut returned, card, Zone::Exile, &mut vec![]);
+            assert!(
+                returned.objects[&card]
+                    .casting_permissions
+                    .iter()
+                    .all(|permission| !matches!(permission, CastingPermission::Plotted { .. })),
+                "later same-id return does not retain the permission"
+            );
+            let delivered_raw = serde_json::to_string(runner.state()).unwrap();
+            for viewer in [Some(P0), Some(P1), None] {
+                let filtered = match viewer {
+                    Some(player) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                assert!(filtered.pending_cost_move_resume.is_none());
+                serde_json::to_value(
+                    engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        runner.state(),
+                        &filtered,
+                        viewer,
+                    ),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                serde_json::to_string(runner.state()).unwrap(),
+                delivered_raw
+            );
+            let card_id = runner.state().objects[&card].card_id;
+            assert!(
+                runner
+                    .act(GameAction::CastSpell {
+                        object_id: card,
+                        card_id,
+                        targets: vec![],
+                        payment_mode: Default::default()
+                    })
+                    .is_err(),
+                "same-turn Plot cast refused"
+            );
+            cda_complete(runner.state());
+            // Normal public turn advancement, with real draw steps and empty
+            // combat declarations, until the owner's later main phase.
+            for _ in 0..128 {
+                if runner.state().turn_number > turn
+                    && runner.state().active_player == P0
+                    && runner.state().phase == Phase::PreCombatMain
+                {
+                    break;
+                }
+                match runner.state().waiting_for {
+                    WaitingFor::Priority { .. } => {
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    WaitingFor::DeclareAttackers { .. } => {
+                        runner
+                            .act(GameAction::DeclareAttackers {
+                                attacks: vec![],
+                                bands: vec![],
+                            })
+                            .unwrap();
+                    }
+                    WaitingFor::DeclareBlockers { .. } => {
+                        runner
+                            .act(GameAction::DeclareBlockers {
+                                assignments: vec![],
+                            })
+                            .unwrap();
+                    }
+                    ref other => panic!("unexpected turn prompt: {other:?}"),
+                }
+            }
+            assert!(runner.state().turn_number > turn);
+            assert_eq!(runner.state().active_player, P0);
+            assert_eq!(runner.state().phase, Phase::PreCombatMain);
+            let hand_before = runner.state().players[0].hand.len();
+            if granted {
+                let outcome = runner.cast(card).resolve();
+                outcome.assert_hand_drawn(P0, 2);
+                assert_eq!(outcome.zone_of(card), Zone::Graveyard);
+                cda_complete(outcome.state());
+            } else {
+                runner.cast(card).commit().stop_at_optional().resolve();
+                let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for
+                else {
+                    panic!("full Highway optional instruction")
+                };
+                assert_eq!(player, P0);
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: paused })
+                    .unwrap();
+                if paused {
+                    let WaitingFor::ChooseOneOfBranch {
+                        player, branches, ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!("discard or sacrifice branch")
+                    };
+                    assert_eq!(*player, P0);
+                    assert_eq!(branches.len(), 2);
+                    assert!(matches!(
+                        branches[1].effect.as_ref(),
+                        Effect::Sacrifice { .. }
+                    ));
+                    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                    let WaitingFor::EffectZoneChoice { player, cards, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!("choose a nondefault land")
+                    };
+                    assert_eq!(*player, P0);
+                    assert!(cards.contains(&land_a) && cards.contains(&land_b));
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![land_b],
+                        })
+                        .unwrap();
+                    assert_eq!(runner.state().objects[&land_b].zone, Zone::Graveyard);
+                    assert_eq!(runner.state().players[0].hand.len(), hand_before + 2);
+                } else {
+                    assert_eq!(runner.state().players[0].hand.len(), hand_before);
+                    assert_eq!(runner.state().objects[&land_b].zone, Zone::Battlefield);
+                }
+                assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+                cda_complete(runner.state());
+            }
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        }
+    }
+}
+
+// Typed multi-component supplement: actual selected cost first, then automatic
+// self movement. CR 608.2h/k keeps their unequal facts and identities separate.
+#[test]
+fn cda_selected_cost_and_automatic_self_cost_preserve_both_slots_across_reload() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ObjectScope,
+        ReplacementDefinition, ReplacementMode, TypeFilter, TypedFilter,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    for paused in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_graveyard(P1, &["Foreign witness"]);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::PutCounter {
+                counter_type: CounterType::Time,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+                target: TargetFilter::CostPaidObject {
+                    reference: engine::types::ability::CostPaidObjectRef::Source,
+                },
+            },
+        );
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("charge".into()),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        engine::types::ability::PropertyAggregate::new(
+                            engine::types::ability::AggregateFunction::Sum,
+                            engine::types::ability::ObjectProperty::ManaValue,
+                            engine::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::CostPaidObject {
+                                    reference: engine::types::ability::CostPaidObjectRef::Source,
+                                },
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                },
+                target: TargetFilter::CostPaidObject {
+                    reference: engine::types::ability::CostPaidObjectRef::Source,
+                },
+            },
+        )));
+        ability.activation_zone = Some(Zone::Graveyard);
+        ability.cost = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: cda_cost(0, vec![ManaCostShard::Green]),
+                },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                    )),
+                },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        });
+        let source = scenario
+            .add_creature_to_graveyard(P0, "Lord of Extinction", 0, 0)
+            .from_oracle_text(LORD)
+            .with_mana_cost(cda_cost(
+                3,
+                vec![ManaCostShard::Black, ManaCostShard::Green],
+            ))
+            .with_ability_definition(ability)
+            .id();
+        let decoy = scenario
+            .add_creature_to_graveyard(P0, "First choice", 2, 2)
+            .id();
+        let selected = scenario
+            .add_creature_to_graveyard(P0, "Nondefault selected", 9, 9)
+            .with_mana_cost(ManaCost::generic(9))
+            .id();
+        if paused {
+            scenario
+                .state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .active_zones(vec![Zone::Graveyard])
+                        .destination_zone(Zone::Exile)
+                        .mode(ReplacementMode::MayCost {
+                            cost: AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                            decline: Some(Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::NoOp,
+                            ))),
+                        }),
+                );
+            let replacements = scenario.state.objects[&source]
+                .replacement_definitions
+                .clone();
+            scenario
+                .state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .base_replacement_definitions = std::sync::Arc::new(replacements);
+        }
+        let mut runner = scenario.build();
+        engine::game::layers::flush_layers(runner.state_mut());
+        cda_pt(runner.state(), source, 4);
+        let original = runner.state().objects[&source].incarnation;
+        let index = engine::game::casting::activated_ability_definitions(runner.state(), source)
+            .into_iter()
+            .find(|(_, definition)| matches!(definition.effect.as_ref(), Effect::PutCounter { .. }))
+            .unwrap()
+            .0;
+        cda_fund(&mut runner, P0, &[ManaType::Green]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: index,
+            })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("selected exile cost")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(choices.contains(&selected) && choices.contains(&decoy));
+        assert_ne!(choices.first(), Some(&selected));
+        let mut changed_source = GameRunner::from_state(runner.state().clone());
+        engine::game::zones::move_to_zone(
+            changed_source.state_mut(),
+            source,
+            Zone::Hand,
+            &mut vec![],
+        );
+        engine::game::zones::move_to_zone(
+            changed_source.state_mut(),
+            source,
+            Zone::Graveyard,
+            &mut vec![],
+        );
+        let h = changed_source.state().objects[&source].incarnation;
+        assert_ne!(h, original);
+        assert!(
+            changed_source
+                .act(GameAction::SelectCards {
+                    cards: vec![selected]
+                })
+                .is_err(),
+            "the automatic residual cannot mint original g authority for a later h at the same id"
+        );
+        assert_eq!(
+            changed_source.state().objects[&source].zone,
+            Zone::Graveyard
+        );
+        assert_eq!(changed_source.state().objects[&source].incarnation, h);
+        assert!(changed_source.state().stack.is_empty());
+        assert!(changed_source.state().resolution_stack.is_empty());
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        if paused {
+            let WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("automatic source cost pause")
+            };
+            assert_eq!(player, P0);
+            assert_eq!(candidate_count, 2);
+            let saved = serde_json::to_string(runner.state()).unwrap();
+            *runner.state_mut() = serde_json::from_str(&saved).unwrap();
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+        }
+        let root = runner.state().stack.last().unwrap().ability().unwrap();
+        assert_eq!(root.source_incarnation, Some(original));
+        let singular = root.cost_paid_object.as_ref().unwrap();
+        assert_eq!(singular.object_id, selected);
+        assert_eq!(singular.lki.power, Some(9));
+        assert_eq!(singular.live_object_id(runner.state()), Some(selected));
+        assert_eq!(root.cost_paid_objects.len(), 2);
+        assert_eq!(root.cost_paid_objects[0].object_id(), selected);
+        assert_eq!(
+            root.cost_paid_objects[0].snapshot().unwrap().lki.power,
+            Some(9)
+        );
+        assert_eq!(root.cost_paid_objects[1].object_id(), source);
+        assert_eq!(
+            root.cost_paid_objects[1].snapshot().unwrap().lki.power,
+            Some(3)
+        );
+        assert_eq!(
+            root.cost_paid_objects[1].live_object_id(runner.state()),
+            Some(source)
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        cda_pt(runner.state(), source, 2);
+        runner.resolve_top();
+        assert_eq!(
+            runner.state().objects[&source]
+                .counters
+                .get(&CounterType::Time),
+            Some(&3)
+        );
+        assert_eq!(runner.state().objects[&source].counters.get(&CounterType::Generic("charge".into())), Some(&5), "singleton Source MV5 is independent of singular Selected MV9 and original numeric power4");
+        assert!(runner.state().objects[&selected].counters.is_empty());
+        assert!(runner.state().objects[&decoy].counters.is_empty());
+        cda_complete(runner.state());
+    }
+}
+
+// CR 201.5 + CR 400.7: sacrificing this permanent does not retarget its
+// ordinary self-reference to the new graveyard card. CR 122.1a permits counters
+// on creature cards there, so this discriminates identity rather than zone legality.
+#[test]
+fn cda_carrion_feeder_self_sacrifice_does_not_counter_its_graveyard_successor() {
+    use engine::types::ability::{CostPaidObjectBinding, Effect};
+    use engine::types::identifiers::ObjectIncarnationRef;
+    const FEEDER: &str =
+        "This creature can't block.\nSacrifice a creature: Put a +1/+1 counter on this creature.";
+    for sacrifice_self in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let feeder = scenario
+            .add_creature(P0, "Carrion Feeder", 1, 1)
+            .from_oracle_text(FEEDER)
+            .with_subtypes(vec!["Zombie"])
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Black]))
+            .id();
+        let other = scenario.add_creature(P0, "Other sacrifice", 2, 2).id();
+        let mut runner = scenario.build();
+        cda_full_source(runner.state(), feeder);
+        let original = runner.state().objects[&feeder].incarnation;
+        let index = engine::game::casting::activated_ability_definitions(runner.state(), feeder)
+            .into_iter()
+            .find(|(_, def)| matches!(def.effect.as_ref(), Effect::PutCounter { .. }))
+            .unwrap()
+            .0;
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: feeder,
+                ability_index: index,
+            })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual sacrifice choice")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(choices.contains(&feeder) && choices.contains(&other));
+        let chosen = if sacrifice_self { feeder } else { other };
+        let chosen_origin = runner.state().objects[&chosen].incarnation;
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .unwrap();
+        let root = runner
+            .state()
+            .stack
+            .last()
+            .expect("real activation stack")
+            .ability()
+            .unwrap();
+        assert_eq!(root.source_incarnation, Some(original));
+        let snapshot = root.cost_paid_object.as_ref().expect("selected FIRST");
+        assert_eq!(snapshot.object_id, chosen);
+        assert_eq!(
+            snapshot.binding,
+            Some(CostPaidObjectBinding::Settled {
+                origin: ObjectIncarnationRef::of(chosen, chosen_origin)
+            })
+        );
+        assert_eq!(snapshot.live_object_id(runner.state()), Some(chosen));
+        assert_eq!(root.cost_paid_objects.len(), 1);
+        if sacrifice_self {
+            assert_eq!(root.self_ref_binding(runner.state()), None);
+            assert_eq!(
+                root.cost_paid_source_binding(runner.state())
+                    .unwrap()
+                    .object_id,
+                feeder,
+                "explicit cost-card reference remains legal while ordinary SelfRef is stale"
+            );
+            assert_eq!(runner.state().objects[&feeder].zone, Zone::Graveyard);
+        } else {
+            assert_eq!(root.self_ref_binding(runner.state()), Some(feeder));
+            assert_eq!(runner.state().objects[&feeder].incarnation, original);
+        }
+        runner.resolve_top();
+        assert_eq!(
+            runner.state().objects[&feeder]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            if sacrifice_self { 0 } else { 1 }
+        );
+        assert_eq!(
+            runner.state().objects[&feeder].power,
+            Some(if sacrifice_self { 1 } else { 2 })
+        );
+        assert_eq!(
+            runner.state().objects[&feeder].toughness,
+            Some(if sacrifice_self { 1 } else { 2 })
+        );
+        cda_complete(runner.state());
+    }
+}
+
+#[test]
+fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    const SYMBIOTE: &str = "Whenever this creature deals combat damage to a player, look at that many cards from the top of your library. Put one of them into your hand and the rest into your graveyard.\nFind New Host — {2}{U/B}, Exile this card from your graveyard: Put a +1/+1 counter on target creature you control. It gains this card's other abilities. Activate only as a sorcery.";
+    for (paused, stale) in [(false, false), (true, false), (false, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Look A", "Look B", "Look C", "Look D", "Look E"]);
+        let donor = scenario
+            .add_creature_to_graveyard(P0, "Symbiote Spider-Man", 2, 4)
+            .from_oracle_text(SYMBIOTE)
+            .as_legendary()
+            .with_subtypes(vec!["Symbiote", "Spider", "Hero"])
+            .with_mana_cost(cda_cost(2, vec![ManaCostShard::BlueBlack]))
+            .id();
+        let other_donor = scenario
+            .add_creature_to_graveyard(P0, "Symbiote Spider-Man", 2, 4)
+            .from_oracle_text(SYMBIOTE)
+            .as_legendary()
+            .with_subtypes(vec!["Symbiote", "Spider", "Hero"])
+            .with_mana_cost(cda_cost(2, vec![ManaCostShard::BlueBlack]))
+            .id();
+        let decoy = scenario.add_creature(P0, "First recipient", 1, 1).id();
+        let recipient = scenario.add_creature(P0, "Nondefault recipient", 2, 2).id();
+        let mut runner = scenario.build();
+        cda_full_source(runner.state(), donor);
+        let donor_trigger = runner.state().objects[&donor]
+            .trigger_definitions
+            .iter_all()
+            .next()
+            .expect("full first printed ability")
+            .definition
+            .clone();
+        let original = runner.state().objects[&donor].incarnation;
+        let index = engine::game::casting::activated_ability_definitions(runner.state(), donor)
+            .into_iter()
+            .find(|(_, def)| matches!(def.effect.as_ref(), Effect::PutCounter { .. }))
+            .unwrap()
+            .0;
+        // Same route's funded positive below guards unfunded refusal.
+        assert!(runner
+            .act(GameAction::ActivateAbility {
+                source_id: donor,
+                ability_index: index
+            })
+            .is_err());
+        assert_eq!(runner.state().objects[&donor].zone, Zone::Graveyard);
+        cda_complete(runner.state());
+        if paused {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .active_zones(vec![Zone::Graveyard])
+                .destination_zone(Zone::Exile)
+                .mode(ReplacementMode::MayCost {
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    decline: Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    ))),
+                });
+            let object = runner.state_mut().objects.get_mut(&donor).unwrap();
+            object.replacement_definitions.push(replacement.clone());
+            std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+        }
+        cda_fund(
+            &mut runner,
+            P0,
+            &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
+        );
+        // Funded twins reach the full printed producer's timing/color checks.
+        for hostile in 0..4 {
+            let mut twin = GameRunner::from_state(runner.state().clone());
+            twin.state_mut().players[0].mana_pool.clear();
+            cda_fund(
+                &mut twin,
+                P0,
+                &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
+            );
+            match hostile {
+                0 => {
+                    twin.state_mut().players[0].mana_pool.clear();
+                    cda_fund(
+                        &mut twin,
+                        P0,
+                        &[ManaType::White, ManaType::White, ManaType::White],
+                    );
+                }
+                1 => twin.state_mut().active_player = P1,
+                2 => twin.state_mut().phase = Phase::Upkeep,
+                3 => {
+                    engine::game::zones::move_to_zone(
+                        twin.state_mut(),
+                        decoy,
+                        Zone::Stack,
+                        &mut vec![],
+                    );
+                    let card_id = twin.state().objects[&decoy].card_id;
+                    twin.state_mut()
+                        .stack
+                        .push(engine::types::game_state::StackEntry {
+                            id: decoy,
+                            source_id: decoy,
+                            controller: P0,
+                            kind: engine::types::game_state::StackEntryKind::Spell {
+                                card_id,
+                                ability: None,
+                                casting_variant: engine::types::game_state::CastingVariant::Normal,
+                                actual_mana_spent: 0,
+                            },
+                        });
+                }
+                _ => unreachable!(),
+            }
+            let before = twin.state().objects[&donor].incarnation;
+            assert!(
+                twin.act(GameAction::ActivateAbility {
+                    source_id: donor,
+                    ability_index: index
+                })
+                .is_err(),
+                "printed producer hostile {hostile}"
+            );
+            assert_eq!(twin.state().objects[&donor].incarnation, before);
+            assert!(twin.state().objects[&donor].counters.is_empty());
+            assert!(twin.state().resolution_stack.is_empty());
+        }
+        let mut no_targets = GameRunner::from_state(runner.state().clone());
+        for id in [decoy, recipient] {
+            let object = no_targets.state_mut().objects.get_mut(&id).unwrap();
+            object
+                .keywords
+                .push(engine::types::keywords::Keyword::Shroud);
+            object
+                .base_keywords
+                .push(engine::types::keywords::Keyword::Shroud);
+        }
+        no_targets.state_mut().layers_dirty.mark_full();
+        evaluate_layers(no_targets.state_mut());
+        assert!(no_targets
+            .act(GameAction::ActivateAbility {
+                source_id: donor,
+                ability_index: index
+            })
+            .is_err());
+        assert_eq!(no_targets.state().objects[&donor].zone, Zone::Graveyard);
+        cda_complete(no_targets.state());
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: donor,
+                ability_index: index,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            pending_cast,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Find New Host public targets")
+        };
+        assert_eq!(*player, P0);
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(recipient)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(decoy)));
+        assert_eq!(pending_cast.ability.source_incarnation, Some(original));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            })
+            .unwrap();
+        if paused {
+            let WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("donor cost replacement")
+            };
+            assert_eq!(player, P0);
+            assert_eq!(candidate_count, 2);
+            let cursor = serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap();
+            assert!(cursor.contains("Captured") && cursor.contains("binding"));
+            for viewer in [Some(P0), Some(P1), None] {
+                let filtered = match viewer {
+                    Some(player) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                assert!(filtered.pending_cost_move_resume.is_none());
+                let wire = serde_json::to_value(
+                    engine::game::derived_views::ClientGameStateRef::wrap(runner.state(), viewer),
+                )
+                .unwrap();
+                for key in ["pendingCostMoveResume", "pending_cost_move_resume"] {
+                    assert!(wire.get(key).is_none_or(serde_json::Value::is_null));
+                }
+            }
+            assert_eq!(
+                serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap(),
+                cursor
+            );
+            let save = serde_json::to_string(runner.state()).unwrap();
+            *runner.state_mut() = serde_json::from_str(&save).unwrap();
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&donor].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&other_donor].zone, Zone::Graveyard);
+        let root = runner.state().stack.last().unwrap().ability().unwrap();
+        assert_eq!(root.source_incarnation, Some(original));
+        assert_eq!(
+            root.cost_paid_source_binding(runner.state())
+                .unwrap()
+                .object_id,
+            donor
+        );
+        let delivered_raw = serde_json::to_string(runner.state()).unwrap();
+        for viewer in [Some(P0), Some(P1), None] {
+            let filtered = match viewer {
+                Some(player) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            assert!(filtered.pending_cost_move_resume.is_none());
+            serde_json::to_value(
+                engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                    runner.state(),
+                    &filtered,
+                    viewer,
+                ),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            serde_json::to_string(runner.state()).unwrap(),
+            delivered_raw
+        );
+        if stale {
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                donor,
+                Zone::Graveyard,
+                &mut vec![],
+            );
+            engine::game::zones::move_to_zone(runner.state_mut(), donor, Zone::Exile, &mut vec![]);
+        }
+        runner.resolve_top();
+        assert_eq!(
+            runner.state().objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1)
+        );
+        assert!(runner.state().objects[&decoy].counters.is_empty());
+        assert!(runner.state().objects[&decoy]
+            .trigger_definitions
+            .iter_all()
+            .next()
+            .is_none());
+        assert!(
+            runner.state().objects[&recipient].abilities.is_empty(),
+            "Find New Host itself is excluded"
+        );
+        let gained: Vec<_> = runner.state().objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect();
+        assert_eq!(gained, if stale { vec![] } else { vec![donor_trigger] });
+        cda_complete(runner.state());
+        if !stale {
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(recipient, AttackTarget::Player(P1))])
+                .unwrap();
+            runner.advance_to_phase(Phase::DeclareBlockers);
+            runner.declare_blockers(&[]).unwrap();
+            let life = runner.state().players[1].life;
+            let expected: Vec<_> = runner.state().players[0]
+                .library
+                .iter()
+                .take(3)
+                .copied()
+                .collect();
+            runner.combat_damage();
+            assert_eq!(runner.state().players[1].life, life - 3);
+            let WaitingFor::DigChoice {
+                player,
+                cards,
+                selectable_cards,
+                keep_count,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("gained full combat trigger must look and choose")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*keep_count, 1);
+            assert_eq!(cards, &expected);
+            assert_eq!(selectable_cards, &expected);
+            let chosen = expected[1];
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![chosen],
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&chosen].zone, Zone::Hand);
+            for id in expected.into_iter().filter(|id| *id != chosen) {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+            }
+            cda_complete(runner.state());
+        }
+    }
+}
+
+// Constructed automatic-cost supplements; these are not invented printed abilities.
+#[test]
+fn cda_all_automatic_source_cost_arms_thread_actual_payment_and_replacement_resume() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CostMoveOutcome,
+        CostPaidObjectBinding, CostPaidObjectRef, DiscardSelfScope, Effect, ReplacementDefinition,
+        ReplacementMode, SacrificeCost,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    for arm in 0..6 {
+        let hidden = arm >= 4;
+        for paused in [false, true] {
+            let (origin, destination, cost, outcome) = match arm {
+                0 => (
+                    Zone::Graveyard,
+                    Zone::Exile,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Graveyard),
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                    CostMoveOutcome::Relocation,
+                ),
+                1 => (
+                    Zone::Battlefield,
+                    Zone::Hand,
+                    AbilityCost::ReturnToHand {
+                        count: 1,
+                        filter: Some(TargetFilter::SelfRef),
+                        from_zone: Some(Zone::Battlefield),
+                    },
+                    CostMoveOutcome::Relocation,
+                ),
+                2 | 4 => (
+                    Zone::Battlefield,
+                    Zone::Graveyard,
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    CostMoveOutcome::Relocation,
+                ),
+                3 | 5 => (
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::SourceCard,
+                    },
+                    CostMoveOutcome::Discard,
+                ),
+                _ => unreachable!(),
+            };
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let mut definition = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::CostPaidObject {
+                        reference: CostPaidObjectRef::Source,
+                    },
+                },
+            )
+            .cost(cost);
+            definition.activation_zone = Some(origin);
+            let id = match origin {
+                Zone::Battlefield => scenario
+                    .add_creature(P0, "Typed self cost", 2, 2)
+                    .with_ability_definition(definition)
+                    .id(),
+                Zone::Graveyard => scenario
+                    .add_creature_to_graveyard(P0, "Typed self cost", 2, 2)
+                    .with_ability_definition(definition)
+                    .id(),
+                Zone::Hand => scenario
+                    .add_creature_to_hand(P0, "Typed self cost", 2, 2)
+                    .with_ability_definition(definition)
+                    .id(),
+                _ => unreachable!(),
+            };
+            let hidden_redirect = if hidden {
+                Some(scenario.add_enchantment_from_oracle(P0, "Typed hidden cost delivery", "If a card would be put into your graveyard from anywhere, shuffle it into its owner's library instead.").id())
+            } else {
+                None
+            };
+            let mut runner = scenario.build();
+            if let Some(probe) = hidden_redirect {
+                cda_full_source(runner.state(), probe);
+            }
+
+            let g = runner.state().objects[&id].incarnation;
+            if paused {
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .active_zones(vec![origin])
+                    .destination_zone(destination)
+                    .mode(ReplacementMode::MayCost {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        decline: Some(Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::NoOp,
+                        ))),
+                    });
+                let object = runner.state_mut().objects.get_mut(&id).unwrap();
+                object.replacement_definitions.push(replacement.clone());
+                std::sync::Arc::make_mut(&mut object.base_replacement_definitions)
+                    .push(replacement);
+            }
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: id,
+                    ability_index: 0,
+                })
+                .unwrap();
+            if paused {
+                let WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("actual automatic-cost pause {arm}")
+                };
+                assert_eq!(player, P0);
+                assert_eq!(candidate_count, 2);
+                let cursor =
+                    serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap();
+                assert!(cursor.contains("Captured") && cursor.contains("binding"));
+                assert!(cursor.contains(if outcome == CostMoveOutcome::Discard {
+                    "Discard"
+                } else {
+                    "Relocation"
+                }));
+                for viewer in [Some(P0), Some(P1), None] {
+                    let projected = match viewer {
+                        Some(player) => engine::game::visibility::filter_state_for_viewer(
+                            runner.state(),
+                            player,
+                        ),
+                        None => engine::game::visibility::filter_state_for_unseated_viewer(
+                            runner.state(),
+                        ),
+                    };
+                    assert!(projected.pending_cost_move_resume.is_none());
+                    let wire = serde_json::to_value(
+                        engine::game::derived_views::ClientGameStateRef::wrap(
+                            runner.state(),
+                            viewer,
+                        ),
+                    )
+                    .unwrap();
+                    for key in ["pendingCostMoveResume", "pending_cost_move_resume"] {
+                        assert!(wire.get(key).is_none_or(serde_json::Value::is_null));
+                    }
+                }
+                assert_eq!(
+                    serde_json::to_string(&runner.state().pending_cost_move_resume).unwrap(),
+                    cursor
+                );
+                let save = serde_json::to_string(runner.state()).unwrap();
+                *runner.state_mut() = serde_json::from_str(&save).unwrap();
+                runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+            }
+            let delivered = if hidden { Zone::Library } else { destination };
+            assert_eq!(runner.state().objects[&id].zone, delivered);
+            let root = runner
+                .state()
+                .stack
+                .last()
+                .expect("actual automatic activation stack")
+                .ability()
+                .unwrap();
+            assert_eq!(root.source_incarnation, Some(g));
+            assert_eq!(root.cost_paid_objects.len(), 1);
+            assert_eq!(root.cost_paid_objects[0].object_id(), id);
+            if arm == 5 {
+                assert!(
+                    root.cost_paid_objects[0].snapshot().is_none(),
+                    "actual hidden self-discard demotes after generic resumed relocation"
+                );
+                assert!(root.cost_paid_object.is_none());
+            } else {
+                let captured = root
+                    .cost_paid_objects
+                    .iter()
+                    .find_map(|record| record.snapshot())
+                    .expect("automatic plural capture");
+                assert_eq!(
+                    captured.binding,
+                    Some(CostPaidObjectBinding::Settled {
+                        origin: engine::types::identifiers::ObjectIncarnationRef::of(id, g)
+                    })
+                );
+                assert_eq!(captured.lki.power, Some(2));
+            }
+            assert_eq!(
+                root.cost_paid_source_binding(runner.state()).is_some(),
+                delivered.is_public()
+            );
+            if arm != 3 {
+                assert!(
+                    root.cost_paid_object.is_none(),
+                    "automatic capture never fills FIRST"
+                );
+            }
+            runner.resolve_top();
+            assert_eq!(
+                runner.state().objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                if delivered.is_public() { 1 } else { 0 }
+            );
+            cda_complete(runner.state());
+            for viewer in [Some(P0), Some(P1), None] {
+                let projected = match viewer {
+                    Some(player) => {
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                    }
+                    None => {
+                        engine::game::visibility::filter_state_for_unseated_viewer(runner.state())
+                    }
+                };
+                assert!(projected.pending_cost_move_resume.is_none());
+                serde_json::to_value(
+                    engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        runner.state(),
+                        &projected,
+                        viewer,
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+// Constructed two-component cost: selected sacrifice settles g, then a later
+// selected exile consumes h at the same storage id. The unrelated intervening
+// zone hops are fixture actions; every cost selection, pause and resume is public.
+#[test]
+fn cda_later_same_id_selected_component_never_resettles_prior_source_origin_across_reload() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, CostPaidObjectBinding, CostPaidObjectRef,
+        Effect, ObjectScope, ReplacementDefinition, ReplacementMode, SacrificeCost, TypedFilter,
+    };
+    use engine::types::game_state::CostResume;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::replacements::ReplacementEvent;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let definition = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+            target: TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Source,
+            },
+        },
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature()),
+                1,
+            )),
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+        ],
+    });
+    let source = scenario
+        .add_creature(P0, "Two-component source", 4, 4)
+        .with_plus_counters(3)
+        .with_ability_definition(definition)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .active_zones(vec![Zone::Graveyard])
+                .destination_zone(Zone::Exile)
+                .mode(ReplacementMode::MayCost {
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    decline: Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::NoOp,
+                    ))),
+                }),
+        )
+        .id();
+    let other = scenario.add_creature(P0, "Other sacrifice", 2, 2).id();
+    let decoy = scenario
+        .add_creature_to_graveyard(P0, "Other exile", 9, 9)
+        .id();
+    let mut runner = scenario.build();
+    let g = runner.state().objects[&source].incarnation;
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("first real selected sacrifice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert!(choices.contains(&source) && choices.contains(&other));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source],
+        })
+        .unwrap();
+    let e = runner.state().objects[&source].incarnation;
+    assert_ne!(g, e);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        resume,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("second selected component")
+    };
+    assert_eq!(*player, P0);
+    assert!(choices.contains(&source) && choices.contains(&decoy));
+    let CostResume::Spell { spell } = resume else {
+        panic!("same actual pending activation")
+    };
+    assert_eq!(spell.ability.source_incarnation, Some(g));
+    let first = spell.ability.cost_paid_objects[0].clone();
+    let first_selected = spell.ability.cost_paid_object.clone();
+    assert_eq!(
+        first.snapshot().unwrap().binding,
+        Some(CostPaidObjectBinding::Settled {
+            origin: ObjectIncarnationRef::of(source, g)
+        })
+    );
+    assert_eq!(first.snapshot().unwrap().incarnation, e);
+    assert_eq!(first.snapshot().unwrap().lki.power, Some(7));
+    assert_eq!(
+        spell
+            .ability
+            .cost_paid_source_binding(runner.state())
+            .unwrap()
+            .object_id,
+        source,
+        "same-route exact predecessor positive before hostile hop"
+    );
+    engine::game::zones::move_to_zone(runner.state_mut(), source, Zone::Hand, &mut vec![]);
+    engine::game::zones::move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut vec![]);
+    let h = runner.state().objects[&source].incarnation;
+    assert_ne!(h, e);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source],
+        })
+        .unwrap();
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = runner.state().waiting_for
+    else {
+        panic!("later component's real cost pause")
+    };
+    assert_eq!(player, P0);
+    assert_eq!(candidate_count, 2);
+    assert!(runner.state().pending_cost_move_resume.is_some());
+    let save = serde_json::to_string(runner.state()).unwrap();
+    *runner.state_mut() = serde_json::from_str(&save).unwrap();
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    let k = runner.state().objects[&source].incarnation;
+    assert_ne!(h, k);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+    let root = runner.state().stack.last().unwrap().ability().unwrap();
+    assert_eq!(root.source_incarnation, Some(g));
+    assert_eq!(root.cost_paid_objects.len(), 2);
+    assert_eq!(
+        root.cost_paid_objects[0], first,
+        "old g pin/LKI/origin remain frozen after h settlement"
+    );
+    let new = root.cost_paid_objects[1].snapshot().unwrap();
+    assert_eq!(
+        new.binding,
+        Some(CostPaidObjectBinding::Settled {
+            origin: ObjectIncarnationRef::of(source, h)
+        })
+    );
+    assert_eq!(new.incarnation, k);
+    assert_eq!(new.live_object_id(runner.state()), Some(source));
+    assert_eq!(new.lki.power, Some(4));
+    assert_eq!(
+        root.cost_paid_object, first_selected,
+        "singular FIRST stays the first sacrifice, including its old e pin and frozen LKI"
+    );
+    assert!(root
+        .cost_paid_object
+        .as_ref()
+        .unwrap()
+        .live_object_id(runner.state())
+        .is_none());
+    assert_eq!(root.cost_paid_objects[1].live_object_id(runner.state()), Some(source), "the plural CostPaidObjects record for the later h component genuinely settles at k; it does not overwrite singular Selected");
+    assert!(
+        root.cost_paid_source_binding(runner.state()).is_none(),
+        "origin h cannot authenticate original g"
+    );
+    assert_eq!(
+        engine::game::quantity::resolve_quantity_with_targets(
+            runner.state(),
+            &QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            },
+            root
+        ),
+        7
+    );
+    runner.resolve_top();
+    assert!(runner.state().objects[&source].counters.is_empty());
+    assert!(runner.state().objects[&decoy].counters.is_empty());
+    cda_complete(runner.state());
+}
+
+// Constructed Source-operand consumer supplements. Each starts at public
+// activation/payment and reaches the real handler after the same ability's own
+// return; the immediate stale twin cannot borrow a decoy's identity.
+#[test]
+fn cda_cost_source_finite_consumers_follow_only_their_own_returned_object() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, CostPaidObjectRef,
+        Duration, Effect,
+    };
+    let source_filter = TargetFilter::CostPaidObject {
+        reference: CostPaidObjectRef::Source,
+    };
+    for consumer in 0..4 {
+        for stale in [false, true] {
+            let effect = match consumer {
+                0 => Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(source_filter.clone())
+                        .modifications(vec![ContinuousModification::AddPower { value: 2 }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: Some(source_filter.clone()),
+                    end_cost: None,
+                },
+                1 => Effect::CopyTokenOf {
+                    target: source_filter.clone(),
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+                2 => Effect::Sacrifice {
+                    target: source_filter.clone(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 1,
+                },
+                3 => Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    subject: source_filter.clone(),
+                },
+                _ => unreachable!(),
+            };
+            let head: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZone", "origin":"Exile", "destination":"Battlefield", "target":{"type":"CostPaidObject", "reference":"Source"}})).unwrap();
+            let mut definition = AbilityDefinition::new(AbilityKind::Activated, head)
+                .cost(AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(TargetFilter::SelfRef),
+                })
+                .sub_ability(AbilityDefinition::new(AbilityKind::Spell, effect));
+            definition.activation_zone = Some(Zone::Graveyard);
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_to_graveyard(P0, "Constructed consumer source", 2, 2)
+                .with_ability_definition(definition)
+                .id();
+            let decoy = scenario.add_creature(P0, "Untouched decoy", 9, 9).id();
+            let mut runner = scenario.build();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+            assert!(runner
+                .state()
+                .stack
+                .last()
+                .unwrap()
+                .ability()
+                .unwrap()
+                .cost_paid_source_binding(runner.state())
+                .is_some());
+            if stale {
+                engine::game::zones::move_to_zone(
+                    runner.state_mut(),
+                    source,
+                    Zone::Hand,
+                    &mut vec![],
+                );
+                engine::game::zones::move_to_zone(
+                    runner.state_mut(),
+                    source,
+                    Zone::Exile,
+                    &mut vec![],
+                );
+            }
+            runner.resolve_top();
+            if consumer == 3 {
+                let WaitingFor::ChooseOneOfBranch {
+                    player, branches, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("actual Endure decision")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(branches.len(), if stale { 1 } else { 2 });
+                runner
+                    .act(GameAction::ChooseBranch {
+                        index: if stale { 0 } else { 1 },
+                    })
+                    .unwrap();
+            }
+            match consumer {
+                0 => {
+                    evaluate_layers(runner.state_mut());
+                    assert_eq!(
+                        runner.state().objects[&source].power,
+                        Some(if stale { 2 } else { 4 })
+                    );
+                }
+                1 => {
+                    let copies: Vec<_> = runner
+                        .state()
+                        .objects
+                        .values()
+                        .filter(|object| object.is_token)
+                        .collect();
+                    assert_eq!(copies.len(), usize::from(!stale));
+                    if !stale {
+                        assert_eq!(copies[0].power, Some(2));
+                        assert_eq!(copies[0].name, "Constructed consumer source");
+                    }
+                }
+                2 => assert_eq!(
+                    runner.state().objects[&source].zone,
+                    if stale { Zone::Exile } else { Zone::Graveyard }
+                ),
+                3 if !stale => assert_eq!(
+                    runner.state().objects[&source]
+                        .counters
+                        .get(&CounterType::Plus1Plus1),
+                    Some(&2)
+                ),
+                3 => assert!(runner.state().objects[&source].counters.is_empty()),
+                _ => unreachable!(),
+            }
+            assert_eq!(runner.state().objects[&decoy].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&decoy].power, Some(9));
+            assert!(runner.state().objects[&decoy].counters.is_empty());
+            cda_complete(runner.state());
+        }
+    }
 }

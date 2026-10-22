@@ -3586,7 +3586,11 @@ fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -4821,6 +4825,16 @@ fn filter_population_anchor_ids(
     filter_ctx: &FilterContext<'_>,
 ) -> Option<Vec<ObjectId>> {
     let ids = match filter {
+        // CR 400.7j: an explicit cost source is a singleton population in its
+        // represented public zone, not an unzoned battlefield predicate.
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => filter_ctx
+            .ability
+            .and_then(|ability| ability.cost_paid_source_binding(state))
+            .into_iter()
+            .map(|reference| reference.object_id)
+            .collect(),
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TrackedSet { id } => tracked_set_object_ids(state, *id),
         // CR 608.2c: The population of a filtered tracked set is the set
@@ -22410,6 +22424,7 @@ mod tests {
             PlayerId(0),
         );
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Regal Force".to_string(),
@@ -22561,6 +22576,7 @@ mod tests {
         );
         // Cost-paid snapshot with a DIFFERENT power, so we can detect which path won.
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrificed Hulk".to_string(),
@@ -22643,6 +22659,7 @@ mod tests {
             PlayerId(0),
         );
         ability.set_effect_context_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Effect-Sacrificed Creature".to_string(),
@@ -22723,6 +22740,7 @@ mod tests {
         // The sacrificed creature (MV 3) is recorded as the effect-context
         // object — no cost-paid object exists for a resolution-effect sacrifice.
         ability.set_effect_context_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Sacrificed Creature".to_string(),
@@ -22789,6 +22807,7 @@ mod tests {
             PlayerId(0),
         );
         let snapshot = |name: &str, mana_value: u32| CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
@@ -22852,6 +22871,7 @@ mod tests {
             PlayerId(0),
         );
         ability.set_effect_context_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Revealed Card".to_string(),
@@ -22908,6 +22928,7 @@ mod tests {
             PlayerId(0),
         );
         let snapshot = |name: &str, mana_value: u32| CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
@@ -22987,6 +23008,7 @@ mod tests {
             PlayerId(0),
         );
         let snapshot = |name: &str, power: i32, toughness: i32| CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
@@ -27168,6 +27190,150 @@ mod captured_numeric_source_tests {
             resolve_quantity(&state, &power, PlayerId(0), source),
             4,
             "bare battlefield look-back API remains separate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cost_source_bridge_tests {
+    use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{
+        Comparator, CostMoveOutcome, CostPaidObjectRef, CostPaidObjectSnapshot, PropertyAggregate,
+    };
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn cost_source_singleton_bridge_preserves_selected_decoy_and_refuses_missing_zero() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Source MV3".into(),
+            Zone::Graveyard,
+        );
+        let selected = create_object(
+            &mut state,
+            CardId(2),
+            p0,
+            "Selected MV9".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(3);
+        state.objects.get_mut(&selected).unwrap().mana_cost = ManaCost::generic(9);
+        let mut ability =
+            ResolvedAbility::new(Effect::NoOp, vec![TargetRef::Object(selected)], id, p0);
+        ability.set_source_incarnation_recursive(Some(state.objects[&id].incarnation));
+        let first = CostPaidObjectSnapshot::capture(
+            &state.objects[&selected],
+            state.objects[&selected].snapshot_for_mana_spent(),
+        );
+        ability.set_cost_paid_object_recursive(first.clone());
+        ability.add_cost_paid_objects_recursive(&[first]);
+        ability.add_cost_paid_objects_recursive(&[CostPaidObjectSnapshot::capture(
+            &state.objects[&id],
+            state.objects[&id].snapshot_for_mana_spent(),
+        )]);
+        let source = TargetFilter::CostPaidObject {
+            reference: CostPaidObjectRef::Source,
+        };
+        let selected_filter = TargetFilter::CostPaidObject {
+            reference: CostPaidObjectRef::Selected,
+        };
+        assert_eq!(
+            crate::game::targeting::resolved_object_ids_for_filter(
+                &state,
+                &ability,
+                &selected_filter
+            ),
+            vec![selected]
+        );
+        move_to_zone(&mut state, selected, Zone::Graveyard, &mut vec![]);
+        move_to_zone(&mut state, id, Zone::Exile, &mut vec![]);
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Relocation);
+        assert!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .unwrap()
+                .live_object_id(&state)
+                .is_none(),
+            "settlement scopes singular FIRST too"
+        );
+        assert_eq!(ability.cost_paid_object.as_ref().unwrap().lki.mana_value, 9);
+        assert_eq!(
+            crate::game::targeting::resolved_object_ids_for_filter(&state, &ability, &source),
+            vec![id],
+            "Source precedes propagated recipient"
+        );
+        let value = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::ManaValue,
+                    CardTypeSetSource::Objects { filter: source },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(resolve_quantity_with_targets(&state, &value, &ability), 3);
+        assert!(try_resolve_quantity_in_source_context(&state, &value, p0, id).is_none());
+        let candidate3 = create_object(
+            &mut state,
+            CardId(3),
+            p0,
+            "Candidate MV3".into(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&candidate3).unwrap().mana_cost = ManaCost::generic(3);
+        let candidate0 = create_object(
+            &mut state,
+            CardId(4),
+            p0,
+            "Candidate MV0".into(),
+            Zone::Library,
+        );
+        let property = FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        };
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![property.clone()]));
+        assert!(matches_target_filter(
+            &state,
+            candidate3,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            candidate0,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+        let mut missing = ability.clone();
+        missing.cost_paid_objects.clear();
+        assert!(
+            !matches_target_filter(
+                &state,
+                candidate0,
+                &filter,
+                &FilterContext::from_ability(&missing)
+            ),
+            "unavailable source is not zero"
+        );
+        let negated = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+            prop: Box::new(property),
+        }]));
+        assert!(
+            !matches_target_filter(
+                &state,
+                candidate3,
+                &negated,
+                &FilterContext::from_ability(&missing)
+            ),
+            "unavailable is not a negatable known value"
         );
     }
 }

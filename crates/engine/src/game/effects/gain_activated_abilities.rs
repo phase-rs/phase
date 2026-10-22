@@ -57,16 +57,30 @@ pub fn resolve(
         ),
     };
 
-    // The donor id depends on the donor filter. Quicksilver/Grell target the
-    // donor, so it is the single declared object target (BecomeCopy-style).
-    // Symbiote's donor is "this card" (`SelfRef`) — read the source directly
-    // (its Find New Host ability is activated from the graveyard and exiles the
-    // source as a cost, but `move_to_zone` preserves the ObjectId and the exiled
-    // object keeps its printed `abilities`/`trigger_definitions`, so the source
-    // remains readable at resolution — GATE #1, proven by the runtime test).
+    // Targeted donors use their declared slot. An explicit cost-card donor uses
+    // only its authenticated cost successor; ordinary SelfRef keeps its own
+    // incarnation boundary. Printed ability bodies remain available on the
+    // authenticated public card without borrowing a later same-id return.
     let donor_id = match donor_filter {
-        // CR 400.7: Symbiote's cost exiles it before the incarnation is
-        // captured, so the exiled card is still the current source here. A
+        // CR 400.7j: an explicit cost-card donor uses its authenticated successor.
+        filter @ TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => {
+            let Some(donor_id) =
+                crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+                    .into_iter()
+                    .next()
+            else {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            };
+            donor_id
+        }
+        // CR 400.7: an ordinary self-reference names the original object. A
         // donor that left and returned since is a new object with nothing to
         // donate (CR 609.3): complete as a no-op, with the same completion
         // event a live donor emits, so the rest of the chain runs unchanged.

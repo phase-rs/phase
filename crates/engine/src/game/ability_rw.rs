@@ -1459,7 +1459,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::AttachedTo
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -1745,7 +1745,11 @@ fn target_is_legacy_ref(f: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::StackSpell
-        | TargetFilter::CostPaidObject => true,
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        } => true,
         TargetFilter::Not { filter } => target_is_legacy_ref(filter),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(target_is_legacy_ref)
@@ -2408,7 +2412,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::StackSpell
-        | TargetFilter::CostPaidObject => true,
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source } => true,
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             legacy_target_filter(filter)
         }
@@ -2711,7 +2715,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::StackSpell
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         // CR 701.47c: resolution-local, carried per-ability like `CostPaidObject`
         // (`ResolvedAbility.amassed_army_object`), not per-source storage keyed
         // by object id — not per-member-bound.
@@ -7299,7 +7303,13 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::StackSpell
-        | TargetFilter::CostPaidObject => legacy_ref(),
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected } => legacy_ref(),
+        TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source } => {
+            let mut p = legacy_ref();
+            p.merge(reads_zone_membership());
+            p.merge(reads_src_of(StateKind::Other));
+            p
+        },
         // Non-D5 event refs. `ParentTargetSlot` is NOT one of the 12 retained tags
         // (it serializes as an object key the frozen serde oracle never matched —
         // the write path `target_is_legacy_ref` excludes it too), so it must NOT
@@ -8932,7 +8942,9 @@ mod tests {
             TargetFilter::ParentTargetController,
             TargetFilter::ParentTargetOwner,
             TargetFilter::StackSpell,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
         ];
         for tag in &tf_tags {
             // dropped-target effect positions (the fail-open holes).
@@ -10159,7 +10171,9 @@ mod sought_reader_rw_tests {
             target,
         };
         assert!(!legacy_effect(&effect(TargetFilter::SelfRef)));
-        assert!(legacy_effect(&effect(TargetFilter::CostPaidObject)));
+        assert!(legacy_effect(&effect(TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected
+        })));
         let (p, _) = rw_effect(&effect(TargetFilter::SelfRef), None, PlayerSpan::None, None);
         assert!(p.reads_member_bound());
         assert!(p.reads_board.any());
@@ -10294,5 +10308,23 @@ mod departure_source_profile_tests {
             source, frozen,
             "a frozen record's predicate still evaluates its actual source-relative operands"
         );
+    }
+}
+
+#[cfg(test)]
+mod cost_source_rw_tests {
+    use super::*;
+    #[test]
+    fn cost_source_reads_membership_and_source_without_member_bound_or_event_write() {
+        let filter = TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        };
+        assert!(target_is_legacy_ref(&filter));
+        let profile = rw_target_filter(&filter);
+        assert!(profile.reads_board.any());
+        assert!(profile.reads_src.any());
+        assert!(!profile.reads_member_bound());
+        assert!(profile.reads_event_live);
+        assert!(!profile.writes_event_object.any());
     }
 }

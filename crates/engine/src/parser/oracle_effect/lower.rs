@@ -4238,7 +4238,11 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::AttachedTo
             | TargetFilter::LastRevealed
             | TargetFilter::LastZoneChanged
-            | TargetFilter::CostPaidObject
+            | TargetFilter::CostPaidObject {
+                reference:
+                    crate::types::ability::CostPaidObjectRef::Selected
+                    | crate::types::ability::CostPaidObjectRef::Source,
+            }
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
@@ -4337,7 +4341,11 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource

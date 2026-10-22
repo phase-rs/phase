@@ -443,10 +443,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v152 before it can silently drop an activated grant's kind selector", async () => {
+  it("rejects Full v160 before it can silently drop cost-source provenance", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 152 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 160 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -454,10 +454,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v159 source-bound chosen-parity protocol", async () => {
+  it("accepts the literal Full v161 cost-source provenance protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 159 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 161 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

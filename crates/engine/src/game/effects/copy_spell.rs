@@ -4457,6 +4457,7 @@ mod tests {
             PlayerId(0),
         );
         original.cost_paid_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrifice".to_string(),

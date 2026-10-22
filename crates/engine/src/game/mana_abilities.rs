@@ -15893,6 +15893,7 @@ mod tests {
         );
         paid.mana_cost = crate::types::mana::ManaCost::generic(5);
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            binding: None,
             object_id: paid.id,
             lki: paid.snapshot_for_mana_spent(),
             incarnation: 0,

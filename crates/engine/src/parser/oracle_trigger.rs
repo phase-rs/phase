@@ -13130,7 +13130,12 @@ fn trigger_damage_recipient_ref_for_condition(
     // `resolve_pronoun_target`).
     let subject_is_self_referential = matches!(
         trigger_subject,
-        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+        TargetFilter::SelfRef
+            | TargetFilter::Any
+            | TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+                    | crate::types::ability::CostPaidObjectRef::Source
+            }
     );
     if !subject_is_self_referential
         && scan_at_word_boundaries(after_keyword, parse_passive_dealt_damage).is_some()
@@ -16291,7 +16296,12 @@ fn try_parse_event(
                 // keyword trigger (`valid_card` = subject, `valid_source` unset).
                 if !matches!(
                     subject,
-                    TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+                    TargetFilter::SelfRef
+                        | TargetFilter::Any
+                        | TargetFilter::CostPaidObject {
+                            reference: crate::types::ability::CostPaidObjectRef::Selected
+                                | crate::types::ability::CostPaidObjectRef::Source
+                        }
                 ) {
                     return None;
                 }

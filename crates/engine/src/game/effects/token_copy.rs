@@ -158,7 +158,19 @@ pub(crate) fn prepare_copy_creation(
                 .flat_map(|zone| targeting::zone_object_ids(state, zone))
                 .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
                 .collect()
-        } else if matches!(target_filter, TargetFilter::CostPaidObject) {
+        } else if matches!(
+            target_filter,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Source
+            }
+        ) {
+            targeting::resolved_object_ids_for_filter(state, ability, target_filter)
+        } else if matches!(
+            target_filter,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+            }
+        ) {
             // CR 400.7: resolve through the shared live-reference guard — a
             // referent that changed zones is a new object and must not become the
             // copy source (no fallback to a same-id object).
@@ -4015,6 +4027,7 @@ pub(crate) mod tests {
         let snapshot = {
             let artifact = state.objects.get(&artifact_id).unwrap();
             CostPaidObjectSnapshot {
+                binding: None,
                 object_id: artifact_id,
                 lki: artifact.snapshot_for_mana_spent(),
                 incarnation: 0,
@@ -4022,7 +4035,9 @@ pub(crate) mod tests {
         };
         let mut ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
-                target: TargetFilter::CostPaidObject,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,

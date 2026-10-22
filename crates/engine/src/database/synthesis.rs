@@ -9058,7 +9058,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                 .contains(&ActivationRestriction::MatchesCardCastTiming)
             && matches!(
                 &*a.effect,
-                Effect::PutCounter { counter_type, target: TargetFilter::SelfRef, .. }
+                Effect::PutCounter { counter_type, target: TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source }, .. }
                     if *counter_type == CounterType::Time
             )
     });
@@ -9086,7 +9086,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                 count: QuantityExpr::Fixed {
                     value: time_counters as i32,
                 },
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Source,
+                },
             },
         )
         .cost(composite_cost)
@@ -9240,7 +9242,9 @@ pub(crate) fn build_plot_activation(
         // the player allowed to cast it later.
         Effect::GrantCastingPermission {
             permission: CastingPermission::Plotted { turn_plotted: 0 },
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Source,
+            },
             grantee: PermissionGrantee::AbilityController,
         },
     )
@@ -18144,7 +18148,12 @@ mod suspend_synthesis_tests {
                 target,
             } => {
                 assert_eq!(counter_type, &CounterType::Time);
-                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    target,
+                    TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Source
+                    }
+                ));
                 assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
             }
             other => panic!("expected PutCounter effect, got {other:?}"),
@@ -18435,7 +18444,10 @@ mod plot_synthesis_tests {
         match &*activation.effect {
             Effect::GrantCastingPermission {
                 permission: CastingPermission::Plotted { turn_plotted },
-                target: TargetFilter::SelfRef,
+                target:
+                    TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Source,
+                    },
                 grantee: PermissionGrantee::AbilityController,
             } => {
                 assert_eq!(

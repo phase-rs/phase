@@ -77,7 +77,12 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
             split_token_except_clause(target_text, ctx);
         let target_lower = target_text.trim().to_lowercase();
         let (mut target, target_remainder) = if parse_cost_paid_object_copy_target(&target_lower) {
-            (TargetFilter::CostPaidObject, "")
+            (
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
+                "",
+            )
         } else {
             parse_target_with_ctx(target_text, ctx)
         };
@@ -2507,7 +2512,12 @@ mod tests {
         let Effect::CopyTokenOf { target, count, .. } = effect else {
             panic!("expected CopyTokenOf, got {effect:?}");
         };
-        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert_eq!(
+            target,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+            }
+        );
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
     }
 

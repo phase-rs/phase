@@ -529,7 +529,9 @@ impl RoleChain {
 fn a_context_filter_host_never_falls_back_to_the_selected_target() {
     // CR 400.7j + CR 608.2k: "the object paid as a cost" names nothing here, so
     // the token gets no host — it must NOT inherit the chosen target.
-    let mut chain = RoleChain::build(TargetFilter::CostPaidObject);
+    let mut chain = RoleChain::build(TargetFilter::CostPaidObject {
+        reference: engine::types::ability::CostPaidObjectRef::Selected,
+    });
     // CR 303.4i: the authority names no object, so the host is undefined and the
     // Role token is not created at all. It used to be created hostless and swept
     // by the CR 704.5m SBA (#7302); either way it must never inherit the chosen

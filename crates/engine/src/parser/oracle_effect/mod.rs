@@ -581,7 +581,12 @@ pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
         Some(subject)
             if !matches!(
                 subject,
-                TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+                TargetFilter::SelfRef
+                    | TargetFilter::Any
+                    | TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected
+                            | crate::types::ability::CostPaidObjectRef::Source
+                    }
             ) =>
         {
             TargetFilter::TriggeringSource
@@ -919,7 +924,9 @@ fn if_you_do_object_anchor(
             Effect::Sacrifice {
                 target: TargetFilter::Typed(_),
                 ..
-            } => Some(TargetFilter::CostPaidObject),
+            } => Some(TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            }),
             _ => None,
         })
 }
@@ -10971,7 +10978,11 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -36754,7 +36765,10 @@ fn is_broadcast_population_filter(filter: &TargetFilter) -> bool {
         filter,
         TargetFilter::TriggeringSource
             | TargetFilter::ParentTarget
-            | TargetFilter::CostPaidObject
+            | TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+                    | crate::types::ability::CostPaidObjectRef::Source
+            }
             | TargetFilter::SelfRef
     )
 }
@@ -45082,6 +45096,7 @@ fn parse_effect_chain_ir_body(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            cost_moved_card_reference: ctx.cost_moved_card_reference.clone(),
             parent_target_available,
             // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
             // chain already produces an exile, so a later singular "the

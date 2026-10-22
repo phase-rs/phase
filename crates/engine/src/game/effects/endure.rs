@@ -166,9 +166,15 @@ fn enduring_object_id(
         // CR 400.7: a source that left and returned before resolution is a new
         // object; "~ endures" has no referent.
         TargetFilter::SelfRef => ability.self_ref_binding(state),
-        TargetFilter::CostPaidObject | TargetFilter::TriggeringSource => {
-            Some(event_source.unwrap_or(ability.source_id))
+        filter @ TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+            .into_iter()
+            .next(),
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected,
         }
+        | TargetFilter::TriggeringSource => Some(event_source.unwrap_or(ability.source_id)),
         TargetFilter::SpecificObject { id } => Some(*id),
         _ => Some(ability.source_id),
     }
@@ -383,8 +389,14 @@ mod tests {
         );
         assert_eq!(amount, 2, "X should equal Warden's counters");
 
-        let enduring = enduring_object_id(&state, &ability, &TargetFilter::CostPaidObject)
-            .expect("a cost-paid subject always binds");
+        let enduring = enduring_object_id(
+            &state,
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+        )
+        .expect("a cost-paid subject always binds");
         assert_eq!(
             enduring, bear,
             "it endures must target the entering creature"

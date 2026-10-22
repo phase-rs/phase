@@ -16667,7 +16667,9 @@ fn heart_shaped_herb_activated_ability_grants_monarch_as_continuation() {
         matches!(
             *change_zone.effect,
             Effect::ChangeZone {
-                target: TargetFilter::CostPaidObject,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                },
                 ..
             }
         ),

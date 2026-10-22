@@ -8301,12 +8301,13 @@ fn try_parse_gain_all_activated_abilities_of_target(text: &str) -> Option<Effect
 /// `Effect::GainActivatedAbilitiesOfTarget` with the `AllOther` scope.
 ///
 /// This is the mirror of `try_parse_gain_all_activated_abilities_of_target`:
-/// the donor is `SelfRef` ("this card" — the source), the recipient is
+/// the donor is the contextual explicit card operand (ordinary `SelfRef` when
+/// no self-moving cost is in scope), the recipient is
 /// `ParentTarget` ("It" — the just-counter'd creature), and the scope is
 /// `AllOther` (every ability of the donor except the granting ability). Per CR
 /// 611.2a the grant states no duration, so it lasts until the end of the game
 /// (`Duration::Permanent`) — NOT the imperative default of until-end-of-turn.
-fn try_parse_gain_this_cards_other_abilities(text: &str) -> Option<Effect> {
+fn try_parse_gain_this_cards_other_abilities(text: &str, ctx: &ParseContext) -> Option<Effect> {
     let lower = text.to_lowercase();
     // nom: the fixed lead-in, composing the two subject-normalized verb forms.
     let matched = nom_parse_lower(&lower, |input| {
@@ -8319,7 +8320,10 @@ fn try_parse_gain_this_cards_other_abilities(text: &str) -> Option<Effect> {
     }
 
     Some(Effect::GainActivatedAbilitiesOfTarget {
-        target: TargetFilter::SelfRef, // donor = "this card" (the source)
+        target: ctx
+            .cost_moved_card_reference
+            .clone()
+            .unwrap_or(TargetFilter::SelfRef),
         recipient: TargetFilter::ParentTarget, // recipient = "It" (the +1/+1 target)
         scope: GrantedAbilityScope::AllOther,
         duration: Some(Duration::Permanent), // CR 611.2a: no duration stated
@@ -13798,10 +13802,10 @@ pub(super) fn parse_imperative_family_ast(
                 // Grell Philosopher). Tried BEFORE the bare-keyword/quoted-ability
                 // arms so the longer, more specific phrase is not shadowed.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
-            } else if let Some(effect) = try_parse_gain_this_cards_other_abilities(text) {
+            } else if let Some(effect) = try_parse_gain_this_cards_other_abilities(text, ctx) {
                 // CR 602.1 + CR 603.1 + CR 611.2a: "gains this card's other
                 // abilities" (Symbiote Spider-Man) — the `AllOther`-scope mirror
-                // (donor = SelfRef, recipient = ParentTarget). Same precedence
+                // (donor = the contextual card operand, recipient = ParentTarget). Same precedence
                 // rationale as the sibling above.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if let Some(effect) =
@@ -26204,7 +26208,13 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(*target, TargetFilter::SelfRef, "donor = 'this card'");
+        assert_eq!(
+            *target,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Source
+            },
+            "donor = explicitly cost-moved card"
+        );
         assert_eq!(*recipient, TargetFilter::ParentTarget, "recipient = 'It'");
         assert_eq!(*scope, GrantedAbilityScope::AllOther, "'OTHER abilities'");
         assert_eq!(

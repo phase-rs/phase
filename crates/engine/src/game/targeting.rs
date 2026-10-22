@@ -1143,7 +1143,22 @@ pub fn resolved_targets(
     // from the recursively-stamped `cost_paid_object`. Mirrors the local
     // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
     // the general chokepoint for every effect that targets a cost-paid object.
-    if matches!(target_filter, TargetFilter::CostPaidObject) {
+    if let TargetFilter::CostPaidObject {
+        reference: crate::types::ability::CostPaidObjectRef::Source,
+    } = target_filter
+    {
+        return ability
+            .cost_paid_source_binding(state)
+            .into_iter()
+            .map(|reference| TargetRef::Object(reference.object_id))
+            .collect();
+    }
+    if matches!(
+        target_filter,
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected
+        }
+    ) {
         // CR 608.2k: resolve through the documented `cost_paid_object →
         // effect_context_object` ladder — slot 1 is the cost-paid referent
         // (sacrifice/exile-as-cost), slot 2 is an object a *Sacrifice effect*
@@ -3450,7 +3465,9 @@ fn has_functioning_cant_be_targeted(
 
 /// CR 608.2g: expose a parked resolving spell only while its object is still
 /// on the stack, without duplicating entries that are already live there.
-fn targetable_stack_spell_entries(state: &GameState) -> impl Iterator<Item = &StackEntry> {
+pub(crate) fn targetable_stack_spell_entries(
+    state: &GameState,
+) -> impl Iterator<Item = &StackEntry> {
     state
         .stack
         .iter()
@@ -8618,7 +8635,13 @@ mod tests {
             returned.incarnation
         );
 
-        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+        let result = resolved_targets(
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+            &state,
+        );
 
         assert!(
             result.is_empty(),
@@ -8677,7 +8700,13 @@ mod tests {
             make_resolved_with_targets(vec![TargetRef::Object(parent_target)], referent);
         ability.set_cost_paid_object_recursive(snapshot);
 
-        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+        let result = resolved_targets(
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+            &state,
+        );
 
         assert_eq!(
             result,
@@ -8722,7 +8751,13 @@ mod tests {
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, referent, Zone::Exile, &mut events);
 
-        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+        let result = resolved_targets(
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+            &state,
+        );
 
         assert!(
             result.is_empty(),
@@ -8773,7 +8808,13 @@ mod tests {
         let mut ability = make_resolved_with_targets(vec![], referent);
         ability.set_cost_paid_object_recursive(legacy);
 
-        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+        let result = resolved_targets(
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
+            &state,
+        );
 
         assert!(
             result.is_empty(),

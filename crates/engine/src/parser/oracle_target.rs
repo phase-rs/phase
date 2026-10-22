@@ -316,7 +316,12 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
         Some(subject)
             if !matches!(
                 subject,
-                TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+                TargetFilter::SelfRef
+                    | TargetFilter::Any
+                    | TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected
+                            | crate::types::ability::CostPaidObjectRef::Source
+                    }
             ) =>
         {
             resolve_it_pronoun(ctx)
@@ -1218,8 +1223,19 @@ pub fn parse_target_with_syntax<'a>(
             // Every other `ctx.subject` state (None/SelfRef/Any/typed trigger
             // subject/…) is unaffected and keeps the historical `ParentTarget`
             // binding (Heart-Shaped Herb, issue #8077).
-            if matches!(ctx.subject, Some(TargetFilter::CostPaidObject)) {
-                return (TargetFilter::CostPaidObject, rem, syntax);
+            if matches!(
+                ctx.subject,
+                Some(TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                })
+            ) {
+                return (
+                    TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected,
+                    },
+                    rem,
+                    syntax,
+                );
             }
             return (TargetFilter::ParentTarget, rem, syntax);
         }
@@ -1252,6 +1268,19 @@ pub fn parse_target_with_syntax<'a>(
     // CR 201.5: self-references name only the source object. Bare "it" is
     // handled by the anaphoric-pronoun block above, so this primarily covers
     // "~", "itself", and typed self-reference phrases.
+    if let Some(reference) = ctx.cost_moved_card_reference.clone() {
+        if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+            let (rest, _) = tag::<_, _, OracleError<'_>>("this card").parse(input)?;
+            let (rest, _) = nom::combinator::peek(alt((
+                value((), nom::combinator::eof),
+                value((), nom::character::complete::one_of(" '.,:")),
+            )))
+            .parse(rest)?;
+            Ok((rest, ()))
+        }) {
+            return (reference, rest, syntax);
+        }
+    }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, nom_target::parse_self_reference) {
         return (filter, rest, syntax);
     }
@@ -8763,7 +8792,12 @@ fn parse_cost_paid_object_reference<'a>(
         tag("land"),
     ))
     .parse(rest)?;
-    Ok((rest, TargetFilter::CostPaidObject))
+    Ok((
+        rest,
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected,
+        },
+    ))
 }
 
 /// CR 400.7: The origin zone named by a "put there from <zone>" provenance
@@ -9973,7 +10007,11 @@ fn narrow_population_for_exclusion(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -15004,7 +15042,12 @@ mod tests {
             ..ParseContext::default()
         };
         let (f, _) = parse_target_with_ctx("the exiled card", &mut ctx);
-        assert_eq!(f, TargetFilter::CostPaidObject);
+        assert_eq!(
+            f,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+            }
+        );
     }
 
     #[test]
@@ -15455,7 +15498,12 @@ mod tests {
     #[test]
     fn parse_cost_paid_object_reference() {
         let (filter, rest) = parse_target("the sacrificed creature");
-        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert_eq!(
+            filter,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+            }
+        );
         assert!(rest.is_empty(), "remainder: {rest:?}");
     }
 

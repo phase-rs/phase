@@ -140,6 +140,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
         P0,
     );
     ability.effect_context_object = Some(CostPaidObjectSnapshot {
+        binding: None,
         object_id: ObjectId(404),
         lki: LKISnapshot {
             name: "Exiled Creature".to_string(),

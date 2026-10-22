@@ -85,8 +85,13 @@ pub fn resolve(
     // chained grants don't inherit parent targets via
     // `effects::mod.rs::resolve_ability_chain`.
     let (target_ids, tracked_set_group): (Vec<_>, Option<TrackedSetId>) = match target_filter {
-        // CR 400.7: Plot's cost exiles the card before the incarnation is
-        // captured, so the exiled card is still the current source here.
+        // CR 400.7j: Plot names the exact card its own cost moved.
+        filter @ TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => (
+            crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter),
+            None,
+        ),
         TargetFilter::SelfRef => (ability.self_ref_binding(state).into_iter().collect(), None),
         // CR 608.2c: The `TrackedSetId(0)` sentinel binds to the highest tracked
         // set id — the set the immediately preceding effect in this chain

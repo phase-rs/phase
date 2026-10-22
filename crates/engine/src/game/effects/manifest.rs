@@ -373,6 +373,7 @@ mod tests {
         let mut ability =
             make_manifest_ability_for_target(1, TargetFilter::ParentTargetController, vec![]);
         ability.effect_context_object = Some(crate::types::ability::CostPaidObjectSnapshot {
+            binding: None,
             object_id: ObjectId(404),
             lki: crate::types::game_state::LKISnapshot {
                 name: "Exiled Creature".to_string(),

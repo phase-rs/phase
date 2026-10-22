@@ -610,6 +610,8 @@ pub(crate) struct ParseContext {
     /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
     /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
     pub current_ability_exile_cost_zone: Option<Zone>,
+    /// CR 400.7j: literal "this card" within the body of a source-moving cost.
+    pub cost_moved_card_reference: Option<TargetFilter>,
     /// CR 608.2c: The current effect-chain chunk has an earlier typed object
     /// referent that `ParentTarget` can legally bind to. Standalone clause
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
@@ -974,6 +976,7 @@ impl ParseContext {
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
             chain_zone_result: self.chain_zone_result,
+            cost_moved_card_reference: self.cost_moved_card_reference.clone(),
             ..Self::default()
         }
     }
@@ -1031,6 +1034,7 @@ impl ParseContext {
         Self {
             trigger_zone_change: TriggerZoneChangeProvenance::none(),
             chain_zone_result: None,
+            cost_moved_card_reference: None,
             ..self.clone()
         }
     }
@@ -1341,5 +1345,33 @@ mod tests {
                 Some(expected_they)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cost_source_context_tests {
+    use super::*;
+    #[test]
+    fn same_body_preserves_cost_card_operand_and_independent_body_clears_it() {
+        let source = TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        };
+        let context = ParseContext {
+            cost_moved_card_reference: Some(source.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            context.clone().cost_moved_card_reference,
+            Some(source.clone())
+        );
+        assert_eq!(
+            context.clone_player_antecedents().cost_moved_card_reference,
+            Some(source)
+        );
+        assert!(context
+            .clone_for_independent_body()
+            .cost_moved_card_reference
+            .is_none());
+        assert!(ParseContext::default().cost_moved_card_reference.is_none());
     }
 }

@@ -757,7 +757,12 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
         TargetFilter::LastZoneChanged => "last zone changed".into(),
-        TargetFilter::CostPaidObject => "cost-paid object".into(),
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected,
+        } => "cost-paid object".into(),
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => "cost-moved source card".into(),
         // CR 701.47c: matches `ObjectScope::AmassedArmy`'s description string.
         TargetFilter::AmassedArmy => "amassed Army".into(),
         TargetFilter::ChosenCard => "the chosen object".into(),

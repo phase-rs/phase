@@ -954,7 +954,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: engine::types::ability::CostPaidObjectRef::Selected | engine::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2860,7 +2860,9 @@ mod create_boon_polarity_tests {
         // opponent — and `CostPaidObject` / fixed ids name no side at all.
         for target in [
             TargetFilter::TriggeringPlayer,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: engine::types::ability::CostPaidObjectRef::Selected,
+            },
             TargetFilter::SpecificObject {
                 id: engine::types::identifiers::ObjectId(7),
             },

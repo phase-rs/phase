@@ -470,7 +470,9 @@ fn empty_forward_result_preserves_triggering_source_generic_effect() {
 fn empty_forward_result_preserves_cost_paid_object_generic_effect() {
     let state = resolve_empty_forward_result_generic_spell(
         vec![StaticDefinition::continuous()
-            .affected(TargetFilter::CostPaidObject)
+            .affected(TargetFilter::CostPaidObject {
+                reference: engine::types::ability::CostPaidObjectRef::Selected,
+            })
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste,
             }])],

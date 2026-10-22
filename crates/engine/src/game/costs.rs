@@ -43,8 +43,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
-    REMOVE_COUNTER_COST_ALL,
+    AbilityCost, CostMoveOutcome, CostPaidObjectSnapshot, EffectKind, PlayerScope, QuantityExpr,
+    QuantityRef, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -519,38 +519,93 @@ pub(crate) fn pause_cost_payment_for_replacement_choice(
 /// through the zone-change pipeline. The activation caller replaces the
 /// provisional continuation with its typed root after this payment function
 /// returns.
+fn capture_self_activation_cost(
+    state: &GameState,
+    source_id: ObjectId,
+    resolved: Option<&mut ResolvedAbility>,
+    outcome: CostMoveOutcome,
+) -> Option<PaymentOutcome> {
+    // CR 400.7j + CR 608.2h: capture at the actual payment boundary. The
+    // original numeric source stamp is independent of the cost's public
+    // successor; a later same-id return during a mana window cannot pay it.
+    if let Some(ability) = resolved {
+        let Some(object) = state.objects.get(&source_id) else {
+            return Some(payment_failed("activation cost source is missing"));
+        };
+        let Some(origin) = ability.source_ref(state) else {
+            return Some(payment_failed("activation cost source is missing"));
+        };
+        let original_is_current = origin.is_current(state);
+        if !original_is_current && ability.cost_paid_source_binding(state).is_none() {
+            return Some(payment_failed("activation cost source changed incarnation"));
+        }
+        let mut snapshot =
+            CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent());
+        snapshot.binding = Some(crate::types::ability::CostPaidObjectBinding::Captured {
+            origin,
+            outcome: Some(outcome),
+        });
+        ability.add_cost_paid_objects_recursive(&[snapshot]);
+    }
+    None
+}
+
+fn park_self_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    destination: Zone,
+    choice_player: PlayerId,
+) {
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+        player,
+        pending: None,
+        chosen: vec![source_id],
+        paused_at_index: 0,
+        destination,
+        completion: PendingCostMoveCompletion::FinishPending,
+        deferred_cost_events: Vec::new(),
+        departure_record_indices: Vec::new(),
+    });
+    // Preserve a delivered replacement's own prompt until it completes.
+    if state.pending_replacement.is_some() {
+        pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+}
+
 fn move_self_activation_cost(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     destination: Zone,
+    mut resolved: Option<&mut ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> Option<PaymentOutcome> {
+    if let Some(failed) = capture_self_activation_cost(
+        state,
+        source_id,
+        resolved.as_deref_mut(),
+        CostMoveOutcome::Relocation,
+    ) {
+        return Some(failed);
+    }
     match zone_pipeline::move_object(
         state,
         ZoneMoveRequest::cost(source_id, destination, source_id),
         events,
     ) {
-        ZoneMoveResult::Done => None,
-        ZoneMoveResult::NeedsChoice(choice_player) => {
-            state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
-                player,
-                pending: None,
-                chosen: vec![source_id],
-                paused_at_index: 0,
-                destination,
-                completion: PendingCostMoveCompletion::FinishPending,
-                // A self-move is one object, so no group can form.
-                deferred_cost_events: Vec::new(),
-                departure_record_indices: Vec::new(),
-            });
-            // A mandatory replacement may have delivered this cost move and
-            // surfaced its own post-effect prompt. Only a still-pending CR
-            // 616.1 ordering choice is synthesized here; never clobber the
-            // live delivery-tail prompt.
-            if state.pending_replacement.is_some() {
-                pause_cost_payment_for_replacement_choice(state, choice_player);
+        ZoneMoveResult::Done => {
+            if let Some(ability) = resolved {
+                ability.settle_cost_paid_provenance_recursive(
+                    state,
+                    &[source_id],
+                    CostMoveOutcome::Relocation,
+                );
             }
+            None
+        }
+        ZoneMoveResult::NeedsChoice(choice_player) => {
+            park_self_activation_cost(state, player, source_id, destination, choice_player);
             Some(PaymentOutcome::Paused {
                 remaining_cost: None,
             })
@@ -641,6 +696,29 @@ pub fn pay_ability_cost_for_activation(
         source_id,
         cost,
         ability_index,
+        None,
+        events,
+    )
+}
+
+/// CR 602.2b + CR 400.7j: execute the same payment walk while retaining the
+/// announced ability's own cost provenance, including a replacement pause.
+pub(crate) fn pay_ability_cost_for_resolved_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    resolved: &mut ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_activation_with_cost_move_replacement(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_index,
+        Some(resolved),
         events,
     )
 }
@@ -651,10 +729,11 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_index: Option<usize>,
+    resolved: Option<&mut ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
-    let outcome = pay_ability_cost_inner(
+    let outcome = pay_ability_cost_inner_with_resolved(
         state,
         player,
         source_id,
@@ -665,6 +744,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
             ability_index,
         },
         None,
+        resolved,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
     // payment failure to an illegal action — the authority's `Failed` is the
@@ -758,6 +838,28 @@ fn pay_ability_cost_inner(
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
     resume_cost: Option<&AbilityCost>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_inner_with_resolved(
+        state,
+        player,
+        source_id,
+        cost,
+        events,
+        scope,
+        resume_cost,
+        None,
+    )
+}
+
+fn pay_ability_cost_inner_with_resolved(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+    scope: &PaymentScope,
+    resume_cost: Option<&AbilityCost>,
+    mut resolved: Option<&mut ResolvedAbility>,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
     // activation-window mana detour, so any shape outside the resolution-payable
@@ -979,7 +1081,7 @@ fn pay_ability_cost_inner(
                     &enclosing_suffix,
                 )
                 .expect("a composite component always has an unpaid suffix");
-                let outcome = pay_ability_cost_inner(
+                let outcome = pay_ability_cost_inner_with_resolved(
                     state,
                     player,
                     source_id,
@@ -987,6 +1089,7 @@ fn pay_ability_cost_inner(
                     events,
                     scope,
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                    resolved.as_deref_mut(),
                 )?;
                 match outcome {
                     PaymentOutcome::Paid => {
@@ -1074,10 +1177,21 @@ fn pay_ability_cost_inner(
                 {
                     return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
                 }
+                if let Some(failed) = capture_self_activation_cost(state, source_id, resolved.as_deref_mut(), CostMoveOutcome::Relocation) {
+                    return Ok(failed);
+                }
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
-                    super::sacrifice::SacrificeOutcome::Complete => {}
+                    super::sacrifice::SacrificeOutcome::Complete => {
+                        if let Some(ability) = resolved.as_deref_mut() {
+                            ability.settle_cost_paid_provenance_recursive(state, &[source_id], CostMoveOutcome::Relocation);
+                        }
+                    }
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                        pause_cost_payment_for_replacement_choice(state, choice_player);
+                        if resolved.is_some() {
+                            park_self_activation_cost(state, player, source_id, Zone::Graveyard, choice_player);
+                        } else {
+                            pause_cost_payment_for_replacement_choice(state, choice_player);
+                        }
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
@@ -1093,14 +1207,27 @@ fn pay_ability_cost_inner(
         AbilityCost::Discard {
             self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             ..
-        } => match super::effects::discard::discard_as_cost(state, source_id, player, events) {
-            super::effects::discard::DiscardOutcome::Complete => {}
+        } => {
+            if let Some(failed) = capture_self_activation_cost(state, source_id, resolved.as_deref_mut(), CostMoveOutcome::Discard) {
+                return Ok(failed);
+            }
+            match super::effects::discard::discard_as_cost(state, source_id, player, events) {
+            super::effects::discard::DiscardOutcome::Complete => {
+                if let Some(ability) = resolved.as_deref_mut() {
+                    ability.settle_cost_paid_provenance_recursive(state, &[source_id], CostMoveOutcome::Discard);
+                }
+            }
             super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                pause_cost_payment_for_replacement_choice(state, choice_player);
+                if resolved.is_some() {
+                    park_self_activation_cost(state, player, source_id, Zone::Graveyard, choice_player);
+                } else {
+                    pause_cost_payment_for_replacement_choice(state, choice_player);
+                }
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
                 });
             }
+        }
         },
         // CR 118.12 + CR 701.9: Resolution-time "discard N cards of your choice"
         // cost (e.g. "discard a card"). The choice of which cards to discard is
@@ -1278,7 +1405,7 @@ fn pay_ability_cost_inner(
                 unreachable!("self-referential exile costs are not payable at resolution")
             };
             if let Some(outcome) =
-                move_self_activation_cost(state, player, source_id, Zone::Exile, events)
+                move_self_activation_cost(state, player, source_id, Zone::Exile, resolved.as_deref_mut(), events)
             {
                 return Ok(outcome);
             }
@@ -1886,7 +2013,7 @@ fn pay_ability_cost_inner(
                 unreachable!("self-referential return costs are not payable at resolution")
             };
             if let Some(outcome) =
-                move_self_activation_cost(state, player, source_id, Zone::Hand, events)
+                move_self_activation_cost(state, player, source_id, Zone::Hand, resolved.as_deref_mut(), events)
             {
                 return Ok(outcome);
             }

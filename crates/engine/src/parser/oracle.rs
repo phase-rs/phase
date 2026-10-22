@@ -8946,6 +8946,33 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
     }
 }
 
+/// CR 400.7j: the explicit card operand follows the card its own typed cost moves.
+fn cost_moved_card_reference(cost: &AbilityCost) -> Option<TargetFilter> {
+    match cost {
+        AbilityCost::Composite { costs } => costs.iter().find_map(cost_moved_card_reference),
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        }
+        | AbilityCost::ReturnToHand {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        }
+        | AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => Some(TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        }),
+        AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
+            Some(TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Source,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Effect-side companion to `activation_zone_from_self_cost`.
 ///
 /// CR 113.6m + CR 602.1: an activated ability whose *effect* moves the object
@@ -9066,6 +9093,8 @@ fn parse_activated_ability_ir(
     // reference. Restored after the effect parse — no leak to sibling abilities.
     let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
     ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+    let prev_cost_card = ctx.cost_moved_card_reference.take();
+    ctx.cost_moved_card_reference = cost_moved_card_reference(&cost);
     // CR 707.9a: thread the activated-ability index so "except it has this
     // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
     let prev_ability_index = ctx.current_ability_index;
@@ -9077,6 +9106,7 @@ fn parse_activated_ability_ir(
     let mut ir = parse_activated_ability_ir_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
+    ctx.cost_moved_card_reference = prev_cost_card;
     ctx.current_ability_index = prev_ability_index;
     let lowered_for_activation_zone = lower_ability_ir(&ir);
     // Three-authority precedence for the activation zone. The ORDER IS A RULES

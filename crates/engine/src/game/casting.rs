@@ -3197,7 +3197,7 @@ fn matches_via_origin_scoped_branch_for_cast(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -24736,7 +24736,10 @@ fn apply_mana_spell_grants(
 // every existing `casting::*` / `super::casting::*` call site compiling
 // unchanged while the implementation lives in `game/costs.rs`.
 pub use super::costs::pay_ability_cost_for_activation;
-pub(crate) use super::costs::{pause_cost_payment_for_replacement_choice, PaymentOutcome};
+pub(crate) use super::costs::{
+    pause_cost_payment_for_replacement_choice, pay_ability_cost_for_resolved_activation,
+    PaymentOutcome,
+};
 
 fn pending_activation_after_cost_pause(
     source_id: ObjectId,
@@ -25082,22 +25085,25 @@ pub(crate) fn stamp_self_ref_discard_cost_paid_object(
     ability: &mut ResolvedAbility,
     cost: &AbilityCost,
 ) {
-    if !has_self_ref_discard_cost(cost) {
+    if !has_self_ref_discard_cost(cost) || ability.cost_paid_object.is_some() {
         return;
     }
     if let Some(obj) = state.objects.get(&source_id) {
-        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
-            obj,
-            obj.snapshot_for_mana_spent(),
-        ));
+        let mut snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent());
+        if let Some(crate::types::ability::CostPaidObjectBinding::Captured { outcome, .. }) =
+            &mut snapshot.binding
+        {
+            *outcome = Some(crate::types::ability::CostMoveOutcome::Discard);
+        }
+        ability.set_cost_paid_object_recursive(snapshot);
     }
 }
 
 /// CR 118.3 + CR 602.2b: Detect a non-self "exile a card from hand/graveyard"
 /// activation cost requiring interactive card selection (Jhoira of the Ghitu).
 /// Self-ref exile (Scavenge, Suspend) returns `None` — that shape is auto-paid
-/// by `pay_ability_cost`'s self-ref exile arm and never back-referenced as a
-/// cost-paid object. Recurses into `Composite`.
+/// by the shared payment authority, including its plural cost provenance;
+/// it bypasses interactive selection. Recurses into `Composite`.
 pub(super) fn find_non_self_exile(
     cost: &AbilityCost,
 ) -> Option<(u32, Zone, Option<&TargetFilter>)> {
@@ -28873,12 +28879,13 @@ fn activate_with_cost_carrier(
         )? {
             return Ok(waiting);
         }
-        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
+        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_resolved_activation(
             state,
             player,
             source_id,
             cost,
             Some(ability_index),
+            &mut resolved,
             events,
         )? {
             let pending = pending_activation_after_cost_pause(
@@ -30297,7 +30304,11 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }

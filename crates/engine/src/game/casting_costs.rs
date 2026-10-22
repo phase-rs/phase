@@ -2463,10 +2463,12 @@ pub(crate) fn handle_discard_for_cost(
         chosen,
         "discard cost selection must be live before cost move",
     );
-    if let Some(first) = cost_paid_snapshots.first() {
-        pending
-            .ability
-            .set_cost_paid_object_recursive(first.clone());
+    if pending.ability.cost_paid_object.is_none() {
+        if let Some(first) = cost_paid_snapshots.first() {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(first.clone());
+        }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY discarded card, not
     // just `chosen.first()` above, so this SAME ability's own target
@@ -3245,7 +3247,7 @@ fn finish_cost_object_moves(
 fn finish_selected_return_to_hand_after_automatic(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     selected: Vec<ObjectId>,
     automatic_remaining: Option<AbilityCost>,
     cost_event_start: usize,
@@ -3262,12 +3264,13 @@ fn finish_selected_return_to_hand_after_automatic(
                 "return-cost continuation missing an activation ability index".to_string(),
             )
         })?;
-        match super::casting::pay_ability_cost_for_activation(
+        match super::casting::pay_ability_cost_for_resolved_activation(
             state,
             player,
             pending.object_id,
             &cost,
             Some(ability_index),
+            &mut pending.ability,
             events,
         )? {
             super::casting::PaymentOutcome::Paid => {}
@@ -4521,7 +4524,11 @@ pub(crate) fn handle_sacrifice_for_cost(
         chosen,
         "sacrifice cost selection must be live before cost move",
     );
-    if let Some(snapshot) = cost_paid_snapshots.first().cloned() {
+    if let Some(snapshot) = cost_paid_snapshots
+        .first()
+        .cloned()
+        .filter(|_| pending.ability.cost_paid_object.is_none())
+    {
         pending
             .ability
             .set_cost_paid_object_recursive(snapshot.clone());
@@ -4989,12 +4996,13 @@ pub(crate) fn handle_return_to_hand_for_cost(
             pending.activation_cost = deferred_return_cost;
 
             if let Some(cost) = automatic_cost {
-                match super::casting::pay_ability_cost_for_activation(
+                match super::casting::pay_ability_cost_for_resolved_activation(
                     state,
                     player,
                     pending.object_id,
                     &cost,
                     Some(ability_index),
+                    &mut pending.ability,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -5161,12 +5169,13 @@ pub(crate) fn handle_remove_counter_for_cost(
             // pay the automatic residual through the outcome-aware authority.
             // If a self-move pauses, the typed continuation resumes this pending
             // activation only after the selected counter was paid exactly once.
-            match super::casting::pay_ability_cost_for_activation(
+            match super::casting::pay_ability_cost_for_resolved_activation(
                 state,
                 player,
                 pending.object_id,
                 &cost,
                 Some(ability_index),
+                &mut pending.ability,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -5339,12 +5348,13 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
             // CR 601.2h + CR 602.2b: The assigned counter payment is complete
             // before an automatic residual can pause on a self-move replacement,
             // so its typed continuation cannot replay the selected distribution.
-            match super::casting::pay_ability_cost_for_activation(
+            match super::casting::pay_ability_cost_for_resolved_activation(
                 state,
                 player,
                 pending.object_id,
                 &cost,
                 Some(ability_index),
+                &mut pending.ability,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -5935,10 +5945,12 @@ fn finish_exile_selection_for_cost(
             }
         }
     }
-    if let Some(snapshot) = cost_paid_snapshots.first() {
-        pending
-            .ability
-            .set_cost_paid_object_recursive(snapshot.clone());
+    if pending.ability.cost_paid_object.is_none() {
+        if let Some(snapshot) = cost_paid_snapshots.first() {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(snapshot.clone());
+        }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY exiled object, not
     // just `chosen.first()` above, so this SAME ability's own target
@@ -7406,12 +7418,13 @@ pub(super) fn push_activated_ability_to_stack(
             ));
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
-            super::casting::pay_ability_cost_for_activation(
+            super::casting::pay_ability_cost_for_resolved_activation(
                 state,
                 player,
                 source_id,
                 cost,
                 Some(ability_index),
+                &mut resolved,
                 events,
             )?
         {
@@ -16665,16 +16678,10 @@ fn finalize_mana_payment_with_resume(
         // CR 701.9c does not reach, so a redirected-to-hidden entry keeps the
         // `lki` CR 608.2h makes its last known information.
         //
-        // The non-empty GUARD is still load-bearing even though the plural pass
-        // is now scoped: the traversal re-pins the SINGULAR `cost_paid_object`
-        // referent UNCONDITIONALLY (unscoped by `moved` — that is settlement's
-        // own deliberate shape, unchanged here), and CR 400.7j licenses settling
-        // across the COST's own move and nothing else — so on a cast with no
-        // deferred sacrifice an unguarded call would bless a LATER move, e.g. a
-        // mana ability that returned the singular referent from the graveyard.
-        // The capture-refresh above carries the same guard, though for the
-        // additional reason that it would otherwise read live state for a
-        // payment that never happened.
+        // Both singular and plural settlement are scoped to `deferred_ids`:
+        // CR 400.7j licenses following this cost's own move only. The non-empty
+        // guard also avoids capture-refresh work for a payment that never
+        // happened; it does not supply otherwise missing singular scoping.
         //
         // The GUARD itself is not covered by a test.
         // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` states
@@ -17167,15 +17174,10 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // `Relocation` is the CR 701.21a cost action CR 701.9c does not reach,
         // so a hidden redirect keeps the CR 608.2h `lki` instead of losing it.
         //
-        // The non-empty GUARD remains load-bearing despite the scoping: the
-        // traversal re-pins the SINGULAR `cost_paid_object` referent
-        // unconditionally (unscoped by `moved` — settlement's own deliberate
-        // shape, unchanged here), and mana payment
-        // (`pay_spell_mana_before_deferred_sacrifice`, above) runs first — so on
-        // a cast with no deferred sacrifice an unguarded call would bless a
-        // LATER move of that singular referent. The capture-refresh above
-        // carries the same guard, and additionally would otherwise read live
-        // state for a payment that never happened.
+        // Both singular and plural settlement are scoped to `deferred_ids`:
+        // CR 400.7j licenses following this cost's own move only. The guard
+        // avoids capture-refresh work for a payment that never happened;
+        // unrelated earlier components retain their existing pins and LKI.
         //
         // The GUARD itself is not covered by a test.
         // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` states

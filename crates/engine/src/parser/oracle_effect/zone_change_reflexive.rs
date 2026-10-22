@@ -95,7 +95,11 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::LastZoneChanged
         | TargetFilter::LastRevealed
         | TargetFilter::LastCreated
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::ExiledBySource
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,

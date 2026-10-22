@@ -11785,13 +11785,16 @@ fn cost_paid_object_resolves_as_put_counter_effect_target() {
         Effect::PutCounter {
             counter_type: CounterType::Time,
             count: QuantityExpr::Fixed { value: 4 },
-            target: TargetFilter::CostPaidObject,
+            target: TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
         },
         Vec::new(),
         source,
         PlayerId(0),
     );
     ability.cost_paid_object = Some(CostPaidObjectSnapshot {
+        binding: None,
         object_id: recipient,
         lki: snapshot,
         incarnation: 0,

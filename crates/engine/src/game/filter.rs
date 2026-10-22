@@ -251,7 +251,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         // CR 701.47c: fixed resolution-local object ref — never whole-board
         // population (mirrors `CostPaidObject`).
         | TargetFilter::AmassedArmy
@@ -498,7 +498,11 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -656,7 +660,11 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -1043,7 +1051,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2342,7 +2350,11 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -2746,7 +2758,11 @@ fn filter_contains_input(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -4165,7 +4181,11 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -4397,7 +4417,11 @@ pub(crate) fn rewrite_filter_props(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -7786,7 +7810,10 @@ fn filter_object_known(
         // arms in `game/quantity.rs`) deliberately do NOT validate — CR 608.2h
         // requires them to keep reporting the departed object's recorded
         // characteristics.
-        TargetFilter::CostPaidObject => ability
+        TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source } =>
+            ability.and_then(|ability| ability.cost_paid_source_binding(state))
+                .is_some_and(|reference| reference.object_id == object_id),
+        TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected } => ability
             // CR 608.2k: each slot is tested INDEPENDENTLY — `Option::or` would
             // short-circuit on a present-but-stale slot 1 and never reach a live
             // slot 2, so a departed cost referent would mask a still-current
@@ -8530,7 +8557,7 @@ fn zone_change_filter_known(
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -8916,7 +8943,7 @@ fn spell_record_filter_known(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -9410,7 +9437,7 @@ fn spell_object_filter_known(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -10691,6 +10718,14 @@ fn filter_prop_verdict(
     source: &SourceContext<'_>,
 ) -> Option<bool> {
     match prop {
+        // CR 400.7j + CR 608.2k: a missing explicit singleton operand is
+        // unavailable information. It must not compare as a known zero, even
+        // under a negated property. Arithmetic retains the same dependency.
+        FilterProp::Cmc { value, .. } if value.any_ref(&mut |reference| {
+            matches!(reference, QuantityRef::PropertyAggregate(aggregate)
+                if matches!(aggregate.source(), crate::types::ability::CardTypeSetSource::Objects { filter }
+                    if filter_contains(filter, &|filter| matches!(filter, TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source }))))
+        }) && source.ability.and_then(|ability| ability.cost_paid_source_binding(state)).is_none() => None,
         FilterProp::ManaValueParity { parity } => parity_from_source(
             parity,
             state.last_named_choice.as_ref(),
@@ -13200,7 +13235,11 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -24031,6 +24070,7 @@ mod tests {
             PlayerId(0),
         );
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: gone_id,
             lki: creature_lki.clone(),
             incarnation: 0,
@@ -24047,6 +24087,7 @@ mod tests {
 
         // Sub-case 2: `targets` empty + snapshot is a Land — no shared card type.
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: gone_id,
             lki: land_lki.clone(),
             incarnation: 0,
@@ -24074,6 +24115,7 @@ mod tests {
             PlayerId(0),
         );
         stale.effect_context_object = Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: gone_id,
             lki: creature_lki.clone(),
             incarnation: 0,
@@ -24159,6 +24201,7 @@ mod tests {
 
         // Reach: a current snapshot of the same object yields its move-time name.
         let fresh = ability_with(Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: target,
             lki: copied_lki.clone(),
             incarnation: current,
@@ -24171,6 +24214,7 @@ mod tests {
 
         // Stale: the object moved again since the snapshot — live name wins.
         let stale = ability_with(Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: target,
             lki: copied_lki.clone(),
             incarnation: current + 1,
@@ -24180,6 +24224,7 @@ mod tests {
 
         // Mismatched: the snapshot names a different object.
         let other = ability_with(Some(CostPaidObjectSnapshot {
+            binding: None,
             object_id: bears,
             lki: copied_lki,
             incarnation: state.objects[&bears].incarnation,

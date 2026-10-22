@@ -1169,7 +1169,8 @@ pub struct TournamentRequestId(pub u64);
 /// 158: exact removal reflexives and private damage-source authority use resolution wire 9.
 /// 159: source-bound chosen-parity references in serialized static definitions.
 /// 160: addressed departure aggregates and retained instruction-result owners.
-pub const PROTOCOL_VERSION: u32 = 160;
+/// 161: explicit cost-source selectors and immutable once-settled cost origins.
+pub const PROTOCOL_VERSION: u32 = 161;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2426,7 +2427,7 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 160);
+        assert_eq!(PROTOCOL_VERSION, 161);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact

@@ -985,6 +985,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cost_source_full_symbiote_survives_all_three_loaders() {
+        let oracle = "Whenever this creature deals combat damage to a player, look at that many cards from the top of your library. Put one of them into your hand and the rest into your graveyard.\nFind New Host — {2}{U/B}, Exile this card from your graveyard: Put a +1/+1 counter on target creature you control. It gains this card's other abilities. Activate only as a sorcery.";
+        let raw = serde_json::json!({"data": {"Symbiote Spider-Man": [{"name":"Symbiote Spider-Man", "manaCost":"{2}{U/B}", "colors":["U","B"], "colorIdentity":["U","B"], "layout":"normal", "type":"Legendary Creature — Symbiote Spider Hero", "types":["Creature"], "subtypes":["Symbiote","Spider","Hero"], "supertypes":["Legendary"], "power":"2", "toughness":"4", "manaValue":3, "identifiers":{}, "text":oracle}]}});
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let raw_db = CardDatabase::from_mtgjson(file.path()).unwrap();
+        let export = raw_db.export_subset_json(&std::collections::BTreeSet::from([
+            "Symbiote Spider-Man".into(),
+        ]));
+        let exported = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(exported.path(), &export).unwrap();
+        let assert_face = |db: &CardDatabase| {
+            let face = db.get_face_by_name("Symbiote Spider-Man").unwrap();
+            assert_eq!(face.oracle_text.as_deref(), Some(oracle));
+            assert_eq!(
+                face.triggers.len(),
+                1,
+                "complete first printed ability retained"
+            );
+            let json = serde_json::to_string(face).unwrap();
+            assert!(!json.contains("Unimplemented"));
+            assert!(json.contains("GainActivatedAbilitiesOfTarget"));
+            assert!(json.contains(r#""reference":"Source""#));
+            assert!(json.contains("AllOther"));
+            serde_json::to_value(face).unwrap()
+        };
+        let expected = assert_face(&raw_db);
+        assert_eq!(
+            assert_face(&CardDatabase::from_export(exported.path()).unwrap()),
+            expected
+        );
+        assert_eq!(
+            assert_face(&CardDatabase::from_json_str(&export).unwrap()),
+            expected
+        );
+    }
+
+    #[test]
     fn u14_source_parity_loader_routes() {
         use crate::types::ability::{
             ChoiceType, ContinuousModification, Effect, FilterProp, ParitySource,

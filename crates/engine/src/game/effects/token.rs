@@ -3627,7 +3627,11 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         TargetFilter::SourceOrPaired
         | TargetFilter::None
         | TargetFilter::GrantingObject { .. }
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::ChosenDamageSource { .. }
@@ -5330,6 +5334,7 @@ mod tests {
             crate::types::ability::ObjectScope::CostPaidObject,
         ] {
             let snapshot = crate::types::ability::CostPaidObjectSnapshot {
+                binding: None,
                 object_id: context,
                 incarnation: state.objects[&context].incarnation,
                 lki: state.objects[&context].snapshot_public_characteristics(),
@@ -10992,7 +10997,9 @@ mod attach_host_authority_tests {
         for filter in [
             TargetFilter::SourceOrPaired,
             TargetFilter::SelfRef,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
             TargetFilter::LastCreated,
             TargetFilter::AttachedTo,
             TargetFilter::EventTarget,

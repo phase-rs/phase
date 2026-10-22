@@ -1727,6 +1727,7 @@ mod tests {
         // live-object consumer would instead capture through
         // `CostPaidObjectSnapshot::capture`.
         let sac_snapshot = CostPaidObjectSnapshot {
+            binding: None,
             object_id: sacrificed,
             lki: state
                 .objects

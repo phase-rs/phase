@@ -286,7 +286,13 @@ pub fn resolve(
     // controller sacrifice a DIFFERENT permanent they control. Mirrors the
     // `stale_parent_target_slot` early return further down, including its
     // `EffectResolved` emission.
-    let cost_paid_referent = if matches!(filter, TargetFilter::CostPaidObject) {
+    let cost_paid_referent = if matches!(
+        filter,
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source
+        }
+    ) {
         let referent = crate::game::targeting::resolved_targets(ability, filter, state)
             .into_iter()
             .find_map(|target| match target {
@@ -417,7 +423,10 @@ pub fn resolve(
         filter,
         TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::CostPaidObject
+            | TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected
+                    | crate::types::ability::CostPaidObjectRef::Source
+            }
     ) {
         targeted_objects.retain(|id| {
             state
@@ -2312,7 +2321,9 @@ mod tests {
     ) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
-                target: TargetFilter::CostPaidObject,
+                target: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 count: QuantityExpr::Fixed { value: 1 },
                 min_count: 0,
             },
@@ -2324,12 +2335,14 @@ mod tests {
             controller,
         );
         ability.cost_paid_object = cost_paid.map(|(id, incarnation)| CostPaidObjectSnapshot {
+            binding: None,
             object_id: id,
             lki: cost_paid_lki("Cost Paid Creature", controller),
             incarnation,
         });
         ability.effect_context_object =
             effect_context.map(|(id, incarnation)| CostPaidObjectSnapshot {
+                binding: None,
                 object_id: id,
                 lki: cost_paid_lki("Context Creature", controller),
                 incarnation,

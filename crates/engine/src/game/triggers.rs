@@ -12679,7 +12679,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // CR 608.2k: the cost-paid / effect-context referent lives on
         // `ResolvedAbility`, so this matches nothing at fire time. The
         // population-level counterpart of `ObjectScope::CostPaidObject`.
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
         | TargetFilter::AmassedArmy
 
         // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c): established BY a
@@ -24329,6 +24329,7 @@ pub mod tests {
         let snapshot = {
             let obj = runner.state().objects.get(&sacrificed).unwrap();
             CostPaidObjectSnapshot {
+                binding: None,
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
                 incarnation: 0,
@@ -24400,6 +24401,7 @@ pub mod tests {
         let snapshot = {
             let obj = runner.state().objects.get(&sacrificed).unwrap();
             CostPaidObjectSnapshot {
+                binding: None,
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
                 incarnation: 0,
@@ -24460,20 +24462,29 @@ pub mod tests {
         };
         assert!(
             QuantityRef::references_cost_paid_object(&counters_on_objects(
-                TargetFilter::CostPaidObject
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                }
             )),
             "CountersOnObjects over the cost-paid object must be detected"
         );
         assert!(
             QuantityRef::references_cost_paid_object(&counters_on_objects(TargetFilter::And {
-                filters: vec![TargetFilter::Controller, TargetFilter::CostPaidObject],
+                filters: vec![
+                    TargetFilter::Controller,
+                    TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected
+                    }
+                ],
             })),
             "a nested CostPaidObject inside an And filter must be detected"
         );
         assert!(
             QuantityRef::references_cost_paid_object(&QuantityRef::ObjectCount {
                 filter: TargetFilter::Not {
-                    filter: Box::new(TargetFilter::CostPaidObject),
+                    filter: Box::new(TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected
+                    }),
                 },
             }),
             "a CostPaidObject inside a Not filter must be detected"
@@ -24508,10 +24519,14 @@ pub mod tests {
         // which characteristic is being counted.
         for qty in [
             QuantityRef::DistinctColorsAmong {
-                source: objects(TargetFilter::CostPaidObject),
+                source: objects(TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                }),
             },
             QuantityRef::DistinctCardTypes {
-                source: objects(TargetFilter::CostPaidObject),
+                source: objects(TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                }),
             },
         ] {
             assert!(
@@ -24524,7 +24539,9 @@ pub mod tests {
         // arm, and `None` there must not be mistaken for a reference.
         assert!(
             QuantityRef::references_cost_paid_object(&QuantityRef::DistinctCardTypes {
-                source: journal(Some(TargetFilter::CostPaidObject)),
+                source: journal(Some(TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                })),
             }),
             "a cost-paid-object reference in the journal's narrowing filter must be detected"
         );
@@ -24545,7 +24562,9 @@ pub mod tests {
             clean.clone(),
             CardTypeSetSource::any_of(vec![
                 CardTypeSetSource::ExiledBySource,
-                objects(TargetFilter::CostPaidObject),
+                objects(TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                }),
             ])
             .expect("two-member union"),
         ])
@@ -24592,6 +24611,7 @@ pub mod tests {
         let snapshot = {
             let obj = runner.state().objects.get(&sacrificed).unwrap();
             CostPaidObjectSnapshot {
+                binding: None,
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
                 incarnation: 0,
@@ -26708,7 +26728,9 @@ pub mod tests {
                 id: crate::types::identifiers::TrackedSetId(1),
             },
             TargetFilter::ExiledBySource,
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
             TargetFilter::ChosenDamageSource { filter: None },
             TargetFilter::PostReplacementDamageSource,
         ] {

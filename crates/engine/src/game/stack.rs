@@ -7429,6 +7429,7 @@ mod tests {
         let snapshot = {
             let exiled = state.objects.get(&exiled_id).unwrap();
             CostPaidObjectSnapshot {
+                binding: None,
                 object_id: exiled_id,
                 lki: exiled.snapshot_for_mana_spent(),
                 incarnation: 0,

@@ -586,6 +586,26 @@ fn register_transient_effect(
     // (issue #2922: Mu Yanling +2).
     let application_filter =
         generic_effect_application_filter(target_filter, static_def.affected.as_ref());
+    // CR 400.7j: an explicit cost-card operand precedes propagated targets.
+    if let Some(
+        filter @ TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        },
+    ) = application_filter
+    {
+        for id in crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter) {
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                TargetFilter::SpecificObject { id },
+                modifications.clone(),
+                static_def.condition.clone(),
+            );
+        }
+        return;
+    }
     let static_affected_references_target_player = target_filter.is_none()
         && static_def
             .affected
@@ -788,7 +808,10 @@ fn register_transient_effect(
         // directly from the recursively-stamped `cost_paid_object`. A bare
         // `ParentTarget` with no chosen targets but a stamped cost-paid object
         // is treated as the cost-paid reference (the parent acted on it).
-        Some(TargetFilter::CostPaidObject) | Some(TargetFilter::ParentTarget)
+        Some(TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Selected,
+        })
+        | Some(TargetFilter::ParentTarget)
             if ability.targets.is_empty() && ability.cost_paid_object.is_some() =>
         {
             // CR 400.7: resolve through the shared live-reference guard so a
@@ -1060,7 +1083,7 @@ pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> 
         TargetFilter::TriggeringSource
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::CostPaidObject
+            | TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Selected | crate::types::ability::CostPaidObjectRef::Source }
             // CR 701.47c: "the amassed Army" is a resolution-local single-object
             // reference (`ResolvedAbility.amassed_army_object`), not a broadcast
             // population — mirrors `CostPaidObject` immediately above. This
@@ -1708,7 +1731,9 @@ mod tests {
             state.objects[&paid].snapshot_public_characteristics(),
         );
         let definition = StaticDefinition::continuous()
-            .affected(TargetFilter::CostPaidObject)
+            .affected(TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            })
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Suspend {
                     count: 1,
@@ -2375,6 +2400,7 @@ mod tests {
             Zone::Battlefield,
         );
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
+            binding: None,
             object_id: army,
             lki: state.objects[&army].snapshot_public_characteristics(),
             incarnation: 0,
@@ -2437,12 +2463,15 @@ mod tests {
             Zone::Exile,
         );
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
+            binding: None,
             object_id: paid,
             lki: state.objects[&paid].snapshot_public_characteristics(),
             incarnation: 0,
         };
         let static_def = StaticDefinition::continuous()
-            .affected(TargetFilter::CostPaidObject)
+            .affected(TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            })
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]);

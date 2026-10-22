@@ -726,7 +726,8 @@ export type P2PInteractionPreviewAnswer =
 // 140: full-game 158 carries exact removal/source authority (resolution wire 9).
 // 141: full-game 159 carries source-bound chosen parity.
 // 142: full-game 160 carries addressed departure aggregates and retained owners.
-export const WIRE_PROTOCOL_VERSION = 142 as const;
+// 143: full-game 161 carries explicit cost-source selectors and settled origins.
+export const WIRE_PROTOCOL_VERSION = 143 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

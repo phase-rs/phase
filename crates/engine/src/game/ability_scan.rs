@@ -3667,7 +3667,11 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         // CR 701.47c: per-resolution local (the Army amass just touched) — no
         // event/sibling/projected axis, mirroring `ObjectScope::AmassedArmy`.
         TargetFilter::AmassedArmy => Axes::NONE,
-        TargetFilter::CostPaidObject => Axes {
+        TargetFilter::CostPaidObject {
+            reference:
+                crate::types::ability::CostPaidObjectRef::Selected
+                | crate::types::ability::CostPaidObjectRef::Source,
+        } => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -11719,7 +11723,9 @@ mod sought_reader_scan_tests {
         );
         let dynamic = scan_effect(
             &effect(
-                TargetFilter::CostPaidObject,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 QuantityExpr::Fixed { value: 1 },
             ),
             ScanMode::Conservative,
@@ -11843,5 +11849,26 @@ mod departure_source_axis_tests {
         );
         assert!(!ability_uses_event_context(&source_read));
         assert!(!ability_reads_projected_resource(&source_read));
+    }
+}
+
+#[cfg(test)]
+mod cost_source_scan_tests {
+    use super::*;
+    #[test]
+    fn cost_source_leaf_keeps_all_four_scan_axes_explicit() {
+        let target = TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        };
+        let effect = Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Time,
+            count: QuantityExpr::Fixed { value: 2 },
+            target,
+        };
+        let axes = scan_effect(&effect, ScanMode::Conservative);
+        assert!(axes.event);
+        assert!(!axes.sibling);
+        assert!(!axes.projected);
+        assert_eq!(axes.history, HistoryReads::NONE);
     }
 }
