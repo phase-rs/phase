@@ -9823,7 +9823,13 @@ fn apply_single_replacement(
                 // event. Moved self-replacements still drain as post-effects so
                 // their entry event can pause on `CopyTargetChoice` before the
                 // final copy snapshot is chosen.
-                let entry_copy = if repl_def.event == ReplacementEvent::ChangeZone {
+                //
+                // CR 614.6: the copy payload is read from `execute`, so it is the
+                // accept branch's outcome; a declined optional replacement enters
+                // the permanent or token as it would have entered without it.
+                let entry_copy = if repl_def.event == ReplacementEvent::ChangeZone
+                    && branch == ReplacementBranch::Execute
+                {
                     create_entry_copy_spec_for_replacement(
                         state,
                         repl_def,
@@ -9993,7 +9999,16 @@ fn apply_single_replacement(
                 // preflight `proposed_draw_survives_replacement`: an AI preflight
                 // therefore cannot disagree with this pipeline about whether a draw
                 // survives, because both ask the same function.
-                if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
+                //
+                // CR 614.6: `runtime_execute` is the accept side's resolution-captured
+                // substitute. A declined branch with no ability of its own substitutes
+                // nothing, so neither this draw zeroing nor the token zeroing below may
+                // consult it.
+                let declined_without_branch_ability =
+                    branch == ReplacementBranch::Decline && ability.is_none();
+                if !declined_without_branch_ability
+                    && draw_is_substituted_away(state, rid, repl_def, ability, &proposed)
+                {
                     if let ProposedEvent::Draw { count, .. } = &mut proposed {
                         *count = 0;
                     }
@@ -10010,10 +10025,15 @@ fn apply_single_replacement(
                                 && !EventModifiers::has_only_event_modifier(Some(def))
                                 && !ability_becomes_copy(def)
                         }
-                        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
-                            !matches!(runtime.effect, Effect::Token { .. })
-                                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
-                        }),
+                        None => {
+                            !declined_without_branch_ability
+                                && repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                                    !matches!(runtime.effect, Effect::Token { .. })
+                                        && !EventModifiers::is_event_modifier_effect(
+                                            &runtime.effect,
+                                        )
+                                })
+                        }
                     };
                     if is_non_token_substitute {
                         if let ProposedEvent::CreateToken { count, .. } = &mut proposed {
@@ -10192,7 +10212,12 @@ fn apply_single_replacement(
                 // replacement definition (not derived from `execute`), parallel to the
                 // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
                 // event modifier so it is written onto the `ZoneChange` below.
-                modifiers.controller_override = repl_def.enters_under.clone();
+                // CR 614.6: like every definition-carried outcome, it belongs to the
+                // accept branch; a declined optional replacement does not apply it.
+                modifiers.controller_override = match branch {
+                    ReplacementBranch::Execute => repl_def.enters_under.clone(),
+                    ReplacementBranch::Decline => None,
+                };
                 (
                     repl_def.event.clone(),
                     modifiers,
@@ -10264,7 +10289,24 @@ fn apply_single_replacement(
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
-        match (handler.applier)(proposed, rid, state, events) {
+        // CR 614.1a + CR 614.6: a registry applier applies the definition's own
+        // outcome (a substituted, multiplied or redirected token batch, a rescaled
+        // draw, a skipped step, ...) and cannot see which branch is being applied.
+        // A declined optional replacement, or a `MayCost` left unpaid, does not
+        // replace the event with that outcome: the event goes on as it would have
+        // without it, carrying only the decline branch's own event modifications
+        // (a shock land's "enters tapped"), which are applied below exactly as on
+        // an accept. The discard applier is the one that still runs: it reads no
+        // definition and only lowers the discard to the hand-to-graveyard move
+        // that CR 701.9a defines a discard to be, on either branch.
+        let applier_result = if branch == ReplacementBranch::Decline
+            && !matches!(proposed, ProposedEvent::Discard { .. })
+        {
+            ApplyResult::Modified(proposed)
+        } else {
+            (handler.applier)(proposed, rid, state, events)
+        };
+        match applier_result {
             ApplyResult::Modified(mut new_event) => {
                 if modifiers.etb_tap_state != EtbTapState::Unspecified {
                     if let Some(enter_tapped) = new_event.battlefield_entry_tap_state_mut() {
@@ -24518,6 +24560,156 @@ mod tests {
             Ok(expected),
             "declining optional counter prevention must preserve the original counter event"
         );
+    }
+
+    /// CR 614.1a + CR 614.6: each event applier applies its definition's outcome,
+    /// whichever branch is being applied. Through the shared prompt and resume
+    /// (`replace_event` -> `continue_replacement`), declining an optional
+    /// replacement must leave the original event unreplaced, and accepting the
+    /// SAME definition must change it. The accept leg is the reach guard: it
+    /// proves each definition's outcome is real, so the decline leg cannot pass
+    /// by the replacement never applying.
+    #[test]
+    fn optional_replacement_decline_never_applies_the_definition_outcome() {
+        fn without_applied(mut event: ProposedEvent) -> ProposedEvent {
+            event.applied_set_mut().clear();
+            event
+        }
+        fn token_branch(name: &str) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: name.to_string(),
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    types: vec!["Creature".to_string(), name.to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            )
+        }
+        fn optional(repl: ReplacementDefinition) -> ReplacementDefinition {
+            repl.mode(ReplacementMode::Optional { decline: None })
+        }
+        let create_two = || ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            applied: HashSet::new(),
+        };
+
+        let cases: Vec<(&str, ReplacementDefinition, ProposedEvent)> = vec![
+            (
+                // Jinnie Fay class: the substitute chain is chosen afterwards.
+                "chosen token substitution",
+                optional(
+                    ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::ChooseOneOf {
+                                chooser: PlayerFilter::Controller,
+                                branches: vec![token_branch("Cat"), token_branch("Dog")],
+                                kind: ChooseOneOfKind::Ordinary,
+                            },
+                        ),
+                    ),
+                ),
+                create_two(),
+            ),
+            (
+                "token count modification",
+                optional(
+                    ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                        .quantity_modification(QuantityModification::DOUBLE),
+                ),
+                create_two(),
+            ),
+            (
+                "draw count modification",
+                optional(
+                    ReplacementDefinition::new(ReplacementEvent::Draw)
+                        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 2 },
+                                target: TargetFilter::Controller,
+                            },
+                        )),
+                ),
+                ProposedEvent::Draw {
+                    player_id: PlayerId(0),
+                    count: 1,
+                    stage: DrawEventStage::Individual,
+                    applied: HashSet::new(),
+                },
+            ),
+            (
+                "life gain modification",
+                optional(
+                    ReplacementDefinition::new(ReplacementEvent::GainLife)
+                        .quantity_modification(QuantityModification::DOUBLE),
+                ),
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(0),
+                    amount: 3,
+                    applied: HashSet::new(),
+                },
+            ),
+        ];
+
+        let source = ObjectId(90);
+        for (label, repl, event) in cases {
+            let resolve = |choice: usize| {
+                let mut state =
+                    test_state_with_object(source, Zone::Battlefield, vec![repl.clone()]);
+                state.players[0].library.push_back(ObjectId(200));
+                state.objects.insert(
+                    ObjectId(200),
+                    GameObject::new(
+                        ObjectId(200),
+                        CardId(200),
+                        PlayerId(0),
+                        "Top Card".to_string(),
+                        Zone::Library,
+                    ),
+                );
+                let mut events = Vec::new();
+                assert_eq!(
+                    replace_event(&mut state, event.clone(), &mut events),
+                    ReplacementResult::NeedsChoice(PlayerId(0)),
+                    "{label}: the optional replacement must apply and prompt"
+                );
+                match continue_replacement(&mut state, choice, &mut events) {
+                    ReplacementResult::Execute(resumed) => without_applied(resumed),
+                    other => {
+                        panic!("{label}: choice {choice} must resume the event, got {other:?}")
+                    }
+                }
+            };
+
+            let original = without_applied(event.clone());
+            assert_ne!(
+                resolve(0),
+                original,
+                "{label}: accepting must apply the definition's outcome"
+            );
+            assert_eq!(
+                resolve(1),
+                original,
+                "{label}: declining must leave the original event unreplaced"
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,7 @@ pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
 // CR 116.2c: the "pay a cost to end a continuous effect" special action.
 pub mod end_continuous_effect;
+pub(crate) mod exert;
 pub(crate) mod exile_links;
 pub mod filter;
 // CR 710: Kamigawa flip cards (flipping, alternative-face application).

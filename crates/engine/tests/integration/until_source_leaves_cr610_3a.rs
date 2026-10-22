@@ -8,6 +8,7 @@
 //! the stack before its costs are paid, so any departure of its source while
 //! it waits counts. CR 610.3b is the triggered-ability twin.
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::VecDeque;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -262,6 +263,7 @@ fn activate_exert_exile_under(
         .act(GameAction::ActivateAbility {
             source_id: angel,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Angel's exert ability can be activated");
     drive(runner, priority_with_stack(stack_len), VecDeque::from([c1]));

@@ -40,7 +40,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
+use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
     parse_number as nom_parse_number, parse_object_recipient_pronoun, parse_period_sentences,
@@ -229,6 +229,30 @@ fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
             .sub_ability
             .as_deref()
             .is_some_and(definition_grants_flashback)
+}
+
+pub(crate) fn parse_attack_exert_header(input: &str) -> OracleResult<'_, Option<StaticCondition>> {
+    let (input, condition) = opt(preceded(
+        tag("if "),
+        terminated(parse_inner_condition, tag(", ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("you may exert ").parse(input)?;
+    let (input, _) = take_until(" as ").parse(input)?;
+    let (input, _) = tag(" as ").parse(input)?;
+    let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
+    let (input, _) = tag(" attacks").parse(input)?;
+    Ok((input, condition))
+}
+
+pub(crate) fn parse_unknown_conditioned_attack_exert_header(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("if ").parse(input)?;
+    let (input, _) = take_until(", you may exert ").parse(input)?;
+    let (input, _) = tag(", you may exert ").parse(input)?;
+    let (input, _) = take_until(" as ").parse(input)?;
+    let (input, _) = tag(" as ").parse(input)?;
+    let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
+    value((), tag(" attacks")).parse(input)
 }
 
 fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
@@ -6808,98 +6832,58 @@ fn parse_normalized_oracle_ir(
             }
         }
 
-        // CR 701.43d: "You may exert [creature] as it attacks" — optional attack cost.
-        // Must intercept BEFORE Priority 7 (static patterns) because the "When you do"
-        // linked effect often contains "gets +N/+M" which is_static_pattern would match.
-        // Standalone: skip (separate "Whenever you exert" trigger line follows).
-        // Compound: produce an Exerted trigger with the linked effect.
-        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
-            value(
-                (),
-                alt((
-                    tag("you may exert this creature as it attacks"),
-                    tag("you may exert ~ as it attacks"),
-                    tag("you may exert it as it attacks"),
-                )),
-            )
-            .parse(i)
-        }) {
-            // Check for linked "When you do, [effect]" in same sentence
-            let rest_trimmed = rest_original.trim().trim_start_matches('.').trim_start();
-            let rest_lower = rest_trimmed.to_lowercase();
-            if let Some(((), effect_rest)) = nom_on_lower(rest_trimmed, &rest_lower, |i| {
-                value((), tag("when you do, ")).parse(i)
+        // CR 701.43d + CR 607.2h: Keep the optional attack cost and its
+        // linked payoff together, intercepting before static P/T dispatch.
+        // CR 603.4: A leading condition gates payment, not trigger resolution.
+        if let Some((attack_cost_condition, rest_original)) =
+            nom_on_lower(&line, &lower, parse_attack_exert_header)
+        {
+            let mut trigger = TriggerDefinition::new(TriggerMode::Exerted)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Battlefield])
+                .description(line.to_string());
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(((), effect_rest)) = nom_on_lower(rest_original, &rest_lower, |input| {
+                value((), tag(". when you do, ")).parse(input)
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
+                trigger = trigger.execute(parse_effect_chain_with_context(
                     effect_rest.trim(),
                     AbilityKind::Spell,
                     &mut ctx,
+                ));
+            } else if all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+                .parse(rest_lower.trim())
+                .is_err()
+            {
+                emitter.ability_at(
+                    item_line,
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::unimplemented("attack_exert_rider", &line),
+                    ),
                 );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                // `&line` is the whole printed sentence, which is also what the
-                // recognizer stamped as `description` — the body was parsed
-                // from the suffix after ". When you do, ", but the CR 701.43d
-                // optional attack cost and its CR 607.2h linked reflexive
-                // trigger are one printed paragraph.
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+                i += 1;
+                continue;
             }
+            if let Some(condition) = attack_cost_condition {
+                trigger = trigger.attack_cost_condition(condition);
+            }
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             i += 1;
             continue;
         }
-        // CR 701.43d: Variant with card name — "You may exert {Name} as {he/she/it/they} attacks"
-        if nom_on_lower(&line, &lower, |i| value((), tag("you may exert ")).parse(i)).is_some()
-            && scan_contains(&lower, "as ")
-            && scan_contains(&lower, "attacks")
-        {
-            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                ctx.subject = None;
-                ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
-                    effect_text.trim(),
+        // A syntactically attack-exert paragraph with an unknown leading gate
+        // must remain unsupported rather than silently losing its restriction.
+        if nom_on_lower(&line, &lower, parse_unknown_conditioned_attack_exert_header).is_some() {
+            emitter.ability_at(
+                item_line,
+                AbilityDefinition::new(
                     AbilityKind::Spell,
-                    &mut ctx,
-                );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
-            }
-            i += 1;
-            continue;
-        }
-        // CR 701.43d: Conditional exert — "If [creature] hasn't been exerted this turn, you may exert it"
-        if nom_on_lower(&line, &lower, |i| value((), tag("if ")).parse(i)).is_some()
-            && scan_contains(&lower, "you may exert")
-            && scan_contains(&lower, "attacks")
-        {
-            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                ctx.subject = None;
-                ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
-                    effect_text.trim(),
-                    AbilityKind::Spell,
-                    &mut ctx,
-                );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                // The leading if-gate this arm dispatches on is still DROPPED —
-                // no condition is stamped for "hasn't been exerted this turn".
-                // That gap is pre-existing and deliberately preserved here: the
-                // conversion is behavior-identical, and the fix belongs in a
-                // change that is allowed to move bytes.
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
-            }
+                    Effect::unimplemented("attack_exert_condition", &line),
+                ),
+            );
             i += 1;
             continue;
         }

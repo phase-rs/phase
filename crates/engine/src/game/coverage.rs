@@ -4614,6 +4614,12 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(cond) = &trig.condition {
         d.push(("condition".into(), fmt_trigger_condition(cond, &trig.mode)));
     }
+    if let Some(condition) = &trig.attack_cost_condition {
+        d.push((
+            "attack cost condition".into(),
+            fmt_static_condition(condition),
+        ));
+    }
     d
 }
 
@@ -5189,6 +5195,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
         SC::SourceHasDealtDamage => "source has dealt damage".into(),
+        SC::SourceExertedThisTurn => "source has been exerted this turn".into(),
         SC::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
             None => "was cast".into(),
@@ -10085,6 +10092,9 @@ fn extract_trigger_features(
         emit_structural(features, StructuralFeature::TriggerCondition);
         extract_trigger_condition_features(condition, features);
     }
+    if let Some(condition) = &trigger.attack_cost_condition {
+        extract_static_condition_features(condition, features);
+    }
 }
 
 fn extract_effect_static_carrier_features(
@@ -11027,6 +11037,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
+        StaticCondition::SourceExertedThisTurn => ("SourceExertedThisTurn", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
@@ -15489,6 +15500,72 @@ mod tests {
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
+    }
+
+    #[test]
+    fn attack_cost_condition_reaches_parse_details() {
+        let oracle = "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)";
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            "Combat Celebrant",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut face = CardFace {
+            name: "Combat Celebrant".into(),
+            oracle_text: Some(oracle.into()),
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            keywords: parsed.extracted_keywords,
+            parse_warnings: parsed.parse_warnings,
+            ..Default::default()
+        };
+        assert_eq!(face.triggers.len(), 1);
+        assert!(face.triggers[0].is_attack_exert_permission());
+        assert!(face.triggers[0].execute.is_some());
+        assert!(face.triggers[0].condition.is_none());
+
+        let items = build_parse_details_for_face(&face);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, ParseCategory::Trigger);
+        assert!(items[0].is_fully_supported());
+        assert!(items[0].details.iter().any(|(key, value)| {
+            key == "attack cost condition" && value == "not (source has been exerted this turn)"
+        }));
+
+        face.triggers[0].condition = Some(crate::types::ability::TriggerCondition::LostLife);
+        for (condition, expected) in [
+            (
+                face.triggers[0].attack_cost_condition.clone(),
+                Some("not (source has been exerted this turn)"),
+            ),
+            (
+                Some(StaticCondition::SourceExertedThisTurn),
+                Some("source has been exerted this turn"),
+            ),
+            (None, None),
+        ] {
+            face.triggers[0].attack_cost_condition = condition;
+            let items = build_parse_details_for_face(&face);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].category, ParseCategory::Trigger);
+            assert!(items[0].is_fully_supported());
+            let details = &items[0].details;
+            assert_eq!(
+                details
+                    .iter()
+                    .find(|(key, _)| key == "attack cost condition")
+                    .map(|(_, value)| value.as_str()),
+                expected,
+                "attack-cost polarity and absence must remain distinct: {details:?}"
+            );
+            assert!(details
+                .iter()
+                .any(|(key, value)| key == "condition" && value == "lost life this turn"));
+        }
     }
 
     /// Exact cardinality and counter-removal eligibility are semantic parser

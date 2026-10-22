@@ -10,6 +10,7 @@
 //! CR 701.6a: a countered ability is removed from the stack, so nothing left on
 //! the stack is "that ability".
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::VecDeque;
 
 use engine::game::effects::attach::attach_to;
@@ -250,6 +251,7 @@ impl EquippedBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.host,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Host's ability activates");
         drive(&mut self.runner, priority_with_stack(2), VecDeque::new());
@@ -274,6 +276,7 @@ impl EquippedBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.squire,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Brass Squire's ability activates");
         drive(
@@ -426,6 +429,7 @@ impl RowanBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.pw,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the loyalty ability activates");
         drive(&mut self.runner, priority_with_stack(2), VecDeque::new());
@@ -510,6 +514,7 @@ fn run_with_the_original_countered(
         .act(GameAction::ActivateAbility {
             source_id: host,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Host's ability activates");
     drive(&mut runner, priority_with_stack(3), VecDeque::new());
@@ -678,6 +683,7 @@ impl TapTriggerBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.chrome,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Chrome Companion's ability activates")
             .events;
@@ -868,6 +874,7 @@ fn bracers_copy_each_activation_not_an_earlier_one_of_the_same_source() {
                 .act(GameAction::ActivateAbility {
                     source_id: kavu,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .expect("Stone Kavu's ability activates")
                 .events,

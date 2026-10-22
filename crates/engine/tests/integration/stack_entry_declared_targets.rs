@@ -340,6 +340,7 @@ fn entity_board(aim_at_self: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId)
         .act(GameAction::ActivateAbility {
             source_id: entity,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     runner
@@ -902,6 +903,7 @@ fn an_end_step_sacrifice_targets_none_of_the_token_it_holds() {
         .act(GameAction::ActivateAbility {
             source_id: kiki,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     if matches!(
@@ -1047,6 +1049,7 @@ fn a_spell_whose_target_is_changed_to_a_creature_targets_that_creature() {
         .act(GameAction::ActivateAbility {
             source_id: spellskite,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     for _ in 0..8 {
@@ -1256,6 +1259,7 @@ fn a_copy_cast_from_isochron_scepter_targets_what_it_is_cast_at() {
         .act(GameAction::ActivateAbility {
             source_id: scepter,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     for _ in 0..12 {
@@ -1509,6 +1513,7 @@ fn a_spell_whose_player_target_is_changed_to_a_creature_targets_that_creature() 
         .act(GameAction::ActivateAbility {
             source_id: spellskite,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     for _ in 0..8 {
@@ -2455,6 +2460,7 @@ fn an_untargeted_activated_ability_is_recorded_as_choosing_no_target() {
         .act(GameAction::ActivateAbility {
             source_id: fountain,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     assert!(
@@ -2529,6 +2535,7 @@ fn an_untargeted_copy_cast_from_isochron_scepter_is_recorded_as_choosing_no_targ
         .act(GameAction::ActivateAbility {
             source_id: scepter,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     let copy = (0..12)

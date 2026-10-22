@@ -23756,6 +23756,9 @@ fn exert_with_when_you_do_pump() {
         );
     assert_eq!(r.triggers.len(), 1);
     assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+    assert!(r.triggers[0].attack_cost_condition.is_none());
+    assert!(r.triggers[0].is_attack_exert_permission());
+    assert!(!r.triggers[0].is_standalone_attack_exert_permission());
     let exec = r.triggers[0].execute.as_ref().unwrap();
     // The "gets +1/+3 and gains lifelink" is a continuous modification (GenericEffect),
     // not a direct Pump — parse_effect_chain handles this composite pattern.
@@ -23771,19 +23774,22 @@ fn exert_with_when_you_do_pump() {
 
 #[test]
 fn exert_standalone_line() {
-    let r = parse(
-            "You may exert this creature as it attacks.\nWhenever you exert a creature, you may discard a card. If you do, draw a card.",
-            "Battlefield Scavenger",
-            &[],
-            &["Creature"],
-            &[],
-        );
-    // Standalone exert line produces no output (trigger is separate)
-    assert!(r.abilities.is_empty());
-    assert_eq!(r.triggers.len(), 1);
-    assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
-    assert_eq!(r.triggers[0].valid_target, Some(TargetFilter::Controller));
-    assert!(r.triggers[0].valid_card.is_some());
+    for (name, oracle) in [
+        ("Battlefield Scavenger", "You may exert this creature as it attacks. (It won't untap during your next untap step.)\nWhenever you exert a creature, you may discard a card. If you do, draw a card."),
+        ("Resolute Survivors", "You may exert this creature as it attacks. (It won't untap during your next untap step.)\nWhenever you exert a creature, this creature deals 1 damage to each opponent and you gain 1 life."),
+    ] {
+        let r = parse(oracle, name, &[], &["Creature"], &[]);
+        // SHAPE, CR 701.43d: Two aggregate records carry one static permission
+        // and one independent triggered observer, not two triggered abilities.
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.triggers.len(), 2);
+        assert!(r.triggers[0].is_attack_exert_permission());
+        assert!(r.triggers[0].is_standalone_attack_exert_permission());
+        assert!(!r.triggers[1].is_attack_exert_permission());
+        assert!(!r.triggers[1].is_standalone_attack_exert_permission());
+        assert_eq!(r.triggers[1].valid_target, Some(TargetFilter::Controller));
+        assert!(r.triggers[1].execute.is_some());
+    }
 }
 
 #[test]
@@ -23800,6 +23806,64 @@ fn exert_with_card_name() {
 }
 
 #[test]
+fn attack_exert_shared_headers_preserve_conditions_and_original_remainders() {
+    // SHAPE: synthetic grammar fixtures cover the existing subject/pronoun axes.
+    let gate = StaticCondition::Not {
+        condition: Box::new(StaticCondition::SourceExertedThisTurn),
+    };
+    for condition in [
+        "If ~ hasn't been exerted this turn, ",
+        "If this creature hasn't been exerted this turn, ",
+    ] {
+        for (subject, pronoun) in [
+            ("~", "it"),
+            ("this creature", "he"),
+            ("it", "she"),
+            ("them", "they"),
+        ] {
+            let text = format!("{condition}you may exert {subject} as {pronoun} attacks. When you do, Draw a card.");
+            let (actual, rest) =
+                nom_on_lower(&text, &text.to_lowercase(), parse_attack_exert_header)
+                    .expect("existing conditional header");
+            assert_eq!(actual, Some(gate.clone()));
+            assert_eq!(rest, ". When you do, Draw a card.");
+        }
+    }
+    for (text, expected_rest) in [
+        ("You may exert this creature as it attacks.", "."),
+        (
+            "You may exert ~ as they attacks. When you do, Draw a card.",
+            ". When you do, Draw a card.",
+        ),
+    ] {
+        let (condition, rest) = nom_on_lower(text, &text.to_lowercase(), parse_attack_exert_header)
+            .expect("existing unconditional header");
+        assert_eq!(condition, None);
+        assert_eq!(rest, expected_rest);
+    }
+    let unknown = "If this creature has danced this turn, you may exert it as it attacks. When you do, Draw a card.";
+    assert!(nom_on_lower(unknown, &unknown.to_lowercase(), parse_attack_exert_header).is_none());
+    let ((), rest) = nom_on_lower(
+        unknown,
+        &unknown.to_lowercase(),
+        parse_unknown_conditioned_attack_exert_header,
+    )
+    .expect("recognized but unsupported conditional header");
+    assert_eq!(rest, ". When you do, Draw a card.");
+    let standalone = parse(
+        "If this creature hasn't been exerted this turn, you may exert it as it attacks.",
+        "Conditional grammar fixture",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(standalone.triggers.len(), 1);
+    assert!(standalone.triggers[0].is_standalone_attack_exert_permission());
+    assert_eq!(standalone.triggers[0].attack_cost_condition, Some(gate));
+    assert!(standalone.abilities.is_empty());
+}
+
+#[test]
 fn exert_conditional() {
     let r = parse(
             "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase.",
@@ -23810,6 +23874,40 @@ fn exert_conditional() {
         );
     assert_eq!(r.triggers.len(), 1);
     assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+    // SHAPE: CR 603.4 — this condition belongs to payment, not resolution.
+    assert!(r.triggers[0].condition.is_none());
+    assert_eq!(
+        r.triggers[0].attack_cost_condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceExertedThisTurn),
+        })
+    );
+    assert!(r.triggers[0].execute.is_some());
+}
+
+#[test]
+fn exert_unknown_condition_and_trailing_rider_stay_unsupported() {
+    for text in [
+        "If this creature has danced this turn, you may exert it as it attacks. When you do, draw a card.",
+        "You may exert this creature as it attacks. Dance a jig.",
+    ] {
+        let parsed = parse(text, "Unknown exert rider", &[], &["Creature"], &[]);
+        assert!(parsed.triggers.is_empty());
+        assert!(parsed.abilities.iter().any(|ability| matches!(*ability.effect, Effect::Unimplemented { .. })));
+    }
+    let supported = parse(
+        "You may exert this creature as it attacks.",
+        "Permission",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(supported.triggers.len(), 1);
+    assert!(supported.abilities.is_empty());
+    assert_eq!(
+        supported.triggers[0].valid_card,
+        Some(TargetFilter::SelfRef)
+    );
 }
 
 // ── Leveler activated abilities (CR 711.2a + CR 711.2b) ──

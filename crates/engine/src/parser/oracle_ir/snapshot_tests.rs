@@ -3080,11 +3080,9 @@ fn themberchaud() {
 /// Conditional form: `"If this creature hasn't been exerted this turn, …"`.
 /// Combat Celebrant is the ONLY card in the pool that reaches this arm.
 ///
-/// Baselines a known pre-existing gap rather than hiding it: the leading
-/// if-gate is parsed for dispatch and then **dropped** — the emitted trigger
-/// carries no condition for it. That is recorded as a census harvest item; this
-/// fixture pins the current (wrong) shape so the conversion is provably
-/// behavior-preserving and the gap stays visible for a separate fix.
+/// The leading condition is retained as `attack_cost_condition`, checked before
+/// optional payment (CR 508.1g). The paid linked payoff remains a real trigger;
+/// the payment gate is not an intervening-if condition (CR 603.4).
 #[test]
 fn combat_celebrant() {
     let (ir, lowered) = parse_two_layer(

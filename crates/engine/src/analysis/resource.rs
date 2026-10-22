@@ -8434,6 +8434,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
     /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
@@ -10036,6 +10037,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10141,6 +10143,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10251,6 +10254,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -15501,6 +15505,7 @@ mod tests {
         on_board: [ObjectId; 2],
         in_hand: ObjectId,
         attacker: ObjectId,
+        exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
         use crate::types::game_state::WaitingFor;
         vec![
@@ -15711,6 +15716,7 @@ mod tests {
                     player: PlayerId(0),
                     // CR 701.43d exerts an ATTACKING permanent.
                     attacker: on_board[0],
+                    permission: exert_permission,
                     remaining: Vec::new(),
                 },
                 true,
@@ -15988,7 +15994,39 @@ mod tests {
         // CLASS-DRIFT GATE, run before the cast proof: every candidate's membership must
         // be what the list says it is. A deleted member reds its `true` row here; an
         // added non-member reds its `false` row.
-        let candidates = cast_proof_candidate_windows(on_board, in_hand, attacker);
+        // CR 508.1g: This optional-cost control needs an actual functioning
+        // permission on an attacking source, rather than an arbitrary object ID.
+        state
+            .objects
+            .get_mut(&on_board[0])
+            .unwrap()
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                crate::types::triggers::TriggerMode::Exerted,
+            )
+            .valid_card(TargetFilter::SelfRef)]))
+            .expect("materialize the permission before binding its occurrence");
+        state.combat.as_mut().unwrap().attackers.push(
+            crate::game::combat::AttackerInfo::attacking_player(on_board[0], PlayerId(1)),
+        );
+        let exert_permission = crate::game::functioning_abilities::active_trigger_definitions(
+            &state,
+            &state.objects[&on_board[0]],
+        )
+        .next()
+        .expect("functioning attack permission")
+        .definition_ref;
+        assert_eq!(
+            exert_permission.source,
+            crate::types::identifiers::ObjectIncarnationRef::from_object(
+                &state.objects[&on_board[0]]
+            )
+        );
+        assert!(!matches!(
+            &exert_permission.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized
+        ));
+        let candidates =
+            cast_proof_candidate_windows(on_board, in_hand, attacker, exert_permission);
         for (why, window, expected_member) in &candidates {
             assert_eq!(
                 window.is_forced_cascade_window(),
@@ -16012,6 +16050,13 @@ mod tests {
             if !expected_member {
                 continue;
             }
+            state.phase = match &window {
+                WaitingFor::DeclareAttackers { .. }
+                | WaitingFor::ExertChoice { .. }
+                | WaitingFor::EnlistChoice { .. } => Phase::DeclareAttackers,
+                WaitingFor::DeclareBlockers { .. } => Phase::DeclareBlockers,
+                _ => Phase::PreCombatMain,
+            };
             state.waiting_for = window;
             // PER-WINDOW REACH-GUARD. The zero below is only evidence if the enumerator
             // is live AT THIS WINDOW. A member whose fixture is under-populated (a

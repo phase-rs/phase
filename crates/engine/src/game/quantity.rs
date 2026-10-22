@@ -1381,6 +1381,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         description: _,
         constraint: None,
         condition,
+        attack_cost_condition: None,
         counter_filter: _,
         saga_chapter: _,
         unless_pay: None,
@@ -2674,6 +2675,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -23701,6 +23703,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: greater_good,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation must succeed");
 

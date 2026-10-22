@@ -2223,6 +2223,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2393,6 +2394,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2524,6 +2526,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2872,6 +2875,8 @@ fn evaluate_condition_inner(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
+        // CR 701.43b: Untapping does not erase an exert from this turn.
+        StaticCondition::SourceExertedThisTurn => state.exerted_this_turn.contains(&source_id),
         // CR 611.2b + CR 110.5d: require battlefield — cards not on the battlefield are
         // neither tapped nor untapped. A source that has left the battlefield (e.g.
         // Callous Oppressor dying while tapped) fails this predicate and any
@@ -5207,6 +5212,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -8775,6 +8781,11 @@ fn expand_granted_triggered_abilities(
                 continue;
             };
             for entry in provider.trigger_definitions.iter_all() {
+                // CR 701.43d + CR 603.1: A triggered-only grant does not copy
+                // a standalone static attack permission from the aggregate.
+                if entry.definition.is_standalone_attack_exert_permission() {
+                    continue;
+                }
                 let provider_ref = provider.trigger_definition_ref(entry);
                 let modification = ContinuousModification::GrantTrigger {
                     trigger: Box::new(entry.definition.clone()),

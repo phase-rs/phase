@@ -461,6 +461,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
                 actions.push(GameAction::ActivateAbility {
                     source_id: object_id,
                     ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 });
             }
         }
@@ -1477,6 +1478,25 @@ fn chain_harms_controller_amount(ability: &AbilityDefinition) -> Option<Option<u
     let mut acc = (false, Some(0_u16));
     walk(ability, &mut acc);
     acc.0.then_some(acc.1)
+}
+
+/// CR 605.3b + CR 119.3: True iff resolving this ability makes its controller
+/// gain life — a controller-scoped `GainLife` anywhere in its effect chain
+/// (Pristine Talisman: "{T}: Add {C}. You gain 1 life."). Presence only: the
+/// amount is what actually resolving the ability gains. Visits the same
+/// `sub_ability` / `else_ability` links as [`chain_harms_controller_amount`].
+pub(crate) fn mana_ability_gains_controller_life(ability: &AbilityDefinition) -> bool {
+    fn walk(ability: &AbilityDefinition) -> bool {
+        matches!(
+            *ability.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ) || ability.sub_ability.as_deref().is_some_and(walk)
+            || ability.else_ability.as_deref().is_some_and(walk)
+    }
+    walk(ability)
 }
 
 /// CR 605.3b: Returns `true` iff the continuation chain (sub_ability /

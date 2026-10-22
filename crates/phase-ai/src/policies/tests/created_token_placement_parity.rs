@@ -403,6 +403,7 @@ fn berta_activate(state: &mut GameState, repr: Representation) -> (ObjectId, Gam
         GameAction::ActivateAbility {
             source_id: id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
 }
@@ -494,6 +495,7 @@ fn kianne_activate(state: &mut GameState, repr: Representation) -> (ObjectId, Ga
         GameAction::ActivateAbility {
             source_id: id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
 }
@@ -968,6 +970,7 @@ fn berta_activate_parsed(state: &mut GameState, repr: Representation) -> (Object
         GameAction::ActivateAbility {
             source_id: id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
 }
@@ -999,6 +1002,7 @@ fn sequence_engine_activate_parsed(
         GameAction::ActivateAbility {
             source_id: id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
 }

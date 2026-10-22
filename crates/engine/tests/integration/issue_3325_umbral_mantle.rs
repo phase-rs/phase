@@ -154,7 +154,7 @@ fn umbral_mantle_grants_untap_pump_ability_to_equipped_creature() {
                     a,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index,
+                        ability_index, ..
                     } if *source_id == brigid && *ability_index == granted_idx
                 )
             })

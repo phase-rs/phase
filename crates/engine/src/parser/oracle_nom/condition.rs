@@ -6,7 +6,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace1, satisfy};
 use nom::combinator::{cut, eof, map, not, opt, peek, recognize, value, verify};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
@@ -2603,6 +2603,30 @@ fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, Sta
     .parse(rest)
 }
 
+/// CR 701.43b: Source exert history, with negation composed over the same leaf.
+fn parse_source_exerted_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_subject(input)?;
+    terminated(
+        alt((
+            value(
+                StaticCondition::SourceExertedThisTurn,
+                tag("has been exerted this turn"),
+            ),
+            value(
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceExertedThisTurn),
+                },
+                (parse_hasnt, tag(" been exerted this turn")),
+            ),
+        )),
+        peek(alt((
+            value((), eof),
+            value((), satisfy(|c: char| !c.is_alphanumeric())),
+        ))),
+    )
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -2655,6 +2679,7 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Not(SourceHasDealtDamage). Specific full-phrase tag; placed before the
         // generic predicates so it is not shadowed.
         parse_source_hasnt_dealt_damage,
+        parse_source_exerted_this_turn,
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
@@ -12255,6 +12280,29 @@ mod tests {
         "controlled by that player",
         "the chosen player controls",
     ];
+
+    #[test]
+    fn source_exert_history_grammar_preserves_polarity_and_boundaries() {
+        for subject in ["~", "this creature", "this permanent"] {
+            let text = format!("{subject} has been exerted this turn, draw a card");
+            let (rest, condition) = parse_inner_condition(&text).unwrap();
+            assert_eq!(rest, ", draw a card");
+            assert_eq!(condition, StaticCondition::SourceExertedThisTurn);
+            for tense in ["hasn't", "hasn’t"] {
+                let text = format!("{subject} {tense} been exerted this turn");
+                let (rest, condition) = parse_inner_condition(&text).unwrap();
+                assert!(rest.is_empty());
+                assert_eq!(
+                    condition,
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::SourceExertedThisTurn)
+                    }
+                );
+            }
+        }
+        assert!(parse_inner_condition("this creature has been exerted this turnip").is_err());
+        assert!(parse_inner_condition("this creature hasn't been exerted this turnip").is_err());
+    }
 
     #[test]
     fn they_control_count_ge_marker() {

@@ -138,6 +138,7 @@ fn syr_konrad_deals_one_damage_per_milled_creature() {
         .act(GameAction::ActivateAbility {
             source_id: konrad,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate mill");
     drain_stack(&mut runner);

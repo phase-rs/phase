@@ -9034,6 +9034,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -9110,9 +9111,10 @@ fn ward_cost_reads_filter_population(
 /// `valid_subject_player`, as `delayed_trigger::condition_filter_groups`
 /// enumerates them), its zone-change clauses, its constraint, its condition and
 /// its `unless_pay`. They are evaluated when the trigger's event fires
-/// (CR 603.2, CR 603.4), against the live ledger. Its `execute` chain is the
-/// nested walk's. The struct is destructured without `..`, so a new field is a
-/// compile error here.
+/// (CR 603.2, CR 603.4), against the live ledger. An attack-exert permission's
+/// `attack_cost_condition` is read the same way, as the attackers are declared
+/// (CR 508.1g). Its `execute` chain is the nested walk's. The struct is
+/// destructured without `..`, so a new field is a compile error here.
 fn trigger_matchers_read_filter_population(
     trigger: &crate::types::ability::TriggerDefinition,
     leaf: &dyn Fn(&TargetFilter) -> bool,
@@ -9157,6 +9159,7 @@ fn trigger_matchers_read_filter_population(
         clash_result: _,
         room_door: _,
         granting_object: _,
+        attack_cost_condition,
     } = trigger;
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
@@ -9171,6 +9174,9 @@ fn trigger_matchers_read_filter_population(
         || condition
             .as_ref()
             .is_some_and(|condition| trigger_condition_reads_filter_population(condition, leaf))
+        || attack_cost_condition
+            .as_ref()
+            .is_some_and(|condition| static_condition_reads_filter_population(condition, leaf))
         || unless_pay.as_ref().is_some_and(|unless_pay| {
             ability_cost_reads_filter_population(&unless_pay.cost, leaf)
                 || has_filter(&unless_pay.payer)
