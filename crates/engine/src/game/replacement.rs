@@ -2738,18 +2738,16 @@ fn damage_done_applier(
                     }
                 }
             };
-            // CR 614.1a + CR 700.1: One-shot amount replacement covers every
-            // portion of this source's simultaneous instance, not later damage.
-            // CR 609.7b: A no-op must not spend the shield's opportunity.
-            if amount > 0
-                && new_amount != amount
-                && matches!(
-                    shield_kind_for_rid(state, rid),
-                    Some(ShieldKind::DamageReplacementOneShot)
-                )
-            {
+            // CR 614.5: Consume a one-shot damage replacement after applying it.
+            // The batch ledger retains only successful amount changes.
+            if matches!(
+                shield_kind_for_rid(state, rid),
+                Some(ShieldKind::DamageReplacementOneShot)
+            ) {
                 consume_prevention_shield(state, rid, None);
-                record_combat_one_shot_application(state, applied_key, source_id);
+                if amount > 0 && new_amount != amount {
+                    record_combat_one_shot_application(state, applied_key, source_id);
+                }
             }
             // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
             // prevention provenance of the shared `Minus` subtraction — CR 702.64
@@ -12353,8 +12351,10 @@ pub fn replace_event(
 /// only for the same damage source's remaining portions (CR 700.1 + CR 615.8).
 /// Definitions stay consumed immediately; a later damage batch starts empty.
 /// `combat_prevention_tally` aggregates continuous all-damage and one-shot runtime
-/// riders. One-shot shields retain per-recipient `DamagePrevented` provenance;
-/// continuous shields defer that event to the aggregate rider boundary.
+/// riders. `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
+/// source/recipient `DamagePrevented` events. `Prevention { All }` with
+/// `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+/// path, whose aggregate event is emitted at the rider boundary.
 /// `Prevention::Next(N)` retains sequential depletion, with no ledger membership.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
@@ -12382,9 +12382,12 @@ pub(crate) fn replace_combat_damage_batch(
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
     let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
-    // AppliedReplacementKey uses registry indices. Consumption marks definitions
-    // in place, without removing/reordering them, so keys remain stable across
-    // the original portions; registry compaction belongs outside this batch.
+    // AppliedReplacementKey is registry-index based, like combat_prevention_tally;
+    // consumption marks entries in place, and turns.rs prunes pending entries outside this batch.
+    // A layer pass can rebuild object lists: game_object.rs's reseed_replacements_carrying_resolution_effects
+    // carries resolution entries after the baseline in stable relative order. A mid-batch shift would
+    // need a layer flush changing the derived-grant count between portions; this batch does not rebuild lists.
+    // Independent follow-ups drain with the ledger taken out; it is restored before the next portion.
 
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
@@ -12403,11 +12406,9 @@ pub(crate) fn replace_combat_damage_batch(
             // CR 700.1: Follow-up damage is an independent event, even if its
             // source also participates in the original simultaneous instance.
             let applications = state.combat_one_shot_applications.take();
-            let tally = state.combat_prevention_tally.take();
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
             );
-            state.combat_prevention_tally = tally;
             state.combat_one_shot_applications = applications;
         }
         match result {

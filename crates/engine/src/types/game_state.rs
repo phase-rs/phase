@@ -24601,8 +24601,11 @@ declare_game_state! {
     /// Set to `Some(empty)` by `replace_combat_damage_batch` for one simultaneous
     /// combat-damage batch. Continuous all-damage and one-shot prevention shields
     /// accumulate amounts under their `AppliedReplacementKey`; the combat resolver
-    /// fires each aggregate runtime rider once with the total. One-shot shields
-    /// retain per-recipient `DamagePrevented` provenance separately.
+    /// fires each aggregate runtime rider once with the total.
+    /// `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
+    /// source/recipient `DamagePrevented` events separately. `Prevention { All }`
+    /// with `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the
+    /// continuous-All path and emits its aggregate event at the rider boundary.
     /// Always `None` at every `apply()` boundary, so this execution-local field
     /// is excluded from serialization and structural equality.
     #[serde(skip)]
@@ -24610,8 +24613,10 @@ declare_game_state! {
     /// CR 510.2 + CR 700.1 + CR 615.8: Successful one-shot applications to a
     /// damage source's current simultaneous combat-damage instance. A consumed
     /// replacement stays eligible only for that same source inside this batch.
-    /// Suspended during independent follow-ups and restored before returning;
-    /// like the prevention tally, excluded from serialization and equality.
+    /// Only this ledger is suspended during independent follow-ups, then restored
+    /// before the next portion; the prevention tally remains active.
+    /// Restored to its prior value before returning; excluded from serialization
+    /// and equality like the prevention tally.
     #[serde(skip)]
     pub(crate) combat_one_shot_applications: Option<Vec<(AppliedReplacementKey, ObjectId)>>,
 }
