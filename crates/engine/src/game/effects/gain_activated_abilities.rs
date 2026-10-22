@@ -67,7 +67,7 @@ pub fn resolve(
             reference: crate::types::ability::CostPaidObjectRef::Source,
         } => {
             let Some(donor_id) =
-                crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+                crate::game::targeting::resolved_object_ids_for_filter(state, ability, &filter)
                     .into_iter()
                     .next()
             else {

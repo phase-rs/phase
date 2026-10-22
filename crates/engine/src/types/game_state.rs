@@ -13435,6 +13435,7 @@ pub(crate) fn live_return_result_occurrences(
                 }
             }
             ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                let pending = &pending.pending;
                 if crate::game::effects::choose_from_zone::validate_per_category_result_owner(
                     state,
                     &pending.ability,
@@ -13767,6 +13768,7 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                 .map_err(|error| error.to_string())?;
             }
             ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                let pending = &pending.pending;
                 crate::game::effects::choose_from_zone::validate_per_category_result_owner(
                     state,
                     &pending.ability,
@@ -14440,6 +14442,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
             }
             ResolutionFrame::PerCategoryZoneChoice(pending) => {
+                let pending = &pending.pending;
                 crate::game::effects::choose_from_zone::validate_per_category_result_owner(
                     state,
                     &pending.ability,

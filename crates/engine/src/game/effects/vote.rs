@@ -735,7 +735,7 @@ pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<G
         pending.return_result_occurrence,
         |state| {
             drain_vote_ballots_in_occurrence(state, events, pending);
-            Ok(())
+            Ok::<(), EffectError>(())
         },
     )
     .expect("a retained vote-ballot owner has a coherent occurrence");

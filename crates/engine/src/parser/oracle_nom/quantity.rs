@@ -1945,7 +1945,7 @@ pub(crate) fn parse_historical_zone_aggregate(
     .ok_or_else(|| oracle_err(input))?;
     let (rest, _) = tag(" that were ").parse(rest)?;
     let (rest, to) = value(Zone::Exile, tag("exiled this way")).parse(rest)?;
-    let (remaining, filter) = parse_type_phrase_folding(noun.trim());
+    let (filter, remaining) = parse_type_phrase_folding(noun.trim());
     if !remaining.trim().is_empty() || matches!(filter, TargetFilter::Any | TargetFilter::None) {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,

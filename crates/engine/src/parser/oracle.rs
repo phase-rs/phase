@@ -6536,11 +6536,9 @@ fn parse_normalized_oracle_ir(
                         .filter(|(label, _)| super::oracle_modal::is_known_ability_word(label))
                         .map_or_else(|| static_line.clone(), |(_, body)| body);
                     let grant_lower = grant_body.to_lowercase();
-                    let grant_prefix = nom_on_lower(
-                        &grant_body,
-                        &grant_lower,
-                        opt(super::oracle_static::parse_leading_turn_scope),
-                    )
+                    let grant_prefix = nom_on_lower(&grant_body, &grant_lower, |input| {
+                        opt(super::oracle_static::parse_leading_turn_scope).parse(input)
+                    })
                     .map_or(grant_body.as_str(), |(_, rest)| rest);
                     let first_kind = try_parse_graveyard_keyword_grant_clause(grant_prefix)
                         .map(|(_, kind, _)| kind);

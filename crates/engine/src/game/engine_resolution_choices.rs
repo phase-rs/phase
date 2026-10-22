@@ -2903,7 +2903,7 @@ fn handle_resolution_choice_in_occurrence(
         // whether to run the process again.
         (
             WaitingFor::RepeatDecision {
-                return_result_occurrence,
+                return_result_occurrence: _,
                 player,
                 ability,
             },
@@ -4017,7 +4017,7 @@ fn handle_resolution_choice_in_occurrence(
         }
         (
             WaitingFor::ClashChooseOpponent {
-                return_result_occurrence,
+                return_result_occurrence: _,
                 player,
                 candidates,
                 ability,
@@ -6285,7 +6285,7 @@ fn handle_resolution_choice_in_occurrence(
         }
         (
             WaitingFor::EffectZoneChoice {
-                return_result_occurrence,
+                return_result_occurrence: _,
                 return_result_process,
                 player,
                 cards,
@@ -7031,7 +7031,7 @@ fn handle_resolution_choice_in_occurrence(
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
-                                        return_result_process: return_result_process,
+                                        return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -7111,7 +7111,7 @@ fn handle_resolution_choice_in_occurrence(
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
-                                        return_result_process: return_result_process,
+                                        return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: Some(

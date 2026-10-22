@@ -59,7 +59,9 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
 fn parse_graveyard_keyword_grant_head(text: &str) -> Option<(String, String)> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
-    let (_, rest) = nom_on_lower(&stripped, &lower, opt(tag("each ")))?;
+    let (_, rest) = nom_on_lower(&stripped, &lower, |input| {
+        opt(value((), tag("each "))).parse(input)
+    })?;
     let rest_lower = rest.to_lowercase();
     let (subject, keyword_text) =
         super::oracle_nom::bridge::split_once_on_lower(rest, &rest_lower, " has ").or_else(
@@ -141,7 +143,9 @@ pub(crate) fn try_parse_graveyard_keyword_grant_source(
     }
     let stripped = strip_reminder_text(line);
     let lower = stripped.to_lowercase();
-    let (condition, body) = nom_on_lower(&stripped, &lower, opt(super::parse_leading_turn_scope))?;
+    let (condition, body) = nom_on_lower(&stripped, &lower, |input| {
+        opt(super::parse_leading_turn_scope).parse(input)
+    })?;
     let body_lower = body.to_lowercase();
     let (grant, continuation) =
         super::oracle_nom::bridge::split_once_on_lower(body, &body_lower, ". ")
@@ -2040,7 +2044,7 @@ fn complete_continuous_members(
                 {
                     continue;
                 }
-                let gate = gate.trim().trim_end_matches('.');
+                let gate = gate.trim_start().trim_end().trim_end_matches('.');
                 let Some(condition) = parse_static_condition(gate.original) else {
                     continue;
                 };
@@ -2602,11 +2606,12 @@ fn complete_modification_clause(
                 // granted by this same complete instruction. Remove the older
                 // abilities before publishing the instruction's own grants.
                 // The complete right transaction above still owns every tail.
+                let right_lower = right.to_lowercase();
                 if preceded(
                     alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
                     tag("all other abilities"),
                 )
-                .parse(right.to_lowercase().as_str())
+                .parse(right_lower.as_str())
                 .is_ok()
                 {
                     if let Some(index) = last.iter().position(|modification| {

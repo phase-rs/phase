@@ -26,7 +26,6 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::DoesTheSameSubject;
 use crate::parser::oracle_quantity::{
     parse_cda_quantity, parse_event_context_quantity, parse_for_each_object_filter_clause,
-    parse_quantity_ref,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,

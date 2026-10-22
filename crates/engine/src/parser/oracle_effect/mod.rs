@@ -32,9 +32,8 @@ pub(crate) use lower::{
 pub(super) use lower::{
     apply_where_x_to_filter, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
-    parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
-    try_parse_pump,
+    parse_multi_target_count_expr, parse_where_x_quantity_expression, strip_exact_target_prefix,
+    strip_optional_target_prefix, try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
@@ -22199,8 +22198,9 @@ fn try_parse_reanimate_self_and_target(
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
 fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
     if tag::<_, _, OracleError<'_>>("destroy ")
-        .parse(text.to_lowercase().as_str())
+        .parse(lower.as_str())
         .is_ok()
     {
         let mut tentative = ctx.clone();

@@ -367,11 +367,11 @@ fn redact_instruction_result_owner(waiting: &mut WaitingFor) {
             }
         }
         WaitingFor::NamedChoice {
-            choice_type: crate::types::ability::ChoiceType::Keyword { options },
+            choice_type: crate::types::ability::ChoiceType::Keyword { options, count: _ },
             ..
         }
         | WaitingFor::OpponentGuess {
-            choice_type: crate::types::ability::ChoiceType::Keyword { options },
+            choice_type: crate::types::ability::ChoiceType::Keyword { options, count: _ },
             ..
         } => {
             for keyword in options {
@@ -1862,8 +1862,8 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         pending.return_result_occurrence = None;
         pending.expected_return_result_process = None;
     }
-    for incarnations in filtered.departed_stack_spells.values_mut() {
-        for departed in incarnations.values_mut() {
+    for (_, incarnations) in filtered.departed_stack_spells.iter_mut() {
+        for (_, departed) in incarnations.iter_mut() {
             if let Some(body) = departed.entry.ability_mut() {
                 body.clear_return_result_process_recursive();
             }
@@ -4937,7 +4937,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     }
     // Canonical templates and retained continuous grants can contain raw snapshots.
     // Clear only the projected typed payload; authoritative saves retain their stamps.
-    for effect in &mut state.transient_continuous_effects {
+    for effect in state.transient_continuous_effects.iter_mut() {
         effect
             .affected
             .clear_typed_return_result_processes(&mut |_| {});
@@ -8368,6 +8368,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Keyword {
                 options: vec![Keyword::CumulativeUpkeep(cost)],
+                count: 1,
             },
             options: vec!["Public keyword option".into()],
             source: None,

@@ -5744,7 +5744,7 @@ pub(crate) fn resume_waiting_for(
             pending_mana_ability,
         },
         ManaAbilityResume::UnlessPayment {
-            return_result_occurrence: return_result_occurrence,
+            return_result_occurrence,
             outer_player,
             cost,
             pending_effect,

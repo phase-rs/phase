@@ -11936,7 +11936,7 @@ impl Effect {
                 modifier.clear_embedded_return_result_processes()
             }
             Effect::Choose {
-                choice_type: ChoiceType::Keyword { options },
+                choice_type: ChoiceType::Keyword { options, count: _ },
                 ..
             } => {
                 for keyword in options {
@@ -12882,7 +12882,7 @@ impl<'a> ResultScopeNode<'a> {
     fn nested(self, f: &mut dyn FnMut(&AbilityDefinition, bool)) {
         use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
         let mut own = HashSet::new();
-        let mut collect = |node| {
+        let mut collect = |node: DefinitionNode<'_>| {
             if let DefinitionNode::Ability(definition) = node {
                 own.insert(std::ptr::from_ref(definition));
             }
@@ -12900,7 +12900,7 @@ impl<'a> ResultScopeNode<'a> {
                 &mut collect,
             );
         }
-        let mut visit = |node| {
+        let mut visit = |node: DefinitionNode<'_>| {
             if let DefinitionNode::Ability(definition) = node {
                 f(definition, !own.contains(&std::ptr::from_ref(definition)));
             }
@@ -52527,6 +52527,7 @@ mod departure_raw_runtime_replacement_tests {
             Effect::Choose {
                 choice_type: ChoiceType::Keyword {
                     options: vec![keyword.clone()],
+                    count: 1,
                 },
                 persist: false,
                 selection: Default::default(),

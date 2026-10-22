@@ -1721,7 +1721,6 @@ fn handle_unless_payment_in_occurrence(
                 ref filter,
                 ref from_zone,
             } => {
-                let source = pending_effect.source_id;
                 let mut payer_view = pending_effect.as_ref().clone();
                 payer_view.controller = player;
                 let ctx = crate::game::filter::FilterContext::from_ability(&payer_view);

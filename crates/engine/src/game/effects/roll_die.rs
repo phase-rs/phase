@@ -432,7 +432,7 @@ fn execute_roll_in_occurrence(
     } = instruction;
 
     let pending = PendingDieRoll {
-        return_result_occurrence: return_result_occurrence,
+        return_result_occurrence,
         expected_return_result_process,
         source_id,
         controller,
@@ -696,7 +696,7 @@ fn resume_after_ignore_in_occurrence(
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
-        return_result_occurrence,
+        return_result_occurrence: _,
         expected_return_result_process,
         source_id,
         controller,

@@ -2078,7 +2078,7 @@ fn publish_empty_return_result_for_active(
     result_id: crate::types::ability::ReturnResultId,
     ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
-    let effect = ability.effect.as_ref();
+    let effect = &ability.effect;
     let occurrence_id = state
         .active_return_result_occurrence
         .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
@@ -2771,7 +2771,7 @@ fn drain_active_repeat_until_in_occurrence(state: &mut GameState, events: &mut V
         return;
     };
     let crate::types::game_state::PendingRepeatUntil {
-        return_result_occurrence,
+        return_result_occurrence: _,
         ability,
         stop_progress,
         iteration_progress,
@@ -3529,7 +3529,7 @@ fn drain_active_repeat_for_in_occurrence(state: &mut GameState, events: &mut Vec
         .expect("repeat-for drain may consume only the active repeat-for frame")
     {
         let crate::types::game_state::PendingRepeatIteration {
-            return_result_occurrence,
+            return_result_occurrence: _,
             ability,
             tracked_members,
             iterated_counter_kinds,
@@ -5846,7 +5846,7 @@ fn resolve_optional_effect_decision_step(
                     .as_deref()
                     .is_none_or(|branch| !branch_declares_return_result(branch, result_id))
                 {
-                    publish_empty_return_result_for_active(state, result_id, ability)?;
+                    publish_empty_return_result_for_active(state, result_id, &ability)?;
                 }
             }
             if let Some(branch) = decline_branch {
@@ -18850,6 +18850,8 @@ fn resolve_chain_body(
                             && batch.fan_out.is_none()
                     });
                 if handed_to_discard_batch {
+                    let return_result_occurrence =
+                        retained_return_result_occurrence(state, ability)?;
                     if let Some(batch) = state.pending_discard_batch.as_mut() {
                         // Widen the batch's pre-pause window from this seat's
                         // own emissions to the whole clause's span: the earlier
@@ -18859,9 +18861,7 @@ fn resolve_chain_body(
                         batch.preceding_events = events[scoped_events_before..].to_vec();
                         batch.fan_out =
                             Some(Box::new(crate::types::game_state::PendingDiscardFanOut {
-                                return_result_occurrence: retained_return_result_occurrence(
-                                    state, ability,
-                                )?,
+                                return_result_occurrence,
                                 scoped_template: Box::new(scoped_template.clone()),
                                 outer: Box::new(ability.clone()),
                                 original_controller: controller,
