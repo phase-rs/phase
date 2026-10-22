@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -336,6 +336,18 @@ impl DraftProcedure {
         cards_per_pack.div_ceil(self.cards_per_pick)
     }
 
+    /// CR 905.2 + CR 903.13b: the cards one pick step takes when the drafter
+    /// uses an `AdditionalPick` draft card ("you may draft an additional card
+    /// from that booster pack"): this procedure's pick step, `cards_per_pick`
+    /// (two cards in Commander Draft), plus that one additional card.
+    ///
+    /// The single definition of that count. `pick_pass::selection_requirements`
+    /// enforces and publishes it, and [`MIN_DRAFT_EFFECT_PICKS`] and
+    /// [`MAX_DRAFT_EFFECT_PICKS`] are derived from it.
+    pub fn additional_pick_step_size(self) -> usize {
+        usize::from(self.cards_per_pick) + 1
+    }
+
     /// Can this distribution express a per-`(seat, round)` set assignment?
     ///
     /// [`SetLayout::Chaos`] says two things at once: each booster is drawn from
@@ -427,6 +439,24 @@ pub const CHAOS_LAYOUT_REFUSAL: &str =
 /// chosen: `max_cards_per_pick_matches_procedure_table` folds over
 /// [`DraftKind::ALL`] and fails if this drifts.
 pub const MAX_CARDS_PER_PICK: usize = 2; // CR 903.13b, the CommanderDraft row
+
+/// The fewest picks a FIFO draft-effect selection takes in any kind with a
+/// pick step: [`DraftProcedure::additional_pick_step_size`] over the procedure
+/// table's `PickAndPass` rows.
+///
+/// With [`MAX_DRAFT_EFFECT_PICKS`], the session-independent bound on a
+/// `DraftAction::Select` that names a draft-effect card in `server-core`'s
+/// `guard_draft_action_payload`, which receives only the action and can never
+/// consult the session (the exact count for the session's kind and head pack
+/// is `pick_pass::selection_requirements`'s). Derived from the procedure table,
+/// not chosen: `draft_effect_pick_bounds_match_procedure_table` fails if either
+/// bound drifts.
+pub const MIN_DRAFT_EFFECT_PICKS: usize = 2;
+
+/// The most picks a FIFO draft-effect selection takes in any kind with a pick
+/// step: Commander Draft's two-card step plus the additional card. See
+/// [`MIN_DRAFT_EFFECT_PICKS`].
+pub const MAX_DRAFT_EFFECT_PICKS: usize = 3;
 
 /// CR 702.124g: "no partner ability or combination of partner abilities can
 /// ever let a player have more than two commanders."
@@ -743,6 +773,103 @@ impl DraftKind {
     /// Match configuration for this draft kind.
     pub fn match_config(self) -> MatchConfig {
         self.procedure().match_config
+    }
+}
+
+/// Which boundary admits a draft configuration. The admission rules are the
+/// same at every boundary; the context only chooses the error a refusal
+/// reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionContext {
+    /// Creating or starting a session: a refusal reads as `StartDraft`'s.
+    Configuration,
+    /// Validating a persisted or imported session: a refusal reads as a
+    /// snapshot error.
+    Snapshot,
+}
+
+impl AdmissionContext {
+    fn sealed_refusal(self, reason: &str) -> DraftError {
+        match self {
+            AdmissionContext::Configuration => DraftError::InvalidSealedConfiguration {
+                reason: reason.to_string(),
+            },
+            AdmissionContext::Snapshot => DraftError::InvalidSealedSnapshot {
+                reason: reason.to_string(),
+            },
+        }
+    }
+}
+
+impl DraftKind {
+    /// Admit `pod_size` seats for this kind: the procedure's allowed range, or,
+    /// for a cube source, its local-cube range. The one seat-count admission
+    /// rule, asked by `StartDraft`, by persisted-snapshot validation and by
+    /// FIFO configuration validation.
+    pub(crate) fn admit_pod_size(
+        self,
+        source: &DraftSource,
+        tournament_format: TournamentFormat,
+        pod_size: u8,
+        context: AdmissionContext,
+    ) -> Result<(), DraftError> {
+        let procedure = self.procedure();
+        let local_cube_size_is_allowed = matches!(source, DraftSource::Cube { .. })
+            && procedure.allows_local_cube_pod_size(tournament_format, pod_size);
+        if procedure.allows_pod_size(tournament_format, pod_size) || local_cube_size_is_allowed {
+            return Ok(());
+        }
+        match context {
+            // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
+            // multiplayer game this kind is defined as. The procedure owns the full
+            // allowed range and the pairing-only single-elimination exact size.
+            AdmissionContext::Configuration if pod_size < procedure.min_pod_size => {
+                Err(DraftError::PodBelowMinimumSize {
+                    kind: self,
+                    required: procedure.min_pod_size,
+                    actual: pod_size,
+                })
+            }
+            AdmissionContext::Configuration => Err(DraftError::UnsupportedTournamentSize {
+                format: tournament_format,
+                required: *procedure.allowed_pod_size_range(tournament_format).start(),
+                actual: pod_size,
+            }),
+            AdmissionContext::Snapshot => Err(DraftError::InvalidSealedSnapshot {
+                reason: "pod size does not satisfy the draft procedure".to_string(),
+            }),
+        }
+    }
+
+    /// Admit an `AllAtOnce` (Sealed) configuration: a set source whose label is
+    /// the configuration's, and the session's when the caller passes one, with
+    /// this kind's pack count and minimum deck size.
+    pub(crate) fn admit_all_at_once(
+        self,
+        config: &DraftConfig,
+        session_set_code: Option<&str>,
+        context: AdmissionContext,
+    ) -> Result<(), DraftError> {
+        if !matches!(config.source, DraftSource::Set { .. }) {
+            return Err(DraftError::SealedRequiresSetSource);
+        }
+        // A multi-set source labels itself with its joined distinct codes, so the
+        // label is compared against `set_code()` rather than against any single
+        // pack's set.
+        if config.source.set_code() != config.set_code
+            || session_set_code.is_some_and(|code| code != config.set_code)
+        {
+            return Err(context.sealed_refusal("set source and session codes must match"));
+        }
+        let procedure = self.procedure();
+        if config.pack_count != procedure.packs_per_player
+            || config.min_deck_size != procedure.min_deck_size
+        {
+            return Err(
+                context.sealed_refusal("sealed requires six packs and a 40-card minimum deck")
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1113,10 +1240,13 @@ impl PassDirection {
 
     /// Calculate the next seat index in this pass direction, wrapping around the pod.
     pub fn next_seat(self, current: u8, pod_size: u8) -> u8 {
-        match self {
+        let current = u16::from(current);
+        let pod_size = u16::from(pod_size);
+        let next = match self {
             PassDirection::Left => (current + 1) % pod_size,
             PassDirection::Right => (current + pod_size - 1) % pod_size,
-        }
+        };
+        u8::try_from(next).expect("a seat modulo a u8 pod size fits u8")
     }
 }
 
@@ -1125,6 +1255,7 @@ impl PassDirection {
 pub enum DraftStatus {
     Lobby,
     Drafting,
+    Review,
     Paused,
     Deckbuilding,
     Pairing,
@@ -1474,6 +1605,18 @@ pub enum SharedStackRefusal {
 #[serde(tag = "type", content = "data")]
 pub enum DraftAction {
     StartDraft,
+    Select {
+        seat: u8,
+        prompt_id: DraftPromptId,
+        picked_card_instance_ids: Vec<String>,
+        burned_card_instance_ids: Vec<String>,
+        effect_card_instance_id: Option<String>,
+    },
+    Control {
+        control: DraftControl,
+    },
+    /// Trusted runtime observation; time is supplied separately to `apply_at`.
+    AdvanceClock,
     /// One whole CR 903.13b pick step: a seat takes every card it drafts this
     /// step in a single action.
     ///
@@ -1556,11 +1699,43 @@ pub enum DraftAction {
     },
 }
 
+impl DraftAction {
+    /// Whether only the FIFO flow can apply this action: a selection bound to a
+    /// prompt, a pause or resume, or a clock observation at explicit host time.
+    /// The legacy reducer and every runtime that does not run FIFO refuse these
+    /// through this one classification.
+    pub fn is_fifo_only(&self) -> bool {
+        match self {
+            DraftAction::Select { .. }
+            | DraftAction::Control { .. }
+            | DraftAction::AdvanceClock => true,
+            DraftAction::StartDraft
+            | DraftAction::Pick { .. }
+            | DraftAction::PickWithDraftEffect { .. }
+            | DraftAction::SubmitDeck { .. }
+            | DraftAction::GeneratePairings
+            | DraftAction::ReportMatchResult { .. }
+            | DraftAction::AdvanceRound
+            | DraftAction::ReplaceSeatWithBot { .. }
+            | DraftAction::SetSeatConnected { .. }
+            | DraftAction::SharedStackDecision { .. } => false,
+        }
+    }
+}
+
 /// State changes produced by applying a DraftAction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DraftDelta {
     DraftStarted,
+    SelectionAccepted {
+        prompt_id: DraftPromptId,
+        seat: u8,
+        picked_card_instance_ids: Vec<String>,
+        burned_card_instance_ids: Vec<String>,
+        returned_card_instance_id: Option<String>,
+        discarded_card_instance_ids: Vec<String>,
+    },
     CardPicked {
         seat: u8,
         card_instance_id: String,
@@ -1605,6 +1780,31 @@ pub enum DraftDelta {
 /// Errors that can occur during draft operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum DraftError {
+    #[error("invalid draft configuration: {reason}")]
+    InvalidConfiguration { reason: String },
+    #[error("invalid draft snapshot: {reason}")]
+    InvalidSnapshot { reason: String },
+    #[error("operation is incompatible with this draft flow")]
+    IncompatibleFlow,
+    #[error("FIFO operations require explicit host time")]
+    ExplicitTimeRequired,
+    #[error("stale draft prompt")]
+    StalePrompt,
+    #[error("draft prompt has expired")]
+    ExpiredPrompt,
+    #[error("invalid {role:?} count: expected {expected}, got {actual}")]
+    InvalidSelectionCount {
+        role: DraftSelectionRole,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("invalid {role:?} selection: {reason}")]
+    InvalidSelection {
+        role: DraftSelectionRole,
+        reason: String,
+    },
+    #[error("draft clock or counter is outside its bounds")]
+    InvalidClockBounds,
     #[error("invalid transition from {from:?}: {action}")]
     InvalidTransition { from: DraftStatus, action: String },
     #[error("seat {seat} out of range for pod size {pod_size}")]
@@ -1613,6 +1813,10 @@ pub enum DraftError {
     CardNotInPack { card_instance_id: String },
     #[error("draft effect card '{card_instance_id}' is not in the player's pool")]
     DraftEffectCardNotInPool { card_instance_id: String },
+    /// For a legacy `PickWithDraftEffect`, `actual_cards` counts the ids the
+    /// action supplied (1 when both ids name the same card). For a FIFO
+    /// selection whose head pack is too small for the effect's step, it counts
+    /// the cards the head holds.
     #[error("draft effect requires {expected_cards} cards, got {actual_cards}")]
     InvalidDraftEffectSelection {
         expected_cards: usize,
@@ -1686,6 +1890,12 @@ pub enum DraftError {
 /// Configuration for a draft session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftConfig {
+    #[serde(default, skip_serializing_if = "DraftFlow::is_legacy")]
+    pub flow: DraftFlow,
+    #[serde(default, skip_serializing_if = "DraftSelectionPolicy::is_default")]
+    pub selection_policy: DraftSelectionPolicy,
+    #[serde(default, skip_serializing_if = "DraftClockPolicy::is_default")]
+    pub clock_policy: DraftClockPolicy,
     #[serde(default)]
     pub source: DraftSource,
     pub set_code: String,
@@ -1726,7 +1936,7 @@ pub struct DraftConfig {
 /// this field lands on `8`.
 ///
 /// That is unreachable from any in-tree producer: `DraftConfig` derives
-/// `Serialize` with no `skip_serializing_if` on any field, so every serializer
+/// `Serialize` and never skips `pod_size`, so every serializer
 /// in this repo emits `pod_size`, and a pre-`CommanderDraft` save — the case
 /// this fallback exists for — cannot name a kind that did not exist when it was
 /// written. The residual is a hand-crafted payload at a system boundary, which
@@ -1819,7 +2029,7 @@ impl DraftPairing {
 }
 
 /// The full state of a draft session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftSession {
     /// Original source name multiset, including copies and entries never dealt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1837,6 +2047,8 @@ pub struct DraftSession {
     /// is status-gated, not the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_stack: Option<SharedStackState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo: Option<FifoDraftState>,
     pub draft_code: String,
     pub set_code: String,
     pub kind: DraftKind,
@@ -1883,6 +2095,276 @@ pub struct DraftSession {
     pub current_round: u8,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// Limits shared by the pure reducer and untrusted transport admission.
+pub const MAX_DRAFT_ID_BYTES: usize = 128;
+pub const MAX_DRAFT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+pub const MAX_DRAFT_DURATION_MS: u32 = 86_400_000;
+
+pub fn valid_draft_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_DRAFT_ID_BYTES && !id.chars().any(char::is_control)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftFlow {
+    #[default]
+    LegacyBarrier,
+    FifoAsync,
+}
+
+impl DraftFlow {
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::LegacyBarrier
+    }
+}
+
+/// The refusal a runtime that does not run the FIFO flow gives for a FIFO
+/// session or a FIFO-only action.
+pub const FIFO_UNSUPPORTED_BY_RUNTIME: &str = "FIFO drafting is not supported by this runtime";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftSelectionPolicy {
+    pub burns_per_pick: u8,
+    pub discard_threshold: u8,
+}
+
+impl DraftSelectionPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum PickClockPolicy {
+    #[default]
+    Off,
+    Fixed {
+        duration_ms: u32,
+    },
+    SeatStep,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftClockPolicy {
+    pub pick: PickClockPolicy,
+    pub review_duration_ms: u32,
+}
+
+/// The native server's pick window, in seconds, when a draft sets no timer: the
+/// legacy pick timer and the FIFO native clock policy both use it.
+pub const NATIVE_DEFAULT_PICK_TIMER_SECONDS: u32 = 75;
+
+impl DraftClockPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn quick_default() -> Self {
+        Self::default()
+    }
+    pub fn native(timer_seconds: Option<u32>, review_seconds: u32) -> Result<Self, DraftError> {
+        let duration_ms =
+            Self::milliseconds(timer_seconds.unwrap_or(NATIVE_DEFAULT_PICK_TIMER_SECONDS))?;
+        Ok(Self {
+            pick: if duration_ms == 0 {
+                PickClockPolicy::Off
+            } else {
+                PickClockPolicy::Fixed { duration_ms }
+            },
+            review_duration_ms: Self::milliseconds(review_seconds)?,
+        })
+    }
+    pub fn p2p(policy: PodPolicy, review_seconds: u32) -> Result<Self, DraftError> {
+        Ok(Self {
+            pick: match policy {
+                PodPolicy::Casual => PickClockPolicy::Off,
+                PodPolicy::Competitive => PickClockPolicy::SeatStep,
+            },
+            review_duration_ms: Self::milliseconds(review_seconds)?,
+        })
+    }
+    fn milliseconds(seconds: u32) -> Result<u32, DraftError> {
+        seconds
+            .checked_mul(1000)
+            .filter(|ms| *ms <= MAX_DRAFT_DURATION_MS)
+            .ok_or(DraftError::InvalidClockBounds)
+    }
+    pub fn validate(&self) -> Result<(), DraftError> {
+        if self.review_duration_ms > MAX_DRAFT_DURATION_MS
+            || matches!(self.pick, PickClockPolicy::Fixed { duration_ms } if duration_ms == 0 || duration_ms > MAX_DRAFT_DURATION_MS)
+        {
+            return Err(DraftError::InvalidClockBounds);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DraftSessionId(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DraftPackId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftPromptId {
+    pub session_id: DraftSessionId,
+    pub seat: u8,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftSelectionRole {
+    Pick,
+    Burn,
+    Effect,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftSelectionRequirements {
+    pub picks: usize,
+    pub burns: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftActivePhase {
+    Drafting,
+    Review,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum DraftControl {
+    Pause { reason: DraftPauseReason },
+    Resume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum DraftClockTarget {
+    Pick { prompt_id: DraftPromptId },
+    Review { next_round: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum DraftClockState {
+    Running { deadline_ms: u64 },
+    Frozen { remaining_ms: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftClock {
+    pub target: DraftClockTarget,
+    pub state: DraftClockState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftPrompt {
+    pub id: DraftPromptId,
+    pub pack_id: DraftPackId,
+    #[serde(deserialize_with = "required_nullable")]
+    pub clock: Option<DraftClock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueuedDraftPack {
+    pub pack_id: DraftPackId,
+    pub opening_seat: u8,
+    pub round: u8,
+    pub original_size: u8,
+    pub pack: DraftPack,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FifoSeatState {
+    pub queue: VecDeque<QueuedDraftPack>,
+    pub generation: u64,
+    #[serde(deserialize_with = "required_nullable")]
+    pub prompt: Option<DraftPrompt>,
+    pub completed_steps: u64,
+    pub round_completed_steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftPackProvenance {
+    pub pack_id: DraftPackId,
+    pub opening_seat: u8,
+    pub round: u8,
+    pub original_size: u8,
+    pub original_card_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftCardProvenance {
+    pub pack_id: DraftPackId,
+    pub card: DraftCardInstance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftRemovalReason {
+    Burn,
+    Threshold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovedDraftCard {
+    pub card_instance_id: String,
+    pub pack_id: DraftPackId,
+    pub reason: DraftRemovalReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftReviewState {
+    pub exhausted_round: u8,
+    pub next_round: u8,
+    pub clock: DraftClock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftPausedState {
+    pub phase: DraftActivePhase,
+    pub reason: DraftPauseReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FifoDraftState {
+    pub session_id: DraftSessionId,
+    pub revision: u64,
+    pub last_now_ms: u64,
+    pub seats: Vec<FifoSeatState>,
+    pub packs: BTreeMap<DraftPackId, DraftPackProvenance>,
+    pub cards: BTreeMap<String, DraftCardProvenance>,
+    pub removed: Vec<RemovedDraftCard>,
+    pub returned_effects: BTreeMap<String, DraftPackId>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub review: Option<DraftReviewState>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub paused: Option<DraftPausedState>,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[cfg(test)]
@@ -2302,6 +2784,40 @@ mod tests {
             derived, MAX_CARDS_PER_PICK,
             "MAX_CARDS_PER_PICK must equal the largest cards_per_pick in the procedure table"
         );
+    }
+
+    /// [`MIN_DRAFT_EFFECT_PICKS`] and [`MAX_DRAFT_EFFECT_PICKS`] are derived
+    /// from the procedure table, not chosen.
+    ///
+    /// `server-core`'s payload guard cannot consult a session, so it bounds a
+    /// `Select` that names a draft-effect card by these two constants. If a
+    /// kind's pick step changed without them, the wire would refuse that kind's
+    /// legitimate effect selections or admit impossible ones.
+    #[test]
+    fn draft_effect_pick_bounds_match_procedure_table() {
+        let mut observed_pick_steps = 0usize;
+        let mut fewest = usize::MAX;
+        let mut most = 0usize;
+        for kind in DraftKind::ALL {
+            let procedure = kind.procedure();
+            match procedure.distribution {
+                PackDistribution::PickAndPass => {
+                    observed_pick_steps += 1;
+                    let step = procedure.additional_pick_step_size();
+                    fewest = fewest.min(step);
+                    most = most.max(step);
+                }
+                PackDistribution::AllAtOnce | PackDistribution::SharedStackPiles { .. } => {}
+            }
+        }
+        // Reach guard: a fold that observed no kind with a pick step would
+        // compare the constants against its own starting values.
+        assert!(
+            observed_pick_steps >= 1,
+            "the fold must observe at least one kind with a pick step"
+        );
+        assert_eq!(fewest, MIN_DRAFT_EFFECT_PICKS);
+        assert_eq!(most, MAX_DRAFT_EFFECT_PICKS);
     }
 
     /// `DraftKind::ALL` must list every variant exactly once.
@@ -2762,5 +3278,23 @@ mod tests {
         }"#;
         let config: DraftConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.spectator_visibility, SpectatorVisibility::Public);
+    }
+
+    #[test]
+    fn selection_accepted_complete_delta_round_trips() {
+        let delta = DraftDelta::SelectionAccepted {
+            prompt_id: DraftPromptId {
+                session_id: DraftSessionId("incarnation".into()),
+                seat: 3,
+                generation: 27,
+            },
+            seat: 3,
+            picked_card_instance_ids: vec!["pick-b".into(), "pick-a".into()],
+            burned_card_instance_ids: vec!["burn-b".into(), "burn-a".into()],
+            returned_card_instance_id: Some("effect".into()),
+            discarded_card_instance_ids: vec!["remainder".into(), "effect".into()],
+        };
+        let json = serde_json::to_value(&delta).unwrap();
+        assert_eq!(serde_json::from_value::<DraftDelta>(json).unwrap(), delta);
     }
 }
