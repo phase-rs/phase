@@ -107,11 +107,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let GameAction::ActivateAbility {
-            source_id,
-            ability_index: _,
-        } = &ctx.candidate.action
-        else {
+        let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
@@ -876,6 +872,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

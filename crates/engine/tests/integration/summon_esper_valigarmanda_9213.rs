@@ -2174,6 +2174,7 @@ fn a_selected_free_cast_keeps_its_required_cost_without_a_second_alternative() {
         .act(GameAction::ActivateAbility {
             source_id: caster,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the free-cast instruction");
     runner.resolve_top();
@@ -2514,6 +2515,7 @@ fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
             .act(GameAction::ActivateAbility {
                 source_id: reserved,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect_err("one permanent cannot pay both sacrifices");
         assert!(error
@@ -2528,6 +2530,7 @@ fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
                 .act(GameAction::ActivateAbility {
                     source_id: other,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect("activate the other Blood Vassal during the mana window")
                 .events,
@@ -2790,12 +2793,14 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
             .act(GameAction::ActivateAbility {
                 source_id: jace,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect_err("the earlier resolved activation has spent this turn's loyalty window");
         runner
             .act(GameAction::ActivateAbility {
                 source_id: comet,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate Comet's [0]");
         force_next_d6(&mut runner, 6);
@@ -2851,6 +2856,7 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
             .act(GameAction::ActivateAbility {
                 source_id: blood,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("sacrifice Blood Vassal for mana during payment");
         assert_eq!(runner.state().objects[&blood].zone, Zone::Graveyard);
@@ -2892,6 +2898,7 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
                 .act(GameAction::ActivateAbility {
                     source_id: jace,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect_err("canceling another spell cannot reopen the loyalty window");
         }
@@ -2992,6 +2999,7 @@ fn check_linked_paid_cast_mana_boundary(route: &str) {
                     .act(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: 1,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     })
                     .expect("activate the stack-using partner");
                 assert_eq!(runner.state().objects[&mill].zone, Zone::Graveyard);

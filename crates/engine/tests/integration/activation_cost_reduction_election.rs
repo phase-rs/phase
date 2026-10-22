@@ -211,6 +211,7 @@ impl Board {
         self.runner.act(GameAction::ActivateAbility {
             source_id: self.source,
             ability_index: self.ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
     }
 
@@ -518,6 +519,7 @@ fn a_bare_loyalty_cost_is_untouched_by_reductions() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the loyalty ability must activate");
     assert_eq!(
@@ -1517,6 +1519,7 @@ fn the_loyalty_placement_records_through_the_authority() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the loyalty ability activates");
     assert_eq!(runner.state().stack.len(), 1);

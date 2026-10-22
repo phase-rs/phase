@@ -173,6 +173,7 @@ fn fetchland_candidate(fetch: ObjectId) -> CandidateAction {
         action: GameAction::ActivateAbility {
             source_id: fetch,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }

@@ -160,6 +160,7 @@ fn legal_ability_indices(state: &GameState, player: PlayerId, source: ObjectId) 
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == source => Some(*ability_index),
             _ => None,
         })
@@ -259,6 +260,7 @@ fn v1b_a_confined_fetchland_accepts_instead_of_buying_a_vacuous_window() {
         actions.contains(&GameAction::ActivateAbility {
             source_id: terramorphic,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto
         }),
         "REACH-GUARD 1: the fetchland's ability must be enumerated, otherwise this row \
          degenerates to the empty-board stage-1 path; got {actions:?}"
@@ -790,7 +792,7 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
         .map(|a| match a {
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } => {
                 let o = state.objects.get(source_id);
                 format!(
@@ -1292,6 +1294,7 @@ fn v9a_stage_two_folds_over_every_action_stage_one_counted() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let (probe, flat) = engine::ai_support::shortcut_probe(runner.state(), P2);
@@ -1360,6 +1363,7 @@ fn v9b_a_sacrifice_for_mana_seat_still_gets_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: ironworks,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     let flat = probe_actions(runner.state(), P2);
@@ -1919,6 +1923,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
     let activation = GameAction::ActivateAbility {
         source_id: petal,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
 
     assert!(
@@ -2044,6 +2049,7 @@ fn v10b_an_actor_owned_sacrifice_for_mana_seat_keeps_its_window() {
             .contains(&GameAction::ActivateAbility {
                 source_id: sol_ring,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             }),
         "REACH-GUARD: the Sol Ring must reach the sweep stage 2 filters, or the negatives \
          below pass because nothing was ever there to re-admit — which is not the \

@@ -360,6 +360,7 @@ fn drive_embalm(runner: &mut GameRunner, vizier: ObjectId, copy_target: Option<&
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
     drive_prompts(runner, copy_target)

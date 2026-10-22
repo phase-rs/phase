@@ -409,6 +409,7 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         GameAction::ActivateAbility {
             source_id: gemstone_id,
             ability_index: gemstone_mana_ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("P1 must be able to activate Gemstone Caverns' exported mana ability");
@@ -499,6 +500,7 @@ fn gemstone_caverns_without_luck_makes_colorless_despite_controller_luck_elsewhe
         .act(GameAction::ActivateAbility {
             source_id: gemstone,
             ability_index: mana_ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the public activation action must activate Gemstone Caverns");
 

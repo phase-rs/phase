@@ -66,7 +66,11 @@ pub(crate) fn activation_announcement_is_live(state: &GameState, next_wait: &Wai
 
 /// The unscanned events in `events[start..]`, after occurrence claims and the
 /// queued zone-change witness (CR 603.2c: one trigger per occurrence).
-fn unclaimed_events(state: &GameState, events: &[GameEvent], start: usize) -> Vec<GameEvent> {
+pub(crate) fn unclaimed_events(
+    state: &GameState,
+    events: &[GameEvent],
+    start: usize,
+) -> Vec<GameEvent> {
     triggers::filter_already_collected_trigger_events_from(
         state,
         events,

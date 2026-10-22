@@ -22,6 +22,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -197,6 +198,7 @@ fn hearse_ability_resolving_after_a_blink_links_nothing_to_the_new_hearse() {
         .act(GameAction::ActivateAbility {
             source_id: hearse,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Hearse's {T} ability");
     for card in graveyard_cards {

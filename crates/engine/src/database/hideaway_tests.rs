@@ -837,6 +837,7 @@ fn returned_hideaway_source_offers_only_its_own_exiled_card() {
         .act(GameAction::ActivateAbility {
             source_id: bridge,
             ability_index: 1,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the play ability");
     let mut offered = false;

@@ -81,6 +81,7 @@ fn activate_mosswort_second_ability(
     let activate = runner.act(GameAction::ActivateAbility {
         source_id: mosswort,
         ability_index: 1,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     if let Err(e) = &activate {
         panic!(
@@ -640,6 +641,7 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
         .act(GameAction::ActivateAbility {
             source_id: mosswort,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Mosswort Bridge's second ability");
     assert!(

@@ -604,6 +604,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -985,6 +986,7 @@ fn drive_embalm_copy(
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 

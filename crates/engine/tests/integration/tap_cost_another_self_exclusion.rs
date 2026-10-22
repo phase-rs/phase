@@ -60,7 +60,7 @@ fn offers_activation(runner: &GameRunner, source: ObjectId) -> bool {
                 action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if *source_id == source
             )
         })
@@ -101,6 +101,7 @@ fn the_source_alone_cannot_pay_its_own_tap_another_cost() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             })
             .is_err(),
         "activating anyway must be rejected — the source may not tap itself for the cost"
