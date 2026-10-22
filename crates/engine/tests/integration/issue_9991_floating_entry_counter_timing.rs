@@ -211,7 +211,7 @@ fn tapped_then_dynamic_counter_prefix_freezes_population_before_response() {
 }
 
 #[test]
-fn mixed_arithmetic_with_recipient_leaf_stays_dynamic_as_a_whole() {
+fn mixed_arithmetic_freezes_population_but_keeps_recipient_live() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     source(
@@ -231,8 +231,33 @@ fn mixed_arithmetic_with_recipient_leaf_stays_dynamic_as_a_whole() {
     let mut runner = scenario.build();
     install(&mut runner, spell);
     remove_after_install(&mut runner, response, victim);
-    // CR 614.1c: recipient MV8 plus the remaining source, not source MV1.
-    finish(&mut runner, spell, 9);
+    // CR 611.2d + CR 614.1c: population stays two; recipient MV8 is read at entry.
+    finish(&mut runner, spell, 10);
+}
+
+#[test]
+fn mixed_arithmetic_event_mana_value_survives_cleared_trigger_context() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(QuantityExpr::Sum {
+            exprs: vec![
+                quantity(QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                }),
+                quantity(QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                }),
+            ],
+        }),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 608.2h + CR 614.1c: the cast spell and entering recipient each have
+    // MV8 (six generic, one green, one blue), even after trigger context clears.
+    finish(&mut runner, spell, 16);
 }
 
 #[test]

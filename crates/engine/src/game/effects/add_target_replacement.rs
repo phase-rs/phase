@@ -1,11 +1,9 @@
-use crate::game::quantity::{
-    quantity_expr_contains_scope, quantity_expr_uses_recipient, resolve_quantity_with_targets,
-};
+use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
     AbilityDefinition, CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Duration,
-    Effect, EffectError, EffectKind, ObjectScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    Effect, EffectError, EffectKind, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
     TargetRef,
 };
@@ -483,23 +481,12 @@ fn freeze_damage_modification_x(
     }
 }
 
-/// CR 614.1c: preserve quantities that need the entering permanent's context.
-/// Any deferred leaf keeps its entire arithmetic expression dynamic.
-fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef> {
-    match expr {
-        QuantityExpr::Fixed { .. } => None,
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. } => entry_counter_deferred_reference(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().find_map(entry_counter_deferred_reference)
-        }
-        QuantityExpr::UpTo { max } => entry_counter_deferred_reference(max),
-        QuantityExpr::Power { exponent, .. } => entry_counter_deferred_reference(exponent),
-        QuantityExpr::Difference { left, right } => entry_counter_deferred_reference(left)
-            .or_else(|| entry_counter_deferred_reference(right)),
-        QuantityExpr::Ref { qty } => match qty {
+/// CR 614.1c: preserve reference leaves that need the entering permanent's context.
+fn entry_counter_reference_is_deferred(expr: &QuantityExpr) -> bool {
+    let QuantityExpr::Ref { qty } = expr else {
+        return false;
+    };
+    match qty {
             // Payment facts belong to the entering spell. Preserved limitations:
             // CostXPaid still reads source/trigger context, not ctx.entering;
             // SharedCardTypes needs ctx.spell, which entry extraction lacks.
@@ -508,10 +495,10 @@ fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef>
             | QuantityRef::AdditionalCostPaymentCount
             | QuantityRef::AdditionalCostPaymentCountFor { .. }
             | QuantityRef::ConvokedCreatureCount
-            | QuantityRef::SharedCardTypes { .. } => Some(qty),
+            | QuantityRef::SharedCardTypes { .. } => true,
             QuantityRef::ManaSpentToCast { scope, .. } => match scope {
-                CastManaObjectScope::SelfObject => Some(qty),
-                CastManaObjectScope::TriggeringSpell | CastManaObjectScope::AbilityTarget => None,
+                CastManaObjectScope::SelfObject => true,
+                CastManaObjectScope::TriggeringSpell | CastManaObjectScope::AbilityTarget => false,
             },
             QuantityRef::Power { .. }
             | QuantityRef::BasePower { .. }
@@ -523,11 +510,9 @@ fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef>
             | QuantityRef::ObjectTypelineComponentCount { .. }
             | QuantityRef::ManaSymbolsInManaCost { .. }
             | QuantityRef::CountersOn { .. }
-            | QuantityRef::NameStickerLetterCount { .. } => {
-                quantity_expr_contains_scope(expr, ObjectScope::Recipient).then_some(qty)
-            }
-            // Delegate player/filter recipient analysis to its existing authority.
-            QuantityRef::HandSize { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
+            // Delegate all object/player/filter recipient analysis to its authority.
+            | QuantityRef::HandSize { .. }
             | QuantityRef::LifeTotal { .. }
             | QuantityRef::GraveyardSize { .. }
             | QuantityRef::StartingLifeTotal { .. }
@@ -559,7 +544,7 @@ fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef>
             | QuantityRef::DistinctCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::DistinctColorsAmong { .. }
-            | QuantityRef::PlayerCount { .. } => quantity_expr_uses_recipient(expr).then_some(qty),
+            | QuantityRef::PlayerCount { .. } => quantity_expr_uses_recipient(expr),
             // CR 608.2h: resolution-owned source/controller/event reads are fixed
             // now. In particular, EventSource/EventTarget and trigger-spell mana
             // reads lose current_trigger_event when stack resolution completes.
@@ -605,8 +590,46 @@ fn entry_counter_deferred_reference(expr: &QuantityExpr) -> Option<&QuantityRef>
             | QuantityRef::ColorsInCommandersColorIdentity
             | QuantityRef::CommanderCastFromCommandZoneCount
             | QuantityRef::CommanderManaValue { .. }
-            | QuantityRef::VoteCount { .. } => None,
-        },
+            | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// CR 611.2d + CR 608.2h: snapshot each resolution-owned reference while its
+/// ability/source/event context is available; keep entry-time leaves live.
+/// Arithmetic remains the shared quantity resolver's responsibility.
+fn freeze_entry_counter_expression(
+    expr: &mut QuantityExpr,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) {
+    match expr {
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { .. } => {
+            if !entry_counter_reference_is_deferred(expr) {
+                *expr = QuantityExpr::Fixed {
+                    value: resolve_quantity_with_targets(state, expr, ability),
+                };
+            }
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            freeze_entry_counter_expression(inner, state, ability);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for expr in exprs {
+                freeze_entry_counter_expression(expr, state, ability);
+            }
+        }
+        QuantityExpr::UpTo { max } => freeze_entry_counter_expression(max, state, ability),
+        QuantityExpr::Power { exponent, .. } => {
+            freeze_entry_counter_expression(exponent, state, ability);
+        }
+        QuantityExpr::Difference { left, right } => {
+            freeze_entry_counter_expression(left, state, ability);
+            freeze_entry_counter_expression(right, state, ability);
+        }
     }
 }
 
@@ -632,13 +655,7 @@ fn freeze_entry_counter_quantities(
             break;
         }
         if let Effect::PutCounter { count, .. } = execute.effect.as_mut() {
-            if !matches!(count, QuantityExpr::Fixed { .. })
-                && entry_counter_deferred_reference(count).is_none()
-            {
-                *count = QuantityExpr::Fixed {
-                    value: resolve_quantity_with_targets(state, count, ability),
-                };
-            }
+            freeze_entry_counter_expression(count, state, ability);
         }
         current = execute.sub_ability.as_deref_mut();
     }
@@ -744,12 +761,14 @@ pub fn resolve(
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
         freeze_entry_counter_quantities(&mut replacement, state, ability);
-        // CR 113.7a + CR 608.2h: the floating rider still refers to its source
-        // ("this enchantment"); anchor that host so the pending scan's host-relative
-        // gates and deferred entry-modifier quantities (via `replacement_source_host`)
-        // read the installing source, not the ObjectId(0) storage sentinel.
-        // Source-independent counts were already frozen with the resolving
-        // ability's source information; deferred entering-object reads stay live.
+        // CR 113.7a + CR 608.2h: a floating rider may still refer to its source
+        // ("this enchantment"); a battlefield source anchors host-relative gates
+        // and deferred quantities (via `replacement_source_host`).
+        // Resolution-owned counts, including source reads, were frozen above
+        // with the resolving ability's source/LKI context (CR 611.2d). Deferred
+        // entering-object reads stay live. A source not on the battlefield at
+        // resolution still leaves the host as the sentinel for gates and any
+        // deferred source read.
         super::install_floating_damage_replacement(
             state,
             replacement,
