@@ -10,8 +10,8 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, GameState, PendingCostMoveResume, PendingCounterPostAction,
-    TokenEntryEventEmission, WaitingFor,
+    CombatPauseSlot, CounterCostRootSubtree, GameState, PendingCostMoveResume,
+    PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -23,6 +23,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
+use super::combat::DamageTarget;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
@@ -166,12 +167,77 @@ pub(crate) fn drain_pending_connive_reentry(
     }
 }
 
+/// CR 510.2 + CR 616.1: whether the just-answered damage event's survivor
+/// must be STASHED into the parked combat-damage batch instead of applied.
+/// Stash iff a damage record is parked AND unstashed (`decided.len() ==
+/// paused_entry`, which also re-arms correctly across re-pause) AND the
+/// answered prompt owns the paused slot — by its combat-pause stamp (Matt
+/// R12: stable ownership captured at the pause point, surviving recipient
+/// rewrites and repeated choices) or, for a prompt that carries no stamp, by
+/// the legacy answered-identity match against the paused entry's source +
+/// target. Nested answers therefore deliver inline exactly once (never
+/// stashed, never lost): after the paused slot is stashed the len gate
+/// excludes them, and the stamp/identity match excludes them regardless.
+fn combat_damage_answer_stashes(
+    state: &GameState,
+    parked_damage_identity: &Option<(ObjectId, TargetRef, bool)>,
+    parked_combat_pause_slot: &Option<CombatPauseSlot>,
+) -> bool {
+    let Some(record) = state.pending_combat_damage.as_ref() else {
+        return false;
+    };
+    if record.decided.len() != record.paused_entry {
+        return false;
+    }
+    // Matt R12: the stamp binds the paused member to its replacement
+    // continuation across recipient rewrites — a prompt stamped for this exact
+    // slot (index, cross-checked against the entry's source) settles it no
+    // matter what the parked `proposed` currently names.
+    let stamped_for_this_slot = parked_combat_pause_slot.is_some_and(|slot| {
+        slot.paused_entry == record.paused_entry
+            && record
+                .entries
+                .get(slot.paused_entry)
+                .is_some_and(|entry| entry.ctx.source_id == slot.source)
+    });
+    if stamped_for_this_slot {
+        return true;
+    }
+    let Some((source_id, target, _)) = parked_damage_identity else {
+        return false;
+    };
+    let Some(entry) = record.entries.get(record.paused_entry) else {
+        return false;
+    };
+    if entry.ctx.source_id != *source_id {
+        return false;
+    }
+    match (&entry.assignment.target, target) {
+        (DamageTarget::Object(a), TargetRef::Object(b)) => a == b,
+        (DamageTarget::Player(a), TargetRef::Player(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Push the paused slot's stash. A set `paused_entry_pruned` flag converts
+/// the slot to `None` and is taken on use (damage to departed recipients
+/// does nothing, CR 800.4e/614.9). The caller checked the stash gate.
+fn stash_paused_combat_damage_slot(state: &mut GameState, survivor: Option<ProposedEvent>) {
+    let record = state
+        .pending_combat_damage
+        .as_mut()
+        .expect("the stash gate checked a damage record is parked");
+    let pruned = std::mem::take(&mut record.paused_entry_pruned);
+    record.decided.push(if pruned { None } else { survivor });
+}
+
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
-/// A simultaneous combat-damage batch (CR 510.2) parks in `state.pending_combat_lifelink`
-/// when a lifelink life gain meets two or more co-applicable replacements. This is the only
-/// boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
+/// A simultaneous combat-damage batch (CR 510.2) parks in
+/// `state.pending_combat_lifelink` (lifelink gain ordering) or
+/// `state.pending_combat_damage` (pre-application damage ordering). This is the
+/// only boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
 /// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
 /// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
 /// which has no such anchor. Stored on the record it would be a persisted index into a
@@ -186,14 +252,141 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
+    // tail was empty parks no continuation, so no drain will ever run for it.
+    // Capture the stamp before the inner handler consumes the record; the
+    // hook below publishes exactly this batch's frames on the fresh outcome,
+    // even while an outer continuation remains queued.
+    let parked_batch_owner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.each_source_batch_owner);
+    // CR 510.2 + CR 615.13 + CR 616.1: a parked combat-damage batch owns this
+    // answer's prevention accumulation. Install its parked prefix as the live
+    // window (locals only — the outer window is restored below on EVERY
+    // return), so the resumed choice's accumulation joins the batch instead
+    // of fragmenting into per-event emission.
+    let outer_tally = if state.pending_combat_damage.is_some() {
+        let live_window = state.combat_prevention_tally.take();
+        let (outer_tally, live) = {
+            // `take()` above needs `&mut`, so the record re-borrows in scope.
+            #[allow(clippy::unnecessary_unwrap)]
+            let record = state
+                .pending_combat_damage
+                .as_ref()
+                .expect("checked parked above");
+            // The live window is `#[serde(skip)]`, so a mid-pause save/load
+            // drops it: prefer it when present, else hydrate the pre-batch
+            // window the park captured.
+            let outer_tally = live_window.or_else(|| {
+                record.outer_tally.as_ref().map(|entries| {
+                    super::effects::deal_damage::tally_map_from_record_entries(entries)
+                })
+            });
+            let mut live =
+                super::effects::deal_damage::tally_map_from_record_entries(&record.phase_a_tally);
+            for (key, amount) in
+                super::effects::deal_damage::tally_map_from_record_entries(&record.phase_b_tally)
+            {
+                *live.entry(key).or_insert(0) += amount;
+            }
+            (outer_tally, live)
+        };
+        state.combat_prevention_tally = Some(live);
+        outer_tally
+    } else {
+        None
+    };
     let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // CR 510.2 + CR 615.13 + CR 616.1: snapshot the answer's accumulation back
+    // into the parked record (ONE field — Phase B, clearing Phase A — so
+    // reinstall is unambiguous) and restore the outer window. Runs on EVERY
+    // return with a record parked, so the combat window is live ONLY during
+    // the inner handler. A vanished live window snapshots nothing: the
+    // install only READ the record, so the parked prefix is still intact.
+    if state.pending_combat_damage.is_some() {
+        if let Some(live) = state.combat_prevention_tally.take() {
+            if let Some(record) = state.pending_combat_damage.as_mut() {
+                record.phase_a_tally = Vec::new();
+                record.phase_b_tally = super::effects::deal_damage::tally_entries_for_record(&live);
+            }
+        }
+        state.combat_prevention_tally = outer_tally;
+    }
+    // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
+    // empty (single source, no downstream) completes with no drain at all, so
+    // the drain hook never evaluates — publish here on the fresh outcome. A
+    // still-queued chain defers to the drain hook (active check); a nested
+    // pause defers to its own resume (fresh choice check). Pop-once makes the
+    // overlap with the drain hook idempotent.
+    //
+    // CR 615.13 + CR 616.1e (Matt M1): when the answered prompt carries its
+    // batch's stamp, that batch's frames publish at its own boundary — before
+    // any outer tail resumes. Deferring would leave a completed nested child
+    // parked for the outer tail to hydrate. Prompts without a stamp keep the
+    // legacy quiescent flush (their tail owns its boundary through its
+    // stamped continuation).
+    if !state.pending_each_source_batches.is_empty()
+        && matches!(waiting_for, WaitingFor::Priority { .. })
+    {
+        // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses mid-drainage
+        // parks a FRESH choice — it wins over the cached Priority, and the
+        // lifelink tail below must not run while a prompt is open. The flush
+        // already synced `state.waiting_for`.
+        if let Some(owner) = parked_batch_owner {
+            if let Some(fresh) =
+                super::effects::deal_damage::flush_owned_each_source_batches(state, events, owner)
+            {
+                return Ok(fresh);
+            }
+        }
+        if state.active_ability_continuation().is_none()
+            && !state.pending_each_source_batches.is_empty()
+        {
+            if let Some(fresh) =
+                super::effects::deal_damage::flush_pending_each_source_batches(state, events)
+            {
+                return Ok(fresh);
+            }
+        }
+    }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        // CR 510.2 + CR 603.3b: EVERY non-Priority answer's events join the ONE
+        // batch (CR 616.1f repeats AND sub-drain fresh prompts) — fold them
+        // into the damage record AND claim them, so no answer's inline-rider
+        // events strand into a premature separate batch.
+        if let Some(record) = state.pending_combat_damage.as_mut() {
+            record
+                .batch_events
+                .extend_from_slice(&events[action_event_start..]);
+        }
+        if state.pending_combat_damage.is_some() {
+            super::combat_damage::claim_combat_lifelink_batch_events_for_ordinary_collection(
+                state,
+                events,
+                action_event_start,
+            );
+        }
         return Ok(waiting_for);
     }
     state.waiting_for = waiting_for.clone();
+    debug_assert!(
+        state.pending_combat_damage.is_none() || state.pending_combat_lifelink.is_none(),
+        "single-park invariant: at most one combat batch parks"
+    );
+    // Damage before lifelink: a damage resume owns its outcome (re-pause
+    // prompt, lifelink-pause prompt, finish prompt, or the Priority
+    // sentinel), so the lifelink drain runs only when no damage record was
+    // parked.
+    if let Some(resumed) =
+        super::combat_damage::resume_pending_combat_damage(state, action_event_start, events)
+    {
+        return Ok(resumed);
+    }
     Ok(
         super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
             .unwrap_or(waiting_for),
@@ -319,6 +512,39 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
+    // tail was empty parks no continuation, so no drain will ever run for it.
+    // Captured before `continue_replacement` consumes the record; the Execute
+    // epilogue publishes exactly this batch's frames before any queued work
+    // resumes.
+    let parked_batch_owner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.each_source_batch_owner);
+    // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): same-event identity for the
+    // stamp restore in the NeedsChoice epilogue below. A mandatory modifier
+    // changes the amount, so the (source, recipient, combat) triple
+    // discriminates the repeated event from a nested child event's choice.
+    let parked_damage_identity: Option<(ObjectId, TargetRef, bool)> = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| match &pending.proposed {
+            ProposedEvent::Damage {
+                source_id,
+                target,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *is_combat)),
+            _ => None,
+        });
+    // CR 510.2 + CR 616.1 (Matt R12): the answered prompt's combat-pause
+    // stamp, captured before `continue_replacement` consumes the pending
+    // record — the stash gate's stable ownership signal.
+    let parked_combat_pause_slot: Option<CombatPauseSlot> = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.combat_pause_slot);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -334,6 +560,30 @@ fn handle_replacement_choice_inner(
     }
     match result {
         super::replacement::ReplacementResult::Execute(event) => {
+            // CR 510.2 + CR 616.1: a transformed (non-Damage) Execute payload
+            // for the PAUSED combat event stashes `None` at the arm's ENTRY —
+            // dominating the early returns — and RETURNS with no generic
+            // delivery (the `None` stash is the paused slot's whole
+            // settlement; the transformed payload is dropped, symmetric to
+            // the lifelink "never re-queued" loss). Damage payloads proceed
+            // to the Damage sub-arm. No Damage→non-Damage pipeline transform
+            // is known — every applier arm returns Damage/Modified(Damage)/
+            // Prevented — so a firing here is a hit-report, not a path.
+            if !matches!(event, ProposedEvent::Damage { .. })
+                && combat_damage_answer_stashes(
+                    state,
+                    &parked_damage_identity,
+                    &parked_combat_pause_slot,
+                )
+            {
+                debug_assert!(false, "Damage-to-non-Damage transform hit the combat stash");
+                stash_paused_combat_damage_slot(state, None);
+                let settled = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                state.waiting_for = settled.clone();
+                return Ok(settled);
+            }
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
             match event {
@@ -516,22 +766,39 @@ fn handle_replacement_choice_inner(
                     is_combat,
                     ..
                 } => {
-                    let mut ctx =
-                        DamageContext::from_source(state, source_id).unwrap_or_else(|| {
-                            let controller = state
-                                .objects
-                                .get(&source_id)
-                                .map(|obj| obj.controller)
-                                .unwrap_or(state.active_player);
-                            DamageContext::fallback(source_id, controller)
-                        });
-                    // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
-                    // the deferred lifelink bonus dropped by the source-derived ctx
-                    // rebuild, so the resumed hit still redirects and a resumed redirect
-                    // leg still gains the combined lifelink total.
-                    ctx.excess_recipient = parked_excess_recipient;
-                    ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    // CR 510.2 + CR 616.1: the PAUSED combat event's survivor
+                    // stashes into the record instead of applying — the generic
+                    // arm's live-ctx rebuild would gain lifelink per-event,
+                    // breaking per-source summing AND ordering. NO inline drain
+                    // here: the Execute epilogue below drains the resumed
+                    // Damage event's riders (an arm drain would run BEFORE the
+                    // epilogue's UNCONDITIONAL `waiting_for = Priority` reset
+                    // and clobber any nested prompt it parks).
+                    if combat_damage_answer_stashes(
+                        state,
+                        &parked_damage_identity,
+                        &parked_combat_pause_slot,
+                    ) {
+                        stash_paused_combat_damage_slot(state, Some(damage));
+                    } else {
+                        let mut ctx =
+                            DamageContext::from_source(state, source_id).unwrap_or_else(|| {
+                                let controller = state
+                                    .objects
+                                    .get(&source_id)
+                                    .map(|obj| obj.controller)
+                                    .unwrap_or(state.active_player);
+                                DamageContext::fallback(source_id, controller)
+                            });
+                        // CR 120.4a + CR 702.15b: restore the excess-redirect rider and
+                        // the deferred lifelink bonus dropped by the source-derived ctx
+                        // rebuild, so the resumed hit still redirects and a resumed redirect
+                        // leg still gains the combined lifelink total.
+                        ctx.excess_recipient = parked_excess_recipient;
+                        ctx.lifelink_bonus = parked_lifelink_bonus;
+                        let _ =
+                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
@@ -1088,6 +1355,33 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
+            // the prompt because no tail was parked). Its event applied above
+            // and its inline riders settled, so its frames are final: publish
+            // exactly this batch here, before any queue below (batch
+            // delivery, sacrifice, discard, continuation) resumes. Deferring
+            // would leave the completed child parked for an outer tail to
+            // hydrate. A fresh rider choice above skips (the batch completes
+            // on its resume); an unstamped prompt is owned by its queued
+            // tail's stamped continuation instead.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(owner) = parked_batch_owner {
+                    // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
+                    // mid-drainage parks a FRESH choice — it wins over the
+                    // cached Priority, and the queues below must not run
+                    // while a prompt is open. The flush already synced
+                    // `state.waiting_for`.
+                    if let Some(fresh) =
+                        super::effects::deal_damage::flush_owned_each_source_batches(
+                            state, events, owner,
+                        )
+                    {
+                        waiting_for = fresh;
+                    }
+                }
+            }
+
             // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
             // deliver its card and then surface an interactive post-replacement
             // effect. Complete the special action at the delivery boundary,
@@ -1535,12 +1829,83 @@ fn handle_replacement_choice_inner(
                 if let Some(paused) = parked_zone_change_delivery.as_ref() {
                     pending.inherit_delivery_boundary(&paused.expected_event);
                 }
+                // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): a SECOND ordering
+                // choice on the same damage event re-parked a fresh record
+                // with `each_source_batch_owner: None` (pipeline_loop
+                // constructs it unstamped). Reapply the stamp captured before
+                // `continue_replacement` consumed the prior record so the
+                // eventual answer still publishes the empty-tail batch at its
+                // own boundary. Same-event gated: a nested child event's
+                // choice (a rider-created reflect names a different source)
+                // must not inherit the stamp.
+                if pending.each_source_batch_owner.is_none() {
+                    let fresh_damage_identity: Option<(ObjectId, TargetRef, bool)> =
+                        match &pending.proposed {
+                            ProposedEvent::Damage {
+                                source_id,
+                                target,
+                                is_combat,
+                                ..
+                            } => Some((*source_id, target.clone(), *is_combat)),
+                            _ => None,
+                        };
+                    if let (Some(owner), Some(parked), Some(fresh)) = (
+                        parked_batch_owner,
+                        parked_damage_identity.clone(),
+                        fresh_damage_identity,
+                    ) {
+                        if parked == fresh {
+                            pending.each_source_batch_owner = Some(owner);
+                        }
+                    }
+                }
+                // CR 510.2 + CR 616.1 (Matt R12): a SECOND (or later) ordering
+                // choice on the same combat-damage event re-parked a fresh
+                // record with `combat_pause_slot: None` (pipeline_loop
+                // constructs it unstamped). Reapply the stamp captured before
+                // `continue_replacement` consumed the prior record so the
+                // eventual answer still settles the paused slot even though an
+                // answered choice redirected the event since the park.
+                // Same-event gated on the damage SOURCE (redirects rewrite
+                // only the recipient): a nested child event's choice names a
+                // different source and must not inherit the stamp.
+                if pending.combat_pause_slot.is_none() {
+                    let fresh_damage_source: Option<ObjectId> = match &pending.proposed {
+                        ProposedEvent::Damage { source_id, .. } => Some(*source_id),
+                        _ => None,
+                    };
+                    if let (Some(slot), Some((parked_source, _, _)), Some(fresh_source)) = (
+                        parked_combat_pause_slot,
+                        parked_damage_identity.as_ref(),
+                        fresh_damage_source,
+                    ) {
+                        if parked_source == &fresh_source {
+                            pending.combat_pause_slot = Some(slot);
+                        }
+                    }
+                }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 510.2 + CR 615.5 + CR 616.1: the PAUSED combat event's
+            // prevention stashes `None`, and its pipeline's per-event rider
+            // stash drains inline HERE (mirroring the batch fn — no epilogue
+            // drain exists on this arm) BEFORE the nested-prompt surface below
+            // — stash-then-surface, so the paused slot is settled before any
+            // nested prompt surfaces.
+            if combat_damage_answer_stashes(
+                state,
+                &parked_damage_identity,
+                &parked_combat_pause_slot,
+            ) {
+                stash_paused_combat_damage_slot(state, None);
+                if state.has_post_replacement_drain() {
+                    let _ = apply_pending_post_replacement_effect(state, None, None, None, events);
+                }
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,
@@ -1579,6 +1944,26 @@ fn handle_replacement_choice_inner(
                 )
             {
                 return Ok(state.waiting_for.clone());
+            }
+            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
+            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
+            // the prompt because no tail was parked; fully-prevented damage
+            // answers land in this arm, not Execute). Its prevention applied
+            // inside `continue_replacement` and no nested prompt is live, so
+            // its frames are final: publish exactly this batch here, before
+            // any queue below resumes. Deferring would leave the completed
+            // child parked for an outer tail to hydrate. An unstamped prompt
+            // is owned by its queued tail's stamped continuation instead.
+            if let Some(owner) = parked_batch_owner {
+                // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
+                // mid-drainage parks a FRESH choice — surface it instead of
+                // falling through to the queues below. The flush already
+                // synced `state.waiting_for`.
+                if let Some(fresh) = super::effects::deal_damage::flush_owned_each_source_batches(
+                    state, events, owner,
+                ) {
+                    return Ok(fresh);
+                }
             }
             if let Some(loser) = pending_phase_drain_life_loser {
                 // CR 614.1a: the chosen replacement prevented the loss outright,
@@ -1811,7 +2196,26 @@ fn handle_replacement_choice_inner(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            if state.active_ability_continuation().is_some() {
+            //
+            // CR 615.13 + CR 616.1e (R2-F1): a stamped batch tail is LIVE, not
+            // dead — its prevention applied inside `continue_replacement` and
+            // its parked frames plus downstream instructions still must drain
+            // through the Priority resume below. Clearing it here orphans the
+            // batch (a stub publishes, downstream never runs). Only dead
+            // continuations clear.
+            //
+            // CR 615.13 + CR 608.2c (Matt F1): the empty-remainder pause's
+            // ownerless downstream tail is equally live — the pause site
+            // marks it with the batch parent, and the stamped prompt's flush
+            // publishes the batch before it drains. A dead prevented-spell
+            // continuation carries neither a batch stamp nor a batch parent.
+            let active_is_live_batch_tail =
+                state.active_ability_continuation().is_some_and(|pending| {
+                    pending.each_source_batch_owner.is_some()
+                        || pending.parent_kind
+                            == Some(crate::types::ability::EffectKind::EachSourceDealsDamage)
+                });
+            if !active_is_live_batch_tail && state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()
                     .expect("replacement cancellation cannot clear a buried continuation");
@@ -4166,6 +4570,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -4843,6 +5249,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

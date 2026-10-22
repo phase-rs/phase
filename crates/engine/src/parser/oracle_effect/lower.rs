@@ -7797,11 +7797,12 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
         // refers to a chained effect's target's OWNER, not the ability's
         // controller (The Eternal Wanderer's +1: "Return that card to the
         // battlefield under its owner's control at the beginning of that
-        // player's next end step"; Faramir, Prince of Ithilien uses the same
-        // surface phrase for a DIFFERENT referent — a chosen player — and
-        // remains its own unimplemented gap, not covered by this arm). Must
-        // precede the bare "your next end step" arm textually distinct
-        // (neither is a suffix of the other), so ordering here is not
+        // player's next end step"). Faramir, Prince of Ithilien uses the same
+        // surface phrase for a DIFFERENT referent — a chosen player — and is
+        // served by the chain-rewrite in mod.rs (`chain_chosen_player_antecedent`
+        // rebinding this arm's `ParentTargetOwner` to `ChosenPlayer`), not by
+        // this arm. Must precede the bare "your next end step" arm textually
+        // distinct (neither is a suffix of the other), so ordering here is not
         // load-bearing, but is kept adjacent for readability.
         (
             " at the beginning of that player's next end step",
@@ -8034,6 +8035,22 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 tag("at the beginning of that turn's end step, "),
+            ),
+            // CR 608.2c + CR 603.7a: "at the beginning of that player's next
+            // end step, " -- the player-anaphor prefix twin of the suffix arm in
+            // `strip_temporal_suffix` (Wanderer shape in trailing position).
+            // Table default is `ParentTargetOwner`; a Choose(Player|Opponent)
+            // antecedent rebinds to `ChosenPlayer` at the call site (Faramir).
+            // Textually distinct from the "that turn's end step" arm above
+            // ("player's" vs "turn's"), so neither shadows the other.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+                },
+                tag("at the beginning of that player's next end step, "),
             ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
@@ -12785,7 +12802,9 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
@@ -12889,7 +12908,9 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 

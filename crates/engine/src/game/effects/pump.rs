@@ -272,14 +272,13 @@ pub fn resolve_double_pt_all(
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = filter::FilterContext::from_ability(ability);
-    let matching: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
-        .copied()
-        .collect();
+    // CR 701.10a + CR 611.2c (Matt R7-F4): select through the shared
+    // authority, exactly as `resolve_pump_all` does — so the doubled set and
+    // the published tracked set are one population, never two that can
+    // disagree. (Identical to the inline scan it replaces: contextual
+    // concretization is a no-op for mass filters, and the phased-out choke
+    // point already excludes phased-out objects from every match.)
+    let matching: Vec<ObjectId> = pump_all_affected_objects(state, ability, &target_filter);
 
     for obj_id in matching {
         let modifications = double_modifications(state, obj_id, mode, factor)?;

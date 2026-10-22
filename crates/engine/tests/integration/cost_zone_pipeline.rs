@@ -990,6 +990,8 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -4951,6 +4953,8 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,

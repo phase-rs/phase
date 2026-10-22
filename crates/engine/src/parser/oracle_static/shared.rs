@@ -1029,6 +1029,8 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to extract.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName

@@ -4490,6 +4490,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: a_protection_does_not_remove,
         room_door: a_room_door,
         granting_object: a_granting_object,
+        bound_actor: a_bound_actor,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4509,6 +4510,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: b_protection_does_not_remove,
         room_door: b_room_door,
         granting_object: b_granting_object,
+        bound_actor: b_bound_actor,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4526,6 +4528,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_protection_does_not_remove == b_protection_does_not_remove
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
+        && a_bound_actor == b_bound_actor
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and

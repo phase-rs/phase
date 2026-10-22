@@ -466,6 +466,16 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                            // CR 608.2d: a resolving player can't choose an
+                            // illegal option — a permanent its chooser is
+                            // barred from sacrificing (Call for Aid's
+                            // installer bar, an object-wide grant) is not a
+                            // legal candidate. Offering it lets the chooser
+                            // name it and evade a mandatory sacrifice while
+                            // keeping a legal victim.
+                            && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                                state, chooser, *id,
+                            )
                             && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
                                 state,
                                 ability,

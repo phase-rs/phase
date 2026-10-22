@@ -15,8 +15,10 @@ use super::ability::{
     AbilityCost, ActivationRestriction, CardSelectionMode, Comparator, CostObjectCount,
     CostReduction, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
+use super::card_type::CoreType;
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
+use super::player::PlayerId;
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
@@ -599,6 +601,201 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+}
+
+/// CR 105.2 + CR 105.4 (Matt R8-F1): the resolved color-count quality of a
+/// matched `ProtectionTarget::Quality`. Only the three spellings the matcher
+/// accepts can appear here — every other quality string fails to match, so it
+/// never resolves. Kept distinct from [`MatchedProtectionQuality::Multicolored`]
+/// (the dedicated variant): two abilities spelled differently stay two
+/// applications even when they match the same sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProtectionColorlessness {
+    Colorless,
+    Monocolored,
+    Multicolored,
+}
+
+/// CR 702.16k (Matt R8-F1): the resolved player scope of a matched
+/// `ProtectionTarget::FromPlayer`. Only the two statically-scoped arms can
+/// match — target/chosen refs fail closed in the gate, so they never resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProtectionPlayerScope {
+    Opponent,
+    You,
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): the resolved quality of the
+/// protection ability that matched one damage event. The damage gate claims
+/// each event for the FIRST matching ability (short-circuit), and the batch
+/// tally keys protection prevention by this quality plus the recipient — so
+/// simultaneous events claimed by different abilities publish as separate
+/// prevention applications, while events claimed by same-quality abilities
+/// still aggregate.
+///
+/// Every payload is the match-time resolution, never the printed spelling:
+/// `ChosenColor`/`ChosenCardType` resolve to the chosen value (merging with
+/// the same quality printed literally), `ChosenPlayer` to the chosen player,
+/// card-type names to the matched [`CoreType`] (case/plural-insensitive, the
+/// same seven types the matcher accepts) or — for the creature-subtype
+/// fallback the parser also stores as `CardType` — to an FNV-1a fingerprint
+/// of the lowercased spelling, and filter predicates to an FNV-1a fingerprint
+/// over their ordered effective `(comparator, threshold)` pairs. Fingerprints
+/// are spelling-sensitive on purpose: textually different abilities split
+/// rather than merge, which is the correct direction — same ability, same
+/// value, same key, always.
+///
+/// All discriminants below are explicit and every payload encodes losslessly,
+/// so keys stay save-stable across builds: pause records serialize them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum MatchedProtectionQuality {
+    Color(ManaColor),
+    CardType(CoreType),
+    CardSubtype(u64),
+    Colorlessness(ProtectionColorlessness),
+    Multicolored,
+    Player(PlayerId),
+    Everything,
+    Filter(u64),
+    FromPlayer(ProtectionPlayerScope),
+}
+
+impl MatchedProtectionQuality {
+    /// Deterministic sort words for the batch-drain rank: the variant
+    /// discriminant plus a minor word that distinguishes every two qualities
+    /// of the same variant (filter fingerprints ride whole). Explicit
+    /// discriminants, never `as` casts, so record order is build-stable.
+    pub fn sort_words(self) -> (u64, u8) {
+        match self {
+            MatchedProtectionQuality::Color(color) => (
+                match color {
+                    ManaColor::White => 0,
+                    ManaColor::Blue => 1,
+                    ManaColor::Black => 2,
+                    ManaColor::Red => 3,
+                    ManaColor::Green => 4,
+                },
+                0,
+            ),
+            MatchedProtectionQuality::CardType(core) => (
+                match core {
+                    CoreType::Artifact => 0,
+                    CoreType::Creature => 1,
+                    CoreType::Enchantment => 2,
+                    CoreType::Instant => 3,
+                    CoreType::Land => 4,
+                    CoreType::Planeswalker => 5,
+                    CoreType::Sorcery => 6,
+                    CoreType::Tribal => 7,
+                    CoreType::Battle => 8,
+                    CoreType::Kindred => 9,
+                    CoreType::Dungeon => 10,
+                    CoreType::Plane => 11,
+                    CoreType::Phenomenon => 12,
+                    CoreType::Scheme => 13,
+                    CoreType::Conspiracy => 14,
+                },
+                1,
+            ),
+            MatchedProtectionQuality::CardSubtype(fingerprint) => (fingerprint, 2),
+            MatchedProtectionQuality::Colorlessness(colorlessness) => (
+                match colorlessness {
+                    ProtectionColorlessness::Colorless => 0,
+                    ProtectionColorlessness::Monocolored => 1,
+                    ProtectionColorlessness::Multicolored => 2,
+                },
+                3,
+            ),
+            MatchedProtectionQuality::Multicolored => (0, 4),
+            MatchedProtectionQuality::Player(player) => (u64::from(player.0), 5),
+            MatchedProtectionQuality::Everything => (0, 6),
+            MatchedProtectionQuality::Filter(fingerprint) => (fingerprint, 7),
+            MatchedProtectionQuality::FromPlayer(scope) => (
+                match scope {
+                    ProtectionPlayerScope::Opponent => 0,
+                    ProtectionPlayerScope::You => 1,
+                },
+                8,
+            ),
+        }
+    }
+
+    /// CR 616.1 (Matt R10-F1): the virtual-candidate rid parts for this
+    /// quality — the variant discriminant (selects one of the nine
+    /// `PROTECTION_REPLACEMENT_SOURCE_*` sentinels) plus the minor word
+    /// (rides whole in the rid index). Shares the ordinal table with
+    /// [`sort_words`](Self::sort_words) so the two can never disagree.
+    pub fn replacement_rid_parts(self) -> (u8, u64) {
+        let (minor, discriminant) = self.sort_words();
+        (discriminant, minor)
+    }
+
+    /// CR 616.1 (Matt R10-F1): inverse of
+    /// [`replacement_rid_parts`](Self::replacement_rid_parts). Total over
+    /// packed values but partial over arbitrary input: unknown discriminants
+    /// or out-of-range minor ordinals (only reachable from corrupt or
+    /// foreign rids, never our own writes) return `None` so callers can fail
+    /// contained. Explicit matches, never `as` casts — rids persist in
+    /// pause records, so the codec must be build-stable.
+    pub fn from_replacement_parts(discriminant: u8, minor: u64) -> Option<Self> {
+        match discriminant {
+            0 => match minor {
+                0 => Some(MatchedProtectionQuality::Color(ManaColor::White)),
+                1 => Some(MatchedProtectionQuality::Color(ManaColor::Blue)),
+                2 => Some(MatchedProtectionQuality::Color(ManaColor::Black)),
+                3 => Some(MatchedProtectionQuality::Color(ManaColor::Red)),
+                4 => Some(MatchedProtectionQuality::Color(ManaColor::Green)),
+                _ => None,
+            },
+            1 => match minor {
+                0 => Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
+                1 => Some(MatchedProtectionQuality::CardType(CoreType::Creature)),
+                2 => Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),
+                3 => Some(MatchedProtectionQuality::CardType(CoreType::Instant)),
+                4 => Some(MatchedProtectionQuality::CardType(CoreType::Land)),
+                5 => Some(MatchedProtectionQuality::CardType(CoreType::Planeswalker)),
+                6 => Some(MatchedProtectionQuality::CardType(CoreType::Sorcery)),
+                7 => Some(MatchedProtectionQuality::CardType(CoreType::Tribal)),
+                8 => Some(MatchedProtectionQuality::CardType(CoreType::Battle)),
+                9 => Some(MatchedProtectionQuality::CardType(CoreType::Kindred)),
+                10 => Some(MatchedProtectionQuality::CardType(CoreType::Dungeon)),
+                11 => Some(MatchedProtectionQuality::CardType(CoreType::Plane)),
+                12 => Some(MatchedProtectionQuality::CardType(CoreType::Phenomenon)),
+                13 => Some(MatchedProtectionQuality::CardType(CoreType::Scheme)),
+                14 => Some(MatchedProtectionQuality::CardType(CoreType::Conspiracy)),
+                _ => None,
+            },
+            2 => Some(MatchedProtectionQuality::CardSubtype(minor)),
+            3 => match minor {
+                0 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Colorless,
+                )),
+                1 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Monocolored,
+                )),
+                2 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Multicolored,
+                )),
+                _ => None,
+            },
+            4 if minor == 0 => Some(MatchedProtectionQuality::Multicolored),
+            5 => u8::try_from(minor)
+                .ok()
+                .map(|id| MatchedProtectionQuality::Player(PlayerId(id))),
+            6 if minor == 0 => Some(MatchedProtectionQuality::Everything),
+            7 => Some(MatchedProtectionQuality::Filter(minor)),
+            8 => match minor {
+                0 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::Opponent,
+                )),
+                1 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::You,
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -4828,6 +5025,49 @@ mod tests {
             parse_protection_target("mana value 3 or less from sources"),
             ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
         );
+    }
+
+    /// CR 616.1 (Matt R10-F1): the rid codec is lossless on every variant
+    /// (fingerprints ride whole) and fails contained on foreign input, so
+    /// virtual-candidate rids survive pause records without a state lookup.
+    #[test]
+    fn matched_protection_quality_rid_codec_round_trips() {
+        for quality in [
+            MatchedProtectionQuality::Color(ManaColor::Red),
+            MatchedProtectionQuality::Color(ManaColor::Green),
+            MatchedProtectionQuality::CardType(CoreType::Artifact),
+            MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardSubtype(0),
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Colorlessness(ProtectionColorlessness::Multicolored),
+            MatchedProtectionQuality::Multicolored,
+            MatchedProtectionQuality::Player(PlayerId(0)),
+            MatchedProtectionQuality::Player(PlayerId(7)),
+            MatchedProtectionQuality::Everything,
+            MatchedProtectionQuality::Filter(1),
+            MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+        ] {
+            let (discriminant, minor) = quality.replacement_rid_parts();
+            assert_eq!(
+                MatchedProtectionQuality::from_replacement_parts(discriminant, minor),
+                Some(quality),
+                "rid codec must round-trip {quality:?}"
+            );
+        }
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(9, 0), None);
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(0, 5), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(1, 15),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(4, 1), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(5, 256),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(8, 2), None);
     }
 
     /// CR 702.16i + CR 903.4: "each color that's not in your commander's color

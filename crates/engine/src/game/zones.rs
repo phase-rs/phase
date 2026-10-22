@@ -1793,7 +1793,10 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // — self-gated so routine library churn stays cheap when no such static is
     // live.
     if to == Zone::Library || from == Zone::Library {
-        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+        crate::game::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+        );
     }
 
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
@@ -2471,7 +2474,10 @@ pub(crate) fn reorder_within_library(
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
     // (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 }
 
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
@@ -2638,7 +2644,10 @@ pub fn move_to_library_at_index(
     // CR 401.5 + CR 611.3a: placing a card at library index 0 changes the top
     // card, so a `TopOfLibraryMatches` static must be re-evaluated. This path
     // bypasses `move_to_zone`, so it invalidates directly (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 }
 
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).

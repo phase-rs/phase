@@ -6226,6 +6226,9 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Reads source-object ledgers via layer-controller endpoints, never
+        // the ability holder: fail closed like its last-turn analog.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -25864,6 +25867,12 @@ pub fn find_eligible_sacrifice_targets(
                 return false;
             }
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+                return false;
+            }
+            // CR 109.5: object-level bars (Call for Aid binds its caster)
+            // exclude the object from cost candidacy — same authority as
+            // execution (`object_cant_be_sacrificed_by`).
+            if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
                 return false;
             }
             // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.

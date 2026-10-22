@@ -1848,6 +1848,9 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-pair endpoints are absolute player refs, not the designation
+        // anaphor: nothing to rebind, like its last-turn analog above.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }

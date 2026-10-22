@@ -263,6 +263,7 @@ fn install_transient(
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
+    bound_actor: Option<PlayerId>,
 ) -> Option<u64> {
     let mut modifications = modifications;
     // CR 201.5a + CR 400.7 + CR 113.7: a grant names the object whose ability resolved, as
@@ -292,6 +293,7 @@ fn install_transient(
             granting_object: ability.context.granting_object,
             ..TransientContinuousEffectBindings::default()
         },
+        bound_actor,
     )
 }
 
@@ -305,6 +307,20 @@ fn register_transient_effect(
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
     let modifications = latch_chosen_text_words(state, modifications);
+
+    // CR 109.5: resolve the def's bound subject role once — every arm below
+    // installs the same def, so the resolved actor is identical for all of
+    // them. `controller_ref_player` is the shared single-ref resolver; an
+    // unresolvable role fails closed to `None` (object-wide bar).
+    let bound_actor = static_def.bound_actor.as_ref().and_then(|role| {
+        crate::game::filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            role,
+        )
+    });
 
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
@@ -335,6 +351,7 @@ fn register_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -372,6 +389,7 @@ fn register_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -405,6 +423,7 @@ fn register_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -459,6 +478,7 @@ fn register_transient_effect(
                     affected,
                     modifications,
                     static_def.condition.clone(),
+                    bound_actor,
                 );
                 return;
             }
@@ -507,6 +527,7 @@ fn register_transient_effect(
             },
             modifications,
             static_def.condition.clone(),
+            bound_actor,
         );
         return;
     }
@@ -527,6 +548,7 @@ fn register_transient_effect(
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -563,6 +585,7 @@ fn register_transient_effect(
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -654,6 +677,7 @@ fn register_transient_effect(
                 bound_filter,
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -672,6 +696,7 @@ fn register_transient_effect(
                 TargetFilter::SpecificPlayer { id: player_id },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
     };
@@ -693,6 +718,7 @@ fn register_transient_effect(
                 },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         // Pass-through: the caller already pinned a specific player.
@@ -707,6 +733,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificPlayer { id: *id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -798,6 +825,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -832,6 +860,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -850,6 +879,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -874,6 +904,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -901,6 +932,7 @@ fn register_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }

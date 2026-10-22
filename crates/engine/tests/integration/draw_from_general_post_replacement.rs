@@ -369,7 +369,7 @@ fn nefarious_lich_case(db: &CardDatabase) {
 ///   2. "that source's controller" lowers to `PostReplacementSourceController`
 ///      (the prevented event's damage dealer's controller), not a dangling
 ///      `ParentTargetController` with no runtime referent.
-///   3. `combat_damage.rs::fire_combat_prevention_riders` seeds the aggregate
+///   3. `combat_damage.rs::fire_batch_prevention_riders` seeds the aggregate
 ///      rider's drain event source from the shield's chosen single-object source
 ///      filter, so `PostReplacementSourceController` resolves to P0.
 #[test]

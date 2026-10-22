@@ -486,6 +486,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
             granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
+            bound_actor: None,
         });
     crate::game::layers::flush_layers(&mut state);
 

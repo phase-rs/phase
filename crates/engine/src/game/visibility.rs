@@ -1465,6 +1465,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // surface, so no viewer — including the choosing player — needs the carrier
     // itself.
     filtered.pending_combat_lifelink = None;
+    // CR 510.2 + CR 616.1: the parked pre-application batch is server
+    // authority for the same reason as its lifelink sibling above — its
+    // `batch_events` can carry redacted effect events and its tallies name
+    // replacement sources. The projected `WaitingFor::ReplacementChoice` is
+    // the complete viewer-facing interaction surface.
+    filtered.pending_combat_damage = None;
     // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
     // authoritative state so save/restore resumes the same application. The
     // value can encode hidden-zone information (for example, hand sizes), so it
@@ -1806,6 +1812,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // An id-only incarnation reference, not a payment carrier.
                 granting_object: _,
                 source_name: _,
+                // Merge seam (upstream/main): the actor binding is irrelevant
+                // to hidden-member redaction — only `duration_event_source`
+                // is read below.
+                bound_actor: _,
             } = effect;
             duration_event_source.as_deref().is_some_and(|context| {
                 source_context_names_hidden_member(context, &hidden_zone_change_ids)
@@ -5499,6 +5509,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
         let departed_object = state.objects[&departed].clone();
@@ -6175,6 +6188,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
 
@@ -11975,6 +11991,78 @@ mod tests {
 
         assert!(
             state.pending_combat_lifelink.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
+    /// CR 510.2 + CR 616.1: `pending_combat_damage` is the parked
+    /// pre-application combat-damage batch. Its `batch_events` can carry
+    /// effect events that `filter_events_for_viewer` redacts in the live
+    /// stream — a hidden-zone `ZoneChanged` among them — and its tallies name
+    /// replacement sources, so it must be absent from every viewer projection
+    /// including the choosing player's own.
+    ///
+    /// REVERT PROBE: delete `filtered.pending_combat_damage = None;` from
+    /// `filter_state_for_viewer` — the first per-viewer assertion below fails.
+    #[test]
+    fn parked_combat_damage_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_019),
+            PlayerId(0),
+            "Library Secret".to_string(),
+            Zone::Library,
+        );
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        );
+        state.pending_combat_damage = Some(Box::new(
+            crate::types::game_state::PendingCombatDamageBatch {
+                entries: Vec::new(),
+                decided: Vec::new(),
+                paused_entry: 0,
+                paused_entry_pruned: false,
+                remaining: Vec::new(),
+                phase_a_tally: Vec::new(),
+                phase_b_tally: Vec::new(),
+                outer_tally: None,
+                batch_events: vec![GameEvent::ZoneChanged {
+                    object_id: hidden,
+                    from: Some(Zone::Library),
+                    to: Zone::Battlefield,
+                    record: Box::new(record),
+                }],
+                lives_before: vec![20, 20],
+                sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+            },
+        ));
+
+        let authoritative = serde_json::to_string(&state.pending_combat_damage)
+            .expect("the authoritative record serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the library card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_combat_damage.is_none(),
+                "viewer {viewer:?} must not receive the parked pre-application batch"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCombatDamage\":{")
+                    && !wire.contains("\"pending_combat_damage\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_combat_damage.is_some(),
             "filtering must not alter the authoritative server carrier"
         );
     }

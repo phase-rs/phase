@@ -4346,7 +4346,9 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => {}
+        | AbilityCondition::SourceLacksKeyword { .. }
+        // `PlayerScope` endpoints name no declared groups (no rebind target).
+        | AbilityCondition::PlayerAttackedPlayer { .. } => {}
     }
 }
 
@@ -26628,6 +26630,8 @@ mod entry_projection_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         };
 
         // An answer pins the boundary before it changes the proposal.

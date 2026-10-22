@@ -145,10 +145,13 @@ pub(crate) enum StateKind {
     /// CR 500 (turn structure) + CR 506.4c (remove from combat) + CR 614.10
     /// (skip step/turn): game-sequencing writes — extra turns/phases, skipped
     /// steps, combat removal. Idempotent/additive among identical siblings (two
-    /// extra turns commute; removing an already-removed creature is a no-op) and
-    /// observed by NO profiled read, so this kind only self-conflicts (a future
-    /// sequencing READ would fail-closed against it) — never the `Other`
-    /// catch-all, which conflicts with every read.
+    /// extra turns commute; removing an already-removed creature is a no-op).
+    /// Profiled reads: the attack ledgers — `AbilityCondition` /
+    /// `StaticCondition::PlayerAttackedPlayer` (this-turn pairs, CR 508.6) and
+    /// `StaticCondition::AnyPlayerAttackedYouLastTurn` (last-turn snapshot).
+    /// Ledgers are turn-immutable during resolution, so sibling triggers
+    /// resolving in the same turn cannot change what they read. Never the
+    /// `Other` catch-all, which conflicts with every read.
     TurnStructure,
     /// Unclassifiable — conflicts with everything (fail-closed).
     Other,
@@ -2061,6 +2064,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::DayNightIs { .. } => false,
     }
 }
@@ -2137,6 +2141,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
@@ -3005,6 +3010,9 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // CR 613.1b + CR 725.5: designation-anchored control carries no
+        // frozen event-context tag (scalar designation payload only).
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         // CR 612.8 + 613.1c: Layer-3 name-set from source's chosen name (Psychic
@@ -6956,6 +6964,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. } => RwProfile::empty(),
+        // CR 508.6: this-turn player-pair attack ledger; same turn-structure
+        // player read as the static last-turn analog (`rw_static_condition`).
+        AbilityCondition::PlayerAttackedPlayer { .. } => reads_player_of(StateKind::TurnStructure),
     }
 }
 
@@ -7168,6 +7179,12 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             let mut p = reads_player_of(StateKind::TurnStructure);
             p.merge(frozen_source_read());
             p
+        }
+        // CR 508.6: this-turn player-pair attack ledger
+        // (`attacked_players_directly_this_turn`); same turn-structure
+        // player read as the last-turn analog above.
+        StaticCondition::PlayerAttackedPlayer { .. } => {
+            reads_player_of(StateKind::TurnStructure)
         }
         // CR 500.8 + CR 506.1: the phase-occurrence gate reads whether the
         // turn's first combat phase is the one in progress — the same

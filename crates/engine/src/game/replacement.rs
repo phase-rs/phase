@@ -23,14 +23,17 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
-    ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
-    ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    CombatPreventionTally, DrainStatus, GameState, LiminalEntry, LiminalEntryKind,
+    NamedChoiceSource, NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::mana::{StepEndManaAction, UnitDisposition};
+use crate::types::keywords::{
+    MatchedProtectionQuality, ProtectionColorlessness, ProtectionPlayerScope,
+};
+use crate::types::mana::{ManaColor, StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
@@ -48,34 +51,34 @@ use super::game_object::GameObject;
 // `ReplacementDefinition`s: ordinary `ShieldKind` definitions expire at cleanup,
 // while shield counters persist. Use reserved per-object candidate IDs so the
 // existing CR 616 replacement-ordering pipeline can still own choice/application.
-const SHIELD_COUNTER_DESTROY_INDEX: usize = usize::MAX;
-const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
+const SHIELD_COUNTER_DESTROY_INDEX: u64 = u64::MAX;
+const SHIELD_COUNTER_DAMAGE_INDEX: u64 = u64::MAX - 1;
 /// CR 702.89a: Umbra armor — virtual destroy-replacement keyed on the enchanted
 /// permanent (the `source` is the would-be-destroyed host, not the Aura). Reserved
 /// candidate id so the CR 616 replacement-ordering pipeline owns its application.
-const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
+const UMBRA_ARMOR_DESTROY_INDEX: u64 = u64::MAX - 2;
 /// CR 702.150a: Compleated — virtual loyalty-counter replacement keyed on the
 /// resolving planeswalker. Compleated is an intrinsic cast-payment replacement,
 /// not a battlefield `ReplacementDefinition`, but it must still participate in
 /// CR 616 ordering against AddCounter replacements such as Doubling Season.
-const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
+const COMPLEATED_LOYALTY_INDEX: u64 = u64::MAX - 3;
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip (False Peace / Empty
 /// City Ruse — "skips all combat phases of their next turn"). The skip effect
 /// leaves no battlefield object, so it is a virtual BeginPhase replacement keyed
 /// on the affected player (whose `PlayerId` is encoded into the sentinel
 /// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
 /// being `Active` for the active player on a combat phase.
-const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
+const TURN_SCOPED_COMBAT_SKIP_INDEX: u64 = u64::MAX - 4;
 /// CR 122.1h: Finality-counter redirect — a virtual `ZoneChange{BF→GY}`
 /// replacement keyed on the dying permanent. Intrinsic to the counter (persists
 /// past cleanup, like shield counters), so a reserved candidate id lets the
 /// CR 616 ordering pipeline own its choice/application.
-const FINALITY_COUNTER_INDEX: usize = usize::MAX - 5;
+const FINALITY_COUNTER_INDEX: u64 = u64::MAX - 5;
 /// CR 903.9b: A commander moving to its owner's hand or library may move to
 /// the command zone instead. This is a rules-source replacement rather than a
 /// card-granted `ReplacementDefinition`, so it uses the existing virtual-ID
 /// protocol shared by intrinsic shield, finality, and compleated effects.
-const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
+const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: u64 = u64::MAX - 6;
 /// CR 702.44a + CR 702.44d: Granted Sunburst — a virtual `Moved`→Battlefield
 /// ETB-counter replacement keyed on the entering spell that was GRANTED
 /// sunburst ("that spell gains sunburst": Solar Array / Lux Artillery). Printed
@@ -94,7 +97,7 @@ const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
 /// (`granted_keyword_etb_instances`, `apply_granted_keyword_etb_replacement`);
 /// only the reserved index and per-instance-definition builder differ. Any future
 /// granted as-enters keyword adds one more reserved index feeding the same core.
-const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
+const GRANTED_SUNBURST_INDEX: u64 = u64::MAX - 7;
 /// CR 702.54a + CR 702.54c: Granted Bloodthirst — the Bloodthirst analogue of
 /// `GRANTED_SUNBURST_INDEX`. Bloodlord of Vaasgoth's "Whenever you cast a Vampire
 /// creature spell, it gains bloodthirst 3" adds only the keyword to the cast
@@ -103,7 +106,7 @@ const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
 /// replacement per GRANTED Bloodthirst instance. Unlike Sunburst, the fixed-N
 /// form is CONDITIONAL (an opponent must have been dealt damage this turn), so the
 /// shared applier honors each granted instance's carried `condition`.
-const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
+const GRANTED_BLOODTHIRST_INDEX: u64 = u64::MAX - 8;
 /// CR 702.52a: Granted Dredge — a virtual Draw replacement keyed on a
 /// graveyard card that has Dredge only via a runtime grant (e.g. The
 /// Necrobloom's "Land cards in your graveyard have dredge 2"), not a printed
@@ -115,7 +118,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// exactly like the object-carried definitions it mirrors — the SAME
 /// definition shape, built by `database::synthesis::dredge_replacement_definition`
 /// (extracted from `synthesize_dredge` for this reuse).
-const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
+const GRANTED_DREDGE_INDEX: u64 = u64::MAX - 9;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -330,7 +333,7 @@ enum GrantedEtbKeyword {
 }
 
 impl GrantedEtbKeyword {
-    fn from_index(index: usize) -> Option<Self> {
+    fn from_index(index: u64) -> Option<Self> {
         match index {
             GRANTED_SUNBURST_INDEX => Some(Self::Sunburst),
             GRANTED_BLOODTHIRST_INDEX => Some(Self::Bloodthirst),
@@ -338,7 +341,7 @@ impl GrantedEtbKeyword {
         }
     }
 
-    fn index(self) -> usize {
+    fn index(self) -> u64 {
         match self {
             Self::Sunburst => GRANTED_SUNBURST_INDEX,
             Self::Bloodthirst => GRANTED_BLOODTHIRST_INDEX,
@@ -1090,9 +1093,8 @@ pub(crate) fn pending_replacement_option_count(
             .candidates
             .iter()
             .filter(|rid| {
-                state
-                    .pending_step_end_mana_handlers
-                    .get(rid.index)
+                rid.index_as_usize()
+                    .and_then(|i| state.pending_step_end_mana_handlers.get(i))
                     .is_some()
             })
             .count();
@@ -1154,9 +1156,8 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     .candidates
                     .iter()
                     .filter_map(|rid| {
-                        state
-                            .pending_step_end_mana_handlers
-                            .get(rid.index)
+                        rid.index_as_usize()
+                            .and_then(|i| state.pending_step_end_mana_handlers.get(i))
                             .map(|entry| ReplacementCandidateSummary {
                                 source_id: entry.source,
                                 source_name: name_of(entry.source),
@@ -1616,7 +1617,8 @@ fn replacement_choice_definition(
     rid: ReplacementId,
 ) -> Option<&ReplacementDefinition> {
     if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         replacement_definition_for_id(state, rid)
     }
@@ -1704,6 +1706,16 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
             None => "Dredge: mill and return this card from graveyard to hand instead of drawing"
                 .to_string(),
         };
+    }
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate has no
+    // object-carried definition to describe it — the label is rebuilt from
+    // the quality on the rid alone, so co-firing qualities read distinctly
+    // in a CR 616.1 ordering prompt.
+    if let Some(quality) = protection_quality_from_rid(rid) {
+        return format!(
+            "Prevent damage with {}",
+            protection_quality_label_tail(quality)
+        );
     }
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
@@ -2145,9 +2157,9 @@ fn damage_modification_for_rid(
 ) -> Option<DamageModification> {
     // CR 615.3: Pending prevention shields use sentinel ObjectId(0).
     if rid.source == ObjectId(0) {
-        return state
-            .pending_damage_replacements
-            .get(rid.index)?
+        return rid
+            .index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))?
             .damage_modification
             .clone();
     }
@@ -2155,7 +2167,7 @@ fn damage_modification_for_rid(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?
+        .get_by_rid(rid)?
         .damage_modification
         .clone()
 }
@@ -2174,9 +2186,8 @@ fn resolve_prevention_formula(
         PreventionFormula::Fixed(value) => Some(*value),
         PreventionFormula::Quantity { quantity } => {
             let controller = if rid.source == ObjectId(0) {
-                state
-                    .pending_damage_replacements
-                    .get(rid.index)
+                rid.index_as_usize()
+                    .and_then(|i| state.pending_damage_replacements.get(i))
                     .and_then(|replacement| replacement.source_controller)
             } else {
                 state
@@ -2210,33 +2221,65 @@ fn resolve_prevention_formula(
 /// as `damage_modification_for_rid`.
 fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKind> {
     if rid.source == ObjectId(0) {
-        return state
-            .pending_damage_replacements
-            .get(rid.index)
+        return rid
+            .index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
             .map(|repl| repl.shield_kind);
     }
     state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .map(|repl| repl.shield_kind)
 }
 
 /// CR 615.5 + CR 510.2: Oracle-text prevention shields carry riders in
 /// `execute`; resolving spells install `runtime_execute` instead. During a
 /// combat-damage batch, `replace_combat_damage_batch` drains `execute` riders
-/// per prevented event inline, while `fire_combat_prevention_riders` handles
+/// per prevented event inline, while `fire_batch_prevention_riders` handles
 /// only `runtime_execute`.
 fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
+}
+
+/// CR 615.5: `Next`/`AllBut` shields stash their rider per event and drain it
+/// inline during the combat-damage batch (`replace_combat_damage_batch`); the
+/// post-batch aggregate drain explicitly skips re-firing them
+/// (`combat_damage.rs`). An ordinary `runtime_execute` rider installed by a
+/// resolving spell (Test of Faith's "for each 1 damage prevented this way"
+/// counters) resolves `EventContextAmount` at that inline drain, so the
+/// per-event prevented amount must be stamped even though the public
+/// `DamagePrevented` event is deferred to the post-batch aggregate.
+/// `execute`-template riders are covered by
+/// `shield_has_per_event_execute_followup`; per-source reflectors by
+/// `shield_rider_reflects_per_event`.
+fn shield_has_inline_runtime_rider(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+    };
+    repl.is_some_and(|r| {
+        matches!(
+            r.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::Next(_) | PreventionAmount::AllBut(_)
+            }
+        ) && r.runtime_execute.is_some()
+    })
 }
 
 /// CR 615.5 + CR 120.1: True when a prevention `runtime_execute` rider reflects
@@ -2274,19 +2317,124 @@ fn rider_reflects_per_event_damage_source(rider: &ResolvedAbility) -> bool {
 
 /// CR 615.5 + CR 120.1: True when the shield identified by `rid` carries a
 /// per-event-source-reflecting `runtime_execute` rider (Comeuppance). Such a
-/// shield must NOT aggregate into the combat batch tally — it fires per prevented
-/// event so each reflection binds to its own damage source and prevented amount.
-fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
+/// rider cannot ride the aggregate batch path (which pins a single chosen
+/// source) — it keeps its per-event stash + inline drain so each reflection
+/// binds its own damage source and prevented amount. The shield's PUBLIC
+/// prevented amount still aggregates into the combat batch tally (CR 615.13);
+/// `fire_batch_prevention_riders` emits the aggregate event but does not
+/// re-fire the rider.
+pub(crate) fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.and_then(|r| r.runtime_execute.as_deref())
         .is_some_and(rider_reflects_per_event_damage_source)
+}
+
+/// CR 510.2 + CR 615.13 + CR 120.3: accumulate one prevention application
+/// into the combat-damage batch tally, keyed by (shield, RECIPIENT). The
+/// recipient rides with the aggregate because one shield's filter is a
+/// predicate that can match several recipients in a single CR 510.2 batch —
+/// the post-batch aggregate must name each of them rather than re-derive one
+/// from the filter.
+///
+/// Returns whether the amount was accumulated (tally active and nonzero).
+/// Callers store that in `accumulated_in_batch` so the shared emit block
+/// defers the public `DamagePrevented` to the post-batch aggregate in
+/// `fire_batch_prevention_riders` instead of fragmenting one event per
+/// damage event.
+///
+/// Rider continuations are NOT deferred here: shields whose riders drain
+/// inline per event (per-source reflectors per CR 615.5, depletion/`AllBut`
+/// shields keeping their per-event stash) still stash + drain per event —
+/// Phase D emits their aggregate event but does not re-fire the rider.
+/// CR 615.13 + CR 616.1e: materialize the top parked batch's tally as the
+/// live transient. The single hydration authority, called before replacement
+/// dispatch (`apply_single_replacement`) so every tally-sensitive reader —
+/// the shield-counter applier, the batch rider-stash suppression gate, and
+/// the accumulator below — observes the resumed scope. Save/load may have
+/// dropped the transient, and the record is authoritative (kept current by
+/// the write-through below and re-parked whole on any further pause). Gated
+/// on a suspended batch, so the common path is one emptiness check.
+fn hydrate_parked_batch_prevention_tally(state: &mut GameState) {
+    if state.combat_prevention_tally.is_none() && !state.pending_each_source_batches.is_empty() {
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail hydrates its OWN
+        // batch's frame — never the stack top, which may be a completed
+        // child's still-parked record. No owned frame (the batch published
+        // inline) hydrates nothing. Outside a batch-tail drain the legacy
+        // top applies: the answered event's own batch parked last.
+        let parked = match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                crate::game::effects::deal_damage::top_owned_each_source_frame(state, owner)
+                    .map(|frame| frame.tally.clone())
+                    .unwrap_or_default()
+            }
+            None => state
+                .pending_each_source_batches
+                .last()
+                .map(|frame| frame.tally.clone())
+                .unwrap_or_default(),
+        };
+        state.combat_prevention_tally =
+            Some(crate::game::effects::deal_damage::tally_map_from_record_entries(&parked));
+    }
+}
+
+pub(crate) fn accumulate_batch_prevention(
+    state: &mut GameState,
+    applied_key: AppliedReplacementKey,
+    recipient: &TargetRef,
+    prevented_amount: u32,
+) -> bool {
+    if prevented_amount == 0 {
+        return false;
+    }
+    // CR 615.13 + CR 616.1e (Matt C3): a resumed batch rehydrates its parked
+    // tally on first accumulation, through the shared authority above.
+    hydrate_parked_batch_prevention_tally(state);
+    let accumulated = if let Some(tally) = state.combat_prevention_tally.as_mut() {
+        *tally.entry((applied_key, recipient.clone())).or_insert(0) += prevented_amount as i32;
+        true
+    } else {
+        false
+    };
+    if accumulated {
+        // CR 615.13: write the accumulation back so the parked record stays
+        // current across any nested boundary (pause, save/load).
+        //
+        // CR 615.13 + CR 616.1e (Matt M1): a draining tail writes through to
+        // its OWN batch's frame — never the stack top, which may be a
+        // completed child's still-parked record. No owned frame (the batch
+        // published inline) writes nowhere. Outside a batch-tail drain the
+        // legacy top applies: the answered event's own batch parked last.
+        let snapshot = state
+            .combat_prevention_tally
+            .as_ref()
+            .map(crate::game::effects::deal_damage::tally_entries_for_record)
+            .unwrap_or_default();
+        match state.resolving_each_source_batch_owner {
+            Some(owner) => {
+                if let Some(frame) =
+                    crate::game::effects::deal_damage::top_owned_each_source_frame_mut(state, owner)
+                {
+                    frame.tally = snapshot;
+                }
+            }
+            None => {
+                if let Some(top) = state.pending_each_source_batches.last_mut() {
+                    top.tally = snapshot;
+                }
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// CR 614.9: Read back the captured concrete recipient (an object or a player)
@@ -2295,12 +2443,13 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
 /// creature" / "to any target", or the creating ability's implicit "you").
 fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     match repl.and_then(|r| r.redirect_target.as_ref()) {
         Some(TargetFilter::SpecificObject { id }) => Some(TargetRef::Object(*id)),
@@ -2417,12 +2566,13 @@ fn prevention_shield_route(
     amount: PreventionAmount,
 ) -> PreventionShieldRoute {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     repl.map_or(PreventionShieldRoute::Prevent, |repl| {
         prevention_shield_route_for_def(repl, amount)
@@ -2654,9 +2804,8 @@ fn damage_done_applier(
                 // `SetToSourcePower` arm).
                 DamageModification::Plus { value } => {
                     let controller = if rid.source == ObjectId(0) {
-                        state
-                            .pending_damage_replacements
-                            .get(rid.index)
+                        rid.index_as_usize()
+                            .and_then(|i| state.pending_damage_replacements.get(i))
                             .and_then(|r| r.source_controller)
                             .unwrap_or(PlayerId(0))
                     } else {
@@ -2760,7 +2909,7 @@ fn damage_done_applier(
             //     THIS event's amount (CR 615.5; mirrors Branch 2's stamp);
             //   * inside a batch, accumulate into the per-replacement tally — the
             //     single `DamagePrevented` and the aggregate `last_effect_count`
-            //     stamp happen post-batch in `fire_combat_prevention_riders`
+            //     stamp happen post-batch in `fire_batch_prevention_riders`
             //     (CR 510.2 + CR 615.13), so nothing is emitted or stamped here;
             //   * exception (mirrors Branch 2): an `execute`-template follow-up
             //     drains per-event inside `replace_combat_damage_batch` and needs
@@ -2775,10 +2924,10 @@ fn damage_done_applier(
                 if prevented > 0 {
                     let mut accumulated_in_batch = false;
                     if !shield_rider_reflects_per_event(state, rid) {
-                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                            *tally.entry(applied_key).or_insert(0) += prevented as i32;
-                            accumulated_in_batch = true;
-                        }
+                        // CR 120.3: key by (shield, RECIPIENT) — see
+                        // `accumulate_batch_prevention`.
+                        accumulated_in_batch =
+                            accumulate_batch_prevention(state, applied_key, &target, prevented);
                     }
                     let per_event_execute_followup =
                         accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
@@ -2852,23 +3001,26 @@ fn damage_done_applier(
     // Branch 2: CR 615 — Prevention shield
     // Look up shield from either object replacement_definitions or pending_damage_replacements.
     let shield_kind = if rid.source == ObjectId(0) {
-        state
-            .pending_damage_replacements
-            .get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
             .map(|repl| repl.shield_kind)
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
             .map(|repl| repl.shield_kind)
     };
 
     let applied_key = AppliedReplacementKey::for_event(&event, rid);
-    // CR 615.5 + CR 120.1: A per-source-reflecting shield (Comeuppance) must NOT
-    // aggregate into the combat batch tally — it fires per prevented event so
-    // each reflection binds its own damage source and prevented amount.
-    let reflects_per_event = shield_rider_reflects_per_event(state, rid);
+    // CR 615.5 + CR 615.13 + CR 120.1: A per-source-reflecting shield
+    // (Comeuppance) aggregates its PUBLIC prevented amount into the combat
+    // batch tally like every other prevention application — one shield
+    // application over simultaneous events is ONE trigger. Only its RIDER
+    // stays per-event: each reflection binds its own damage source and
+    // prevented amount, which a batch aggregate cannot carry. The rider keeps
+    // its per-event stash + inline drain; Phase D emits the aggregate event
+    // but does not re-fire the rider (see `fire_batch_prevention_riders`).
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -2963,11 +3115,17 @@ fn damage_done_applier(
                     // prevented amount into the per-shield aggregate keyed by
                     // `rid`. The single rider firing happens post-batch in
                     // `combat_damage.rs` against the summed total.
-                    if !reflects_per_event {
-                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                            *tally.entry(applied_key).or_insert(0) += prevented_amount as i32;
-                            accumulated_in_batch = true;
-                        }
+                    // CR 120.3 + CR 615.13: key the batch aggregate by (shield,
+                    // RECIPIENT). One `Prevention::All` shield whose filter is a
+                    // predicate over recipients (Safe Passage's "you and creatures
+                    // you control", or an unfiltered Fog-class shield with no
+                    // `damage_target_filter` at all) prevents damage for several
+                    // recipients in one CR 510.2 batch; the post-batch aggregate
+                    // must name each of them rather than re-derive one from the
+                    // filter. Reflecting shields accumulate here too — only
+                    // their rider stays per-event (see above + Phase D).
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
                     }
                 }
                 PreventionAmount::AllBut(keep) => {
@@ -2996,6 +3154,14 @@ fn damage_done_applier(
                             is_combat,
                             applied,
                         });
+                    }
+                    // CR 510.2 + CR 615.13: like `All`, one application over
+                    // simultaneous events is ONE trigger — accumulate the
+                    // public amount per (shield, recipient). The rider (if any)
+                    // keeps its per-event stash + inline drain; Phase D emits
+                    // but does not re-fire.
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
                     }
                 }
                 PreventionAmount::Next(n) => {
@@ -3027,6 +3193,16 @@ fn damage_done_applier(
                             applied,
                         });
                     }
+                    // CR 510.2 + CR 615.13: CR 615.7's "the number of events
+                    // or sources dealing it doesn't matter" makes one
+                    // application over simultaneous events ONE trigger — the
+                    // shielded player's WHICH-damage choice is unaffected by
+                    // aggregating the public amount per (shield, recipient).
+                    // The rider (if any) keeps its per-event stash + inline
+                    // drain; Phase D emits but does not re-fire.
+                    if accumulate_batch_prevention(state, applied_key, &target, prevented_amount) {
+                        accumulated_in_batch = true;
+                    }
                 }
             }
 
@@ -3037,12 +3213,35 @@ fn damage_done_applier(
             // `combat_damage.rs` — emitting them per-source here would fragment
             // the rider's `EventContextAmount` across attackers.
             //
-            // Exception: `execute`-template shields (Mindskinner, Weeping Angel)
-            // drain per-event inside `replace_combat_damage_batch` and need the
-            // per-event prevented amount stamped here so `EventContextAmount`
-            // resolves when that inline drain runs.
-            let per_event_execute_followup =
-                accumulated_in_batch && shield_has_per_event_execute_followup(state, rid);
+            // Exceptions (stamp only; the public event still aggregates
+            // post-batch): `execute`-template shields (Mindskinner, Weeping
+            // Angel) and ordinary `Next`/`AllBut` `runtime_execute` riders
+            // (Test of Faith) drain per-event inside
+            // `replace_combat_damage_batch` and need the per-event prevented
+            // amount stamped here so `EventContextAmount` resolves when that
+            // inline drain runs.
+            //
+            // CR 615.13: every prevention arm above accumulates into
+            // `combat_prevention_tally` when a batch is active
+            // (`PreventionMinus` except per-source reflectors, which have no
+            // printed carrier), so this per-event emit block is reached inside
+            // a batch only for the `execute`-template exception below — one
+            // `DamagePrevented` per (shield, recipient) is emitted post-batch.
+            // The per-event shape survives ONLY where batching cannot carry
+            // the semantics: a per-source-reflecting RIDER (Comeuppance:
+            // CR 615.5 binds each reflection to its own damage source — "that
+            // much damage to that creature" / "the source's controller").
+            // Those riders keep their per-event stash + inline drain; only the
+            // rider stays per-event, while the public `DamagePrevented`
+            // aggregates (Phase D emits but does not re-fire). The stamp is
+            // load-bearing for them: the inline drain resolves
+            // `EventContextAmount` against `last_effect_count`, and without
+            // the per-event stamp it would read a stale aggregate (or
+            // nothing) and reflect the wrong amount.
+            let per_event_execute_followup = accumulated_in_batch
+                && (shield_has_per_event_execute_followup(state, rid)
+                    || shield_rider_reflects_per_event(state, rid)
+                    || shield_has_inline_runtime_rider(state, rid));
             if prevented_amount > 0 && (!accumulated_in_batch || per_event_execute_followup) {
                 if !accumulated_in_batch {
                     events.push(GameEvent::DamagePrevented {
@@ -3127,12 +3326,13 @@ fn damage_done_applier(
 /// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
 fn mark_replacement_consumed(state: &mut GameState, rid: ReplacementId) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
     if let Some(repl) = repl {
         repl.is_consumed = true;
@@ -3148,12 +3348,13 @@ fn consume_prevention_shield(
     new_amount: Option<PreventionAmount>,
 ) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
 
     if let Some(repl) = repl {
@@ -3176,12 +3377,13 @@ fn update_redirection_shield(
     lifetime: RedirectionLifetime,
 ) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get_mut(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get_mut(i))
     } else {
         state
             .objects
             .get_mut(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_mut_by_rid(rid))
     };
 
     if let Some(repl) = repl {
@@ -3231,7 +3433,7 @@ fn destroy_applier(
     let is_regen = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .is_some_and(|repl| {
             matches!(
                 repl.shield_kind,
@@ -3282,7 +3484,7 @@ fn destroy_applier(
 
     // Mark the shield as consumed (one-shot).
     if let Some(obj) = state.objects.get_mut(&rid.source) {
-        if let Some(repl) = obj.replacement_definitions.get_mut(rid.index) {
+        if let Some(repl) = obj.replacement_definitions.get_mut_by_rid(rid) {
             repl.is_consumed = true;
         }
     }
@@ -3355,10 +3557,17 @@ fn apply_shield_counter_replacement(
             // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
             // combat damage dealt to the permanent in the batch. Defer counter
             // removal until the post-batch aggregation fires exactly once.
-            if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                *tally
-                    .entry(AppliedReplacementKey::for_event(&event, rid))
-                    .or_insert(0) += amount as i32;
+            // CR 615.13 + CR 616.1e (Matt C3): route through the shared
+            // accumulation/write-through authority — a resumed batch hydrates
+            // its parked prefix first, so the resumed entry joins the SAME
+            // aggregate application (one counter at drain) instead of burning
+            // a counter immediately plus a second at drain.
+            if accumulate_batch_prevention(
+                state,
+                AppliedReplacementKey::for_event(&event, rid),
+                &target,
+                amount,
+            ) {
                 return Err(ApplyResult::Prevented);
             }
 
@@ -3374,6 +3583,55 @@ fn apply_shield_counter_replacement(
             }
         }
         (_, other) => Ok(other),
+    }
+}
+
+/// CR 702.16e + CR 615.1 (Matt R10-F1): apply one virtual protection
+/// candidate. Protection prevents ALL remaining damage from a matching
+/// source — the quality on the rid only records WHICH protection the
+/// affected player ordered first, never a partial amount. Publication
+/// mirrors the gate's direct-claim path exactly
+/// (`emit_or_accumulate_protection_prevention`: accumulate in a live batch,
+/// else emit `DamagePrevented`; no `last_effect_count` stamp — protection
+/// carries no riders), so post-choice application is indistinguishable from
+/// a single-quality direct claim. The candidate id is already recorded in
+/// `applied` by the pipeline's `mark_applied(rid)` before this applier runs
+/// (`for_event`-keyed, so the key is `Protection { quality }`).
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
+fn apply_protection_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    _rid: ReplacementId,
+    quality: MatchedProtectionQuality,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    match event {
+        ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+        } => {
+            // CR 120.8: a 0-damage event is not damage at all — no
+            // `DamagePrevented`, no consumption, pass through unmodified.
+            if amount == 0 {
+                return Ok(ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+            crate::game::effects::deal_damage::emit_or_accumulate_protection_prevention(
+                state, source_id, &target, amount, quality, events,
+            );
+            Err(ApplyResult::Prevented)
+        }
+        other => Ok(other),
     }
 }
 
@@ -3530,7 +3788,7 @@ fn draw_applier(
     let prevents = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.as_ref())
         .is_some_and(|m| matches!(m, QuantityModification::Prevent));
     if prevents {
@@ -3622,7 +3880,7 @@ fn draw_replacement_count(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?;
+        .get_by_rid(rid)?;
     let execute = repl_def.execute.as_deref()?;
 
     match &*execute.effect {
@@ -3802,7 +4060,7 @@ fn scry_applier(
     let execute = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref());
 
     match execute {
@@ -3897,7 +4155,7 @@ fn explore_applier(
     };
     let Some(execute) = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone())
     else {
         return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
@@ -3985,7 +4243,7 @@ fn connive_applier(
     };
     let Some(execute) = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone())
     else {
         // CR 614.5: carry the captured `applied` set (already marks this rid) so
@@ -4159,7 +4417,7 @@ fn coin_flip_applier(
     let execute = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref());
 
     let new_count = match execute {
@@ -4219,7 +4477,7 @@ fn roll_dice_applier(
     let def = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index));
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid));
 
     // CR 614.1a: "instead roll that many dice plus one" — the definition's
     // `execute` carries `RollDie { count: Offset { EventContextAmount, +1 } }`.
@@ -4280,7 +4538,7 @@ fn proliferate_applier(
     let new_count = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .and_then(|execute| match &*execute.effect {
             Effect::Proliferate if execute.sub_ability.is_none() => execute
@@ -4390,7 +4648,7 @@ fn gain_life_applier(
     let qmod = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.clone());
     if let Some(modification) = qmod {
         if let ProposedEvent::LifeGain {
@@ -4475,7 +4733,7 @@ fn gain_life_execute_substitutes_event_type(state: &GameState, rid: ReplacementI
     let Some(execute) = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
     else {
         return false;
@@ -4500,7 +4758,7 @@ fn gain_life_replacement_amount(
         .objects
         .get(&rid.source)?
         .replacement_definitions
-        .get(rid.index)?
+        .get_by_rid(rid)?
         .execute
         .as_deref()?;
 
@@ -4549,7 +4807,7 @@ fn lose_life_applier(
     let definition = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index));
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid));
 
     if let Some(modification) = definition.and_then(|def| def.quantity_modification.clone()) {
         let ProposedEvent::LifeLoss {
@@ -4643,7 +4901,7 @@ fn add_counter_applier(
     let modification = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.quantity_modification.clone());
     let Some(modification) = modification else {
         return ApplyResult::Modified(event);
@@ -4781,9 +5039,8 @@ fn create_token_applier(
         // `pending_damage_replacements`; their installing controller is latched
         // in `source_controller` (mirrors `damage_modification_for_rid`). Fall
         // back to the active player when unstamped.
-        state
-            .pending_damage_replacements
-            .get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
             .map(|def| {
                 let controller = def.source_controller.unwrap_or(state.active_player);
                 extract(def, controller)
@@ -4795,7 +5052,7 @@ fn create_token_applier(
             .get(&rid.source)
             .and_then(|obj| {
                 obj.replacement_definitions
-                    .get(rid.index)
+                    .get_by_rid(rid)
                     .map(|def| extract(def, obj.controller))
             })
             .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
@@ -5121,7 +5378,7 @@ fn produce_mana_applier(
     let modification = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.mana_modification.clone());
 
     if let ProposedEvent::ProduceMana {
@@ -5239,7 +5496,10 @@ fn apply_empty_mana_pool_replacement(
         unreachable!("apply_empty_mana_pool_replacement discriminator guarantees variant");
     };
 
-    let entry = match state.pending_step_end_mana_handlers.get(rid.index) {
+    let entry = match rid
+        .index_as_usize()
+        .and_then(|i| state.pending_step_end_mana_handlers.get(i))
+    {
         Some(e) => e.clone(),
         None => {
             // Handler vanished — return event unchanged so the pipeline can complete.
@@ -5322,7 +5582,7 @@ fn untap_applier(
     let controller = source.controller;
     let execute = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone());
 
     // Run the alternative effect chain (if any) against the would-be-untapped
@@ -5376,7 +5636,7 @@ fn turn_face_up_applier(
     let controller = source.controller;
     let execute = source
         .replacement_definitions
-        .get(rid.index)
+        .get_by_rid(rid)
         .and_then(|def| def.execute.clone());
 
     if let Some(execute) = execute {
@@ -5523,7 +5783,7 @@ fn dealt_damage_applier(
     ) && state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .is_some_and(|execute| {
             execute.sub_ability.is_none()
@@ -5576,7 +5836,7 @@ fn mill_applier(
     let new_count = state
         .objects
         .get(&rid.source)
-        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|source| source.replacement_definitions.get_by_rid(rid))
         .and_then(|def| def.execute.as_deref())
         .and_then(|execute| match &*execute.effect {
             Effect::Mill { count: qty, .. } if execute.sub_ability.is_none() => {
@@ -5716,7 +5976,7 @@ fn bind_search_found_definition(
     rid: ReplacementId,
 ) -> Option<BoundSearchFoundDisposition> {
     let source = state.objects.get(&rid.source)?;
-    let definition = source.replacement_definitions.get(rid.index)?;
+    let definition = source.replacement_definitions.get_by_rid(rid)?;
     if definition.event != ReplacementEvent::SearchFound {
         return None;
     }
@@ -5875,7 +6135,7 @@ fn snapshot_search_found_candidates(
         .iter()
         .filter_map(|rid| {
             let source = state.objects.get(&rid.source)?;
-            let definition = source.replacement_definitions.get(rid.index)?;
+            let definition = source.replacement_definitions.get_by_rid(*rid)?;
             let disposition = bind_search_found_definition(state, *rid)?;
             Some(BoundSearchFoundCandidate {
                 replacement_id: *rid,
@@ -6262,12 +6522,13 @@ fn is_damage_prevention_replacement(
 
     // Look up the replacement definition from either objects or pending_damage_replacements.
     let repl_def = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(*rid))
     };
 
     let Some(repl) = repl_def else {
@@ -7382,7 +7643,7 @@ fn object_replacement_candidate_applies(
     let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
-    let Some(repl_def) = obj.replacement_definitions.get(rid.index) else {
+    let Some(repl_def) = obj.replacement_definitions.get_by_rid(rid) else {
         return false;
     };
 
@@ -8196,7 +8457,7 @@ fn legacy_object_replacement_candidates(
             }
             let rid = ReplacementId {
                 source: obj.id,
-                index,
+                index: index as u64,
             };
             object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
         })
@@ -8213,7 +8474,7 @@ fn legacy_object_replacement_candidates(
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
                             source: entry_ref,
-                            index,
+                            index: index as u64,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
                             .then_some(rid)
@@ -8269,7 +8530,7 @@ fn indexed_object_replacement_candidates_from_index(
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
                             source: entry_ref,
-                            index,
+                            index: index as u64,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
                             .then_some(rid)
@@ -8336,7 +8597,7 @@ fn rebuild_replacement_index(state: &mut GameState) {
         let entry = ReplacementIndexEntry {
             id: ReplacementId {
                 source: obj.id,
-                index,
+                index: index as u64,
             },
             ordinal,
         };
@@ -8363,6 +8624,82 @@ fn dirty_replacement_index(state: &mut GameState) {
 
 fn clear_replacement_index_pipeline(state: &mut GameState) {
     state.replacement_index.pipeline_active = false;
+}
+
+/// CR 616.1 (Matt R10-F1): the virtual-candidate rid for one applicable
+/// protection quality. The source selects the quality variant's sentinel;
+/// the index carries the minor word whole. The index is `u64` on every
+/// target (never `usize`), so 64-bit fingerprint qualities survive the pack
+/// on wasm32 exactly as on native.
+fn protection_replacement_id(quality: MatchedProtectionQuality) -> ReplacementId {
+    use crate::types::identifiers::PROTECTION_REPLACEMENT_SOURCE_BASE;
+    let (discriminant, minor) = quality.replacement_rid_parts();
+    ReplacementId {
+        source: ObjectId(PROTECTION_REPLACEMENT_SOURCE_BASE + u64::from(discriminant)),
+        index: minor,
+    }
+}
+
+/// CR 616.1 (Matt R10-F1): the quality named by a protection
+/// virtual-candidate rid, or `None` when `rid` is not one (or names a
+/// foreign quality — never our own writes; callers fail contained).
+fn protection_quality_from_rid(rid: ReplacementId) -> Option<MatchedProtectionQuality> {
+    let discriminant = rid.source.protection_source_discriminant()?;
+    MatchedProtectionQuality::from_replacement_parts(discriminant, rid.index)
+}
+
+/// CR 616.1 (Matt R10-F1): English tail for a protection candidate label,
+/// rendered from the rid alone (no state, no event). Exact for the seven
+/// denotable variants; the two fingerprint variants name their class plus
+/// the low 32 hash bits so overlapping members still read distinctly.
+fn protection_quality_label_tail(quality: MatchedProtectionQuality) -> String {
+    match quality {
+        MatchedProtectionQuality::Color(color) => {
+            let name = match color {
+                ManaColor::White => "White",
+                ManaColor::Blue => "Blue",
+                ManaColor::Black => "Black",
+                ManaColor::Red => "Red",
+                ManaColor::Green => "Green",
+            };
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::CardType(core) => {
+            // Matched card-type qualities are always one of the seven the
+            // matcher accepts; the fallback is unreachable from our own rids.
+            let name = core.protection_quality_str().unwrap_or("card");
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::CardSubtype(fingerprint) => {
+            format!(
+                "protection from a creature subtype #{:08x}",
+                fingerprint as u32
+            )
+        }
+        MatchedProtectionQuality::Colorlessness(colorlessness) => {
+            let name = match colorlessness {
+                ProtectionColorlessness::Colorless => "colorless",
+                ProtectionColorlessness::Monocolored => "monocolored",
+                ProtectionColorlessness::Multicolored => "multicolored",
+            };
+            format!("protection from {name}")
+        }
+        MatchedProtectionQuality::Multicolored => "protection from multicolored".to_string(),
+        MatchedProtectionQuality::Player(player) => {
+            format!("protection from Player {}", player.0)
+        }
+        MatchedProtectionQuality::Everything => "protection from everything".to_string(),
+        MatchedProtectionQuality::Filter(fingerprint) => {
+            format!(
+                "protection from filtered sources #{:08x}",
+                fingerprint as u32
+            )
+        }
+        MatchedProtectionQuality::FromPlayer(scope) => match scope {
+            ProtectionPlayerScope::Opponent => "protection from opponents".to_string(),
+            ProtectionPlayerScope::You => "protection from your own objects".to_string(),
+        },
+    }
 }
 
 pub fn find_applicable_replacements(
@@ -8411,6 +8748,53 @@ pub fn find_applicable_replacements(
             }
         }
         _ => {}
+    }
+
+    // CR 616.1 (Matt R10-F1): overlapping protections are virtual
+    // candidates — one rid per applicable quality — so the affected player
+    // orders them against each other (and any shields) instead of the gate's
+    // scan order deciding silently. A separate `if let` (like umbra armor
+    // below), independent of the shield-counter match above, so a damage
+    // event with both exposes every candidate. Drawn iff two-plus apply
+    // (the same predicate the gate uses to propose): single-quality events
+    // never reach here through a gated path. Amount-gated, so a
+    // fully-prevented event draws nothing on re-derive.
+    if let ProposedEvent::Damage {
+        target,
+        amount,
+        source_id,
+        ..
+    } = event
+    {
+        if *amount > 0 {
+            let applicable = match target {
+                TargetRef::Object(object_id) => {
+                    match (state.objects.get(object_id), state.objects.get(source_id)) {
+                        (Some(target_obj), Some(source_obj)) => {
+                            crate::game::keywords::all_preventing_protection_qualities(
+                                target_obj, source_obj,
+                            )
+                        }
+                        _ => Vec::new(),
+                    }
+                }
+                TargetRef::Player(player_id) => {
+                    crate::game::static_abilities::all_preventing_player_protection_qualities(
+                        state,
+                        *player_id,
+                        Some(*source_id),
+                    )
+                }
+            };
+            if applicable.len() >= 2 {
+                for quality in applicable {
+                    let rid = protection_replacement_id(quality);
+                    if !event.already_applied(&rid) {
+                        candidates.push(rid);
+                    }
+                }
+            }
+        }
     }
 
     // CR 903.9b: This is an intrinsic rules-source replacement, not an
@@ -8500,7 +8884,7 @@ pub fn find_applicable_replacements(
     // card via a runtime continuous effect rather than printing it, so the
     // card's `replacement_definitions` is empty and the ordinary
     // object-carried scan (`object_replacement_candidate_applies`, which reads
-    // `obj.replacement_definitions.get(rid.index)`) never offers it. Surface
+    // `obj.replacement_definitions.get_by_rid(rid)`) never offers it. Surface
     // one virtual Draw-replacement candidate per graveyard card with an
     // effective GRANTED (non-printed) Dredge value.
     //
@@ -8723,7 +9107,7 @@ pub fn find_applicable_replacements(
 
             let rid = ReplacementId {
                 source: ObjectId(0),
-                index,
+                index: index as u64,
             };
 
             if event.already_applied(&rid) {
@@ -8935,7 +9319,7 @@ pub fn find_applicable_replacements(
         for (index, entry) in state.pending_step_end_mana_handlers.iter().enumerate() {
             let rid = ReplacementId {
                 source: ObjectId(0),
-                index,
+                index: index as u64,
             };
             // CR 614.5: skip handlers that already applied to this event.
             if event.already_applied(&rid) {
@@ -9063,7 +9447,7 @@ pub(crate) fn proposed_event_prompt_cause(
         let def = state
             .objects
             .get(&rid.source)
-            .and_then(|o| o.replacement_definitions.get(rid.index));
+            .and_then(|o| o.replacement_definitions.get_by_rid(*rid));
         let Some(def) = def else {
             // CR 614.1a: no resolvable definition (every virtual candidate) ⇒
             // conservatively interactive.
@@ -9565,7 +9949,7 @@ pub(super) fn current_self_enter_replacement_modifiers(
         let Some(replacement) = state
             .objects
             .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         else {
             continue;
         };
@@ -9609,7 +9993,7 @@ pub(super) fn current_self_enter_replacement_choice(
             state
                 .objects
                 .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         })
         .filter(|replacement| !replacement_mode_is_optional(&replacement.mode))
         .filter_map(|replacement| {
@@ -9715,6 +10099,11 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
+    // CR 615.13 + CR 616.1e (Matt C3): activate the parked batch scope before
+    // replacement dispatch, so the shield-counter applier and the batch
+    // rider-stash suppression gate below read the resumed tally instead of a
+    // dropped transient. No-op unless a batch is suspended.
+    hydrate_parked_batch_prevention_tally(state);
     // CR 703.4q + CR 614.1a: Path A carve-out for step-end empty-mana events.
     // Step-end mana handlers carry no `ReplacementDefinition` (no execute /
     // decline ability, no event-modifier sub-ability work, no runtime_execute)
@@ -9758,6 +10147,12 @@ fn apply_single_replacement(
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
 
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate applies its
+    // recorded quality — total prevention of the remaining damage.
+    if let Some(quality) = protection_quality_from_rid(rid) {
+        return apply_protection_replacement(state, proposed, rid, quality, events);
+    }
+
     if is_commander_hand_or_library_return_replacement(rid) {
         return apply_commander_hand_or_library_return_replacement(
             state, proposed, rid, branch, events,
@@ -9786,14 +10181,15 @@ fn apply_single_replacement(
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         state
             .liminal_entries
             .get(&rid.source)
             .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
     };
     // CR 109.5: snapshot the replacing ability's controller HERE, while
     // `repl_def_ref`'s borrow is still live. The stash sites below run after the
@@ -9847,7 +10243,7 @@ fn apply_single_replacement(
                 // resolving spell (e.g. Inkshield) captures a `runtime_execute`
                 // rider at resolution time and fires it once post-batch against the
                 // aggregate prevented amount. Suppress the per-event stash here for
-                // such shields so `fire_combat_prevention_riders` owns the single
+                // such shields so `fire_batch_prevention_riders` owns the single
                 // continuation.
                 //
                 // Static permanent-ability shields (e.g. Weeping Angel's "prevent
@@ -9859,7 +10255,7 @@ fn apply_single_replacement(
                 // CR 615.5 + CR 120.1: A rider that reflects PER SOURCE (Comeuppance:
                 // "if damage from a creature source is prevented this way, deal that
                 // much damage to that creature") cannot ride the aggregate batch path
-                // — `fire_combat_prevention_riders` only pins a single CHOSEN source
+                // — `fire_batch_prevention_riders` only pins a single CHOSEN source
                 // (`shield_specific_source`), so a class-scoped `damage_source_filter`
                 // leaves the drain's `event_source` unset and the per-source
                 // reflection/gate never resolves. Such riders must fire per-event so
@@ -10934,7 +11330,7 @@ fn candidate_materiality(
 
     // CR 702.52a + CR 616.1: granted dredge has no object-carried definition
     // to walk via the generic execute-chain classifier below (that walk reads
-    // `state.objects...replacement_definitions.get(rid.index)`, which always
+    // `state.objects...replacement_definitions.get_by_rid(rid)`, which always
     // misses for `GRANTED_DREDGE_INDEX`), so mirror here what that walk would
     // find for PRINTED dredge: the execute chain's head (`Effect::Mill`)
     // matches no specific arm in the walk and falls to its conservative
@@ -10964,6 +11360,17 @@ fn candidate_materiality(
             }
         }
         None => {}
+    }
+
+    // CR 616.1 (Matt R10-F1): a virtual protection candidate prevents all
+    // damage — a Damage-field write exactly like the shield-counter damage
+    // replacement, non-commuting with it and with sibling qualities, so any
+    // overlap forces the CR 616.1e player ordering choice.
+    if protection_quality_from_rid(rid).is_some() {
+        return CandidateMateriality::Writes {
+            field: EventField::Damage,
+            commute: CommuteClass::NonCommuting,
+        };
     }
 
     // CR 122.1h + CR 616.1: finality redirects the graveyard move to exile — an
@@ -11321,7 +11728,7 @@ fn replacement_definition_for_id(
         .get(&rid.source)
         .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&rid.source))
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
         // individual draws, and CR 121.2a modifies the instruction's count *before* any
         // individual draw happens. A Draw replacement must therefore declare which of the
@@ -11405,6 +11812,8 @@ fn park_entry_controller_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -11578,6 +11987,8 @@ fn park_as_enters_named_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        each_source_batch_owner: None,
+        combat_pause_slot: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -11762,7 +12173,9 @@ fn auto_choice_identities(
         .iter()
         .map(|rid| {
             if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
-                let entry = state.pending_step_end_mana_handlers.get(rid.index)?;
+                let entry = rid
+                    .index_as_usize()
+                    .and_then(|i| state.pending_step_end_mana_handlers.get(i))?;
                 let object = state.objects.get(&entry.source)?;
                 return Some(ReplacementAutoChoiceIdentity::Mana {
                     source: ObjectIncarnationRef::from_object(object),
@@ -12144,6 +12557,8 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                     delivery_boundary: None,
+                    each_source_batch_owner: None,
+                    combat_pause_slot: None,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -12207,6 +12622,8 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
+                combat_pause_slot: None,
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -12268,12 +12685,14 @@ pub fn replace_event(
 ///
 /// Each proposed `Damage` event is passed through `replace_event` individually
 /// (the pipeline is inherently per-event), but for the duration of the batch
-/// `state.combat_prevention_tally` is active: the damage-replacement applier's
-/// `Prevention::All` branch routes each prevented amount into a per-shield
-/// aggregate keyed by `ReplacementId` instead of stamping `last_effect_count`
-/// or emitting a per-source `DamagePrevented`. `Prevention::Next(N)` shields
-/// keep the existing per-event sequential path — depletion-style shields are
-/// not aggregated here.
+/// `state.combat_prevention_tally` is active: the damage-replacement applier
+/// routes each prevented amount into a per-shield aggregate keyed by
+/// (`ReplacementId`, recipient) instead of stamping `last_effect_count` or
+/// emitting a per-source `DamagePrevented` — CR 615.13 makes one prevention
+/// application over simultaneous events ONE trigger. Every prevention arm
+/// (`All`, `AllBut`, `Next`, `PreventionMinus`) accumulates; depletion and
+/// per-source-reflecting shields keep their per-event rider stash + inline
+/// drain, and Phase D emits their aggregate event without re-firing the rider.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
 /// player choice — out of scope (#314 is Prevention::All)`. When two or more
@@ -12282,18 +12701,42 @@ pub fn replace_event(
 /// player-choice path is not modeled — the shields apply per-event in pipeline
 /// order instead.
 ///
-/// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
-/// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
-/// `None` means that source's damage was fully prevented or skipped. The
-/// `HashMap` is the per-`Prevention::All`-shield aggregate prevented amount.
+/// Returns [`CombatDamageReplacementOutcome`]: either every event's survivor
+/// (`Some(event)` is a post-replacement `Damage` event for `combat_damage.rs`
+/// Phase C to apply; `None` means that source's damage was fully prevented)
+/// plus the per-shield-AND-per-recipient aggregate prevented amount (CR 120.3
+/// makes the recipient a load-bearing property of a damage event, and one
+/// shield's `damage_target_filter` is a predicate that can match several
+/// recipients in the same CR 510.2 batch, so the key carries the recipient
+/// the applier actually prevented damage for) — or a pause, when one event's
+/// pipeline needs a CR 616.1 ordering choice the batch cannot answer itself.
+///
+/// CR 616.1 (Matt R11-F1): a pause keeps `state.pending_replacement`
+/// populated (it is the resume authority) and reports the decided survivors
+/// plus the unprocessed remainder; the caller parks both alongside the live
+/// tally window and prompts the affected player. The batch never drops a
+/// paused event: skipping it would un-deal simultaneous damage (CR 510.2).
+pub(crate) enum CombatDamageReplacementOutcome {
+    Complete {
+        survivors: Vec<Option<ProposedEvent>>,
+        tally: CombatPreventionTally,
+    },
+    Paused {
+        /// Survivors for the events before the paused one, in batch order. The
+        /// paused event is `entries[decided.len()]` at the caller: consumed
+        /// from the iterator, so it is in neither `decided` nor `remaining`.
+        decided: Vec<Option<ProposedEvent>>,
+        remaining: Vec<ProposedEvent>,
+        tally: CombatPreventionTally,
+        player: PlayerId,
+    },
+}
+
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     proposed: Vec<ProposedEvent>,
-) -> (
-    Vec<Option<ProposedEvent>>,
-    HashMap<AppliedReplacementKey, i32>,
-) {
+) -> CombatDamageReplacementOutcome {
     let registry = replacement_registry();
 
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
@@ -12301,7 +12744,8 @@ pub(crate) fn replace_combat_damage_batch(
     state.combat_prevention_tally = Some(HashMap::new());
 
     let mut survivors = Vec::with_capacity(proposed.len());
-    for event in proposed {
+    let mut proposed = proposed.into_iter();
+    for event in proposed.by_ref() {
         prepare_replacement_index_for_pipeline(state);
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);
@@ -12323,21 +12767,26 @@ pub(crate) fn replace_combat_damage_batch(
             ReplacementResult::Prevented => {
                 survivors.push(None);
             }
-            ReplacementResult::NeedsChoice(_) => {
-                // CR 510.2: Combat damage cannot pause for a replacement
-                // ordering choice. Mirror the legacy per-event behavior
-                // (`apply_damage_to_target`'s combat `NeedsChoice` arm) — skip
-                // this source's damage. Clear the pending pause so it does not
-                // leak out of the batch.
-                state.pending_replacement = None;
-                survivors.push(None);
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1 (Matt R11-F1): report the pause instead of dropping
+                // the event. `pending_replacement` stays populated (the resume
+                // authority); the partial tally returns with the decided
+                // survivors so the caller can park the batch whole.
+                let tally = state.combat_prevention_tally.take().unwrap_or_default();
+                state.combat_prevention_tally = restore_tally;
+                return CombatDamageReplacementOutcome::Paused {
+                    decided: survivors,
+                    remaining: proposed.collect(),
+                    tally,
+                    player,
+                };
             }
         }
     }
 
     let tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
-    (survivors, tally)
+    CombatDamageReplacementOutcome::Complete { survivors, tally }
 }
 
 /// Resume a frozen SearchFound candidate set after one optional candidate was
@@ -12479,6 +12928,15 @@ fn continue_replacement_impl(
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         let reparked_delivery_boundary = pending.delivery_boundary.clone();
+        // CR 615.13 + CR 616.1e (Matt M1): a reconstructing re-park carries
+        // the batch stamp with the record — a stamp dropped here would
+        // strand an empty-tail batch's boundary (practically `None` on this
+        // zone-change path, but the lifecycle must not depend on that).
+        let reparked_batch_owner = pending.each_source_batch_owner;
+        // CR 510.2 + CR 616.1 (Matt R12): same lifecycle rule for the
+        // combat-pause stamp (practically `None` on this zone-change path,
+        // but the lifecycle must not depend on that).
+        let reparked_pause_slot = pending.combat_pause_slot;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
@@ -12611,6 +13069,8 @@ fn continue_replacement_impl(
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
+                    each_source_batch_owner: reparked_batch_owner,
+                    combat_pause_slot: reparked_pause_slot,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -15940,6 +16400,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -16004,6 +16466,8 @@ mod tests {
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
+                each_source_batch_owner: None,
+                combat_pause_slot: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -16089,6 +16553,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -18155,6 +18621,120 @@ mod tests {
         }
     }
 
+    /// CR 616.1 (Matt R11-F2): the virtual-candidate rid pack/unpack
+    /// round-trips every protection quality through the REAL `ReplacementId`
+    /// — including 64-bit fingerprints with high bits set — so candidate
+    /// identities survive pause records on every target. The halves-only test
+    /// in `keywords.rs` never touches the pack; this one fails on any target
+    /// that narrows the index (the wasm32 `as usize` truncation).
+    #[test]
+    fn protection_replacement_id_codec_round_trips_through_rid() {
+        for quality in [
+            MatchedProtectionQuality::Color(ManaColor::Red),
+            MatchedProtectionQuality::CardType(CoreType::Artifact),
+            MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardSubtype(0),
+            MatchedProtectionQuality::CardSubtype(0xFFFF_FFFF_0000_0001),
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Colorlessness(ProtectionColorlessness::Multicolored),
+            MatchedProtectionQuality::Multicolored,
+            MatchedProtectionQuality::Player(PlayerId(7)),
+            MatchedProtectionQuality::Everything,
+            MatchedProtectionQuality::Filter(1),
+            MatchedProtectionQuality::Filter(0x0000_0001_0000_0000),
+            MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+        ] {
+            let rid = protection_replacement_id(quality);
+            assert_eq!(
+                protection_quality_from_rid(rid),
+                Some(quality),
+                "rid codec must round-trip {quality:?}"
+            );
+        }
+        // The narrowing probe: a fingerprint with high bits set must ride the
+        // index whole. Under the old `minor as usize` pack this assertion
+        // fails on 32-bit targets (wasm32).
+        let rid = protection_replacement_id(MatchedProtectionQuality::Filter(u64::MAX));
+        assert!(
+            rid.index > u64::from(u32::MAX),
+            "high fingerprint bits must survive the pack, got index {:#x}",
+            rid.index
+        );
+        // Foreign rids fail contained, never decode to a quality.
+        assert_eq!(
+            protection_quality_from_rid(ReplacementId {
+                source: ObjectId(1),
+                index: 0
+            }),
+            None
+        );
+        assert_eq!(
+            protection_quality_from_rid(ReplacementId {
+                source: ObjectId(crate::types::identifiers::PROTECTION_REPLACEMENT_SOURCE_BASE),
+                index: 6,
+            }),
+            None,
+            "sentinel source with an out-of-range Color minor is foreign"
+        );
+    }
+
+    /// CR 616.1 (Matt R11-F2): a parked protection-overlap choice serializes
+    /// its candidate rids losslessly — high-bit fingerprint minors survive a
+    /// JSON round trip and still decode to their qualities. JSON numbers
+    /// carry `u64` exactly, so this holds on 32- and 64-bit targets alike;
+    /// under the old `usize` index the same payload overflows on wasm32.
+    #[test]
+    fn protection_overlap_pending_choice_serializes_losslessly() {
+        let qualities = [
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Filter(0xDEAD_BEEF_CAFE_F00D),
+            MatchedProtectionQuality::Color(ManaColor::Red),
+        ];
+        let pending = PendingReplacement {
+            proposed: ProposedEvent::Damage {
+                source_id: ObjectId(9),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 2,
+                is_combat: false,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: qualities.map(protection_replacement_id).to_vec(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: Default::default(),
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
+        };
+        let json = serde_json::to_string(&pending).expect("pending choice serializes");
+        assert!(
+            json.contains("18446744073709551615"),
+            "u64::MAX minor must ride whole in JSON: {json}"
+        );
+        let back: PendingReplacement =
+            serde_json::from_str(&json).expect("pending choice deserializes");
+        assert_eq!(back.candidates, pending.candidates);
+        for (rid, quality) in back.candidates.iter().zip(qualities) {
+            assert_eq!(
+                protection_quality_from_rid(*rid),
+                Some(quality),
+                "deserialized candidate must still decode"
+            );
+        }
+    }
+
     #[test]
     fn finality_competes_by_identity_and_resumes_through_the_cr_616_choice() {
         let finality_id = ObjectId(10);
@@ -18755,7 +19335,7 @@ mod tests {
                 .token_owner_redirect(ControllerRef::You),
         );
 
-        let on_object = |index: usize| ReplacementId {
+        let on_object = |index: u64| ReplacementId {
             source: ObjectId(10),
             index,
         };
@@ -20244,7 +20824,7 @@ mod tests {
     /// CR 510.2 + CR 615.13: inside a combat-damage batch, `PreventionMinus`
     /// must defer BOTH the `DamagePrevented` emission and the
     /// `last_effect_count` stamp to the post-batch aggregate — it accumulates
-    /// into the per-replacement tally that `fire_combat_prevention_riders`
+    /// into the per-replacement tally that `fire_batch_prevention_riders`
     /// consumes (which emits the single event and stamps the batch total),
     /// mirroring the `Prevention::All` shield batching.
     #[test]
@@ -20278,10 +20858,22 @@ mod tests {
              happens post-batch so the rider sees the un-fragmented total"
         );
         let tally = state.combat_prevention_tally.as_ref().unwrap();
+        // CR 120.3: assert the whole entry, key AND recipient included — the
+        // amount alone compiles unchanged after the key was widened, so an
+        // amount-only assertion would keep passing if the recipient were dropped
+        // or replaced by a shield-derived guess. `damage_event` heads its damage
+        // at `Player(PlayerId(1))`; that is the value that must be threaded.
         assert_eq!(
-            tally.values().copied().collect::<Vec<_>>(),
-            vec![2],
-            "the prevented amount must accumulate into the per-replacement batch tally"
+            tally.iter().collect::<Vec<_>>(),
+            vec![(
+                &(
+                    AppliedReplacementKey::object(rid.source, rid.index),
+                    TargetRef::Player(PlayerId(1)),
+                ),
+                &2,
+            )],
+            "the prevented amount must accumulate into the batch tally keyed by \
+             (shield, recipient), carrying the recipient the damage was headed at"
         );
     }
 
@@ -20907,6 +21499,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);
@@ -25498,6 +26092,151 @@ mod tests {
         assert!(
             record_proposed_events(|| {}).is_empty(),
             "an armed extent with no pipeline entry records nothing"
+        );
+    }
+
+    /// CR 616.1 (Matt R11-F1): `replace_combat_damage_batch` reports a pause
+    /// instead of dropping the event. The paused event is consumed from the
+    /// iterator, so it is in NEITHER `decided` NOR `remaining`: the caller
+    /// reads it as `entries[decided.len()]`, and `pending_replacement` stays
+    /// populated as the resume's authority. The tally window restores on the
+    /// pause exit exactly as on completion.
+    ///
+    /// REVERT PROBE: restore the old NeedsChoice arm (clear pending, push
+    /// `None`) — both `Paused` matches below fail.
+    #[test]
+    fn combat_damage_batch_pause_reports_decided_and_remaining_around_the_paused_event() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        fn overlap_fixture() -> (GameState, ObjectId, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let attacker = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "RG Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&attacker).unwrap().color =
+                vec![ManaColor::Red, ManaColor::Green];
+            let plain = crate::game::zones::create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Plain Blocker".to_string(),
+                Zone::Battlefield,
+            );
+            let warded = crate::game::zones::create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(1),
+                "Warded Blocker".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&warded).unwrap().keywords.extend([
+                Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+                Keyword::Protection(ProtectionTarget::Color(ManaColor::Green)),
+            ]);
+            (state, attacker, plain, warded)
+        }
+        fn damage_to(source: ObjectId, target: ObjectId) -> ProposedEvent {
+            ProposedEvent::Damage {
+                source_id: source,
+                target: TargetRef::Object(target),
+                amount: 3,
+                is_combat: true,
+                applied: HashSet::new(),
+            }
+        }
+
+        // Pause on the SECOND event: one decided survivor, empty remainder.
+        let (mut state, attacker, plain, warded) = overlap_fixture();
+        let mut events = Vec::new();
+        let outcome = replace_combat_damage_batch(
+            &mut state,
+            &mut events,
+            vec![damage_to(attacker, plain), damage_to(attacker, warded)],
+        );
+        let CombatDamageReplacementOutcome::Paused {
+            decided,
+            remaining,
+            tally,
+            player,
+        } = outcome
+        else {
+            panic!("a two-quality protection overlap must pause the batch");
+        };
+        assert_eq!(decided.len(), 1, "paused_entry == decided.len() == 1");
+        assert!(
+            matches!(&decided[0], Some(ProposedEvent::Damage { target, .. })
+                if *target == TargetRef::Object(plain)),
+            "the decided prefix holds the first event's survivor, got {decided:?}"
+        );
+        assert!(
+            remaining.is_empty(),
+            "the paused event is last: nothing remains, got {remaining:?}"
+        );
+        assert_eq!(
+            player,
+            PlayerId(1),
+            "the affected object's controller chooses"
+        );
+        assert!(
+            tally.is_empty(),
+            "no shield applied on the decided leg: the partial tally is empty"
+        );
+        assert!(
+            state.combat_prevention_tally.is_none(),
+            "the tally window restores on the pause exit"
+        );
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("the pause keeps pending_replacement populated");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::Damage { target, .. }
+                if *target == TargetRef::Object(warded)),
+            "the resume authority owns the PAUSED event, got {:?}",
+            pending.proposed
+        );
+
+        // Pause on the FIRST event: empty decided prefix, one remainder.
+        let (mut state, attacker, plain, warded) = overlap_fixture();
+        let mut events = Vec::new();
+        let outcome = replace_combat_damage_batch(
+            &mut state,
+            &mut events,
+            vec![damage_to(attacker, warded), damage_to(attacker, plain)],
+        );
+        let CombatDamageReplacementOutcome::Paused {
+            decided,
+            remaining,
+            player,
+            ..
+        } = outcome
+        else {
+            panic!("a two-quality protection overlap must pause the batch");
+        };
+        assert_eq!(decided.len(), 0, "paused_entry == decided.len() == 0");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the unprocessed event waits in remaining"
+        );
+        assert!(
+            matches!(&remaining[0], ProposedEvent::Damage { target, .. }
+                if *target == TargetRef::Object(plain)),
+            "remaining holds the proposed (pre-pipeline) event, got {remaining:?}"
+        );
+        assert_eq!(
+            player,
+            PlayerId(1),
+            "the affected object's controller chooses"
+        );
+        assert!(
+            state.pending_replacement.is_some(),
+            "the pause keeps pending_replacement populated"
         );
     }
 }

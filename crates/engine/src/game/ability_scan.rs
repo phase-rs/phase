@@ -3447,6 +3447,22 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_controller_ref(controller));
             acc
         }
+        // Turn-structure ledger read (projected, cf. the static last-turn
+        // analog) plus the endpoint axes (`WasStartingPlayer` pattern).
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+                // The uncollapsed this-turn ledger is not a `HistoryMember`;
+                // mirrors `SpellCastWithVariantThisTurn` (projected, no
+                // history axis).
+                history: HistoryReads::NONE,
+            };
+            acc = acc.or(scan_player_scope(attacker));
+            acc = acc.or(scan_player_scope(defender));
+            acc
+        }
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
             event: false,
             sibling: false,
@@ -4762,6 +4778,22 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             projected: true,
             history: HistoryReads::NONE,
         },
+        // Turn-structure ledger read (same class as the last-turn analog
+        // above) plus the endpoint axes (WasStartingPlayer pattern).
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+                // The uncollapsed this-turn ledger is not a `HistoryMember`;
+                // mirrors `SpellCastWithVariantThisTurn` (projected, no
+                // history axis).
+                history: HistoryReads::NONE,
+            };
+            acc = acc.or(scan_controller_ref(attacker));
+            acc = acc.or(scan_controller_ref(defender));
+            acc
+        }
         StaticCondition::OpponentPoisonAtLeast { count: _ } => Axes {
             event: false,
             sibling: false,
@@ -6491,6 +6523,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // CR 613.1b + CR 725.5: designation-anchored control reads a scalar
+        // designation (`state.monarch`), no growing aggregate — read-free
+        // alongside its `ChangeController` sibling.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -6534,6 +6570,7 @@ fn scan_resolved_continuous_static(
         per_player_condition,
         attack_defended,
         bypass_beneficiary,
+        bound_actor,
         // Restricts where `affected` is evaluated; `affected`'s own scan carries any read.
         affected_zone: _,
         // A location, a flag, a label, a fixed id, or an exemption over the protected object's
@@ -6570,6 +6607,11 @@ fn scan_resolved_continuous_static(
     }
     if let Some(beneficiary) = bypass_beneficiary {
         acc = acc.or(scan_controller_ref(beneficiary));
+    }
+    // Same controller-role vocabulary as the beneficiary above: the bound
+    // subject role is resolved at install against the resolving ability.
+    if let Some(actor) = bound_actor {
+        acc = acc.or(scan_controller_ref(actor));
     }
     acc
 }
@@ -6821,6 +6863,7 @@ pub(crate) fn transient_effect_history(
         id: _,
         source_id: _,
         controller: _,
+        bound_actor: _,
         timestamp: _,
         affected_recipient: _,
         duration_subject: _,

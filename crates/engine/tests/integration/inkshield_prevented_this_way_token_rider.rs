@@ -309,6 +309,125 @@ fn test_of_faith_puts_no_counters_when_no_damage_is_prevented() {
     );
 }
 
+/// PR #9867 review (HIGH: inline-rider amount stamping) — Test of Faith
+/// through a real combat-damage batch. The `Next(3)` shield accumulates its
+/// public `DamagePrevented` event into the batch aggregate, but its
+/// `runtime_execute` rider still drains inline per event; the per-event
+/// prevented amount must be stamped so the rider's `EventContextAmount`
+/// resolves. A 1/1 blocks a 6-power attacker: 3 prevented → 3 counters
+/// (4/4) with 3 marked → survives SBAs (the authoritative ruling's line:
+/// a 1/1 receiving six damage finishes 4/4 with three damage marked).
+///
+/// CR 510.2 (simultaneous combat damage) + CR 615.5 (follow-up timing) +
+/// CR 615.7 (Next(3) depletion) + CR 704.5g (lethal damage SBA).
+#[test]
+fn test_of_faith_combat_batch_stamps_inline_rider_amount() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let blocker = scenario.add_creature(P0, "Blocker", 1, 1).id();
+    let attacker = scenario.add_creature(P1, "Attacker", 6, 6).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test of Faith", true, TEST_OF_FAITH_TEXT)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[blocker]).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "reach guard: Test of Faith must resolve to a clean priority window, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        !outcome.state().objects[&blocker]
+            .replacement_definitions
+            .as_slice()
+            .is_empty(),
+        "reach guard: the prevention shield must be installed on the targeted blocker"
+    );
+
+    runner.state_mut().active_player = P1;
+    let mut attacked = false;
+    let mut blocked = false;
+    for _ in 0..200 {
+        match runner.state().phase {
+            Phase::EndCombat | Phase::PostCombatMain => break,
+            _ => {}
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                if runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::DeclareAttackers { player, .. } if !attacked => {
+                attacked = true;
+                let a = if player == P1 {
+                    vec![(attacker, AttackTarget::Player(P0))]
+                } else {
+                    vec![]
+                };
+                if runner.declare_attackers(&a).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                if runner.declare_attackers(&[]).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareBlockers { player, .. } if !blocked => {
+                blocked = true;
+                let b = if player == P0 {
+                    vec![(blocker, attacker)]
+                } else {
+                    vec![]
+                };
+                if runner.declare_blockers(&b).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                if runner.declare_blockers(&[]).is_err() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    runner.advance_until_stack_empty();
+    assert!(
+        attacked && blocked,
+        "reach guard: combat must have reached both declaration prompts \
+         (attacked={attacked}, blocked={blocked})"
+    );
+
+    assert_eq!(
+        damage_marked(&runner, blocker),
+        3,
+        "the Next(3) shield must prevent 3 of the 6 combat damage, leaving 3 marked"
+    );
+    assert_eq!(
+        plus1plus1_counters(&runner, blocker),
+        3,
+        "CR 615.5: one +1/+1 counter per 1 damage prevented — the inline rider must \
+         resolve EventContextAmount against the stamped per-event amount"
+    );
+    assert_eq!(
+        runner.state().objects[&blocker].zone,
+        Zone::Battlefield,
+        "the 4/4 with 3 marked damage must survive SBAs (authoritative ruling)"
+    );
+}
+
 /// #8777 (H-2) — Brace for Impact: real cast, targeted (`ColorCount {GE,2}`),
 /// `All` shield, combat-batch aggregate drain. A multicolored 1/1 blocks a
 /// 3/3 attacker: all 3 damage is prevented, 3 +1/+1 counters go on, and the

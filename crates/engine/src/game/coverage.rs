@@ -2567,6 +2567,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
             crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => {
                 format!("at that player's next {}", fmt_phase(phase))
             }
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { .. } => {
+                format!("at that player's next {}", fmt_phase(phase))
+            }
         },
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
             format!("at that added {}", fmt_phase(phase))
@@ -4856,6 +4859,11 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::ScopedPlayerMatches { filter } => {
             format!("scoped player is {}", fmt_player_filter(filter))
         }
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => format!(
+            "{} attacked {} this turn",
+            fmt_player_scope(attacker),
+            fmt_player_scope(defender)
+        ),
     }
 }
 
@@ -5208,6 +5216,34 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AttackedPlayer,
         } => "the attacked player attacked you during their last turn".into(),
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // Exhaustive on purpose: every endpoint renders distinctly so the
+            // coverage diff shows a change between any two of them. A new
+            // `ControllerRef` breaks the build here instead of collapsing
+            // into a shared fallback label.
+            let endpoint = |scope: &ControllerRef| match scope {
+                ControllerRef::You => "you",
+                ControllerRef::Opponent => "an opponent",
+                ControllerRef::ScopedPlayer => "the scoped player",
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => "target player",
+                ControllerRef::ParentTargetController => "the parent target's controller",
+                ControllerRef::EventTargetController => "the event target's controller",
+                ControllerRef::ParentTargetOwner => "the parent target's owner",
+                ControllerRef::DefendingPlayer => "the defending player",
+                ControllerRef::ChosenPlayer { .. } => "the chosen player",
+                ControllerRef::DeclaredPlayer { .. } => "the declared player",
+                ControllerRef::SourceChosenPlayer => "the source-chosen player",
+                ControllerRef::TriggeringPlayer => "the triggering player",
+                ControllerRef::EnchantedPlayer => "the enchanted player",
+                ControllerRef::ActivePlayer => "the active player",
+                ControllerRef::SpecificPlayer { .. } => "a specific player",
+            };
+            format!(
+                "{} attacked {} this turn",
+                endpoint(attacker),
+                endpoint(defender)
+            )
+        }
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
@@ -5367,6 +5403,16 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             "damage as though unblocked".into()
         }
         ContinuousModification::ChangeController => "change controller".into(),
+        // CR 725.5: designation-anchored control — label names the holder so
+        // coverage distinguishes it from source-controller changes. Exhaustive
+        // over `Designation`: a future leaf breaks the build here by design.
+        ContinuousModification::ChangeControllerToDesignation { designation } => {
+            match designation {
+                crate::types::ability::Designation::Monarch => {
+                    "change controller to monarch".into()
+                }
+            }
+        }
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
@@ -5754,7 +5800,11 @@ fn build_trigger_item(
 ) -> ParsedItem {
     // CR 603.8: StateCondition triggers use the priority pipeline, not the
     // event-based trigger registry — they are supported.
-    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry);
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry)
+        && !trig.unsupported_damage_prevention_qualifiers();
     let mut children = Vec::new();
     if let Some(execute) = &trig.execute {
         children.push(build_ability_item(
@@ -7826,7 +7876,12 @@ fn check_trigger(
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
     // (check_state_triggers), not the event-based trigger registry. They are supported.
-    if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs surface the same
+    // gap — the def AS SPECIFIED cannot fire (shared refusal authority on
+    // `TriggerDefinition`).
+    if !trigger_mode_is_supported(&trigger.mode, trigger_registry)
+        || trigger.unsupported_damage_prevention_qualifiers()
+    {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
             missing.push(label);
@@ -9258,6 +9313,14 @@ fn is_static_definition_supported(
             .condition
             .as_ref()
             .is_some_and(StaticCondition::contains_unrecognized)
+        // CR 109.4 (Matt R2-F4, widened by R7-F2): a resolution-scoped
+        // `ChosenPlayer` or target-relative endpoint has no answer inside the
+        // layer pipeline, so the runtime entry gate refuses the whole tree —
+        // coverage must refuse it too (shared authority on `StaticCondition`).
+        && !stat
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::has_unanswerable_attack_endpoint)
         && stat.modifications.iter().all(|modification| {
             modification_is_supported(
                 modification,
@@ -9316,6 +9379,12 @@ fn is_trigger_supported(
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
         return false;
     }
     trigger.execute.as_deref().is_none_or(|execute| {
@@ -10249,6 +10318,7 @@ fn extract_ability_condition_features(
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -10600,6 +10670,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs). Used by cross-scope decline-tail
         // gates (Liliana, Waker of the Dead — parent `All`, decline `Opponent`).
         AbilityCondition::ScopedPlayerMatches { .. } => ("ScopedPlayerMatches", Handled),
+        // CR 508.6: handled by `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
     }
 }
 
@@ -11137,6 +11209,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 508.6: bridges to `AbilityCondition::PlayerAttackedPlayer`,
+        // runtime-handled (same shape as `WasStartingPlayer` below).
+        StaticCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
         // CR 702.185c: "a spell was warped this turn"; bridges to Ability/Trigger
         // `SpellCastWithVariantThisTurn`, both runtime-handled.
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
@@ -14801,6 +14876,84 @@ mod tests {
         );
     }
 
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs are
+    /// refused at ALL THREE coverage authorities — parse-details items,
+    /// missing parts, and carrier support — because the runtime matcher
+    /// cannot honor the qualifiers. The unqualified Squire shape stays
+    /// supported everywhere. Pre-fix the qualified forms are admitted.
+    #[test]
+    fn qualified_damage_prevention_trigger_is_unsupported() {
+        use crate::types::ability::DamageKindFilter;
+
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        let traversal = super::TokenStaticTraversal::Include;
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            super::is_trigger_supported(&plain, &trigger_registry, &static_registry, traversal),
+            "unqualified prevention trigger stays supported"
+        );
+        assert!(
+            super::build_trigger_item(&plain, &trigger_registry, &static_registry, traversal)
+                .supported,
+            "unqualified prevention trigger item stays supported"
+        );
+        let mut missing = Vec::new();
+        super::check_trigger(
+            &plain,
+            &trigger_registry,
+            &static_registry,
+            traversal,
+            &mut missing,
+        );
+        assert!(
+            missing.is_empty(),
+            "unqualified prevention trigger surfaces no gap: {missing:?}"
+        );
+
+        let source = crate::types::identifiers::ObjectId(7);
+        let qualified = [
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::CombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::NoncombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .valid_source(TargetFilter::SpecificObject { id: source }),
+        ];
+        for trigger in &qualified {
+            assert!(
+                !super::is_trigger_supported(
+                    trigger,
+                    &trigger_registry,
+                    &static_registry,
+                    traversal
+                ),
+                "qualified prevention trigger must be unsupported: {trigger:?}"
+            );
+            assert!(
+                !super::build_trigger_item(trigger, &trigger_registry, &static_registry, traversal)
+                    .supported,
+                "qualified prevention trigger item must be unsupported: {trigger:?}"
+            );
+            let mut missing = Vec::new();
+            super::check_trigger(
+                trigger,
+                &trigger_registry,
+                &static_registry,
+                traversal,
+                &mut missing,
+            );
+            assert!(
+                missing.iter().any(|gap| gap.starts_with("Trigger:")),
+                "qualified prevention trigger must surface a gap: {missing:?}"
+            );
+        }
+    }
+
     /// An explicit Exile origin can retrieve the intended set when it is still
     /// the latest, but does not preserve that identity across a later publisher.
     #[test]
@@ -14858,6 +15011,7 @@ mod tests {
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 ..Default::default()
             }
@@ -20705,6 +20859,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -20756,6 +20911,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -23272,6 +23428,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -23317,6 +23474,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -23359,6 +23517,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -23395,6 +23554,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -24118,6 +24278,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -24153,6 +24314,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -24198,6 +24360,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -24234,6 +24397,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -24272,6 +24436,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -24316,6 +24481,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             });
         }
 
@@ -24516,6 +24682,66 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// CR 109.4 (Matt R2-F4): a typed Continuous static gated on a
+    /// `PlayerAttackedPlayer` with a resolution-scoped `ChosenPlayer`
+    /// endpoint is UNSUPPORTED — the layer pipeline has no resolving
+    /// ability to answer it, so the runtime entry gate refuses the whole
+    /// tree. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal covers the
+    /// target-relative endpoints (`TargetPlayer`/`TargetOpponent`), which
+    /// read no declared target without a resolving ability. The `Not`
+    /// wrapper must not bypass the refusal (the leaf view recurses), while
+    /// the same gate with bindable endpoints stays supported. Pre-fix the
+    /// target-relative shapes are admitted.
+    #[test]
+    fn unanswerable_attack_endpoint_nested_not_gate_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        for attacker in [
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+        ] {
+            let refused = StaticDefinition::continuous().condition(StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: attacker.clone(),
+                    defender: ControllerRef::You,
+                }),
+            });
+            assert!(
+                !is_static_supported(
+                    &refused,
+                    &trigger_registry,
+                    &static_registry,
+                    TokenStaticTraversal::Include,
+                ),
+                "a Continuous static gated on an unanswerable Not(attacked you) \
+                 endpoint must be reported unsupported, not silently accepted \
+                 as fully parsed: {refused:?}"
+            );
+        }
+
+        // Sanity: the same gate with bindable endpoints stays supported —
+        // proving the gap signal comes from the unanswerable leaf, not from
+        // the attack gate or the Not wrapper themselves. `ActivePlayer`
+        // reads live game state with no ability context.
+        let supported = StaticDefinition::continuous().condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ActivePlayer,
+                defender: ControllerRef::You,
+            }),
+        });
+        assert!(
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "Not(ActivePlayer attacked you) must remain supported"
+        );
+    }
+
     /// CR 113.11: CantHaveKeyword is a data-carrying static (parameterized by
     /// keyword). Archetype of Imagination et al. must be covered once this arm
     /// is present in `is_data_carrying_static()`.
@@ -24546,6 +24772,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(

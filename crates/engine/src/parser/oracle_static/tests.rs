@@ -7,8 +7,8 @@ use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    Designation, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
@@ -22613,6 +22613,46 @@ fn control_enchanted_creature() {
     // Also works without trailing period
     let def2 = parse_static_line("You control enchanted creature").unwrap();
     assert_eq!(def2.mode, StaticMode::Continuous);
+}
+
+/// CR 303.4e + CR 613.1b + CR 725.5: "The monarch controls enchanted
+/// creature" (Fealty to the Realm pattern) — structural twin of the Control
+/// Magic arm: same affected filter, designation-anchored modification.
+#[test]
+fn monarch_controls_enchanted_creature() {
+    let def = parse_static_line("The monarch controls enchanted creature.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::ChangeControllerToDesignation {
+            designation: Designation::Monarch,
+        }));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        }
+        _ => panic!("expected Typed filter"),
+    }
+    // Also works without trailing period
+    let def2 = parse_static_line("The monarch controls enchanted creature").unwrap();
+    assert_eq!(def2.mode, StaticMode::Continuous);
+}
+
+/// Fail-closed: a trailing clause after the type phrase must NOT produce a
+/// partial control grant — the line falls through (no designation member).
+#[test]
+fn monarch_controls_enchanted_creature_with_trailing_clause_falls_through() {
+    let result = parse_static_line("The monarch controls enchanted creature. Draw a card.");
+    assert!(
+        result
+            .as_ref()
+            .is_none_or(|def| !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::ChangeControllerToDesignation { .. }
+            ))),
+        "trailing clause must not yield a designation control grant: {result:?}"
+    );
 }
 
 #[test]

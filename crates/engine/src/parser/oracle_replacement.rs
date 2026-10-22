@@ -7042,6 +7042,8 @@ fn replacement_condition_from_static(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-ledger predicates have no replacement-condition carrier.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn

@@ -410,6 +410,9 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::AssignDamageAsThoughUnblocked
             | ContinuousModification::AssignNoCombatDamage
             | ContinuousModification::ChangeController
+            // CR 613.1b: designation-anchored control is layered (layer 2)
+            // like its source-controller sibling — preserved, not folded.
+            | ContinuousModification::ChangeControllerToDesignation { .. }
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
             | ContinuousModification::SetChosenName

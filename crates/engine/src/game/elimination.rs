@@ -14,6 +14,7 @@ use crate::types::resolved_commands::{
 };
 use crate::types::zones::Zone;
 
+use super::combat::DamageTarget;
 use super::players;
 
 /// CR 800.4a: A spell that has been announced but not yet cast can be parked in
@@ -261,6 +262,14 @@ pub fn eliminate_players_simultaneously(
         })
         .flatten();
 
+    // CR 800.4a + CR 725.4 (Matt R7-F3): the designation holder AT DEPARTURE,
+    // captured before any `do_eliminate` runs succession. The control-effect
+    // prune below judges a designation-anchored transient by the recipient it
+    // was actually giving control to — reading the live designation after
+    // succession would see the successor and wrongly keep an effect that was
+    // giving the leaver control.
+    let pre_elimination_monarch = state.monarch;
+
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
         // earlier loser in this same batch).
@@ -291,7 +300,7 @@ pub fn eliminate_players_simultaneously(
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
-    end_control_effects_for_leaving_players(state, &leaving_set, events);
+    end_control_effects_for_leaving_players(state, &leaving_set, pre_elimination_monarch, events);
 
     // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
     // player controlled any objects on the stack not represented by cards, those
@@ -881,20 +890,42 @@ fn exile_owned_objects_on_player_left_game(
 fn end_control_effects_for_leaving_players(
     state: &mut GameState,
     leaving_set: &HashSet<PlayerId>,
+    pre_elimination_monarch: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::ability::ContinuousModification;
+    use crate::types::ability::{ContinuousModification, Designation};
     use crate::types::identifiers::ObjectId;
 
-    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
-    // Prune every single-mod ChangeController TCE controlled by any leaver, over
-    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
-    // steal of a survivor's object reverts rather than being over-exiled.
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends,
+    // over the FULL leaving_set (symmetric with the sweep below), so a
+    // co-leaver's steal of a survivor's object reverts rather than being
+    // over-exiled.
     state.transient_continuous_effects.retain(|e| {
-        !(leaving_set.contains(&e.controller)
+        // Plain steal: the recipient IS the installer, so a leaver-controlled
+        // ChangeController TCE ends with its controller.
+        let plain_steal_gives_leaver_control = leaving_set.contains(&e.controller)
             && e.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController));
+        // CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a
+        // designation-anchored TCE gives control to the LIVE holder (the layer
+        // arm reads the designation, never `e.controller`), so departure
+        // treatment keys on the holder AT DEPARTURE (captured before
+        // succession), not the installer. A surviving holder — or a vacant
+        // throne, which gives nobody control — keeps the transient for its
+        // stated duration; a leaving holder ends it. Whole-TCE prune, matching
+        // the plain-steal half: one effect, one lifetime. Exhaustive over
+        // `Designation`: a future leaf breaks the build here by design.
+        let designation_gives_leaver_control = e.modifications.iter().any(|m| match m {
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                let holder = match designation {
+                    Designation::Monarch => pre_elimination_monarch,
+                };
+                holder.is_some_and(|h| leaving_set.contains(&h))
+            }
+            _ => false,
+        });
+        !(plain_steal_gives_leaver_control || designation_gives_leaver_control)
     });
 
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
@@ -1458,6 +1489,96 @@ fn do_eliminate(
         record.remaining.retain(|gain| gain.controller != player);
     }
 
+    // CR 800.4e + CR 614.9 + CR 616.1: prune a parked PRE-application damage
+    // batch for the leaving player. Departed lifelink controllers gain
+    // nothing (per-entry `None`, mirroring the lifelink prune above).
+    // Departed recipients are owed no damage: player recipients equal to the
+    // leaver, and object recipients the leaver owns (exiled below), prune as
+    // entry+slot PAIRS (decided slots and remaining events), preserving
+    // positional alignment; `paused_entry` is re-indexed by the count of
+    // pruned decided slots before it.
+    //
+    // Paused-slot fate is conditioned on stash state. UNSTASHED
+    // (`decided.len() == paused_entry`): the paused entry itself is RETAINED
+    // (it has no decided/remaining slot — it lives in `pending_replacement`
+    // — so pair-pruning cannot express it); instead the prune sets
+    // `paused_entry_pruned = true`, and both the answer-stash path and the
+    // guard-settle path convert the paused slot to `None`, TAKING the flag on
+    // use. STASHED (`len == paused_entry + 1`, the nested window):
+    // `decided[paused_entry]` EXISTS, so the prune writes it `None` IN PLACE
+    // (entry retained, flag left clear, no re-index for the paused slot —
+    // mirroring the lifelink per-entry None-ing). Sources never prune: the
+    // snapshot incarnation is LKI-correct.
+    let departed_recipients: Vec<bool> = state
+        .pending_combat_damage
+        .as_ref()
+        .map(|record| {
+            record
+                .entries
+                .iter()
+                .map(|entry| match &entry.assignment.target {
+                    DamageTarget::Player(recipient) => *recipient == player,
+                    DamageTarget::Object(object_id) => state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.owner == player),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(record) = state.pending_combat_damage.as_mut() {
+        for entry in record.entries.iter_mut() {
+            if entry.lifelink_controller == Some(player) {
+                entry.lifelink_controller = None;
+            }
+        }
+        let paused = record.paused_entry;
+        let unstashed = record.decided.len() == paused;
+        debug_assert!(
+            unstashed || record.decided.len() == paused + 1,
+            "a parked batch is either unstashed or holds exactly its paused slot's stash"
+        );
+        debug_assert!(
+            paused < record.entries.len()
+                && record.remaining.len() + paused + 1 == record.entries.len(),
+            "paused slot must sit exactly between decided and remaining"
+        );
+        let old_entries = std::mem::take(&mut record.entries);
+        let old_decided = std::mem::take(&mut record.decided);
+        let old_remaining = std::mem::take(&mut record.remaining);
+        let mut pruned_before_paused = 0usize;
+        for (index, entry) in old_entries.into_iter().enumerate() {
+            let departed = departed_recipients.get(index).copied().unwrap_or(false);
+            if index == paused {
+                // The paused slot: always retained (see above).
+                if departed {
+                    if unstashed {
+                        record.paused_entry_pruned = true;
+                    } else {
+                        record.decided.push(None);
+                    }
+                } else if !unstashed {
+                    record.decided.push(old_decided[paused].clone());
+                }
+                record.entries.push(entry);
+            } else if departed {
+                // Pair-prune: drop the entry with its decided/remaining slot.
+                if index < paused {
+                    pruned_before_paused += 1;
+                }
+            } else if index < paused {
+                record.decided.push(old_decided[index].clone());
+                record.entries.push(entry);
+            } else {
+                record
+                    .remaining
+                    .push(old_remaining[index - paused - 1].clone());
+                record.entries.push(entry);
+            }
+        }
+        record.paused_entry = paused - pruned_before_paused;
+    }
+
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed
@@ -1529,6 +1650,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,
@@ -1969,6 +2099,357 @@ mod tests {
         state
     }
 
+    /// CR 800.4e + CR 614.9 + CR 616.1 (B4/B6 site 1): eliminating a player
+    /// prunes a parked pre-application damage batch. Departed recipients
+    /// prune as entry+slot PAIRS with `paused_entry` re-indexed; departed
+    /// lifelink controllers None out per entry; sources never prune (LKI).
+    /// The paused slot's fate is stash-state-conditioned: UNSTASHED it is
+    /// retained with `paused_entry_pruned` set (no slot exists to pair-prune,
+    /// so alignment never shifts under the live authority); STASHED the
+    /// prune writes `decided[paused_entry] = None` IN PLACE. Object departure
+    /// is owner-keyed (exile is owner-keyed): the paused recipient here is
+    /// STOLEN (owned by the leaver, controlled by a living seat).
+    #[test]
+    fn parked_damage_batch_prunes_departed_recipients_in_both_stash_states() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::types::ability::DamageContextSnapshot;
+        use crate::types::game_state::{
+            CombatDamageSubStep, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+        };
+        use crate::types::zones::Zone;
+
+        fn snapshot(source: ObjectId, controller: PlayerId) -> DamageContextSnapshot {
+            DamageContextSnapshot {
+                source_id: source,
+                source_incarnation: Some(3),
+                controller,
+                source_is_creature: true,
+                has_deathtouch: false,
+                has_lifelink: false,
+                has_wither: false,
+                has_infect: false,
+                combat_damage_poison: 0,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+            }
+        }
+        fn parked(
+            source: ObjectId,
+            controller: PlayerId,
+            target: DamageTarget,
+            lifelink_controller: Option<PlayerId>,
+        ) -> ParkedCombatDamageEntry {
+            ParkedCombatDamageEntry {
+                ctx: snapshot(source, controller),
+                source_is_commander: false,
+                assignment: DamageAssignment { target, amount: 3 },
+                lifelink_controller,
+            }
+        }
+        fn decided_damage(source: ObjectId, target: TargetRef) -> Option<ProposedEvent> {
+            Some(ProposedEvent::Damage {
+                source_id: source,
+                target,
+                amount: 3,
+                is_combat: true,
+                applied: std::collections::HashSet::new(),
+            })
+        }
+        // Three entries: a decided player hit on the leaver, the paused hit
+        // on the leaver-owned (stolen) creature, a remaining hit on a living
+        // seat's creature whose lifelink controller is the leaver.
+        fn fixture(stashed: bool) -> (GameState, ObjectId, ObjectId, ObjectId) {
+            let mut state = setup_three_player();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let stolen = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Stolen Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+            let survivor = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(2),
+                "Survivor".to_string(),
+                Zone::Battlefield,
+            );
+            let mut decided = vec![decided_damage(source, TargetRef::Player(PlayerId(0)))];
+            if stashed {
+                decided.push(decided_damage(source, TargetRef::Object(stolen)));
+            }
+            state.pending_combat_damage = Some(Box::new(PendingCombatDamageBatch {
+                entries: vec![
+                    parked(source, PlayerId(2), DamageTarget::Player(PlayerId(0)), None),
+                    parked(source, PlayerId(2), DamageTarget::Object(stolen), None),
+                    parked(
+                        source,
+                        PlayerId(2),
+                        DamageTarget::Object(survivor),
+                        Some(PlayerId(0)),
+                    ),
+                ],
+                decided,
+                paused_entry: 1,
+                paused_entry_pruned: false,
+                remaining: vec![ProposedEvent::Damage {
+                    source_id: source,
+                    target: TargetRef::Object(survivor),
+                    amount: 3,
+                    is_combat: true,
+                    applied: std::collections::HashSet::new(),
+                }],
+                phase_a_tally: Vec::new(),
+                phase_b_tally: Vec::new(),
+                outer_tally: None,
+                batch_events: Vec::new(),
+                lives_before: vec![20, 20, 20],
+                sub_step: CombatDamageSubStep::Regular,
+            }));
+            (state, source, stolen, survivor)
+        }
+
+        // UNSTASHED: the decided pair prunes, the paused slot retains + flags,
+        // the remaining pair survives with its lifelink controller noned.
+        let (mut state, source, stolen, survivor) = fixture(false);
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(
+            record.entries.len(),
+            2,
+            "the decided pair prunes; the paused slot retains"
+        );
+        assert!(
+            record.decided.is_empty(),
+            "the decided slot pair-prunes with its entry"
+        );
+        assert_eq!(
+            record.paused_entry, 0,
+            "paused_entry re-indexes by pruned decided slots before it"
+        );
+        assert!(
+            record.paused_entry_pruned,
+            "owner-keyed departure flags the retained paused entry"
+        );
+        assert_eq!(record.remaining.len(), 1, "the remaining pair survives");
+        assert_eq!(
+            record.entries[0].assignment.target,
+            DamageTarget::Object(stolen),
+            "the retained paused entry still names the departed recipient"
+        );
+        assert_eq!(
+            record.entries[1].assignment.target,
+            DamageTarget::Object(survivor)
+        );
+        assert_eq!(
+            record.entries[1].ctx.source_id, source,
+            "sources never prune: the snapshot incarnation is LKI-correct"
+        );
+        assert_eq!(
+            record.entries[1].lifelink_controller, None,
+            "the departed lifelink controller gains nothing"
+        );
+
+        // STASHED (the nested window): same pair-prunes, but the paused slot
+        // EXISTS — written None IN PLACE, flag left clear, no re-index for
+        // the paused slot itself.
+        let (mut state, _, stolen, survivor) = fixture(true);
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+        let record = state.pending_combat_damage.as_ref().unwrap();
+        assert_eq!(record.entries.len(), 2);
+        assert_eq!(
+            record.decided,
+            vec![None],
+            "the stashed slot converts to None in place"
+        );
+        assert_eq!(record.paused_entry, 0);
+        assert!(
+            !record.paused_entry_pruned,
+            "the stashed path takes no flag (nothing to defer)"
+        );
+        assert_eq!(record.remaining.len(), 1);
+        assert_eq!(
+            record.entries[0].assignment.target,
+            DamageTarget::Object(stolen)
+        );
+        assert_eq!(
+            record.entries[1].assignment.target,
+            DamageTarget::Object(survivor)
+        );
+    }
+
+    /// CR 800.4e + CR 614.9 + CR 616.1 (B6 site 3 companion): a parked
+    /// pre-application batch whose REMAINING tail names a leaver-owned
+    /// recipient pair-prunes that entry with its `remaining` slot, and
+    /// `remaining` stays aligned with the post-pause entries (`remaining[j]`
+    /// ↔ `entries[paused_entry + 1 + j]`).
+    ///
+    /// REVERT PROBE: retain the departed remaining entry (or mis-index
+    /// `old_remaining[index - paused - 1]` under drops) → the alignment
+    /// asserts fail in both stash states.
+    #[test]
+    fn parked_damage_batch_prunes_leaver_owned_remaining_entry() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::types::ability::DamageContextSnapshot;
+        use crate::types::game_state::{
+            CombatDamageSubStep, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+        };
+        use crate::types::zones::Zone;
+
+        fn snapshot(source: ObjectId, controller: PlayerId) -> DamageContextSnapshot {
+            DamageContextSnapshot {
+                source_id: source,
+                source_incarnation: Some(3),
+                controller,
+                source_is_creature: true,
+                has_deathtouch: false,
+                has_lifelink: false,
+                has_wither: false,
+                has_infect: false,
+                combat_damage_poison: 0,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+            }
+        }
+        fn parked(
+            source: ObjectId,
+            controller: PlayerId,
+            target: DamageTarget,
+        ) -> ParkedCombatDamageEntry {
+            ParkedCombatDamageEntry {
+                ctx: snapshot(source, controller),
+                source_is_commander: false,
+                assignment: DamageAssignment { target, amount: 3 },
+                lifelink_controller: None,
+            }
+        }
+        fn damage(source: ObjectId, target: TargetRef) -> ProposedEvent {
+            ProposedEvent::Damage {
+                source_id: source,
+                target,
+                amount: 3,
+                is_combat: true,
+                applied: std::collections::HashSet::new(),
+            }
+        }
+        // Four entries: a decided player hit on the leaver, the paused hit on
+        // the leaver-owned (stolen) creature, a remaining hit on a living
+        // seat's creature, and a remaining hit on a leaver-owned creature.
+        fn fixture(stashed: bool) -> (GameState, ObjectId, ObjectId) {
+            let mut state = setup_three_player();
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(2),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let stolen = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Stolen Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+            let survivor = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(2),
+                "Survivor".to_string(),
+                Zone::Battlefield,
+            );
+            let doomed = create_object(
+                &mut state,
+                CardId(4),
+                PlayerId(0),
+                "Doomed Bear".to_string(),
+                Zone::Battlefield,
+            );
+            let mut decided = vec![Some(damage(source, TargetRef::Player(PlayerId(0))))];
+            if stashed {
+                decided.push(Some(damage(source, TargetRef::Object(stolen))));
+            }
+            state.pending_combat_damage = Some(Box::new(PendingCombatDamageBatch {
+                entries: vec![
+                    parked(source, PlayerId(2), DamageTarget::Player(PlayerId(0))),
+                    parked(source, PlayerId(2), DamageTarget::Object(stolen)),
+                    parked(source, PlayerId(2), DamageTarget::Object(survivor)),
+                    parked(source, PlayerId(2), DamageTarget::Object(doomed)),
+                ],
+                decided,
+                paused_entry: 1,
+                paused_entry_pruned: false,
+                remaining: vec![
+                    damage(source, TargetRef::Object(survivor)),
+                    damage(source, TargetRef::Object(doomed)),
+                ],
+                phase_a_tally: Vec::new(),
+                phase_b_tally: Vec::new(),
+                outer_tally: None,
+                batch_events: Vec::new(),
+                lives_before: vec![20, 20, 20],
+                sub_step: CombatDamageSubStep::Regular,
+            }));
+            (state, stolen, survivor)
+        }
+
+        for stashed in [false, true] {
+            let (mut state, stolen, survivor) = fixture(stashed);
+            {
+                let record = state.pending_combat_damage.as_ref().unwrap();
+                assert_eq!(
+                    (record.entries.len(), record.remaining.len()),
+                    (4, 2),
+                    "reach guard: the leaver-owned remaining pair exists pre-prune (stashed={stashed})"
+                );
+            }
+            let mut events = Vec::new();
+            eliminate_player(&mut state, PlayerId(0), &mut events);
+            let record = state.pending_combat_damage.as_ref().unwrap();
+            assert_eq!(
+                record.entries.len(),
+                2,
+                "the decided pair AND the leaver-owned remaining pair prune (stashed={stashed})"
+            );
+            assert_eq!(
+                record.remaining.len(),
+                1,
+                "the leaver-owned remaining slot drops with its entry (stashed={stashed})"
+            );
+            assert!(
+                matches!(&record.remaining[0], ProposedEvent::Damage { target, .. }
+                    if *target == TargetRef::Object(survivor)),
+                "the surviving slot still names the survivor (stashed={stashed}), got {:?}",
+                record.remaining[0]
+            );
+            assert_eq!(
+                record.entries[1].assignment.target,
+                DamageTarget::Object(survivor),
+                "remaining stays aligned with the post-pause entries (stashed={stashed})"
+            );
+            assert_eq!(
+                record.paused_entry, 0,
+                "paused_entry re-indexes by pruned decided slots before it (stashed={stashed})"
+            );
+            assert_eq!(
+                record.entries[0].assignment.target,
+                DamageTarget::Object(stolen),
+                "the retained paused entry still names the departed recipient (stashed={stashed})"
+            );
+        }
+    }
+
     fn setup_2hg() -> GameState {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
@@ -2133,6 +2614,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         }
     }
 
@@ -3654,6 +4137,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3798,6 +4283,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3854,6 +4341,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3902,6 +4391,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -3980,6 +4471,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
