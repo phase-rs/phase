@@ -5,7 +5,7 @@ expression: "&diagnostics"
 [
   {
     "type": "IgnoredRemainder",
-    "text": "it's attacking",
+    "text": "it's blocking",
     "parser": "deal-damage",
     "line_index": 0
   }

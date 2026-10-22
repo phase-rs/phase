@@ -39449,6 +39449,90 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
         );
     }
 }
+
+/// CR 508.5 + CR 608.2c: Cavalcade of Calamity — "deals 1 damage to the player or
+/// planeswalker that creature is attacking". The trigger has no parent target, so a
+/// `ParentTarget` recipient resolved to nobody and the damage never happened.
+#[test]
+fn cavalcade_of_calamity_damages_the_attacked_player() {
+    use crate::types::ability::Effect;
+
+    let def = parse_trigger_line(
+        "Whenever a creature you control with power 1 or less attacks, this enchantment deals 1 damage to the player or planeswalker that creature is attacking.",
+        "Cavalcade of Calamity",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let execute = def.execute.as_deref().expect("execute ability");
+    match execute.effect.as_ref() {
+        Effect::DealDamage { target, .. } => assert!(
+            matches!(target, TargetFilter::DefendingPlayer),
+            "recipient must be the attacked player, got {target:?}"
+        ),
+        other => panic!("expected DealDamage, got {other:?}"),
+    }
+}
+
+/// CR 508.5 + CR 608.2c: "the player or planeswalker it's attacking" is the same
+/// recipient as "... that creature is attacking" — the attacked player of the
+/// attacker the trigger is about, never a parent target (the trigger has none, so
+/// the damage resolved to nobody). Scorch Spitter, Hellrider, Fathom Fleet
+/// Swordjack, Rakdos Roustabout, Mage Slayer and Myr Battlesphere.
+#[test]
+fn its_attacking_damage_recipient_is_the_defending_player() {
+    use crate::types::ability::{AbilityDefinition, Effect};
+
+    fn damage_target(ability: &AbilityDefinition) -> Option<&TargetFilter> {
+        match ability.effect.as_ref() {
+            Effect::DealDamage { target, .. } => Some(target),
+            _ => ability.sub_ability.as_deref().and_then(damage_target),
+        }
+    }
+
+    let cases = [
+        (
+            "Scorch Spitter",
+            "Whenever this creature attacks, it deals 1 damage to the player or planeswalker it's attacking.",
+            TriggerMode::Attacks,
+        ),
+        (
+            "Hellrider",
+            "Whenever a creature you control attacks, this creature deals 1 damage to the player or planeswalker it's attacking.",
+            TriggerMode::Attacks,
+        ),
+        (
+            "Fathom Fleet Swordjack",
+            "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.",
+            TriggerMode::Attacks,
+        ),
+        (
+            "Rakdos Roustabout",
+            "Whenever this creature becomes blocked, it deals 1 damage to the player or planeswalker it's attacking.",
+            TriggerMode::BecomesBlocked,
+        ),
+        (
+            "Mage Slayer",
+            "Whenever equipped creature attacks, it deals damage equal to its power to the player or planeswalker it's attacking.",
+            TriggerMode::Attacks,
+        ),
+        (
+            "Myr Battlesphere",
+            "Whenever this creature attacks, you may tap X untapped Myr you control. If you do, this creature gets +X/+0 until end of turn and deals X damage to the player or planeswalker it's attacking.",
+            TriggerMode::Attacks,
+        ),
+    ];
+    for (name, line, mode) in cases {
+        let def = parse_trigger_line(line, name);
+        assert_eq!(def.mode, mode, "{name}: trigger mode");
+        let execute = def.execute.as_deref().expect("execute ability");
+        let target = damage_target(execute)
+            .unwrap_or_else(|| panic!("{name}: no DealDamage in {execute:?}"));
+        assert!(
+            matches!(target, TargetFilter::DefendingPlayer),
+            "{name}: recipient must be the attacked player, got {target:?}"
+        );
+    }
+}
+
 // CR 603.4 + CR 722.3a: Woodwork Prodigy (FRA) front face, verbatim Oracle —
 // "At the beginning of your upkeep, if this creature isn't prepared, it
 // becomes prepared. (While it's prepared, you may cast a copy of its spell.
