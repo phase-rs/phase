@@ -29,9 +29,6 @@ use nom::{combinator::all_consuming, Parser};
 const FLOWSTONE_SURGE: &str = "Creatures you control get +1/-1.";
 
 const U22_RETURN: &str = "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.";
-const U22_OTARIA: &str = "Instant and sorcery cards in graveyards have flashback. The flashback cost is equal to the card's mana cost. (Its owner may cast the card from their graveyard for its mana cost. Then they exile it.)\nWhenever chaos ensues, take an extra turn after this one.";
-const U22_TAZEEM: &str =
-    "Creatures can't block.\nWhenever chaos ensues, draw a card for each land you control.";
 const U22_DOOM: &str = "Destroy target nonblack creature.";
 const U22_DIVINATION: &str = "Draw two cards.";
 const U22_COUNTER: &str = "Counter target spell.";
@@ -6523,7 +6520,7 @@ fn complete_continuous_elturel_paid_cast_myriad_accept_and_two_player_empty_popu
             .with_mana_cost(complete_publication_cost("{U}"))
             .id();
         for seat in 0..seats {
-            let player = PlayerId(seat as u8);
+            let player = PlayerId(seat);
             scenario.with_life(player, 100);
             for _ in 0..8 {
                 scenario.add_card_to_library_top(player, "Draw buffer");
@@ -6537,7 +6534,7 @@ fn complete_continuous_elturel_paid_cast_myriad_accept_and_two_player_empty_popu
         assert_continuous_complete(runner.state());
         // The real paid creature waits through a complete cycle before attacking.
         for seat in 0..seats {
-            assert_eq!(runner.state().active_player, PlayerId(seat as u8));
+            assert_eq!(runner.state().active_player, PlayerId(seat));
             runner.advance_to_combat();
             runner.declare_attackers(&[]).unwrap();
             runner.advance_to_end_step();
@@ -6616,7 +6613,7 @@ fn complete_continuous_elturel_paid_cast_myriad_accept_and_two_player_empty_popu
             let WaitingFor::DeclareBlockers { player, .. } = runner.state().waiting_for else {
                 panic!("actual defender blockers")
             };
-            assert_eq!(player, PlayerId(seat as u8));
+            assert_eq!(player, PlayerId(seat));
             runner.declare_blockers(&[]).unwrap();
         }
         runner.advance_to_phase(Phase::PostCombatMain);
