@@ -6235,8 +6235,11 @@ pub(crate) mod tests {
         }
         state.combat = Some(combat);
         if matches!(effect, Effect::Encore) {
+            // allow-raw-zone: test setup places the Encore source in exile before resolution; no gameplay move is simulated.
             state.battlefield.retain(|id| *id != source);
+            // allow-raw-zone: test setup assigns the Encore source's initial exile zone before resolution.
             state.objects.get_mut(&source).unwrap().zone = Zone::Exile;
+            // allow-raw-zone: test setup registers the initial Encore source in the exile container.
             state.exile.push_back(source);
         }
         let queued = matches!(
@@ -7259,6 +7262,7 @@ pub(crate) mod tests {
                     .unwrap()
                     .id;
                 state.objects.remove(&entrant);
+                // allow-raw-zone: hostile reload fixture removes the paused entrant to exercise missing-object continuation handling.
                 state.battlefield.retain(|id| *id != entrant);
             }
             state = serde_json::from_value::<ResolutionStateWire>(

@@ -5786,6 +5786,7 @@ pub(crate) fn matches_target_filter_in_population(
     // CR 601.2a + CR 108.3: the announced caster controls this spell; its
     // original owner is unchanged. Project only this supplied live object.
     let mut projected = object.clone();
+    // allow-raw-zone: local announced-spell characteristic view; the live object and zone containers are unchanged.
     projected.zone = Zone::Stack;
     projected.controller = entry.controller;
     if let StackEntryKind::Spell {
@@ -6973,7 +6974,7 @@ fn apply_entrant_own_statics(
             && def.affected.as_ref().is_some_and(|filter| {
                 matches_target_filter_on_object(state, entrant, filter, &context)
             })
-            && !entrant.keywords.contains(&Keyword::Haste)
+            && !crate::game::keywords::has_keyword(entrant, &Keyword::Haste)
         {
             entrant.keywords.push(Keyword::Haste);
         }
@@ -13703,6 +13704,7 @@ fn object_shares_quality_with_reference_filter(
             .and_then(|spell| {
                 let object = state.objects.get(&spell.object_id)?;
                 let mut projected = object.clone();
+                // allow-raw-zone: local casting-spell characteristic view for shared-quality comparison, not a zone event.
                 projected.zone = Zone::Stack;
                 projected.fused_split_spell = spell.casting_variant == CastingVariant::Fuse;
                 let values = if matches!(quality, SharedQuality::Name) {
@@ -14700,7 +14702,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(projected.controller, PlayerId(1));
-            assert_eq!(projected.keywords.contains(&Keyword::Haste), expected);
+            assert_eq!(
+                crate::game::keywords::has_keyword(&projected, &Keyword::Haste),
+                expected
+            );
             let captured =
                 crate::game::triggers::trigger_source_context_for_latch(&state, &projected);
             assert_eq!(
@@ -14715,7 +14720,10 @@ mod tests {
             state.objects.get_mut(&source).unwrap().chosen_attributes =
                 vec![ChosenAttribute::OddOrEven(parity)];
             let delivered = EntryProjection::delivered(&state, source, &consumer).unwrap();
-            assert_eq!(delivered.keywords.contains(&Keyword::Haste), expected);
+            assert_eq!(
+                crate::game::keywords::has_keyword(&delivered, &Keyword::Haste),
+                expected
+            );
         }
         let base = state.objects[&source].static_definitions[0].clone();
         assert!(entry_haste_static_allowlisted(&base));
@@ -14739,7 +14747,10 @@ mod tests {
                 &consumer,
             )
             .unwrap();
-            assert!(projected.keywords.contains(&Keyword::Haste));
+            assert!(crate::game::keywords::has_keyword(
+                &projected,
+                &Keyword::Haste
+            ));
             for choices in [vec![], vec![ChosenAttribute::Color(ManaColor::Blue)]] {
                 let projected = EntryProjection::proposed(
                     &state,
@@ -14749,7 +14760,10 @@ mod tests {
                     &consumer,
                 )
                 .unwrap();
-                assert_eq!(projected.keywords.contains(&Keyword::Haste), fixed);
+                assert_eq!(
+                    crate::game::keywords::has_keyword(&projected, &Keyword::Haste),
+                    fixed
+                );
             }
         }
         let mut unsupported = base.clone();

@@ -394,10 +394,14 @@ fn u6_native_absent_zero_fixed_nonmana_compound_and_independent_free_cards_keep_
         assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
         let effects = face.abilities.iter().flat_map(|root| std::iter::successors(Some(root), |node| node.sub_ability.as_deref())).collect::<Vec<_>>();
         match name {
+            // allow-raw-authority: parser assertion reads the printed CardFace Suspend payload, not live game characteristics.
             "Ancestral Vision" => { assert!(matches!(*effects[0].effect, Effect::Draw { count: QuantityExpr::Fixed { value: 3 }, .. })); assert!(face.keywords.iter().any(|keyword| matches!(keyword, Keyword::Suspend { .. }))); }
             "Pact of the Titan" => { assert!(matches!(*effects[0].effect, Effect::Token { .. })); assert!(effects.iter().any(|node| matches!(*node.effect, Effect::CreateDelayedTrigger { .. }))); assert_eq!(face.mana_cost, ManaCost::zero()); }
+            // allow-raw-authority: parser assertion preserves the printed CardFace's exact Flashback mana cost.
             "Think Twice" => assert!(face.keywords.contains(&Keyword::Flashback(FlashbackCost::Mana(parse_mana_symbols("{2}{U}").unwrap().0)))),
+            // allow-raw-authority: parser assertion preserves the printed CardFace's exact Flashback mana cost.
             "Firebolt" => assert!(face.keywords.contains(&Keyword::Flashback(FlashbackCost::Mana(parse_mana_symbols("{4}{R}").unwrap().0)))),
+            // allow-raw-authority: parser assertion requires the printed CardFace Flashback payload to retain its nonmana cost form.
             "Battle Screech" | "Deep Analysis" => assert!(face.keywords.iter().any(|keyword| matches!(keyword, Keyword::Flashback(FlashbackCost::NonMana(_))))),
             "Light of Judgment" => {
                 assert_eq!(effects.len(), 3);
@@ -40081,9 +40085,13 @@ fn complete_publication_actual_modal_dfc_faces_keep_full_values_in_both_loaders(
     assert_eq!(front.toughness, Some(PtValue::Fixed(1)));
     assert_eq!(back.power, Some(PtValue::Fixed(3)));
     assert_eq!(back.toughness, Some(PtValue::Fixed(3)));
+    // allow-raw-authority: parser assertion checks the printed front CardFace lacks the back face's Flying keyword.
     assert!(!front.keywords.contains(&Keyword::Flying));
+    // allow-raw-authority: parser assertion checks the printed front CardFace lacks the back face's Menace keyword.
     assert!(!front.keywords.contains(&Keyword::Menace));
+    // allow-raw-authority: parser assertion checks Flying on the printed back CardFace, not a live object.
     assert!(back.keywords.contains(&Keyword::Flying));
+    // allow-raw-authority: parser assertion checks Menace on the printed back CardFace, not a live object.
     assert!(back.keywords.contains(&Keyword::Menace));
     assert_eq!(front.abilities.len(), 1);
     assert_eq!(front.triggers.len(), 1);
