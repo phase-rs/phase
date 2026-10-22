@@ -1325,7 +1325,7 @@ fn locket_graveyard_announcement_and_lock() {
         );
         runner
             .act(GameAction::ActivateAbility {
-                payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: mana_source,
                 ability_index: 0,
             })
@@ -3265,7 +3265,7 @@ fn pending_population_lock_payment_and_cancel() {
             );
             runner
                 .act(GameAction::ActivateAbility {
-                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })
@@ -3677,7 +3677,7 @@ fn pending_population_transient_grant_lock() {
         if mode == "dynamic" {
             runner
                 .act(GameAction::ActivateAbility {
-                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })
@@ -3780,7 +3780,7 @@ fn pending_population_functioning_modifier_sources() {
         );
         runner
             .act(GameAction::ActivateAbility {
-                payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: mana_source,
                 ability_index: 0,
             })
@@ -3990,7 +3990,7 @@ fn pending_population_selected_permission_cost() {
         .controller = P1;
     runner
         .act(GameAction::ActivateAbility {
-            payment_mode: engine::types::actions::CastPaymentMode::Auto,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             source_id: ability_source,
             ability_index: 0,
         })

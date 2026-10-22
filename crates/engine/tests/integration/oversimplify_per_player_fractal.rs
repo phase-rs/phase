@@ -8765,7 +8765,7 @@ fn departure_return_aura_latched_host_and_independent_granted_local_process_do_n
     );
     runner
         .act(GameAction::ActivateAbility {
-            payment_mode: engine::types::actions::CastPaymentMode::Auto,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             source_id: source,
             ability_index: 0,
         })
@@ -8829,7 +8829,7 @@ fn departure_return_aura_latched_host_and_independent_granted_local_process_do_n
         .expect("the ordinary installed grant really supplies its complete later activated body");
     runner
         .act(GameAction::ActivateAbility {
-            payment_mode: engine::types::actions::CastPaymentMode::Auto,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             source_id: source,
             ability_index: index,
         })
@@ -8856,7 +8856,7 @@ fn departure_return_aura_latched_host_and_independent_granted_local_process_do_n
             engine::types::ability::validate_instruction_result_definition(&root).unwrap_err();
         assert!(format!("{error:?}").contains("instruction-result"));
         bad.act(GameAction::ActivateAbility {
-            payment_mode: engine::types::actions::CastPaymentMode::Auto,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             source_id: source,
             ability_index: 0,
         })
@@ -8974,7 +8974,7 @@ fn departure_token_and_emblem_later_bodies_start_fresh_after_the_creating_proces
                 .unwrap();
             runner
                 .act(GameAction::ActivateAbility {
-                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: index,
                 })

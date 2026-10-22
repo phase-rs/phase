@@ -819,7 +819,7 @@ fn u5_grimgrin_actual_activation_pays_another_own_nondefault_creature() {
         let epoch = runner.state().objects[&source].incarnation;
         runner
             .act(GameAction::ActivateAbility {
-                payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: source,
                 ability_index: 0,
             })
@@ -1759,7 +1759,7 @@ fn u5_grimgrin_and_traxos_old_abilities_cannot_affect_blinked_incarnations() {
         if grimgrin {
             runner
                 .act(GameAction::ActivateAbility {
-                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })
@@ -1975,7 +1975,7 @@ fn u5_same_body_if_reads_the_actual_outer_dies_snapshot_after_its_own_cost() {
         let hand = runner.state().players[0].hand.len();
         runner
             .act(GameAction::ActivateAbility {
-                payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: grimgrin,
                 ability_index: 0,
             })
@@ -2131,7 +2131,7 @@ fn u5_full_grimgrin_attack_retains_defending_targets_and_counter_rulings() {
         let mut runner = scenario.build();
         runner
             .act(GameAction::ActivateAbility {
-                payment_mode: engine::types::actions::CastPaymentMode::Auto,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: source,
                 ability_index: 0,
             })

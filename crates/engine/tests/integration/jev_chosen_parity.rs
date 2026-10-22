@@ -2984,7 +2984,7 @@ fn u14_continuous_grammar_reference_preservation_whip() {
         .position(|a| matches!(a.effect.as_ref(), Effect::SetTapState { .. }))
         .unwrap();
     r.act(GameAction::ActivateAbility {
-        payment_mode: engine::types::actions::CastPaymentMode::Auto,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         source_id: next_host,
         ability_index: index,
     })
