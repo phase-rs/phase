@@ -21802,6 +21802,7 @@ mod tests {
             resolve(QuantityRef::DistinctSubtypes {
                 source: poisoned.clone(),
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             }),
             0,
             "DistinctSubtypes must not consume a filtered batch leaf"

@@ -13133,6 +13133,7 @@ mod tests {
                 QuantityRef::DistinctSubtypes {
                     source: source.clone(),
                     exclude: SubtypeExclusion::None,
+                    restrict: None,
                 },
                 QuantityRef::DistinctColorsAmong { source },
             ]
