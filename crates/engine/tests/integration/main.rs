@@ -1755,6 +1755,7 @@ mod heartwood_storyteller_opponents_draw;
 mod human_torch_combat_damage_redirect;
 mod i_call_for_slaughter;
 mod identity_crisis_multi_zone_exile;
+mod impulsive_maneuvers_batch_shield;
 mod incredible_hulk_enrage_attacking;
 mod indestructible_survives_destroy;
 mod issue_4365_msh_legality;
