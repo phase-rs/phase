@@ -190,6 +190,7 @@ mod combat_damage_order_triggers_no_hang;
 mod combat_damage_stack_object;
 mod combat_lifelink_replacement_ordering;
 mod combat_target_support;
+mod combined_creature_coverage_honesty;
 mod combo_infinite_pile;
 mod combustible_gearhulk;
 mod come_back_wrong_finality_counter;

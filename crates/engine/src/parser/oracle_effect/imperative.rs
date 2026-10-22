@@ -8696,12 +8696,64 @@ fn parse_graveyard_top_source(input: &str) -> Option<&str> {
     Some(rest)
 }
 
+/// Fail-closed boundary for the casual "combined into one creature" qualifier
+/// on a put-to-battlefield clause (Monster Mash-Up; Grusilda, Monster Masher's
+/// activated ability).
+///
+/// CR 100.7: certain cards are intended for casual play "and may have features
+/// and text that aren't covered by these rules" (Un-sets, promotional cards) —
+/// "combined into one creature" is such text, and the engine has no
+/// combined-creature representation at all. It is NOT CR 730 merging: the
+/// keyword that causes a merge is mutate (CR 730.1), which this text is not.
+///
+/// CR 608.2c: later text on the card may modify the meaning of earlier text and
+/// the whole text is read together, so the qualifier belongs to the whole
+/// "put … onto the battlefield" instruction. Dropping it would
+/// execute a different instruction than the card prints (two separate
+/// creatures), so the parser must decline the clause instead of lowering a
+/// plain `ChangeZone`.
+///
+/// Non-consuming guard, run through `scan_at_word_boundaries` so it matches the
+/// qualifier wherever it sits after the put admission. The trailing
+/// `peek_clause_terminator` accepts both the whitespace-terminated form
+/// ("…one creature under your control") and the clause-terminated form
+/// ("…one creature, then …"), while a longer final token ("…one creatures")
+/// is left untouched and keeps its ordinary parse.
+fn parse_battlefield_combined_creature_qualifier(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("onto the battlefield").parse(input)?;
+    let (rest, _) = space1::<_, OracleError<'_>>(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("combined into").parse(rest)?;
+    let (rest, _) = space1::<_, OracleError<'_>>(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("one creature").parse(rest)?;
+    alt((
+        value((), peek(space1::<_, OracleError<'_>>)),
+        nom_primitives::peek_clause_terminator,
+    ))
+    .parse(rest)?;
+    Ok((rest, ()))
+}
+
 pub(super) fn parse_put_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<PutImperativeAst> {
     tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
+
+    // CR 100.7 + CR 608.2c: refuse "… onto the battlefield combined into one
+    // creature …" before any specialized put interpretation or the generic
+    // zone-change fallback can silently drop the qualifier (the engine has no
+    // combined-creature representation, and CR 730 merging is mutate-only).
+    // Returning the `Unimplemented` carrier — never `None` — keeps a later
+    // fallback from reclaiming the clause as a plain `ChangeZone`.
+    if nom_primitives::scan_at_word_boundaries(lower, parse_battlefield_combined_creature_qualifier)
+        .is_some()
+    {
+        return Some(PutImperativeAst::Unimplemented {
+            gap: "put_battlefield_combined_creature",
+            fragment: text.to_string(),
+        });
+    }
 
     if nom_on_lower(text, lower, |input| {
         value(
