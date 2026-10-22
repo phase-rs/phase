@@ -11256,10 +11256,12 @@ fn matches_filter_prop(
         // through the shared `SharedQuality::Name` value set, which is empty for
         // a nameless object, so a nameless reference never collides.
         // CR 109.5: the group is the permanents "you" control — the source's
-        // controller. `SourceContext::controller` is backfilled from the source's
-        // LKI by `source_context_from_filter`, so `None` is not expected here;
-        // handle it explicitly (no "you", no group, no match) rather than
-        // defaulting to player 0's permanents.
+        // controller. `SourceContext::controller` is always `Some` from the
+        // filter-context constructors (backfilled from the source's LKI, or from a
+        // placeholder snapshot when neither exists — see
+        // `source_context_from_filter`), so `None` is not expected here; handle it
+        // explicitly (no "you", no group, no match) rather than defaulting to
+        // player 0's permanents in this arm.
         FilterProp::DifferentNameFrom { filter } => {
             let Some(controller) = source.controller else {
                 return false;
