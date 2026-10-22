@@ -1636,12 +1636,22 @@ mod tests {
             is_combat: true,
             applied: std::collections::HashSet::new(),
         };
-        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
+        let mut pass = crate::game::replacement::CombatDamageReplacementPass {
+            unstarted: [proposed].into(),
+            ..Default::default()
+        };
+        let outcome = crate::game::replacement::replace_combat_damage_batch(
             &mut state,
             &mut events,
-            vec![proposed],
+            &mut pass,
+            None,
         );
-        assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
+        assert!(matches!(
+            outcome,
+            crate::game::replacement::CombatDamageReplacementOutcome::Complete
+        ));
+        let tally = pass.tally;
+        assert_eq!(pass.resolved, vec![None], "all 3 combat damage prevented");
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);
