@@ -10706,6 +10706,47 @@ fn mana_commute_class(modification: &crate::types::ability::ManaModification) ->
     }
 }
 
+/// CR 616.1 + CR 614.5: commute class of a replacement's EXECUTE-side expression
+/// that rescales the event's own count (`factor × EventContextAmount`).
+///
+/// The execute-side sibling of [`quantity_commute_class`], which classifies the
+/// `null`-execute side field (`quantity_modification`) and therefore cannot take
+/// a `QuantityExpr`. Both effects of this class read the event's live count and
+/// multiply it (`resolve_event_replacement_quantity`), so two of them commute
+/// (×a then ×b == ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f
+/// repeats the choice until none remain) and the affected player's CR 616.1
+/// ordering choice is immaterial — the same call the
+/// engine already makes for the null-execute count doublers (Doubling Season +
+/// Ojer Taq) and for `ManaModification::Multiply` / `DamageModification::Double`.
+///
+/// `None` for every other shape — an overwrite, an offset, a foreign quantity —
+/// which callers treat as order-material (conservative). Any integer `factor`
+/// commutes here, including 0 and negatives: the applier clamps each resolved
+/// product with `max(0)` (`coin_flip_applier` / `proliferate_applier`), so a
+/// non-positive product lands on 0 in either order and 0 × anything stays 0.
+///
+/// The coin-flip population of this class is assumed to mean "ignore all but
+/// one": `flip_coin.rs` fixes `CoinFlipKeepChoice { keep_count: 1 }` for every
+/// multi-flip run, so a count-scaling coin-flip replacement's whole effect is
+/// that count.
+fn event_count_multiplier_commute_class(expr: &QuantityExpr) -> Option<CommuteClass> {
+    match expr {
+        // The shape the parser emits for "proliferate twice instead" (Tekuthal)
+        // and for "instead flip two coins and ignore one" (Krark's Thumb).
+        QuantityExpr::Multiply { inner, .. }
+            if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::EventContextAmount
+                }
+            ) =>
+        {
+            Some(CommuteClass::Multiplicative)
+        }
+        _ => None,
+    }
+}
+
 /// CR 616.1 classification of a single replacement candidate.
 enum CandidateMateriality {
     /// An order-sensitive shape regardless of the other candidates (zone
@@ -10972,21 +11013,47 @@ fn candidate_materiality(
         }
         return CandidateMateriality::Disjoint;
     };
-    // CR 616.1: a proliferate count-doubler ("proliferate twice instead",
-    // Tekuthal) multiplies the proliferate action count via a `Multiply`
-    // `repeat_for`. Two such doublers commute (x2 then x2 == x2 then x2 == x4),
-    // so the ordering is immaterial and they must auto-apply — mirroring the
-    // `QuantityModification::DOUBLE` -> `Multiplicative` count-write path. Without
-    // this they fall to the conservative `Unconditional` default below and force
-    // a degenerate CR 616.1 ordering choice. (A non-`Multiply` `repeat_for` is not
-    // a doubler and correctly falls through to the conservative default.)
-    if matches!(&*execute.effect, Effect::Proliferate)
-        && matches!(execute.repeat_for, Some(QuantityExpr::Multiply { .. }))
-    {
-        return CandidateMateriality::Writes {
-            field: EventField::Count,
-            commute: CommuteClass::Multiplicative,
+    // CR 616.1 + CR 614.5: an execute-side COUNT SCALING replacement reads the
+    // event's own count and multiplies it, so two of them commute (×a then ×b ==
+    // ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f repeats the
+    // choice until none remain). The ordering choice is therefore immaterial — the same call the `quantity_modification`
+    // doubler path above makes. Two shipped shapes reach here: Tekuthal's
+    // "proliferate twice instead" and Krark's Thumb's "instead flip two coins
+    // and ignore one". Without this arm both fall to the conservative
+    // `Unconditional` default below and force a degenerate CR 616.1 ordering
+    // prompt — which for a CoinFlip event also DROPS the flip, because
+    // `flip_through_replacement`'s `NeedsChoice` arm parks a keep-choice frame
+    // the delivery path cannot serve (see `engine_replacement`'s CoinFlip arm).
+    //
+    // Both arms mirror their applier's read EXACTLY — same `ProposedEvent`, same
+    // `Effect` shape, same `sub_ability.is_none()` gate — so the classifier can
+    // never promise immateriality for a candidate whose applier will not
+    // rescale: `proliferate_applier` reads `repeat_for` only under
+    // `Effect::Proliferate if execute.sub_ability.is_none()`, and
+    // `coin_flip_applier` reads `count` only under a non-single
+    // `CoinFlipRun::Exactly` with no sub-ability. A non-`Multiply` count
+    // expression is not a doubler and correctly falls through to the
+    // conservative default.
+    if execute.sub_ability.is_none() {
+        let count_expr = match (&*execute.effect, proposed) {
+            (Effect::Proliferate, ProposedEvent::Proliferate { .. }) => execute.repeat_for.as_ref(),
+            // A single flip (`is_single_flip`) or an `UntilLoss` run carries no
+            // count to scale, so it is not a count write.
+            (
+                Effect::FlipCoins {
+                    flips: flips @ CoinFlipRun::Exactly { count },
+                    ..
+                },
+                ProposedEvent::CoinFlip { .. },
+            ) if !flips.is_single_flip() => Some(count),
+            _ => None,
         };
+        if let Some(commute) = count_expr.and_then(event_count_multiplier_commute_class) {
+            return CandidateMateriality::Writes {
+                field: EventField::Count,
+                commute,
+            };
+        }
     }
     let mut field: Option<EventField> = None;
     let mut enter_tapped_commute: Option<CommuteClass> = None;

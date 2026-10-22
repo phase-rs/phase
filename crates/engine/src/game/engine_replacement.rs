@@ -964,11 +964,21 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
-                // are always Mandatory and applied inline by
-                // `flip_coin::flip_through_replacement`; they never reach the
-                // optional replacement-choice resume path. Unreachable in
-                // practice — present only for match exhaustiveness.
+                // CR 616.1 + CR 705.1: every coin-flip replacement parsed today
+                // (Krark's Thumb) is a count multiplier that
+                // `candidate_materiality` classifies as a commuting `Count`
+                // writer, and its mode is Mandatory — so competing coin-flip
+                // replacements auto-apply and a CoinFlip NEVER parks for an
+                // ordering or an optional choice. An optional coin-flip
+                // replacement (Pokey, the Scallywagg, currently unparsed) would
+                // reach this arm even alone, through the optional-choice path.
+                //
+                // A non-commuting coin-flip replacement would need its flip
+                // context parked OUTSIDE the resolution stack (the
+                // `pending_die_roll_instruction` precedent) plus a delivery
+                // here; `flip_through_replacement`'s `NeedsChoice` arm cannot
+                // serve it, because it parks a keep-choice frame whose gate does
+                // not match `ReplacementChoice`.
                 ProposedEvent::CoinFlip { .. } => {
                     debug_assert!(
                         false,
