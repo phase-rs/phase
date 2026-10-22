@@ -1,8 +1,9 @@
 //! CR 100.7 + CR 608.2c: a put-to-battlefield clause whose qualifier is
 //! "combined into one creature" (Monster Mash-Up; Grusilda, Monster Masher)
-//! instructs the player to create a combined creature. The engine's combine
-//! machinery (`Effect::CombineHost`, `MergeKind::{Mutate, Meld, Augment}`) only
-//! merges onto an existing permanent and cannot enter two creature cards as one
+//! instructs the player to create a combined creature. The engine's merge
+//! machinery does not cover it: `Effect::CombineHost` needs an existing
+//! battlefield Host, mutate merges onto an existing permanent, and meld enters a
+//! predefined result face. None enters two arbitrary creature cards as one
 //! creature with summed power and toughness. CR 100.7 says casual-play cards
 //! "may have features and text that aren't covered by these rules", and the
 //! keyword that causes a CR 730 merge is mutate (CR 730.1), so the qualifier
@@ -190,7 +191,9 @@ fn qualifier_token_boundary_is_respected() {
         describe(&exact)
     );
 
-    // Comma-terminated form: fail-closed must not fail open at a clause boundary.
+    // Clause-boundary form: fail-closed must not fail open when the qualifier is
+    // followed by a comma (the sequence splitter may hand the put clause over with
+    // the comma already cut, so this row pins the outcome, not one lookahead arm).
     let comma_terminated = spell_face(
         "Boundary Comma",
         "Put two target creature cards from graveyards onto the battlefield combined into one creature, then draw a card.",

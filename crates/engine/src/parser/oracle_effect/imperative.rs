@@ -8702,10 +8702,11 @@ fn parse_graveyard_top_source(input: &str) -> Option<&str> {
 ///
 /// CR 100.7: certain cards are intended for casual play "and may have features
 /// and text that aren't covered by these rules" (Un-sets, promotional cards) —
-/// "combined into one creature" is such text. The engine's combine machinery
-/// (`Effect::CombineHost`, `MergeKind::{Mutate, Meld, Augment}`) only merges
-/// onto an existing permanent; it has no representation for two creature cards
-/// entering as one creature with summed power and toughness. It is NOT CR 730
+/// "combined into one creature" is such text. The engine's merge machinery
+/// does not cover it: `Effect::CombineHost` needs an existing battlefield Host,
+/// mutate merges onto an existing permanent, and meld enters a predefined
+/// result face. None enters two arbitrary creature cards as one creature with
+/// summed power and toughness. It is NOT CR 730
 /// merging: the keyword that causes a merge is mutate (CR 730.1), which this
 /// text is not.
 ///
@@ -8744,9 +8745,9 @@ pub(super) fn parse_put_ast(
 
     // CR 100.7 + CR 608.2c: refuse "… onto the battlefield combined into one
     // creature …" before any specialized put interpretation or the generic
-    // zone-change fallback can silently drop the qualifier (the engine's combine
-    // machinery only merges onto an existing permanent, and the only keyword
-    // that causes a CR 730 merge is mutate).
+    // zone-change fallback can silently drop the qualifier (no merge path enters
+    // two arbitrary creature cards as one creature, and the only keyword that
+    // causes a CR 730 merge is mutate).
     // Returning the `Unimplemented` carrier — never `None` — keeps a later
     // fallback from reclaiming the clause as a plain `ChangeZone`.
     if nom_primitives::scan_at_word_boundaries(lower, parse_battlefield_combined_creature_qualifier)
