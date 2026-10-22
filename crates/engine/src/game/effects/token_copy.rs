@@ -1003,6 +1003,16 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     modifications: body_modifications,
                 },
                 resulting_tapped,
+                // No entry answers on this seam (P1 code-proof): this file's
+                // only `TokenEntry` construction and entry-replacement consult
+                // are the liminal arm's; the loop head creates via
+                // `zones::create_object` (pure alloc) with no proposal, the
+                // aura-host pause parks a target selection (Attachment family,
+                // post-record), and the finish + resume arms only stamp
+                // modifications, consult `AddCounter` events (no choices slot),
+                // and record entry events — no `chosen_attributes` write and
+                // no `PayAmountChoice` is reachable anywhere on this route.
+                entry_choices: Vec::new(),
                 resulting_next_object_id: state.next_object_id,
                 cause,
             };

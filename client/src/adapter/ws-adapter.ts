@@ -215,6 +215,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 160 — ResolvedTokenCreationCommand gains entry_choices (CR 614.12a), the
+ *       entrant's as-enters answers as they rode the entry event — see
+ *       PROTOCOL_VERSION's own `/// 160` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v159 peer parses the state but
+ *       silently drops a non-empty latch, replaying a payment-creature copy as
+ *       a 0/0 that dies to CR 704.5f; the exact-match version check at connect
+ *       refuses the pairing. Wire 142 moves with it.
  * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
  *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
  *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
@@ -968,7 +975,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 159;
+export const PROTOCOL_VERSION = 160;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

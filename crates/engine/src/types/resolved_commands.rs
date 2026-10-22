@@ -13,7 +13,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ContinuousModification, TriggerDefinitionRef};
+use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -818,6 +818,15 @@ pub struct ResolvedTokenCreationCommand {
     /// CR 614.1: the post-replacement tapped state the token actually entered
     /// with, not the spec's pre-replacement request.
     pub resulting_tapped: bool,
+    /// CR 614.12a + CR 400.7: the entrant's as-enters answers (entry-payment
+    /// latches, self `choose` latches) as they rode the entry event. The
+    /// applier installs them onto the materialized object before its
+    /// entry-record snapshot, mirroring the live fold; without them a replayed
+    /// copy of a payment creature has no latch and its CDA reads 0. `default`
+    /// keeps pre-change journals parsing; `skip_serializing_if` keeps the
+    /// empty case byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_choices: Vec<ChosenAttribute>,
     /// The `next_object_id` high-water after this token's id was drawn, so a
     /// replay resuming from a shorter prefix cannot hand the same id out twice.
     pub resulting_next_object_id: u64,

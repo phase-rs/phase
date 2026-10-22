@@ -18,6 +18,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
@@ -2002,4 +2003,627 @@ fn unkicked_rite_nameless_cap_zero_auto_commits_token_entry() {
     assert_eq!(orig.zone, Zone::Battlefield);
     assert_eq!((orig.power, orig.toughness), (Some(1), Some(1)));
     assert_eq!(chosen_number_of(&runner, nameless), Some(0));
+}
+
+/// Find the journaled `TokenCreation` birth for `token_id` in the journal
+/// window at/after `journal_start`. A missing row is a test failure, not an
+/// `Option`: every token birth journals.
+fn token_birth_for(
+    runner: &GameRunner,
+    journal_start: usize,
+    token_id: ObjectId,
+) -> Box<engine::types::resolved_commands::ResolvedTokenCreationCommand> {
+    runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::TokenCreation(command)
+                if command.object.object_id == token_id =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("the token birth is journaled")
+}
+
+/// T1 (U1 discriminator): an unkicked Rite of Replication copying Minion of
+/// the Wastes journals the token's paid latch on its `TokenCreation` birth,
+/// and the CR 733 applier reinstalls it — replayed latch, replayed P/T, and
+/// the replayed entry record's LKI all read the paid amount.
+#[test]
+fn rite_copying_minion_replays_its_payment_latch() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    // Minion {3}{B}{B}{B} + unkicked Rite {2}{U}{U}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Minion enters first as the copy target.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+
+    // Unkicked Rite targeting the Minion. The kicker decline is REQUIRED —
+    // without it the drive parks at the kicker prompt.
+    let committed = runner
+        .cast(rite)
+        .target_object(minion)
+        .decline_optional()
+        .commit();
+    let pre_state = committed.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+    committed.resolve();
+
+    // Resolution parks on the token-entry payment (source = the liminal token).
+    let waiting = runner.state().waiting_for.clone();
+    let token_id = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the token-entry payment prompt, got {other:?}"),
+    };
+    assert_pay_prompt(&waiting, P0, 0, 15, token_id);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 7 })
+        .expect("answer the token payment");
+    runner.advance_until_stack_empty();
+
+    // Completion boundary.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+
+    // Reach guards: the live token is 7/7 with exactly the [Number(7)] latch,
+    // and the journal window holds its birth carrying the same answers.
+    let live = runner.state().objects.get(&token_id).unwrap();
+    assert_eq!(live.zone, Zone::Battlefield);
+    assert_eq!(
+        (live.power, live.toughness),
+        (Some(7), Some(7)),
+        "live token P/T reads its own latch"
+    );
+    assert_eq!(
+        live.chosen_attributes,
+        vec![ChosenAttribute::Number(7)],
+        "live token carries exactly the paid latch"
+    );
+    let birth = token_birth_for(&runner, journal_start, token_id);
+    assert_eq!(
+        birth.entry_choices,
+        vec![ChosenAttribute::Number(7)],
+        "the birth journals the paid latch"
+    );
+
+    // Replay the birth onto the pre-state clone.
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &birth)
+        .expect("the recorded birth replays against its captured predecessor");
+    engine::game::layers::mark_layers_entered(&mut replay, token_id);
+    engine::game::layers::flush_layers(&mut replay);
+    let replayed = replay.objects.get(&token_id).unwrap();
+    assert_eq!(
+        replayed.chosen_attributes,
+        vec![ChosenAttribute::Number(7)],
+        "replay reinstalls the latch"
+    );
+    assert_eq!(
+        (replayed.power, replayed.toughness),
+        (Some(7), Some(7)),
+        "replayed P/T reads the reinstalled latch"
+    );
+
+    // The replayed entry record's LKI carries the latch too — pins the
+    // install's pre-snapshot placement (installing after the snapshot would
+    // fork the record from the live one).
+    let records: Vec<_> = replay
+        .zone_changes_this_turn
+        .iter()
+        .filter(|record| record.object_id == token_id)
+        .collect();
+    assert_eq!(records.len(), 1, "the replay records exactly one birth");
+    let record_latch = records[0]
+        .trigger_source_context
+        .as_ref()
+        .expect("the birth record owns a trigger source context")
+        .lki
+        .chosen_attributes
+        .clone();
+    assert_eq!(record_latch, vec![ChosenAttribute::Number(7)]);
+}
+
+/// T4 (legacy-serde guard, mirrors the `zones.rs` `rebound_from` row): a birth
+/// WITHOUT the `entry_choices` key deserializes to an empty vec (the `default`
+/// half), and a fresh empty birth serializes WITHOUT the key (the
+/// `skip_serializing_if` half). The enum level matters: the command is
+/// externally tagged, so the key is read at `wire["TokenCreation"]` — a
+/// top-level `wire.get("entry_choices")` would be `None` with or without the
+/// attr, vacuously.
+#[test]
+fn entry_choices_absent_deserializes_to_empty() {
+    // A liminal birth WITH a latch: unkicked Rite copying Minion, answered 7.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let outcome = runner
+        .cast(rite)
+        .target_object(minion)
+        .decline_optional()
+        .commit()
+        .resolve();
+    let waiting = outcome.final_waiting_for().clone();
+    let token_id = match &waiting {
+        WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+        other => panic!("expected the token-entry payment prompt, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 7 })
+        .expect("answer the token payment");
+    runner.advance_until_stack_empty();
+
+    let birth = token_birth_for(&runner, journal_start, token_id);
+    assert_eq!(
+        birth.entry_choices,
+        vec![ChosenAttribute::Number(7)],
+        "reach: the liminal birth carries the key"
+    );
+    let wire = serde_json::to_value(ResolvedRulesCommand::TokenCreation(birth.clone()))
+        .expect("the birth serializes");
+    assert!(
+        wire["TokenCreation"].get("entry_choices").is_some(),
+        "reach: a latched birth carries the key"
+    );
+    let mut legacy = wire.clone();
+    legacy["TokenCreation"]
+        .as_object_mut()
+        .expect("TokenCreation holds an object")
+        .remove("entry_choices");
+    let back: ResolvedRulesCommand =
+        serde_json::from_value(legacy).expect("the legacy shape reads");
+    let mut expected = birth.as_ref().clone();
+    expected.entry_choices.clear();
+    assert_eq!(
+        back,
+        ResolvedRulesCommand::TokenCreation(Box::new(expected)),
+        "a key-deleted birth reads back with empty choices and nothing else changed"
+    );
+
+    // A Spec birth with NO latch: Processor activation mints an X/X Minion with
+    // no entry answers, so the key is omitted on the wire.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proc = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Phyrexian Processor", PROCESSOR_ORACLE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let mut runner = scenario.build();
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 8);
+
+    let outcome = runner.cast(proc).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, proc);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 7 })
+        .expect("answer the entry payment");
+    runner.advance_until_stack_empty();
+
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let outcome = runner.activate(proc, 0).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "activation resolves, got {:?}",
+        outcome.final_waiting_for()
+    );
+    runner.advance_until_stack_empty();
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 1, "one Minion token minted");
+
+    let spec_birth = token_birth_for(&runner, journal_start, tokens[0]);
+    assert!(
+        spec_birth.entry_choices.is_empty(),
+        "reach: the Spec birth records no choices"
+    );
+    let wire = serde_json::to_value(ResolvedRulesCommand::TokenCreation(spec_birth.clone()))
+        .expect("the Spec birth serializes");
+    assert!(
+        wire["TokenCreation"].get("entry_choices").is_none(),
+        "skip_serializing_if pins the empty case"
+    );
+    let back: ResolvedRulesCommand = serde_json::from_value(wire).expect("round-trips");
+    assert_eq!(
+        back,
+        ResolvedRulesCommand::TokenCreation(spec_birth.clone()),
+        "the empty birth round-trips exactly"
+    );
+}
+
+/// T6 (negative + reach guard): an ordinary Spec birth (Processor activation)
+/// records no entry choices, and replaying it reproduces the live P/T — the
+/// positive reach guard proving the replay ran, so the empty assertion is not
+/// vacuous.
+#[test]
+fn ordinary_spec_birth_records_no_choices() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let proc = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Phyrexian Processor", PROCESSOR_ORACLE)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let mut runner = scenario.build();
+    // Cast {4} + activation {4}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 8);
+
+    let outcome = runner.cast(proc).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, proc);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 7 })
+        .expect("answer the entry payment");
+    runner.advance_until_stack_empty();
+    assert_eq!(chosen_number_of(&runner, proc), Some(7));
+
+    // `AbilityActivation` has no commit/state split, so the pre-state is the
+    // runner state before the activation resolves — still a valid retained
+    // prefix: the birth's id is absent from it and its owner is known.
+    let pre_state = runner.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+    let outcome = runner.activate(proc, 0).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "activation resolves, got {:?}",
+        outcome.final_waiting_for()
+    );
+    runner.advance_until_stack_empty();
+
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 1, "one Minion token minted");
+    let token_id = tokens[0];
+    let live = runner.state().objects.get(&token_id).unwrap();
+    assert_eq!(
+        (live.power, live.toughness),
+        (Some(7), Some(7)),
+        "live P/T reads the Processor latch"
+    );
+
+    // THE NEGATIVE: the Spec birth records no entry answers.
+    let birth = token_birth_for(&runner, journal_start, token_id);
+    assert!(
+        birth.entry_choices.is_empty(),
+        "an ordinary Spec birth carries no entry choices, got {:?}",
+        birth.entry_choices
+    );
+
+    // Reach guard: the replay runs and reproduces the live P/T.
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &birth)
+        .expect("the Spec birth replays");
+    engine::game::layers::mark_layers_entered(&mut replay, token_id);
+    engine::game::layers::flush_layers(&mut replay);
+    let replayed = replay.objects.get(&token_id).unwrap();
+    assert_eq!(
+        (replayed.power, replayed.toughness),
+        (Some(7), Some(7)),
+        "replayed P/T equals live P/T"
+    );
+}
+
+/// R5 (multi-authority, token-side): a kicked Rite mints five independent
+/// latches; replaying ALL FIVE births sequentially onto one pre-state clone
+/// keeps each latch on its own token — the unique amount-3 birth
+/// discriminates a wrong-object install — and the clone-side original
+/// Minion's latch is untouched (negative on cross-talk into unrelated
+/// objects).
+#[test]
+fn kicked_rite_replay_keeps_each_latch_on_its_own_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    // Minion {3}{B}{B}{B} + kicked Rite {2}{U}{U} + {5}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 10);
+    add_mana_for(&mut runner, P0, ManaType::Black, 3);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Minion enters first as the copy target.
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+
+    // Cast Rite kicked targeting the Minion; resolution parks on the first
+    // token-entry payment.
+    let committed = runner
+        .cast(rite)
+        .target_object(minion)
+        .accept_optional()
+        .commit();
+    let pre_state = committed.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+    committed.resolve();
+
+    // Drive the five sequential token-entry payments (1, 2, 3, 1, 2). Each
+    // prompt's max is the life total at prompt time: 15, 14, 12, 9, 8.
+    let amounts = [1u32, 2, 3, 1, 2];
+    let maxes = [15u32, 14, 12, 9, 8];
+    let mut paid: Vec<(ObjectId, u32)> = Vec::new();
+    for _ in 0..128 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::PayAmountChoice { .. } => {
+                let idx = paid.len();
+                assert!(
+                    idx < amounts.len(),
+                    "exactly five token payments, got a sixth: {:?}",
+                    runner.state().waiting_for
+                );
+                let waiting = runner.state().waiting_for.clone();
+                let source = match &waiting {
+                    WaitingFor::PayAmountChoice { source_id, .. } => *source_id,
+                    _ => unreachable!("matched above"),
+                };
+                assert_pay_prompt(&waiting, P0, 0, maxes[idx], source);
+                let amount = amounts[idx];
+                paid.push((source, amount));
+                runner
+                    .act(GameAction::SubmitPayAmount { amount })
+                    .expect("answer the token payment");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                if paid.len() == amounts.len() && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                continue;
+            }
+            other => panic!("unexpected prompt while driving kicked Rite: {other:?}"),
+        }
+    }
+    assert_eq!(paid.len(), 5, "all five token payments were required");
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The window holds exactly the five births, each carrying its own payment.
+    let birth_count = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .filter(|command| matches!(command, ResolvedRulesCommand::TokenCreation(_)))
+        .count();
+    assert_eq!(birth_count, 5, "the window holds exactly the five births");
+    let births: Vec<_> = paid
+        .iter()
+        .map(|(id, _)| token_birth_for(&runner, journal_start, *id))
+        .collect();
+    for ((id, amount), birth) in paid.iter().zip(births.iter()) {
+        assert_eq!(
+            birth.entry_choices,
+            vec![ChosenAttribute::Number(*amount)],
+            "token {id:?} journals its own payment"
+        );
+        let live = runner.state().objects.get(id).unwrap();
+        assert_eq!(
+            (live.power, live.toughness),
+            (Some(*amount as i32), Some(*amount as i32)),
+            "live token {id:?} P/T reads its own latch"
+        );
+    }
+    // The unique-3 birth is the discriminator: exactly one payment used 3.
+    assert_eq!(
+        paid.iter().filter(|(_, amount)| *amount == 3).count(),
+        1,
+        "exactly one payment used the discriminating amount"
+    );
+
+    // Replay all five births sequentially onto one pre-state clone.
+    let mut replay = pre_state;
+    for birth in &births {
+        engine::game::effects::token::apply_resolved_token_creation(&mut replay, birth)
+            .expect("each birth replays");
+    }
+    for (id, _) in &paid {
+        engine::game::layers::mark_layers_entered(&mut replay, *id);
+    }
+    engine::game::layers::flush_layers(&mut replay);
+
+    // Full per-object mapping: each replayed id carries exactly its own
+    // birth's amount (a wrong-object install visibly misplaces the 3).
+    for (id, amount) in &paid {
+        let replayed = replay.objects.get(id).unwrap();
+        assert_eq!(
+            replayed.chosen_attributes,
+            vec![ChosenAttribute::Number(*amount)],
+            "replayed token {id:?} keeps its own latch"
+        );
+        assert_eq!(
+            (replayed.power, replayed.toughness),
+            (Some(*amount as i32), Some(*amount as i32)),
+            "replayed token {id:?} P/T reads its own latch"
+        );
+    }
+
+    // Negative on cross-talk: the clone-side original Minion's latch is
+    // unchanged after replaying all five births.
+    let clone_orig = replay.objects.get(&minion).unwrap();
+    assert_eq!(
+        clone_orig.chosen_attributes,
+        vec![ChosenAttribute::Number(5)],
+        "replay does not touch the unrelated original"
+    );
+    assert_eq!((clone_orig.power, clone_orig.toughness), (Some(5), Some(5)));
+}
+
+/// Determined-0 (token-side): an unkicked Rite copying Nameless Race at cap 0
+/// auto-commits the token entry with an inline `Number(0)` latch — no prompt —
+/// and the replayed token carries `[Number(0)]`, distinguishing absent from
+/// zero. Glorious Anthem keeps the 0/0 base alive as a 1/1 (B2a setup).
+#[test]
+fn nameless_determined_zero_token_replays_number_zero() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM_ORACLE);
+    let nameless = scenario
+        .add_creature_to_hand_from_oracle(P0, "Nameless Race", 0, 0, NAMELESS_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 3))
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            2,
+        ))
+        .id();
+    let mut runner = scenario.build();
+    // Nameless {3}{B} + unkicked Rite {2}{U}{U}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 5);
+    add_mana_for(&mut runner, P0, ManaType::Black, 1);
+    add_mana_for(&mut runner, P0, ManaType::Blue, 2);
+
+    // Pre-cast Nameless: cap 0 auto-commits with no prompt.
+    let outcome = runner.cast(nameless).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "cap-0 pre-cast auto-commits with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(chosen_number_of(&runner, nameless), Some(0));
+
+    // Unkicked Rite targeting Nameless: the single token entry is determined-0
+    // and auto-commits SILENTLY — the resolve runs to Priority with no prompt
+    // anywhere in the window.
+    let committed = runner
+        .cast(rite)
+        .target_object(nameless)
+        .decline_optional()
+        .commit();
+    let pre_state = committed.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+    let outcome = committed.resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "determined-0 token entry auto-commits with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(runner.state().stack.is_empty());
+
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 1, "exactly one token entered");
+    let token_id = tokens[0];
+    let live = runner.state().objects.get(&token_id).unwrap();
+    assert_eq!(
+        (live.power, live.toughness),
+        (Some(1), Some(1)),
+        "live 0/0 base + anthem"
+    );
+    assert_eq!(
+        live.chosen_attributes,
+        vec![ChosenAttribute::Number(0)],
+        "live token carries exactly the determined-0 latch"
+    );
+    let birth = token_birth_for(&runner, journal_start, token_id);
+    assert_eq!(
+        birth.entry_choices,
+        vec![ChosenAttribute::Number(0)],
+        "the birth journals the determined-0 latch"
+    );
+
+    // Replay: the latch reads [Number(0)] — present-but-zero, not absent.
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &birth)
+        .expect("the recorded birth replays against its captured predecessor");
+    engine::game::layers::mark_layers_entered(&mut replay, token_id);
+    engine::game::layers::flush_layers(&mut replay);
+    let replayed = replay.objects.get(&token_id).unwrap();
+    assert_eq!(
+        replayed.chosen_attributes,
+        vec![ChosenAttribute::Number(0)],
+        "replay reinstalls the determined-0 latch (absent would be [])"
+    );
+    assert_eq!(
+        (replayed.power, replayed.toughness),
+        (Some(1), Some(1)),
+        "replayed 0/0 base + anthem"
+    );
 }

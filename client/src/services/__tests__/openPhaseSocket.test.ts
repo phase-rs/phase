@@ -444,7 +444,7 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it.each([152, 153, 154, 155, 156, 157, 158])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries or a merged coin-flip run", async (version) => {
+  it.each([152, 153, 154, 155, 156, 157, 158, 159])("rejects Full v%s before it can read a parked ChangeZone frame's pre-event member entries, a merged coin-flip run or a journaled token entry latch", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: version }));
@@ -466,10 +466,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v159 merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
+  it("accepts the literal Full v160 journaled token entry choices, merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 159 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 160 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
