@@ -4373,7 +4373,7 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
         }
         runner.act(GameAction::PassPriority).unwrap();
     }
-    for index in 0..2 {
+    for aura in &auras[..2] {
         let WaitingFor::ReturnAsAuraTarget {
             returned_id,
             legal_targets,
@@ -4382,7 +4382,7 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
         else {
             panic!("each actual Aura pauses the mass return before the remaining members");
         };
-        assert_eq!(*returned_id, auras[index]);
+        assert_eq!(*returned_id, *aura);
         assert!(legal_targets.contains(&TargetRef::Object(hosts[1])));
         let pending = runner
             .state()
@@ -4451,7 +4451,7 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
             })
             .unwrap();
         assert_eq!(
-            runner.state().objects[&auras[index]]
+            runner.state().objects[aura]
                 .attached_to
                 .and_then(|target| target.as_object()),
             Some(hosts[1])
@@ -7515,7 +7515,7 @@ fn departure_selected_import_family_definition(
             *win_effect = Some(Box::new(imported.clone()));
             *lose_effect = Some(Box::new(imported));
         }
-        Effect::RollDie { results, .. } => results[0].effect = Box::new(departure_branch_reader()),
+        Effect::RollDie { results, .. } => *results[0].effect = departure_branch_reader(),
         Effect::Vote {
             per_choice_effect,
             subject,
@@ -7541,7 +7541,7 @@ fn departure_selected_import_family_definition(
                 outcome_template, ..
             } = subject
             {
-                *outcome_template = Box::new(imported);
+                **outcome_template = imported;
             } else {
                 *per_choice_effect = vec![Box::new(imported.clone()), Box::new(imported)];
             }
@@ -7551,7 +7551,7 @@ fn departure_selected_import_family_definition(
             unchosen_pile_effect,
             ..
         } => {
-            *chosen_pile_effect = Box::new(imported.clone());
+            **chosen_pile_effect = imported.clone();
             *unchosen_pile_effect = Some(Box::new(imported));
         }
         _ => unreachable!(),
@@ -7593,7 +7593,7 @@ fn departure_all_thirteen_selected_entries_keep_imports_separate_from_complete_l
                     } => {
                         assert_eq!(*player, PlayerId(ballots as u8));
                         assert_eq!(options.len(), 2);
-                        let choice = if matches!(family, 7 | 8 | 9) {
+                        let choice = if matches!(family, 7..=9) {
                             ballots % 2
                         } else {
                             1
@@ -8697,7 +8697,7 @@ fn departure_return_as_aura_runner(
     use engine::types::phase::Phase;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let victims = vec![
+    let victims = [
         scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
         scenario.add_creature(P0, "Centaur Courser", 3, 3).id(),
         scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
