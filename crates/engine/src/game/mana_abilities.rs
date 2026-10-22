@@ -1447,7 +1447,13 @@ pub(crate) fn mana_choice_prompt(
         // single option auto-picks). Mirrors `AnyTypeProduceableBy`.
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
-            let options = super::mana_sources::opponent_land_color_options(state, owner);
+            // CR 106.1a + CR 105.1: the survey yields `ManaColor`s, so colorless can
+            // never be offered as an "any color" option.
+            let options: Vec<ManaType> =
+                super::mana_sources::opponent_land_color_options(state, owner)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect();
             // CR 106.5: An ability that would produce mana of an undefined type
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability

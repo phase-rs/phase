@@ -415,6 +415,7 @@ mod exile_dynamic_from_top;
 mod exile_one_card_from_each_graveyard_9213;
 mod exiled_card_power_linked_pile;
 mod exocrine_compound_damage_subject;
+mod exotic_orchard_colorless_excluded;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;
 mod extract_power_each_player_exile;
