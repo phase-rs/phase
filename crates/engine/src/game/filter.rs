@@ -2735,7 +2735,7 @@ fn filter_grammar_any(
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { .. }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -5882,6 +5882,7 @@ pub(crate) fn matches_target_filter_on_entry_observation(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::LiveOrLki,
         HeldObject::Detached,
     )
@@ -8048,6 +8049,7 @@ fn filter_inner_for_object(
     granting_object: Option<ObjectIncarnationRef>,
     casting_spell: Option<CastSpellContext>,
     controller_lookup: ControllerLookup,
+    held: HeldObject,
 ) -> bool {
     filter_object_verdict(
         state,
@@ -8065,6 +8067,7 @@ fn filter_inner_for_object(
         granting_object,
         casting_spell,
         controller_lookup,
+        held,
     )
     .unwrap_or(false)
 }
@@ -8110,6 +8113,7 @@ fn filter_object_verdict(
     granting_object: Option<ObjectIncarnationRef>,
     casting_spell: Option<CastSpellContext>,
     controller_lookup: ControllerLookup,
+    held: HeldObject,
 ) -> Option<bool> {
     let recurse = |filter: &TargetFilter| {
         filter_object_verdict(
@@ -8128,6 +8132,7 @@ fn filter_object_verdict(
             granting_object,
             casting_spell,
             controller_lookup,
+            held,
         )
     };
     match filter {
@@ -8152,6 +8157,7 @@ fn filter_object_verdict(
                 granting_object,
                 casting_spell,
                 controller_lookup,
+                held,
             );
             let mut source = source_context_from_filter(
                 state,
@@ -8171,7 +8177,9 @@ fn filter_object_verdict(
                         .properties
                         .iter()
                         .filter(|prop| prop_has_parity(prop))
-                        .map(|prop| filter_prop_verdict(prop, state, obj, object_id, &source)),
+                        .map(|prop| {
+                            filter_prop_verdict(prop, state, obj, object_id, held, &source)
+                        }),
                 ),
             )
         }
@@ -8191,6 +8199,7 @@ fn filter_object_verdict(
             granting_object,
             casting_spell,
             controller_lookup,
+            held,
         )),
     }
 }
@@ -11367,6 +11376,14 @@ fn parity_from_source(
     }
 }
 
+// CR 202.3: compare the object's mana value using the requested integer parity.
+fn mana_value_matches_parity(mana_value: u32, parity: Parity) -> bool {
+    match parity {
+        Parity::Odd => !mana_value.is_multiple_of(2),
+        Parity::Even => mana_value.is_multiple_of(2),
+    }
+}
+
 fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
@@ -11526,7 +11543,7 @@ fn matches_filter_prop(
     held: HeldObject,
     source: &SourceContext<'_>,
 ) -> bool {
-    filter_prop_verdict(prop, state, obj, object_id, source).unwrap_or(false)
+    filter_prop_verdict(prop, state, obj, object_id, held, source).unwrap_or(false)
 }
 
 fn filter_prop_verdict(
@@ -11534,6 +11551,7 @@ fn filter_prop_verdict(
     state: &GameState,
     obj: &GameObject,
     object_id: ObjectId,
+    held: HeldObject,
     source: &SourceContext<'_>,
 ) -> Option<bool> {
     match prop {
@@ -11552,15 +11570,15 @@ fn filter_prop_verdict(
         )
         .map(|parity| mana_value_matches_parity(obj.effective_mana_value(), parity)),
         FilterProp::Not { prop } => {
-            filter_prop_verdict(prop, state, obj, object_id, source).map(|matched| !matched)
+            filter_prop_verdict(prop, state, obj, object_id, held, source).map(|matched| !matched)
         }
         FilterProp::AnyOf { props } => kleene_or(
             props
                 .iter()
-                .map(|prop| filter_prop_verdict(prop, state, obj, object_id, source)),
+                .map(|prop| filter_prop_verdict(prop, state, obj, object_id, held, source)),
         ),
         _ => Some(matches_filter_prop_known(
-            prop, state, obj, object_id, source,
+            prop, state, obj, object_id, held, source,
         )),
     }
 }
@@ -11570,6 +11588,7 @@ fn matches_filter_prop_known(
     state: &GameState,
     obj: &GameObject,
     object_id: ObjectId,
+    held: HeldObject,
     source: &SourceContext<'_>,
 ) -> bool {
     match prop {
@@ -14442,6 +14461,7 @@ mod tests {
                         &state,
                         &state.objects[&candidate],
                         candidate,
+                        HeldObject::Live,
                         &source_context
                     ),
                     expected
@@ -14628,11 +14648,25 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            filter_prop_verdict(&not, &state, &state.objects[&candidate], candidate, &old),
+            filter_prop_verdict(
+                &not,
+                &state,
+                &state.objects[&candidate],
+                candidate,
+                HeldObject::Live,
+                &old
+            ),
             Some(true)
         );
         assert_eq!(
-            filter_prop_verdict(&not, &state, &state.objects[&candidate], candidate, &live),
+            filter_prop_verdict(
+                &not,
+                &state,
+                &state.objects[&candidate],
+                candidate,
+                HeldObject::Live,
+                &live
+            ),
             Some(false)
         );
     }

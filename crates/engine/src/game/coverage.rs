@@ -10213,6 +10213,7 @@ fn extract_ability_condition_features(
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }

@@ -10238,8 +10238,14 @@ fn prepare_spell_cast_announced(
         casting_permission_index,
         casting_variant,
     ) && !(casting_variant == CastingVariant::Normal
-        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
-            .is_some())
+        && casting_costs::payable_spell_alternative_cost_details_for_cast_at_index(
+            state,
+            player,
+            object_id,
+            casting_spell,
+            casting_permission_index,
+        )
+        .is_some())
     {
         return Err(EngineError::ActionNotAllowed(
             "A card with no mana cost can't be cast by paying its mana cost".to_string(),
@@ -26995,6 +27001,7 @@ fn automatic_activation_phyrexian_life_payable_now(
             source_cache: None,
             explicit_tap_payment_mode: None,
             phyrexian_life_budget: ProbeLifeBudget::BeforeAutoTap,
+            casting_spell: None,
         },
     )
 }

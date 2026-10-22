@@ -2388,6 +2388,7 @@ fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo
+        | AbilityCondition::CounterRemovedThisWay { .. }
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }

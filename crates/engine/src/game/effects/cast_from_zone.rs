@@ -420,10 +420,12 @@ fn open_private_zone_cast_selection(
     // cleared and the reference would read 0 and reject every cast. Freeze the
     // gate to a `Fixed` on the stashed ability now, while the trigger context is
     // live, so the resume's finalize-time re-evaluation is correct.
+    let return_result_occurrence = super::retained_return_result_occurrence(state, &stash)?;
+    let return_result_process = stash.return_result_process;
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
-        return_result_occurrence: None,
-        return_result_process: None,
+        return_result_occurrence,
+        return_result_process,
         player: ability.controller,
         cards: eligible,
         count: 1,
@@ -511,8 +513,12 @@ fn open_linked_exile_cast_selection(
         });
         return Ok(());
     }
+    let return_result_occurrence = super::retained_return_result_occurrence(state, &stash)?;
+    let return_result_process = stash.return_result_process;
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        return_result_occurrence,
+        return_result_process,
         player: ability.controller,
         cards: pool,
         count: 1,
@@ -4843,6 +4849,179 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // CR 608.2c + CR 608.2h: the public pick restores the creating process
+    // before its retained continuation reads the instruction's result.
+    #[test]
+    fn private_and_linked_cast_picks_restore_the_retained_result_before_public_completion() {
+        use crate::types::ability::{
+            AggregateFunction, ObjectProperty, ReturnResultId, ZoneChangeRecordSource,
+        };
+
+        for linked in [false, true] {
+            let mut state = make_test_state();
+            let source = create_object(
+                &mut state,
+                CardId(8_300),
+                PlayerId(0),
+                "Cast pick source".into(),
+                Zone::Battlefield,
+            );
+            let card = if linked {
+                add_card_to_exile(&mut state, PlayerId(0), CardId(8_301))
+            } else {
+                add_card_to_hand(&mut state, PlayerId(0), CardId(8_301))
+            };
+            state.objects.get_mut(&card).unwrap().mana_cost = ManaCost::zero();
+            if linked {
+                state.exile_links.push(ExileLink {
+                    exiled_id: card,
+                    source_id: source,
+                    kind: ExileLinkKind::TrackedBySource,
+                });
+            }
+            let departed = create_object(
+                &mut state,
+                CardId(8_302),
+                PlayerId(0),
+                "Departing five-power creature".into(),
+                Zone::Battlefield,
+            );
+            {
+                let object = state.objects.get_mut(&departed).unwrap();
+                object.card_types.core_types = vec![CoreType::Creature];
+                object.base_card_types = object.card_types.clone();
+                object.power = Some(5);
+                object.base_power = Some(5);
+                object.toughness = Some(5);
+                object.base_toughness = Some(5);
+            }
+            let record = state.objects[&departed].snapshot_for_zone_change(
+                departed,
+                Some(Zone::Battlefield),
+                Zone::Exile,
+            );
+            let mut events = vec![];
+            zones::move_to_zone(&mut state, departed, Zone::Exile, &mut events);
+            let (_, process) =
+                crate::game::effects::begin_return_result_occurrence(&mut state).unwrap();
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            crate::game::effects::publish_return_result(
+                &mut state,
+                occurrence,
+                ReturnResultId(7),
+                Some(process),
+                vec![record],
+            )
+            .unwrap();
+            let quantity = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult {
+                        result: ReturnResultId(7),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Any,
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+            };
+            let mut ability = electrodominance_hand_ability(3);
+            ability.source_id = source;
+            if linked {
+                let Effect::CastFromZone {
+                    target,
+                    without_paying_mana_cost,
+                    driver,
+                    ..
+                } = &mut ability.effect
+                else {
+                    unreachable!()
+                };
+                *target = TargetFilter::ExiledBySource;
+                *without_paying_mana_cost = false;
+                *driver = CastFromZoneDriver::DuringResolution;
+            }
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: quantity.clone(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            });
+            ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: quantity,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )));
+            ability.sub_ability.as_mut().unwrap().condition = Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+            });
+            ability.bind_return_result_process(Some(process));
+            crate::game::effects::resolve_resume_owned_ability_chain(
+                &mut state,
+                &ability,
+                &mut events,
+                0,
+            )
+            .unwrap();
+            let WaitingFor::EffectZoneChoice {
+                return_result_occurrence,
+                return_result_process,
+                cards,
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("the positive addressed gate must reach the public cast pick")
+            };
+            assert_eq!(cards, &vec![card]);
+            assert_eq!(*return_result_occurrence, Some(occurrence));
+            assert_eq!(*return_result_process, Some(process));
+            assert_eq!(
+                state.players[0].life, 20,
+                "the reader must wait for the actual public answer"
+            );
+            assert!(
+                crate::types::game_state::live_return_result_occurrences(&state)
+                    .contains(&occurrence)
+            );
+            state.active_return_result_occurrence = None;
+            state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+            assert_eq!(
+                state.objects[&card].zone,
+                if linked { Zone::Exile } else { Zone::Hand }
+            );
+            assert!(state.objects[&card].casting_permissions.is_empty());
+            assert_eq!(
+                state.players[0].life, 25,
+                "the retained reader completes once with its own published result"
+            );
+            assert!(state.active_ability_continuation().is_none());
+            assert!(state.return_result_frames.is_empty());
+            assert_eq!(state.active_return_result_occurrence, None);
+
+            // A subsequent independent pick has no import to borrow.
+            let next = add_card_to_hand(&mut state, PlayerId(0), CardId(8_303));
+            let mut independent = electrodominance_hand_ability(3);
+            independent.source_id = source;
+            crate::game::effects::resolve_ability_chain(&mut state, &independent, &mut events, 0)
+                .unwrap();
+            assert!(
+                matches!(&state.waiting_for, WaitingFor::EffectZoneChoice { return_result_occurrence: None, return_result_process: None, cards, .. } if cards.contains(&next))
+            );
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![next] }).unwrap();
+            assert_eq!(state.objects[&next].zone, Zone::Stack);
+            crate::game::stack::resolve_top(&mut state, &mut events);
+            assert_eq!(state.players[0].life, 25);
+            assert!(state.active_ability_continuation().is_none());
+            assert!(state.return_result_frames.is_empty());
+        }
     }
 
     #[test]

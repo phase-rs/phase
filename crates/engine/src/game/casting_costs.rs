@@ -1051,21 +1051,6 @@ pub(crate) fn payable_spell_alternative_cost_details_for_cast(
     )
 }
 
-pub(super) fn payable_spell_alternative_cost_details_at_index(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    casting_permission_index: Option<CastingPermissionIndex>,
-) -> Option<PayableSpellAlternativeCost> {
-    payable_spell_alternative_cost_details_for_cast_at_index(
-        state,
-        player,
-        object_id,
-        CastSpellContext::for_spell(state, object_id),
-        casting_permission_index,
-    )
-}
-
 pub(super) fn payable_spell_alternative_cost_details_for_cast_at_index(
     state: &GameState,
     player: PlayerId,
@@ -1594,9 +1579,16 @@ pub(crate) fn finish_pending_cost_or_cast(
         && pending.alternative_cost_election
             == crate::types::game_state::SpellAlternativeCostElection::Undecided
     {
-        if let Some(alt_cost) =
-            payable_spell_alternative_cost_details(state, player, pending.object_id)
-        {
+        if let Some(alt_cost) = payable_spell_alternative_cost_details_for_cast_at_index(
+            state,
+            player,
+            pending.object_id,
+            CastSpellContext {
+                object_id: pending.object_id,
+                casting_variant: pending.casting_variant,
+            },
+            pending.casting_permission_index,
+        ) {
             pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
             if state.objects.get(&pending.object_id).is_some_and(|obj| {
                 super::casting::cast_pays_nonexistent_printed_cost(
@@ -8017,7 +8009,18 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         })
     {
         let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
-            .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
+            .then(|| {
+                payable_spell_alternative_cost_details_for_cast_at_index(
+                    state,
+                    player,
+                    pending.object_id,
+                    CastSpellContext {
+                        object_id: pending.object_id,
+                        casting_variant: pending.casting_variant,
+                    },
+                    pending.casting_permission_index,
+                )
+            })
             .flatten()
         else {
             return Err(EngineError::SpellCastReversed {
@@ -8885,10 +8888,14 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
             })
             .or_else(|| {
-                payable_spell_alternative_cost_details_at_index(
+                payable_spell_alternative_cost_details_for_cast_at_index(
                     state,
                     player,
                     object_id,
+                    CastSpellContext {
+                        object_id,
+                        casting_variant,
+                    },
                     casting_permission_index,
                 )
             });

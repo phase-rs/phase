@@ -10819,6 +10819,7 @@ AbilityCondition::RevealedHasCardType { additional_filter, subtype_filter, .. } 
 AbilityCondition::ObjectsShareQuality { subject, reference, .. } => { subject.$nested(f); reference.$nested(f); },
 AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target, .. } => { target.$nested(f); },
 AbilityCondition::QuantityCheck { lhs, rhs, .. } => { lhs.$expr(f); rhs.$expr(f); },
+AbilityCondition::QuantityQuality { quantity, .. } => { quantity.$expr(f); },
 AbilityCondition::PreviousEffectAmount { rhs, .. } => { rhs.$expr(f); },
 AbilityCondition::DiscardedCardMatchesFilter { filter, .. } => { filter.$nested(f); },
 AbilityCondition::TargetMatchesFilter { filter, .. } => { filter.$nested(f); },
@@ -10969,6 +10970,7 @@ FilterProp::MatchesLastChosenCardPredicate |
 FilterProp::HasSingleTarget |
 FilterProp::Modal |
 FilterProp::PrepareSpell |
+FilterProp::Prepared |
 FilterProp::NotColor { .. } |
 FilterProp::NotSupertype { .. } |
 FilterProp::Suspected |
@@ -11058,7 +11060,7 @@ PlayerScope::Target |
 PlayerScope::Opponent { .. } |
 PlayerScope::RecipientController |
 PlayerScope::DefendingPlayer |
-PlayerScope::ParentObjectTargetController |
+PlayerScope::ParentObjectTarget { .. } |
 PlayerScope::SourceChosenPlayer |
 PlayerScope::AnyTurn |
 PlayerScope::SpecificPlayer { .. } => {}
@@ -29904,7 +29906,7 @@ macro_rules! define_effect_quantity_walk {
                 }
             }
             Effect::FlipCoins { flips, .. } => {
-                flips.$name(f);
+                flips.$scalar(f);
             }
             Effect::Mana { produced, .. } => {
                 // The production descriptor's dynamic `count` slots (Colorless,

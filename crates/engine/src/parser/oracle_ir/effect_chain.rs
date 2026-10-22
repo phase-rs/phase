@@ -1452,7 +1452,8 @@ macro_rules! define_disposition_quantity_walk {
                 use super::ast::PutCount;
                 use crate::types::ability::PtValue;
                 match self {
-                    Self::TokenEntersWithCounters { count, .. } => count.$refs(f),
+                    Self::TokenEntersWithCounters { count, .. }
+                    | Self::PutCountersOnLastCreated { count, .. } => count.$refs(f),
                     Self::TokenSourcePowerToughness { power, toughness } => {
                         for value in [power, toughness] { if let PtValue::Quantity(expr) = value { expr.$refs(f); } }
                     }

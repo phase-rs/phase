@@ -823,6 +823,7 @@ fn build_conditional_continuous_members(
         multi_target: application.multi_target.clone(),
         condition: first.condition,
         optional: application.is_optional,
+        optional_targeting: first.optional_targeting,
         unless_pay: first.unless_pay,
     })
 }
