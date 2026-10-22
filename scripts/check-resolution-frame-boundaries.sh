@@ -2,8 +2,9 @@
 # Full-tree guard for the Phase 4 resolution-frame compatibility boundary.
 #
 # The 39 v1 JSON input keys may exist as quoted keys only in the
-# ResolutionStateWire v1 reader, its legacy wire structures/inventory, or test
-# fixtures. Runtime resolution work is represented by typed ResolutionFrame
+# ResolutionStateWire v1 reader, its legacy wire structures/inventory, the
+# instruction-batch compatibility visitor, or test fixtures. Runtime resolution
+# work is represented by typed ResolutionFrame
 # payloads; identically named typed payload members are not wire keys. The
 # frame stack permits top access, a captured adjacent-pair boundary, or
 # identity-addressed access. Removing an arbitrary index, or searching the
@@ -163,7 +164,10 @@ def block_span(source: str, match: re.Match[str]) -> tuple[int, int]:
 
 
 def cfg_test_module_spans(source: str) -> list[tuple[int, int]]:
-    pattern = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]+\]\s*)*mod\s+\w+\s*\{")
+    pattern = re.compile(
+        r"#\[cfg\(test\)\]\s*(?:#\[[^\]]+\]\s*)*"
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{"
+    )
     return [block_span(source, match) for match in pattern.finditer(source)]
 
 
@@ -258,6 +262,9 @@ def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
         block_span(source, v1_match),
         block_span(source, inventory_match),
         (live_roots_match.start(), live_roots_end + 2),
+        # Decode validation visits legacy batch carriers as well as typed frames.
+        # Only this exact compatibility reader may name their legacy keys here.
+        function_span(source, "visit_instruction_batches_mut"),
     ]
     legacy_struct = re.compile(r"\bstruct\s+Legacy\w+Wire\b[^\{]*\{")
     spans.extend(block_span(source, match) for match in legacy_struct.finditer(source))
