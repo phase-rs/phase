@@ -2067,6 +2067,10 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "costRecipient": {
+    "title": "Choose an Opponent",
+    "subtitle": "Choose the opponent for this cost: {{cost}}."
+  },
   "entryController": {
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
@@ -2389,6 +2393,7 @@
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "haveOpponentGainLife": "Have an opponent gain {{amount}} life",
       "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },

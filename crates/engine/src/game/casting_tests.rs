@@ -19315,6 +19315,7 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     let WaitingFor::ChooseGiftRecipient {
         pending_cast,
         candidates,
+        purpose,
         ..
     } = &state.waiting_for
     else {
@@ -19322,6 +19323,11 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     };
     assert_eq!(pending_cast.object_id, spell);
     assert_eq!(candidates, &vec![PlayerId(1), PlayerId(2)]);
+    // CR 702.174a: the Gift prompt keeps the Gift purpose (the default wire shape).
+    assert_eq!(
+        purpose,
+        &crate::types::game_state::CastOpponentChoicePurpose::Gift
+    );
 }
 
 #[test]

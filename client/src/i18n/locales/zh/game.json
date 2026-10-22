@@ -1157,6 +1157,10 @@
       "PoisonLoss": "此循环会造成致命的中毒指示物。"
     }
   },
+  "costRecipient": {
+    "subtitle": "选择此费用的对手：{{cost}}",
+    "title": "选择对手"
+  },
   "costReductionOrder": {
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
@@ -2324,6 +2328,7 @@
       "exile": "从{{zone}}放逐{{count}}张{{cards}}",
       "filteredCard": "{{types}}牌",
       "filteredCards": "{{types}}牌",
+      "haveOpponentGainLife": "让一位对手获得{{amount}}点生命",
       "nonType": "非{{type}}",
       "orSeparator": " 或 ",
       "reveal": "从{{zone}}展示{{count}}张{{cards}}",
