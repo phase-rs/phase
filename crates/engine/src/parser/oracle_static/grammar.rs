@@ -1939,6 +1939,20 @@ pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
             tag("have "),
         ))
         .parse(candidate)?;
+        if alt((
+            tag::<_, _, OracleError<'_>>("base "),
+            tag("power "),
+            tag("+"),
+            tag("-"),
+        ))
+        .parse(rest)
+        .is_ok()
+        {
+            return Err(nom::Err::Error(OracleError::new(
+                candidate,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
         let offset = lower.len() - candidate.len();
         if text[..offset].chars().filter(|c| *c == '"').count() % 2 != 0 {
             return Err(nom::Err::Error(OracleError::new(
@@ -1946,6 +1960,8 @@ pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
                 nom::error::ErrorKind::Fail,
             )));
         }
+        // Span extraction does not certify the predicate; each caller retains
+        // complete keyword or quoted-body validation.
         Ok((rest, &text[lower.len() - rest.len()..]))
     })?;
     // Return the entire suffix: the complete companion owner must consume

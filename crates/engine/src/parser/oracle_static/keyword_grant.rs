@@ -1592,8 +1592,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     // CR 509.1b + CR 613.4b: "can't be blocked [this turn] and has/have base power
     // and toughness N/N" — the restriction conjunct precedes the base-PT conjunct.
-    // `extract_keyword_clause` only recovers the trailing conjunct, so scan the
-    // leading restriction explicitly (Atomic Microsizer).
+    // Compatibility keyword extraction skips base-stat verbs. The leading
+    // restriction keeps its own complete owner (Atomic Microsizer).
     if let Some((restriction_text, _)) =
         nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
             (
@@ -1724,7 +1724,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // CR 613.1f: Pre-quote keyword recovery for compound lines like Swashbuckler's
     // Whip: 'has reach, "{2}, {T}: ...," and "{8}, {T}: ...".' Stripping the quoted
     // segments can mangle the boundary between the leading bare keyword and the
-    // first quote, so the keyword clause above may miss "reach". Scan the slice
+    // first quote, so compatibility extraction also scans the original slice
     // BEFORE the first quote independently. GUARD: only run when the post-strip
     // path produced no AddKeyword (prevents double-adding a keyword).
     if !modifications
@@ -1862,6 +1862,218 @@ pub(crate) fn parse_complete_continuous_modifications(
     Some(modifications)
 }
 
+/// Complete member transactions retain recipient gates separately from board
+/// conditions. Hosted callers keep these predicates live; resolving callers
+/// check each gate once before installing their ordinary transient effect.
+pub(crate) type CompleteContinuousMember = (
+    Vec<ContinuousModification>,
+    Option<StaticCondition>,
+    Option<TargetFilter>,
+    Option<crate::types::ability::Duration>,
+);
+
+pub(crate) fn parse_complete_continuous_members(
+    text: &str,
+) -> Option<Vec<CompleteContinuousMember>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (predicate, where_x, remaining) = complete_static_where_x(tp)?;
+    let (mut members, verb) =
+        complete_continuous_members(predicate.original, where_x, ContinuousVerb::Grant)?;
+    if let Some(remaining) = remaining {
+        members.extend(complete_continuous_members(remaining, where_x, verb)?.0);
+    }
+    Some(members)
+}
+
+fn complete_continuous_members(
+    text: &str,
+    where_x: Option<&str>,
+    inherited_verb: ContinuousVerb,
+) -> Option<(Vec<CompleteContinuousMember>, ContinuousVerb)> {
+    let text = text.trim().trim_end_matches('.').trim();
+    let (without_duration, duration) = strip_trailing_duration(text);
+    if duration.is_some() {
+        let (mut members, verb) =
+            complete_continuous_members(without_duration, where_x, inherited_verb)?;
+        for (_, _, _, member_duration) in &mut members {
+            if member_duration.is_none() {
+                *member_duration = duration.clone();
+            }
+        }
+        return Some((members, verb));
+    }
+    if let Some((mods, verb)) = complete_modification_clause(text, where_x, inherited_verb) {
+        return Some((vec![(mods, None, None, None)], verb));
+    }
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    // A complete leaf owns its own condition. If the prefix or suffix contains
+    // another member this transaction fails and the connector recursion below
+    // tries the next outside-quote boundary without publishing a prefix.
+    for (marker, negative) in [(" if ", false), (" as long as ", false), (" unless ", true)] {
+        if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
+            if let Some((mods, verb)) =
+                complete_modification_clause(body.original, where_x, inherited_verb)
+            {
+                // A suffix "if" on a later explicit member cannot gate the
+                // preceding members. Bare keyword lists stay atomic.
+                if marker == " if "
+                    && nom_primitives::scan_at_word_boundaries(body.lower, |candidate| {
+                        let (rest, _) = alt((
+                            tag::<_, _, OracleError<'_>>("gets "),
+                            tag("get "),
+                            tag("has "),
+                            tag("have "),
+                            tag("gains "),
+                            tag("gain "),
+                        ))
+                        .parse(candidate)?;
+                        let offset = body.len() - candidate.len();
+                        if offset == 0
+                            || body.original[..offset]
+                                .chars()
+                                .filter(|character| *character == '"')
+                                .count()
+                                % 2
+                                != 0
+                        {
+                            return Err(nom::Err::Error(OracleError::new(
+                                candidate,
+                                nom::error::ErrorKind::Fail,
+                            )));
+                        }
+                        Ok((rest, ()))
+                    })
+                    .is_some()
+                {
+                    continue;
+                }
+                let gate = gate.trim().trim_end_matches('.');
+                let Some(condition) = parse_static_condition(gate.original) else {
+                    continue;
+                };
+                let condition = if negative {
+                    StaticCondition::Not {
+                        condition: Box::new(condition),
+                    }
+                } else {
+                    condition
+                };
+                if let Some((condition, recipient)) = partition_continuous_member_gate(condition) {
+                    return Some((vec![(mods, condition, recipient, None)], verb));
+                }
+            }
+        }
+    }
+    let mut scan = tp;
+    loop {
+        let (_, prefix) = recognize(many0(alt((
+            recognize(nom::sequence::delimited(
+                tag::<_, _, OracleError<'_>>("\""),
+                take_until("\""),
+                tag("\""),
+            )),
+            recognize(preceded(
+                not(alt((tag(", and "), tag(" and "), tag(", ")))),
+                nom::character::complete::anychar,
+            )),
+        ))))
+        .parse(scan.lower)
+        .ok()?;
+        let connector = &scan.lower[prefix.len()..];
+        let (after, _) = alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(" and "),
+            tag(", "),
+        ))
+        .parse(connector)
+        .ok()?;
+        let offset = tp.len() - connector.len();
+        let right_offset = tp.len() - after.len();
+        if let Some((mut left, verb)) =
+            complete_continuous_members(&text[..offset], where_x, inherited_verb)
+        {
+            if let Some((right, verb)) =
+                complete_continuous_members(&text[right_offset..], where_x, verb)
+            {
+                left.extend(right);
+                return Some((left, verb));
+            }
+        }
+        scan = tp.slice(right_offset, tp.len());
+    }
+}
+
+/// Extract only a wholly recipient-relative typed predicate. Ordinary board
+/// gates stay on their static definition; mixed disjunctions cannot be split.
+fn continuous_recipient_gate(condition: &StaticCondition) -> Option<TargetFilter> {
+    match condition {
+        StaticCondition::RecipientMatchesFilter { filter } => Some(filter.clone()),
+        StaticCondition::Not { condition } => Some(TargetFilter::Not {
+            filter: Box::new(continuous_recipient_gate(condition)?),
+        }),
+        StaticCondition::And { conditions } => Some(TargetFilter::And {
+            filters: conditions
+                .iter()
+                .map(continuous_recipient_gate)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        StaticCondition::Or { conditions } => Some(TargetFilter::Or {
+            filters: conditions
+                .iter()
+                .map(continuous_recipient_gate)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        _ => None,
+    }
+}
+
+fn continuous_condition_has_recipient(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::RecipientMatchesFilter { .. } => true,
+        StaticCondition::Not { condition } => continuous_condition_has_recipient(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(continuous_condition_has_recipient)
+        }
+        _ => false,
+    }
+}
+
+fn partition_continuous_member_gate(
+    condition: StaticCondition,
+) -> Option<(Option<StaticCondition>, Option<TargetFilter>)> {
+    if let Some(filter) = continuous_recipient_gate(&condition) {
+        return Some((None, Some(filter)));
+    }
+    if let StaticCondition::And { conditions } = condition {
+        let mut board = Vec::new();
+        let mut recipients = Vec::new();
+        for condition in conditions {
+            let (ordinary, recipient) = partition_continuous_member_gate(condition)?;
+            board.extend(ordinary);
+            recipients.extend(recipient);
+        }
+        let board = match board.len() {
+            0 => None,
+            1 => board.pop(),
+            _ => Some(StaticCondition::And { conditions: board }),
+        };
+        let recipients = match recipients.len() {
+            0 => None,
+            1 => recipients.pop(),
+            _ => Some(TargetFilter::And {
+                filters: recipients,
+            }),
+        };
+        Some((board, recipients))
+    } else if continuous_condition_has_recipient(&condition) {
+        None
+    } else {
+        Some((Some(condition), None))
+    }
+}
+
 fn complete_static_where_x<'a>(
     tp: TextPair<'a>,
 ) -> Option<(TextPair<'a>, Option<&'a str>, Option<&'a str>)> {
@@ -1968,6 +2180,40 @@ fn complete_modification_clause(
         Ok((rest, verb)) => (&text[text.len() - rest.len()..], verb),
         Err(_) => (text, inherited_verb),
     };
+    // CR 613.1f: denial is a distinct rule mode. It never invents removal of a
+    // different denied keyword. Resolving callers can retain the ordinary
+    // recipient-local mode grant; hosted publication promotes it to a sibling.
+    if let Ok((keyword_text, _)) = alt((
+        tag::<_, _, OracleError<'_>>("can't have or gain "),
+        tag("can't have "),
+    ))
+    .parse(lower.as_str())
+    {
+        let keyword = map_keyword_complete(keyword_text)?;
+        return Some((
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantHaveKeyword { keyword },
+            }],
+            verb,
+        ));
+    }
+    if let Some(((), subtype_text)) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("isn't "),
+            tag("is not "),
+            tag("are not "),
+        ))
+        .parse(input)?;
+        value((), opt(nom_primitives::parse_article)).parse(input)
+    }) {
+        let (subtype, consumed) = parse_subtype(subtype_text)?;
+        if consumed == subtype_text.len() {
+            return Some((
+                vec![ContinuousModification::RemoveSubtype { subtype }],
+                verb,
+            ));
+        }
+    }
     // These existing owners expose a complete nom production. Reuse their
     // ordinary lowering only after that production owns the entire clause.
     let complete_loss = all_consuming(parse_loss_enumeration)
@@ -2060,7 +2306,11 @@ fn complete_modification_clause(
         return (!mods.is_empty()).then_some((mods, verb));
     }
     let body_lower = body.to_lowercase();
-    if matches!(verb, ContinuousVerb::Pump) {
+    if matches!(verb, ContinuousVerb::Pump)
+        || alt((tag::<_, _, OracleError<'_>>("+"), tag("-")))
+            .parse(body_lower.as_str())
+            .is_ok()
+    {
         // CR 613.4c: "an additional" qualifies this additive pump, while the
         // base-P/T numeric production retains its separate grammar contract.
         let body_lower = body.to_lowercase();
@@ -2116,6 +2366,25 @@ fn complete_modification_clause(
     {
         return Some((vec![ContinuousModification::SetToughness { value }], verb));
     }
+    if alt((
+        tag::<_, _, OracleError<'_>>("base power and "),
+        tag("power and "),
+    ))
+    .parse(body_lower.as_str())
+    .is_ok()
+    {
+        if let Some(value) = super::anthem::parse_base_pt_each_equal_dynamic(body_lower.as_str()) {
+            return Some((
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: value.clone(),
+                    },
+                    ContinuousModification::SetToughnessDynamic { value },
+                ],
+                verb,
+            ));
+        }
+    }
     // The pair owner also consumes both values completely, including an X
     // pair whose expression is owned by the where-X clause.
     if let Ok((_, (power, _, toughness))) = all_consuming(preceded(
@@ -2168,20 +2437,34 @@ fn complete_modification_clause(
     }
     // A type companion ends at its modeled additive suffix. The type grammar
     // must own every word before that suffix, as well as the complete suffix.
-    if let Some(type_body) = nom_tag_tp(&tp, "are ").or_else(|| nom_tag_tp(&tp, "is ")) {
+    if let Some(type_body) = nom_tag_tp(&tp, "are ")
+        .or_else(|| nom_tag_tp(&tp, "is "))
+        .or_else(|| nom_tag_tp(&tp, "becomes "))
+        .or_else(|| nom_tag_tp(&tp, "become "))
+    {
         if let Some((types, suffix)) = type_body.split_around_outside_quotes(" in addition to ") {
             if all_consuming((
                 alt((tag::<_, _, OracleError<'_>>("its "), tag("their "))),
                 tag("other "),
-                alt((tag("creature types"), tag("land types"), tag("types"))),
+                alt((
+                    tag("colors and creature types"),
+                    tag("colors and types"),
+                    tag("creature types"),
+                    tag("land types"),
+                    tag("types"),
+                    tag("colors"),
+                )),
             ))
             .parse(suffix.lower)
             .is_ok()
             {
                 let (filter, remainder) = parse_type_phrase_folding(types.original);
                 if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
-                    return parse_additive_type_clause_modifications(text)
-                        .map(|modifications| (modifications, verb));
+                    return parse_additive_type_clause_modifications(&format!(
+                        "is {} in addition to {}",
+                        types.original, suffix.original
+                    ))
+                    .map(|modifications| (modifications, verb));
                 }
             }
         }
@@ -2221,9 +2504,26 @@ fn complete_modification_clause(
         if let Some((mut first, left_verb)) =
             complete_modification_clause(left, where_x, inherited_verb)
         {
-            if let Some((last, final_verb)) =
+            if let Some((mut last, final_verb)) =
                 complete_modification_clause(right, where_x, left_verb)
             {
+                // CR 613.1f: "loses all other abilities" preserves abilities
+                // granted by this same complete instruction. Remove the older
+                // abilities before publishing the instruction's own grants.
+                // The complete right transaction above still owns every tail.
+                if preceded(
+                    alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
+                    tag("all other abilities"),
+                )
+                .parse(right.to_lowercase().as_str())
+                .is_ok()
+                {
+                    if let Some(index) = last.iter().position(|modification| {
+                        matches!(modification, ContinuousModification::RemoveAllAbilities)
+                    }) {
+                        first.insert(0, last.remove(index));
+                    }
+                }
                 first.extend(last);
                 return Some((first, final_verb));
             }

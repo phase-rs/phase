@@ -51,7 +51,7 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
+    AbilityCost, ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
     Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
@@ -41970,6 +41970,384 @@ fn u14_inherited_removal_preserves_modeled_companions() {
             assert!(
                 refused.iter().all(u14_static_residual),
                 "{bad}: {refused:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn complete_publication_members_gates_and_compatibility() {
+    // SHAPE: the full-source production consumers are in flowstone_surge_mixed_anthem.
+    let predicate = "has base power and toughness 9/10 and has indestructible";
+    assert_eq!(extract_keyword_clause(predicate), Some("indestructible"));
+    let expected = vec![
+        ContinuousModification::SetPower { value: 9 },
+        ContinuousModification::SetToughness { value: 10 },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        },
+    ];
+    assert_eq!(
+        parse_complete_continuous_modifications(predicate),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        parse_static_line_multi(&format!("Enchanted creature {predicate}."))[0].modifications,
+        expected
+    );
+    for tail in [" and draw two cards", ", unexplained", " and"] {
+        let bad = format!("{predicate}{tail}");
+        assert!(
+            parse_complete_continuous_modifications(&bad).is_none(),
+            "{bad}"
+        );
+    }
+    let gated = "gets +2/+0, gains trample if it's red, and gains vigilance if it's white";
+    let members = super::keyword_grant::parse_complete_continuous_members(gated).unwrap();
+    assert_eq!(members.len(), 3);
+    assert!(members[0].1.is_none() && members[0].2.is_none());
+    assert_eq!(
+        members[1].2,
+        Some(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::HasColor {
+                color: ManaColor::Red
+            }]
+        )))
+    );
+    assert_eq!(
+        members[2].2,
+        Some(TargetFilter::Typed(TypedFilter::default().properties(
+            vec![FilterProp::HasColor {
+                color: ManaColor::White
+            }]
+        )))
+    );
+    assert!(
+        parse_complete_continuous_modifications(gated).is_none(),
+        "plain callers cannot flatten gates"
+    );
+    for bad in [
+        format!("{gated} and unexplained"),
+        "gains trample if it's a mysterious color".into(),
+    ] {
+        assert!(super::keyword_grant::parse_complete_continuous_members(&bad).is_none());
+    }
+}
+
+#[test]
+fn complete_publication_subject_cda_history_and_denial() {
+    let archon = parse_static_line_multi("Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.");
+    assert_eq!(archon.len(), 1);
+    assert!(!u14_static_residual(&archon[0]));
+    let TargetFilter::Typed(filter) = archon[0].affected.as_ref().unwrap() else {
+        panic!("typed Archon")
+    };
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter.properties.contains(&FilterProp::Another));
+    assert!(filter.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasAttachment {
+            kind: AttachmentKind::Aura,
+            controller: Some(ControllerRef::You),
+            ..
+        }
+    )));
+    let bear = parse_static_line("~ has power and toughness each equal to the number of Forests you control plus the number of Bears you control.").unwrap();
+    assert!(bear.characteristic_defining);
+    assert_eq!(bear.modifications.len(), 2);
+    assert!(bear.modifications.iter().all(|m| matches!(m, ContinuousModification::SetDynamicPower { value: QuantityExpr::Sum { exprs } } | ContinuousModification::SetDynamicToughness { value: QuantityExpr::Sum { exprs } } if exprs.len() == 2)));
+    let history = parse_static_line("~ has hexproof if it hasn't dealt damage yet.").unwrap();
+    assert_eq!(
+        history.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage)
+        })
+    );
+    for (name, keyword) in [
+        ("flying", Keyword::Flying),
+        ("first strike", Keyword::FirstStrike),
+        ("deathtouch", Keyword::Deathtouch),
+        ("hexproof", Keyword::Hexproof),
+        ("trample", Keyword::Trample),
+    ] {
+        let line =
+            format!("Creatures your opponents control lose {name} and can't have or gain {name}.");
+        let defs = parse_static_line_multi(&line);
+        let denial = defs
+            .iter()
+            .filter(
+                |d| matches!(&d.mode, StaticMode::CantHaveKeyword { keyword: k } if *k == keyword),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(denial.len(), 1, "{line}: {defs:?}");
+        let removed = defs
+            .iter()
+            .find(|d| {
+                d.modifications
+                    .contains(&ContinuousModification::RemoveKeyword {
+                        keyword: keyword.clone(),
+                    })
+            })
+            .unwrap();
+        assert_eq!(denial[0].affected, removed.affected);
+        assert_eq!(denial[0].condition, removed.condition);
+    }
+    let distinct = parse_static_line_multi(
+        "Creatures your opponents control lose flying and can't have or gain trample.",
+    );
+    assert!(distinct.iter().any(|d| d.modifications.contains(
+        &ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Flying
+        }
+    )));
+    assert!(distinct.iter().any(|d| matches!(
+        d.mode,
+        StaticMode::CantHaveKeyword {
+            keyword: Keyword::Trample
+        }
+    )));
+    assert_eq!(distinct.len(), 2);
+    assert_eq!(
+        distinct[0].modifications,
+        vec![ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+    assert!(
+        distinct
+            .iter()
+            .all(|definition| !definition.modifications.contains(
+                &ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Trample
+                }
+            )),
+        "denial does not fabricate a separately unprinted removal"
+    );
+    let retry = parse_static_line_multi(
+        "Threshold — Creatures your opponents control lose flying and can't have or gain trample.",
+    );
+    assert_eq!(
+        retry.len(),
+        2,
+        "common finalization also owns the ability-word retry"
+    );
+    assert_eq!(
+        retry
+            .iter()
+            .map(|d| (&d.mode, &d.modifications, &d.affected, &d.condition))
+            .collect::<Vec<_>>(),
+        distinct
+            .iter()
+            .map(|d| (&d.mode, &d.modifications, &d.affected, &d.condition))
+            .collect::<Vec<_>>()
+    );
+    for tail in [" unexpectedly", " and an unknown keyword", " and"] {
+        let source = format!(
+            "Creatures your opponents control lose flying and can't have or gain trample{tail}."
+        );
+        let definitions = parse_static_line_multi(&source);
+        assert!(
+            definitions.is_empty() || definitions.iter().any(u14_static_residual),
+            "a denied-keyword prefix cannot certify {source}: {definitions:#?}"
+        );
+        assert!(definitions
+            .iter()
+            .all(|d| !matches!(d.mode, StaticMode::CantHaveKeyword { .. })));
+    }
+}
+
+#[test]
+fn complete_publication_typed_recipient_gate_boolean_structure() {
+    let red = TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::HasColor {
+            color: ManaColor::Red,
+        }]),
+    );
+    let white =
+        TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasColor {
+                color: ManaColor::White,
+            }]),
+        );
+    for (source, expected) in [
+        (
+            "gains trample if it isn't red",
+            TargetFilter::Not {
+                filter: Box::new(red.clone()),
+            },
+        ),
+        (
+            "gains trample if it's red or white",
+            TargetFilter::Or {
+                filters: vec![red, white],
+            },
+        ),
+    ] {
+        let members =
+            super::keyword_grant::parse_complete_continuous_members(source).expect(source);
+        assert_eq!(
+            members,
+            vec![(
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample
+                }],
+                None,
+                Some(expected),
+                None
+            )]
+        );
+        assert!(
+            parse_complete_continuous_modifications(source).is_none(),
+            "plain modification clients cannot flatten a predicate"
+        );
+    }
+    assert!(
+        super::keyword_grant::parse_complete_continuous_members(
+            "gains trample if it's red or you control a Forest"
+        )
+        .is_none(),
+        "recipient/board OR has no faithful single-filter partition"
+    );
+}
+
+#[test]
+fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_transactions() {
+    // SHAPE: constructed grammar controls complement the verbatim paid Aura
+    // and granter production witnesses; no card-name production branch exists.
+    for (source, expected) in [
+        (
+            "has indestructible and has base power and toughness 3/7",
+            vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Indestructible,
+                },
+                ContinuousModification::SetPower { value: 3 },
+                ContinuousModification::SetToughness { value: 7 },
+            ],
+        ),
+        (
+            "gets -2/+3 and has flying",
+            vec![
+                ContinuousModification::AddPower { value: -2 },
+                ContinuousModification::AddToughness { value: 3 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                },
+            ],
+        ),
+        (
+            "has base toughness 7 and has vigilance",
+            vec![
+                ContinuousModification::SetToughness { value: 7 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance,
+                },
+            ],
+        ),
+        (
+            "has base power 3 and has trample",
+            vec![
+                ContinuousModification::SetPower { value: 3 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                },
+            ],
+        ),
+    ] {
+        assert_eq!(
+            parse_complete_continuous_modifications(source),
+            Some(expected)
+        );
+        for suffix in [
+            " and",
+            " and an unexplained keyword",
+            " if an unexplained condition",
+            " until an unexplained duration",
+            " where X is an unknown quantity",
+        ] {
+            assert!(
+                parse_complete_continuous_modifications(&format!("{source}{suffix}")).is_none(),
+                "complete refusal: {source}{suffix}"
+            );
+        }
+    }
+    let quote="gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on ~.\"";
+    let complete = parse_complete_continuous_modifications(quote).unwrap();
+    assert_eq!(complete.len(), 2);
+    let ContinuousModification::GrantAbility { definition } = &complete[1] else {
+        panic!("full quoted ability")
+    };
+    let Some(AbilityCost::Composite { costs }) = &definition.cost else {
+        panic!("complete cost")
+    };
+    assert_eq!(costs.len(), 2);
+    assert_eq!(costs[0], AbilityCost::Tap);
+    assert!(matches!(costs[1], AbilityCost::Sacrifice(_)));
+    assert!(matches!(
+        definition.effect.as_ref(),
+        Effect::PutCounter {
+            target: TargetFilter::GrantingObject,
+            ..
+        }
+    ));
+    for bad in [
+        "gets +1/+0 and has \"{T}, Sacrifice an unexplained thing: Put a blood counter on ~.\"",
+        "gets +1/+0 and has \"{T}, Sacrifice a creature: An unexplained effect.\"",
+        "gets +1/+0 and has \"{T}: Draw a card.\" unexplained",
+        "gets +1/+0 and has \"{T}: Draw a card.",
+        "gets +1/+0 and has \"{T}: Draw a card.\" and",
+    ] {
+        assert!(
+            parse_complete_continuous_modifications(bad).is_none(),
+            "whole quoted transaction: {bad}"
+        );
+    }
+}
+
+#[test]
+fn complete_publication_attachment_subjects_require_both_controllers_and_whole_tail() {
+    for (description, kind) in [
+        ("enchanted by an Aura", AttachmentKind::Aura),
+        ("enchanted by Auras", AttachmentKind::Aura),
+        ("equipped by an Equipment", AttachmentKind::Equipment),
+        ("equipped by Equipment", AttachmentKind::Equipment),
+    ] {
+        let subject = format!("Other creatures you control that are {description} you control");
+        let expected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::Another,
+                    FilterProp::HasAttachment {
+                        kind,
+                        controller: Some(ControllerRef::You),
+                        exclude_source: crate::types::ability::SourceExclusion::Include,
+                    },
+                ]),
+        );
+        assert_eq!(
+            parse_continuous_subject_filter(&subject),
+            Some(expected.clone())
+        );
+        let definitions = parse_static_line_multi(&format!(
+            "{subject} have base power and toughness 4/7 and have flying."
+        ));
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].affected, Some(expected));
+        assert_eq!(
+            definitions[0].modifications,
+            vec![
+                ContinuousModification::SetPower { value: 4 },
+                ContinuousModification::SetToughness { value: 7 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }
+            ]
+        );
+        for tail in [" unexplained", " that you chose", " and something unknown"] {
+            assert!(
+                parse_continuous_subject_filter(&format!("{subject}{tail}")).is_none(),
+                "subject proof cannot discard {tail}"
             );
         }
     }

@@ -53,6 +53,7 @@ pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
     alt((
         parse_max_quantity,
         parse_fraction_rounded,
+        parse_equal_to_sum,
         map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
@@ -680,7 +681,9 @@ fn parse_quantity_controller_suffix(input: &str) -> OracleResult<'_, ControllerR
 /// suffix admits.
 fn admits_quantity_controller(controller: &ControllerRef, form: ControllerForm) -> bool {
     match controller {
-        ControllerRef::You | ControllerRef::SourceChosenPlayer => true,
+        ControllerRef::You | ControllerRef::SourceChosenPlayer | ControllerRef::DefendingPlayer => {
+            true
+        }
         // CR 109.4: "your opponents control" — aggregate across each opponent's
         // permanents (Angry Mob, Chameleon Spirit, Entropic Specter class).
         // "an opponent controls" and "you don't control" are not admitted.
@@ -694,7 +697,6 @@ fn admits_quantity_controller(controller: &ControllerRef, form: ControllerForm) 
         | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
-        | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
@@ -1693,18 +1695,24 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
-/// CR 122.1: Parse "[kind] counters on [object]" after "the number of".
+/// CR 122.1: Parse typed counters or all counters on an object after "the number of".
 /// Used for patterns like "equal to the number of charge counters on it".
 /// Maps to `QuantityRef::CountersOn` with the appropriate scope and counter type.
 fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, counter_type) = parse_counter_type_typed(input)?;
-    let (rest, _) = tag(" counters on ").parse(rest)?;
+    let (rest, counter_type) = alt((
+        value(None, tag("counters on ")),
+        map(
+            terminated(parse_counter_type_typed, tag(" counters on ")),
+            Some,
+        ),
+    ))
+    .parse(input)?;
     let (rest, scope) = parse_counter_object_scope(rest)?;
     Ok((
         rest,
         QuantityRef::CountersOn {
             scope,
-            counter_type: Some(counter_type),
+            counter_type,
         },
     ))
 }
@@ -2707,11 +2715,152 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 /// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
 /// "permanents named Food Fight you control" or "other creature named Seven
 /// Dwarves you control". The named/card-quality parser (`parse_type_phrase_folding`)
-/// owns the object description — type word plus any `other`/`named X`
-/// qualifier — and this quantity parser owns the trailing controller scope.
+/// owns the object description and may consume its controller. The quantity
+/// owner proves that consumed controller or consumes the trailing scope.
 /// Shared by the "the number of … you control" and "for each … you control"
 /// paths: a `named X` qualifier sits between the type word and the controller
 /// suffix, which the bare-`parse_type_filter_word` arms cannot reach.
+fn quantity_filter_controller(filter: &TargetFilter) -> Option<&ControllerRef> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller.as_ref(),
+        TargetFilter::Or { filters } => {
+            let controller = quantity_filter_controller(filters.first()?)?;
+            filters
+                .iter()
+                .all(|filter| quantity_filter_controller(filter) == Some(controller))
+                .then_some(controller)
+        }
+        TargetFilter::And { filters } => {
+            let mut controllers = filters.iter().filter_map(quantity_filter_controller);
+            let controller = controllers.next()?;
+            controllers
+                .all(|candidate| candidate == controller)
+                .then_some(controller)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod complete_publication_quantity_tests {
+    use super::*;
+    use crate::types::ability::{PtStat, PtValueScope};
+    use crate::types::card_type::Supertype;
+
+    #[test]
+    fn complete_qualified_counts_preserve_exact_controller_and_properties() {
+        for (text, expected) in [
+            (
+                "the number of legendary creatures you control",
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    }]),
+            ),
+            (
+                "the number of other creatures you control with base power 1",
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Base,
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ]),
+            ),
+            (
+                "the number of lands defending player controls",
+                TypedFilter::land().controller(ControllerRef::DefendingPlayer),
+            ),
+        ] {
+            assert_eq!(
+                parse_quantity_ref_complete(text).unwrap().1,
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(expected)
+                },
+                "{text}"
+            );
+            assert!(parse_quantity_ref_complete(&format!("{text} unexplained")).is_err());
+        }
+        for text in [
+            "legendary creatures",
+            "other creatures",
+            "creatures they control",
+            "creatures an opponent controls",
+            "legendary you control",
+            "green mysteries you control",
+        ] {
+            assert!(parse_qualified_controlled_type(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn complete_sums_and_counter_scopes_do_not_publish_prefixes() {
+        let operand = |name: &str| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype(name.into())],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            },
+        };
+        for connector in [" plus ", " and "] {
+            let text = format!(
+                "the number of Forests you control{connector}the number of Bears you control"
+            );
+            assert_eq!(
+                all_consuming(parse_quantity).parse(&text).unwrap().1,
+                QuantityExpr::Sum {
+                    exprs: vec![operand("Forest"), operand("Bear")]
+                }
+            );
+            for tail in [
+                " unexplained",
+                " plus something unknown",
+                " plus the number of Bears they control",
+            ] {
+                assert!(all_consuming(parse_quantity)
+                    .parse(&format!("{text}{tail}"))
+                    .is_err());
+            }
+        }
+        for (text, expected) in [
+            (
+                "the number of counters on ~",
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                },
+            ),
+            (
+                "the number of charge counters on ~",
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic("charge".into())),
+                },
+            ),
+            (
+                "the number of counters on that creature",
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: None,
+                },
+            ),
+        ] {
+            assert_eq!(parse_quantity_ref_complete(text).unwrap().1, expected);
+            assert!(parse_quantity_ref_complete(&format!("{text} unknown")).is_err());
+        }
+        assert!(
+            parse_quantity_ref_complete("the number of counters on an unknown object").is_err()
+        );
+    }
+}
+
 fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (mut filter, rest) = parse_type_phrase_folding(input);
     if !quantity_filter_has_meaningful_content(&filter) {
@@ -2721,8 +2870,29 @@ fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
         )));
     }
 
+    // A meaningful noun alone is not proof of a controlled population. The
+    // consumed span must contain admitted present-controller syntax matching
+    // the typed controller the noun owner actually published.
+    let consumed = &input[..input.len() - rest.len()];
+    let consumed_controller = super::primitives::scan_at_word_boundaries(consumed, |candidate| {
+        map_opt(parse_controller_phrase, |phrase| {
+            match (phrase.subject, phrase.tense) {
+                (ControllerSubject::Direct(controller), ControllerTense::Present)
+                    if admits_quantity_controller(&controller, phrase.form)
+                        && quantity_filter_controller(&filter) == Some(&controller) =>
+                {
+                    Some(controller)
+                }
+                _ => None,
+            }
+        })
+        .parse(candidate)
+    });
     let (rest, chosen_prop) = opt(parse_pre_controller_chosen_filter_suffix).parse(rest)?;
-    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
+    let (rest, controller) = match consumed_controller {
+        Some(controller) => (rest, controller),
+        None => parse_quantity_controller_suffix(rest)?,
+    };
     if let Some(prop) = chosen_prop {
         attach_property_to_quantity_filter(&mut filter, prop);
     }
@@ -5726,7 +5896,8 @@ pub fn parse_equal_to(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// Each summand is prefixed with "the number of" to avoid greedy type-list
 /// consumption by parse_the_number_of.
 fn parse_equal_to_sum(input: &str) -> OracleResult<'_, QuantityExpr> {
-    let (rest, refs) = separated_list1(tag(" and "), parse_the_number_of).parse(input)?;
+    let (rest, refs) =
+        separated_list1(alt((tag(" plus "), tag(" and "))), parse_the_number_of).parse(input)?;
     if refs.len() < 2 {
         return Err(nom::Err::Error(OracleError::new(
             input,

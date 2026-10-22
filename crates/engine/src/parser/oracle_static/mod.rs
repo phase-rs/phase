@@ -166,6 +166,7 @@ pub(crate) use grammar::promote_nested_ability_quotes;
 pub(crate) use grammar::typed_filter_for_subtype;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
+    parse_complete_continuous_members, parse_complete_continuous_modifications,
     parse_continuous_modifications, parse_graveyard_granted_keyword_kind,
     parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,

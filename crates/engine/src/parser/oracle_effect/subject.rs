@@ -16,11 +16,11 @@ use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
-    ContinuousModification, ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtValue, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind,
+    ColorChangeMode, ContinuousModification, ControllerRef, CopyRecipient, Duration,
+    EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, SiblingCondition,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TargetReadOrigin, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -653,7 +653,7 @@ fn try_parse_subject_continuous_clause(
     )
 }
 
-/// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
+/// CR 611.3a + CR 702.16: Complete conditional continuous members and the existing protection grant
 /// ("creatures you control gain protection from white if you control a Plains,
 /// from blue if you control an Island, ..., and from green if you control a
 /// Forest" — Dominaria's Judgment). Must be tried on the FULL clause text before
@@ -663,7 +663,7 @@ fn try_parse_subject_continuous_clause(
 pub(super) fn try_parse_conditional_protection_grant_clause(
     text: &str,
     ctx: &mut ParseContext,
-) -> Option<ParsedEffectClause> {
+) -> Option<(ParsedEffectClause, TargetReadOrigin)> {
     // CR 611.2a: "Until end of turn, creatures you control gain ..." carries a
     // leading duration ahead of the subject; peel it (propagating the duration)
     // so the subject grammar sees a bare "creatures you control" subject.
@@ -674,8 +674,113 @@ pub(super) fn try_parse_conditional_protection_grant_clause(
     if subject.eq_ignore_ascii_case("you") {
         return None;
     }
-    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    build_conditional_protection_grant_clause(&application, predicate, leading_duration)
+    let mut complete_ctx = ctx.clone();
+    let application =
+        parse_subject_application_for(subject, &mut complete_ctx, AnaphorConsumer::AffectedObject)?;
+    let origin = if application.inherits_parent {
+        TargetReadOrigin::ParentAnnouncement
+    } else {
+        TargetReadOrigin::OwnAnnouncement
+    };
+    let clause =
+        build_conditional_continuous_members(&application, predicate, leading_duration.clone())
+            .or_else(|| {
+                build_conditional_protection_grant_clause(&application, predicate, leading_duration)
+            })?;
+    *ctx = complete_ctx;
+    Some((clause, origin))
+}
+
+/// CR 608.2c + CR 611.2a + CR 611.2c: each resolving member checks its own
+/// predicate once, then installs an ordinary transient for the selected object.
+fn build_conditional_continuous_members(
+    application: &SubjectApplication,
+    predicate: &str,
+    leading_duration: Option<Duration>,
+) -> Option<ParsedEffectClause> {
+    let (body, trailing_duration) = super::strip_trailing_duration(predicate);
+    let members = crate::parser::oracle_static::parse_complete_continuous_members(body)?;
+    if !members.iter().any(|(_, gate, recipient, duration)| {
+        gate.is_some() || recipient.is_some() || duration.is_some()
+    }) {
+        return None;
+    }
+    let bound_target = (application.inherits_parent || application.target.is_some())
+        && application
+            .multi_target
+            .as_ref()
+            .is_none_or(|targets| matches!(targets.max, Some(QuantityExpr::Fixed { value: 1 })));
+    if members
+        .iter()
+        .any(|(_, _, recipient, _)| recipient.is_some())
+        && !bound_target
+    {
+        return None;
+    }
+    let duration = leading_duration.or(trailing_duration);
+    let affected = static_affected_for_application(application);
+    let mut definitions = Vec::new();
+    for (modifications, condition, recipient, member_duration) in members {
+        let member_duration = member_duration.or_else(|| duration.clone());
+        let mut definition = StaticDefinition::continuous()
+            .affected(affected.clone())
+            .modifications(modifications);
+        definition.condition = condition;
+        let mut member = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![definition],
+                duration: member_duration.clone(),
+                target: if application.inherits_parent {
+                    Some(TargetFilter::ParentTarget)
+                } else {
+                    application.target.clone()
+                },
+                end_cost: None,
+            },
+        );
+        member.duration = member_duration;
+        member.condition = recipient.map(|filter| AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::HasObjectTarget,
+                AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: false,
+                    subject_slot: None,
+                },
+            ],
+        });
+        if application.inherits_parent {
+            member.target_reads = TargetReadOrigin::ParentAnnouncement;
+            if member.condition.is_none() {
+                member.condition = Some(AbilityCondition::HasObjectTarget);
+            }
+        }
+        // CR 608.2c: a false earlier recipient gate does not suppress a sibling.
+        member.sub_link = SubAbilityLink::SequentialSibling;
+        member.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        definitions.push(member);
+    }
+    let mut tail = None;
+    for mut member in definitions.into_iter().rev() {
+        member.sub_ability = tail;
+        tail = Some(Box::new(member));
+    }
+    let first = tail?;
+    // The owner returns the root target-read origin alongside this clause;
+    // its IR caller stamps that metadata at construction rather than losing it
+    // when the root is represented by ParsedEffectClause.
+    Some(ParsedEffectClause {
+        unlowered_guard: first.unlowered_guard,
+        effect: *first.effect,
+        duration: first.duration,
+        sub_ability: first.sub_ability,
+        distribute: first.distribute,
+        multi_target: application.multi_target.clone(),
+        condition: first.condition,
+        optional: application.is_optional,
+        unless_pay: first.unless_pay,
+    })
 }
 
 /// CR 611.3a + CR 702.16: Build one conditional continuous protection grant per
@@ -5232,7 +5337,8 @@ fn build_continuous_clause(
         });
     }
 
-    let modifications = parse_continuous_modifications(predicate_text);
+    let modifications =
+        crate::parser::oracle_static::parse_complete_continuous_modifications(predicate_text)?;
     if modifications.is_empty() {
         return None;
     }
@@ -5326,7 +5432,15 @@ fn build_continuous_clause(
         duration
     };
 
-    if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
+    if let Some((power, toughness)) = extract_pump_modifiers(&modifications).filter(|_| {
+        matches!(
+            modifications.as_slice(),
+            [
+                ContinuousModification::AddPower { .. },
+                ContinuousModification::AddToughness { .. }
+            ]
+        )
+    }) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
             unlowered_guard: None,

@@ -40094,7 +40094,7 @@ fn try_parse_repeat_process_directive(
 /// case when reached via [`parse_oracle_text`] or any of the wrapper parsers
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
-/// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
+/// CR 611.3a + CR 702.16: Complete conditional continuous members and the protection grant
 /// ("Until end of turn, creatures you control gain protection from white if you
 /// control a Plains, ..., and from green if you control a Forest" — Dominaria's
 /// Judgment) — handle the FULL clause here, before the chain's trailing-condition
@@ -40106,15 +40106,11 @@ fn parse_conditional_protection_grant_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
-    let clause = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
-    Some(EffectChainIr::single_clause(
-        text,
-        kind,
-        clause,
-        None,
-        ctx.actor.clone(),
-        ctx.in_trigger,
-    ))
+    let (clause, target_reads) = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
+    let mut ir =
+        EffectChainIr::single_clause(text, kind, clause, None, ctx.actor.clone(), ctx.in_trigger);
+    ir.clauses.first_mut()?.target_reads = target_reads;
+    Some(ir)
 }
 
 /// CR 101.4 + CR 707.2 + CR 122.1: Whole-body detector for the WHO phenomena
@@ -40776,7 +40772,7 @@ pub(crate) fn parse_ability_ir(
             ctx.relative_player_scope = Some(possessor.controller_ref());
         }
     }
-    // The conditional protection recognizer may mutate `ParseContext` before
+    // The complete conditional-continuous recognizer may mutate `ParseContext` before
     // declining. Preserve the two legacy entry-point semantics exactly: the
     // standalone bypass context was fresh and discarded on decline, while the
     // with-context entry point passed its caller context through to the ordinary
@@ -42528,6 +42524,31 @@ fn parse_effect_chain_ir_body(
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        // CR 608.2c + CR 611.2c: own all conditional members before suffix
+        // peeling, after the declared-target registry above has been published.
+        let mut complete_member_ctx = ctx.clone();
+        if let Some((parsed, target_reads)) = subject::try_parse_conditional_protection_grant_clause(
+            normalized_text,
+            &mut complete_member_ctx,
+        ) {
+            *ctx = complete_member_ctx;
+            builder
+                .clause(
+                    normalized_text,
+                    parsed,
+                    chunk.boundary_after,
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .push();
+            builder
+                .last_mut()
+                .expect("complete member clause was pushed")
+                .target_reads = target_reads;
+            continue;
+        }
         if is_all_revealed_result_consumer(chunk.text.trim()) {
             if let Some((condition, _, body)) =
                 conditions::parse_all_revealed_condition(chunk.text.trim(), ctx)

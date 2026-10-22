@@ -37480,3 +37480,1107 @@ fn u14_inherited_removal_companion_documents() {
         }
     }
 }
+
+// SHAPE: select the printed owning ability, then compare every modification,
+// affected filter, condition and duration. Runtime counterparts are in the
+// existing flowstone_surge_mixed_anthem integration module.
+fn complete_publication_static_nodes(
+    value: &serde_json::Value,
+    output: &mut Vec<StaticDefinition>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.contains_key("mode") && fields.contains_key("modifications") {
+                output.push(
+                    serde_json::from_value(value.clone()).expect("serialized static definition"),
+                );
+            }
+            for child in fields.values() {
+                complete_publication_static_nodes(child, output);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                complete_publication_static_nodes(child, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn complete_publication_full_native_companion_population() {
+    use crate::types::ability::{CountScope, ManaProduction, QuantityRef};
+    use crate::types::card_type::SubtypeSet;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::player::PlayerCounterKind;
+    for (name, text, types, subtypes, owner, power, toughness, companions) in [
+
+        ("Almost Perfect", "Enchant creature\nEnchanted creature has base power and toughness 9/10 and has indestructible.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(9), Some(10), &["Indestructible"] as &[&str]),
+        ("Alpine Moon", "As this enchantment enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"", &["Enchantment"] as &[&str], &[] as &[&str], "statics", None, None, &["GrantAbility","RemoveAllAbilities"] as &[&str]),
+        ("Archon of the Wild Rose", "Flying\nOther creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.", &["Creature"] as &[&str], &["Archon"] as &[&str], "statics", Some(4), Some(4), &["Flying"] as &[&str]),
+        ("Aven Mimeomancer", "Flying\nAt the beginning of your upkeep, you may put a feather counter on target creature. If you do, that creature has base power and toughness 3/1 and has flying for as long as it has a feather counter on it.", &["Creature"] as &[&str], &["Bird","Wizard"] as &[&str], "triggers", Some(3), Some(1), &["Flying"] as &[&str]),
+        ("Azula, Ruthless Firebender", "Firebending 1 (Whenever this creature attacks, add {R}. This mana lasts until end of combat.)\nWhenever Azula attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: Until end of turn, Azula gets +1/+1 for each experience counter you have and gains menace.", &["Creature"] as &[&str], &["Human","Noble"] as &[&str], "abilities", None, None, &["Menace","AddDynamicPower","AddDynamicToughness"] as &[&str]),
+        ("Battlegate Mimic", "Whenever you cast a spell that's both red and white, this creature has base power and toughness 4/2 until end of turn and gains first strike until end of turn.", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "triggers", Some(4), Some(2), &["FirstStrike"] as &[&str]),
+        ("Blade of the Oni", "Menace\nEquipped creature has base power and toughness 5/5, has menace, and is a black Demon in addition to its other colors and types.\nReconfigure {2}{B}{B} ({2}{B}{B}: Attach to target creature you control; or unattach from a creature. Reconfigure only as a sorcery. While attached, this isn't a creature.)", &["Artifact","Creature"] as &[&str], &["Equipment","Demon"] as &[&str], "statics", Some(5), Some(5), &["Menace","AddSubtype","AddColor"] as &[&str]),
+        ("Coerced to Kill", "Enchant creature\nYou control enchanted creature.\nEnchanted creature has base power and toughness 1/1, has deathtouch, and is an Assassin in addition to its other types.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(1), Some(1), &["Deathtouch","AddSubtype"] as &[&str]),
+        ("Creeperhulk", "Trample\n{1}{G}: Until end of turn, target creature you control has base power and toughness 5/5 and gains trample.", &["Creature"] as &[&str], &["Plant","Elemental"] as &[&str], "abilities", Some(5), Some(5), &["Trample"] as &[&str]),
+        ("Deep Freeze", "Enchant creature\nEnchanted creature has base power and toughness 0/4, has defender, loses all other abilities, and is a blue Wall in addition to its other colors and types.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(0), Some(4), &["Defender","RemoveAllAbilities","AddSubtype","AddColor"] as &[&str]),
+        ("Dragonblood Twins", "Double team\nFlurry — Whenever you cast your second spell each turn, until end of turn, this creature has base power and toughness 4/4 and gains flying.", &["Creature"] as &[&str], &["Human","Monk"] as &[&str], "triggers", Some(4), Some(4), &["Flying"] as &[&str]),
+        ("Eidolon of Astral Winds", "Vigilance\nConstellation — Whenever this creature or another enchantment you control enters, choose target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains flying.", &["Enchantment","Creature"] as &[&str], &["Spirit"] as &[&str], "triggers", Some(4), Some(4), &["Flying"] as &[&str]),
+        ("Flayer of Loyalties", "When you cast this spell, gain control of target creature until end of turn. Untap that creature. Until end of turn, it has base power and toughness 10/10 and gains trample, annihilator 2, and haste.\nAnnihilator 2 (Whenever this creature attacks, defending player sacrifices two permanents of their choice.)\nTrample", &["Creature"] as &[&str], &["Eldrazi"] as &[&str], "triggers", Some(10), Some(10), &["Trample","Annihilator","Haste"] as &[&str]),
+        ("Gigantiform", "Kicker {4}\nEnchant creature\nEnchanted creature has base power and toughness 8/8 and has trample.\nWhen this Aura enters, if it was kicked, you may search your library for a card named Gigantiform, put it onto the battlefield, then shuffle.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(8), Some(8), &["Trample"] as &[&str]),
+        ("Glamer Gifter", "Flash\nFlying\nWhen this creature enters, choose up to one other target creature. Until end of turn, that creature has base power and toughness 4/4 and gains all creature types.", &["Creature"] as &[&str], &["Faerie","Wizard"] as &[&str], "triggers", Some(4), Some(4), &["Changeling"] as &[&str]),
+        ("Greensleeves", "[+2]: Create a Giant Badger token. (It's a {1}{G}{G} 2/2 Badger creature with \"Whenever this token blocks, it gets +2/+2 until end of turn.\")\n[−3]: Mill three cards. Put all permanent cards from among them into your hand.\n[−8]: Until end of turn, creatures you control have base power and toughness 8/8 and gain trample.\nGreensleeves can be your commander.", &["Planeswalker"] as &[&str], &["Greensleeves"] as &[&str], "abilities", Some(8), Some(8), &["Trample"] as &[&str]),
+        ("Hulkbuster Armor", "Equipped creature has base power and toughness 9/9 and has flying.\nEquip Hero {3}\nEquip {6}", &["Artifact"] as &[&str], &["Equipment"] as &[&str], "statics", Some(9), Some(9), &["Flying"] as &[&str]),
+        ("Mace of the Valiant", "Equipped creature gets +1/+1 for each charge counter on this Equipment and has vigilance. (Attacking doesn't cause it to tap.)\nWhenever a creature you control enters, put a charge counter on this Equipment.\nEquip {3}", &["Artifact"] as &[&str], &["Equipment"] as &[&str], "statics", None, None, &["Vigilance","AddDynamicPower","AddDynamicToughness"] as &[&str]),
+        ("Mirror Entity", "Changeling (This card is every creature type.)\n{X}: Until end of turn, creatures you control have base power and toughness X/X and gain all creature types.", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "abilities", None, None, &["SetPowerDynamic","SetToughnessDynamic","Changeling"] as &[&str]),
+        ("Mirror Entity Avatar", "{X}: Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.", &["Vanguard"] as &[&str], &[] as &[&str], "abilities", None, None, &["SetPowerDynamic","SetToughnessDynamic","Changeling"] as &[&str]),
+        ("Nightsky Mimic", "Whenever you cast a spell that's both white and black, this creature has base power and toughness 4/4 until end of turn and gains flying until end of turn.", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "triggers", Some(4), Some(4), &["Flying"] as &[&str]),
+        ("Nyxborn Hydra", "Bestow {X}{G}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nReach, trample\nThis permanent enters with X +1/+1 counters on it.\nEnchanted creature gets +1/+1 for each +1/+1 counter on this Aura and has reach and trample.", &["Enchantment","Creature"] as &[&str], &["Hydra"] as &[&str], "statics", None, None, &["Reach","Trample","AddDynamicPower","AddDynamicToughness"] as &[&str]),
+        ("Oko, the Trickster", "[+1]: Put two +1/+1 counters on up to one target creature you control.\n[0]: Until end of turn, Oko becomes a copy of target creature you control. Prevent all damage that would be dealt to him this turn.\n[−7]: Until end of turn, each creature you control has base power and toughness 10/10 and gains trample.", &["Planeswalker"] as &[&str], &["Oko"] as &[&str], "abilities", Some(10), Some(10), &["Trample"] as &[&str]),
+        ("Phantasmal Form", "Until end of turn, up to two target creatures each have base power and toughness 3/3, gain flying, and become blue Illusions in addition to their other colors and types.\nDraw a card.", &["Instant"] as &[&str], &[] as &[&str], "abilities", Some(3), Some(3), &["Flying","AddSubtype","AddColor"] as &[&str]),
+        ("Rakdos Riteknife", "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on Rakdos Riteknife.\"\n{B}{R}, Sacrifice this Equipment: Target player sacrifices a permanent of their choice for each blood counter on this Equipment.\nEquip {2}", &["Artifact"] as &[&str], &["Equipment"] as &[&str], "statics", None, None, &["GrantAbility","AddDynamicPower"] as &[&str]),
+        ("Reaper's Scythe", "Job select\nAt the beginning of your end step, put a soul counter on this Equipment for each player who lost life this turn.\nEquipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.\nDeath Sickle — Equip {2}", &["Artifact"] as &[&str], &["Equipment"] as &[&str], "statics", None, None, &["AddSubtype","AddDynamicPower","AddDynamicToughness"] as &[&str]),
+        ("Shorecrasher Mimic", "Whenever you cast a spell that's both green and blue, this creature has base power and toughness 5/3 until end of turn and gains trample until end of turn.", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "triggers", Some(5), Some(3), &["Trample"] as &[&str]),
+        ("Stasis Field", "Enchant creature\nEnchanted creature has base power and toughness 0/2, has defender, and loses all other abilities.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(0), Some(2), &["Defender","RemoveAllAbilities"] as &[&str]),
+        ("Super State", "Enchant creature you control\nEnchanted creature has base power and toughness 9/9 and has flying, first strike, trample, and haste.\nWhenever enchanted creature deals combat damage to an opponent, it deals that much damage to each other opponent.", &["Enchantment"] as &[&str], &["Aura"] as &[&str], "statics", Some(9), Some(9), &["Flying","FirstStrike","Trample","Haste"] as &[&str]),
+        ("Taranika, Akroan Veteran", "Vigilance\nWhenever Taranika attacks, untap another target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains indestructible.", &["Creature"] as &[&str], &["Human","Soldier"] as &[&str], "triggers", Some(4), Some(4), &["Indestructible"] as &[&str]),
+        ("Turtle-Duck", "{3}: Until end of turn, this creature has base power 4 and gains trample.", &["Creature"] as &[&str], &["Turtle","Bird"] as &[&str], "abilities", Some(4), None, &["Trample"] as &[&str]),
+        ("Water Wings", "Until end of turn, target creature you control has base power and toughness 4/4 and gains flying and hexproof. (It can't be the target of spells or abilities your opponents control.)", &["Instant"] as &[&str], &[] as &[&str], "abilities", Some(4), Some(4), &["Flying","Hexproof"] as &[&str]),
+        ("Werewolf Pack Leader", "Pack tactics — Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.\n{3}{G}: Until end of turn, this creature has base power and toughness 5/3, gains trample, and isn't a Human.", &["Creature"] as &[&str], &["Human","Werewolf"] as &[&str], "abilities", Some(5), Some(3), &["Trample","RemoveSubtype"] as &[&str]),
+        ("Wings of Velis Vel", "Changeling (This card is every creature type.)\nUntil end of turn, target creature has base power and toughness 4/4, gains all creature types, and gains flying.", &["Kindred","Instant"] as &[&str], &["Shapeshifter"] as &[&str], "abilities", Some(4), Some(4), &["Flying","Changeling"] as &[&str]),
+        ("Woodlurker Mimic", "Whenever you cast a spell that's both black and green, this creature has base power and toughness 4/5 until end of turn and gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "triggers", Some(4), Some(5), &["Wither"] as &[&str]),    ] {
+        let types = types.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let subtypes = subtypes.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, text);
+        assert!(!doc.items.iter().any(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })), "{name}: {doc:#?}");
+        for (line_number, line) in text.lines().enumerate() {
+            if line == "Greensleeves can be your commander." { continue; }
+            assert!(doc.items.iter().any(|item| item.source.fragment() == Some(line)
+                && item.source.span().first_line == line_number + 1),
+                "every printed independent source unit remains represented: {name}: {line:?}");
+        }
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(!parsed_has_unimplemented(&parsed), "complete source {name}: {parsed:#?}");
+        complete_publication_assert_independent_printed_units(name, text, &types, &subtypes, &parsed);
+        let face = complete_publication_native_face(name, text, &types, &subtypes);
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "all claimed owning families, including static and replacement siblings: {name}: {:?}",
+            crate::game::coverage::card_face_gaps(&face));
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        let owner_count = match name {
+            "Coerced to Kill" => 2,
+            "Greensleeves" | "Oko, the Trickster" => 3,
+            _ => 1,
+        };
+        assert_eq!(serialized[owner].as_array().unwrap().len(), owner_count,
+            "establish the complete printed owning family before selecting its member: {name}");
+        let owned = &serialized[owner][owner_count - 1];
+        let mut definitions = Vec::new();
+        complete_publication_static_nodes(owned, &mut definitions);
+        assert!(!definitions.is_empty(), "{name}: {owned:#}");
+        let expected_scope = if owner == "statics" {
+            match name {
+                "Alpine Moon" => TargetFilter::And { filters: vec![TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)), TargetFilter::HasChosenName] },
+                "Archon of the Wild Rose" => TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![
+                    FilterProp::Another, FilterProp::HasAttachment { kind: crate::types::ability::AttachmentKind::Aura,
+                        controller: Some(ControllerRef::You), exclude_source: crate::types::ability::SourceExclusion::Include }])),
+                "Blade of the Oni" | "Hulkbuster Armor" | "Mace of the Valiant" | "Rakdos Riteknife" | "Reaper's Scythe" =>
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+                _ => TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            }
+        } else {
+            match name {
+                "Azula, Ruthless Firebender" | "Battlegate Mimic" | "Dragonblood Twins" | "Nightsky Mimic" |
+                "Shorecrasher Mimic" | "Woodlurker Mimic" | "Turtle-Duck" | "Werewolf Pack Leader" => TargetFilter::SelfRef,
+                "Mirror Entity" | "Greensleeves" | "Oko, the Trickster" => TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                "Mirror Entity Avatar" => TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![FilterProp::IsChosenCreatureType])),
+                _ => TargetFilter::ParentTarget,
+            }
+        };
+        for definition in &definitions {
+            assert_eq!(definition.mode, StaticMode::Continuous, "{name}");
+            assert_eq!(definition.affected, Some(expected_scope.clone()), "{name}");
+            assert_eq!(definition.condition, None, "a final member must not gate the whole predicate: {name}");
+            assert!(!definition.characteristic_defining, "a grant is not the recipient's own printed CDA: {name}");
+        }
+        let mut actual = definitions.into_iter().flat_map(|definition| definition.modifications).collect::<Vec<_>>();
+        let grants = actual.iter().filter_map(|modification| match modification {
+            ContinuousModification::GrantAbility { definition } => Some(definition.as_ref()), _ => None,
+        }).collect::<Vec<_>>();
+        if name == "Alpine Moon" {
+            assert_eq!(grants.len(), 1); assert_eq!(grants[0].cost, Some(AbilityCost::Tap));
+            let Effect::Mana { produced, restrictions, grants: mana_grants, expiry, target } = grants[0].effect.as_ref() else { panic!("{name}: {:?}", grants[0]) };
+            assert_eq!(*produced, ManaProduction::AnyOneColor { count: QuantityExpr::Fixed { value: 1 },
+                color_options: ManaColor::ALL.to_vec(), contribution: crate::types::ability::ManaContribution::Base });
+            assert!(restrictions.is_empty() && mana_grants.is_empty()); assert_eq!(*expiry, None); assert_eq!(*target, None);
+            assert!(grants[0].sub_ability.is_none());
+        } else if name == "Rakdos Riteknife" {
+            assert_eq!(grants.len(), 1);
+            let Some(AbilityCost::Composite { costs }) = &grants[0].cost else { panic!("complete granted cost") };
+            assert_eq!(costs.len(), 2); assert_eq!(costs[0], AbilityCost::Tap);
+            let AbilityCost::Sacrifice(cost) = &costs[1] else { panic!("sacrifice creature") };
+            assert_eq!(cost.requirement, crate::types::ability::SacrificeRequirement::Count { count: 1 });
+            assert_eq!(cost.target, TargetFilter::Typed(TypedFilter::creature()));
+            let Effect::PutCounter { target, counter_type, count, .. } = grants[0].effect.as_ref() else { panic!("knife counter") };
+            assert_eq!(*target, TargetFilter::GrantingObject); assert_eq!(*counter_type, CounterType::Generic("blood".into()));
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 }); assert!(grants[0].sub_ability.is_none());
+        } else { assert!(grants.is_empty(), "no unexplained granted body: {name}"); }
+        actual.retain(|modification| !matches!(modification, ContinuousModification::GrantAbility { .. }));
+        let mut expected = Vec::new();
+        if matches!(name, "Deep Freeze" | "Stasis Field") { expected.push(ContinuousModification::RemoveAllAbilities); }
+        if name == "Alpine Moon" {
+            expected.extend([ContinuousModification::RemoveAllSubtypes { set: SubtypeSet::Land }, ContinuousModification::RemoveAllAbilities]);
+        }
+        if let Some(value) = power { expected.push(ContinuousModification::SetPower { value }); }
+        if let Some(value) = toughness { expected.push(ContinuousModification::SetToughness { value }); }
+        if matches!(name, "Mirror Entity" | "Mirror Entity Avatar") {
+            expected.extend([ContinuousModification::SetPowerDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } },
+                ContinuousModification::SetToughnessDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } }]);
+        }
+        if matches!(name, "Mace of the Valiant" | "Reaper's Scythe" | "Nyxborn Hydra" | "Rakdos Riteknife" | "Azula, Ruthless Firebender") {
+            let quantity = if name == "Azula, Ruthless Firebender" {
+                QuantityRef::PlayerCounter { kind: PlayerCounterKind::Experience, scope: CountScope::Controller }
+            } else {
+                QuantityRef::CountersOn { scope: crate::types::ability::ObjectScope::Source, counter_type: Some(match name {
+                    "Mace of the Valiant" => CounterType::Generic("charge".into()), "Reaper's Scythe" => CounterType::Generic("soul".into()),
+                    "Nyxborn Hydra" => CounterType::Plus1Plus1, _ => CounterType::Generic("blood".into()),
+                }) }
+            };
+            expected.push(ContinuousModification::AddDynamicPower { value: QuantityExpr::Ref { qty: quantity.clone() } });
+            if name != "Rakdos Riteknife" { expected.push(ContinuousModification::AddDynamicToughness { value: QuantityExpr::Ref { qty: quantity } }); }
+        }
+        for companion in companions {
+            if matches!(*companion, "GrantAbility" | "RemoveAllAbilities" | "AddSubtype" | "AddColor" | "RemoveSubtype" |
+                "AddDynamicPower" | "AddDynamicToughness" | "SetPowerDynamic" | "SetToughnessDynamic") { continue; }
+            let keyword = if *companion == "Annihilator" { Keyword::Annihilator(2) } else { companion.parse().expect("exact represented keyword") };
+            expected.push(ContinuousModification::AddKeyword { keyword });
+        }
+        match name {
+            "Blade of the Oni" => expected.extend([ContinuousModification::AddColor { color: ManaColor::Black }, ContinuousModification::AddSubtype { subtype: "Demon".into() }]),
+            "Coerced to Kill" => expected.push(ContinuousModification::AddSubtype { subtype: "Assassin".into() }),
+            "Reaper's Scythe" => expected.push(ContinuousModification::AddSubtype { subtype: "Assassin".into() }),
+            "Deep Freeze" => expected.extend([ContinuousModification::AddColor { color: ManaColor::Blue }, ContinuousModification::AddSubtype { subtype: "Wall".into() }]),
+            "Phantasmal Form" => expected.extend([ContinuousModification::AddColor { color: ManaColor::Blue }, ContinuousModification::AddSubtype { subtype: "Illusion".into() }]),
+            "Werewolf Pack Leader" => expected.push(ContinuousModification::RemoveSubtype { subtype: "Human".into() }),
+            _ => {}
+        }
+        assert_eq!(actual, expected, "ALL ordered claimed members: {name}: {owned:#}");
+        if owner != "statics" {
+            let expected_duration = if name == "Aven Mimeomancer" { Duration::ForAsLongAs { condition: StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("feather".into())), minimum: 1, maximum: None } } } else { Duration::UntilEndOfTurn };
+            let ability = if owner == "triggers" { parsed.triggers[owner_count - 1].execute.as_deref().unwrap() } else { &parsed.abilities[owner_count - 1] };
+            let mut count = 0;
+            for node in std::iter::successors(Some(ability), |node| node.sub_ability.as_deref()) {
+                if let Effect::GenericEffect { duration, .. } = node.effect.as_ref() {
+                    assert_eq!(*duration, Some(expected_duration.clone()), "{name}");
+                    assert_eq!(node.duration, Some(expected_duration.clone()), "{name}"); count += 1;
+                }
+            }
+            assert!(count > 0, "owning runtime definition: {name}");
+        }
+        match name {
+            "Mace of the Valiant" => { assert_eq!(parsed.triggers.len(), 1); assert!(parsed.extracted_keywords.contains(&Keyword::Equip(crate::types::mana::ManaCost::Cost { generic: 3, shards: vec![] }))); },
+            "Reaper's Scythe" => { assert_eq!(parsed.triggers.len(), 1); assert!(parsed.extracted_keywords.contains(&Keyword::JobSelect)); },
+            "Rakdos Riteknife" => assert_eq!(parsed.abilities.len(), 1, "independent BR Equipment sacrifice body"),
+            "Greensleeves" | "Oko, the Trickster" => assert_eq!(parsed.abilities.len(), 3, "all independent loyalty bodies"),
+            "Coerced to Kill" => assert_eq!(parsed.statics.len(), 2, "independent control static"),
+            "Gigantiform" | "Super State" => assert_eq!(parsed.triggers.len(), 1, "independent printed trigger"),
+            _ => {}
+        }
+    }
+}
+
+// SHAPE: exact offending-source contracts supplement the production regressions.
+// A gap in a different line cannot satisfy any of these rows.
+fn complete_publication_gap_fragments<'a>(value: &'a serde_json::Value, output: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("type").and_then(serde_json::Value::as_str) == Some("Unimplemented") {
+                output.push(
+                    fields
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("lossless unsupported fragment"),
+                );
+            }
+            for child in fields.values() {
+                complete_publication_gap_fragments(child, output);
+            }
+        }
+        serde_json::Value::Array(children) => {
+            for child in children {
+                complete_publication_gap_fragments(child, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn complete_publication_gap_payloads(
+    value: &serde_json::Value,
+    output: &mut Vec<(String, String)>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("type").and_then(serde_json::Value::as_str) == Some("Unimplemented") {
+                output.push((
+                    fields["name"]
+                        .as_str()
+                        .expect("specific unsupported reason")
+                        .into(),
+                    fields["description"]
+                        .as_str()
+                        .expect("lossless unsupported fragment")
+                        .into(),
+                ));
+            }
+            for child in fields.values() {
+                complete_publication_gap_payloads(child, output);
+            }
+        }
+        serde_json::Value::Array(children) => {
+            for child in children {
+                complete_publication_gap_payloads(child, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_source_gaps() {
+    for (name, text, types, subtypes, line_number) in [
+        ("Possessed Aven", "Flying\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target blue creature.\"", &["Creature"] as &[&str], &["Bird","Soldier","Horror"] as &[&str], 1usize),
+        ("Possessed Barbarian", "First strike\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target red creature.\"", &["Creature"] as &[&str], &["Human","Barbarian","Horror"] as &[&str], 1usize),
+        ("Possessed Centaur", "Trample\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target green creature.\"", &["Creature"] as &[&str], &["Centaur","Horror"] as &[&str], 1usize),
+        ("Possessed Nomad", "Vigilance\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target white creature.\"", &["Creature"] as &[&str], &["Human","Nomad","Horror"] as &[&str], 1usize),
+        ("Undercover Skrull", "As long as there are two or more creature cards in your graveyard, this creature gets +2/+2 and is all creature types.\n{T}: Add one mana of any color.", &["Creature"] as &[&str], &["Skrull","Shapeshifter","Villain"] as &[&str], 0usize),
+        ("Wayward Angel", "Flying, vigilance\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +3/+3, is black, has trample, and has \"At the beginning of your upkeep, sacrifice a creature.\"", &["Creature"] as &[&str], &["Angel","Horror"] as &[&str], 1usize),
+        ("Wrath of Oko", "All creatures lose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)", &["Sorcery"] as &[&str], &[] as &[&str], 0usize),
+        ("Spark Rupture", "When this enchantment enters, draw a card.\nEach planeswalker with one or more loyalty counters on it loses all abilities and is a creature with power and toughness each equal to the number of loyalty counters on it.", &["Enchantment"] as &[&str], &[] as &[&str], 1usize),
+        ("Sinister Concierge", "When this creature dies, you may exile it and put three time counters on it. If you do, exile up to one target creature and put three time counters on it. Each card exiled this way that doesn't have suspend gains suspend. (For each card with suspend, its owner removes a time counter from it at the beginning of their upkeep. When the last is removed, they may cast it without paying its mana cost. Those creature spells have haste.)", &["Creature"] as &[&str], &["Human","Wizard"] as &[&str], 0usize),
+        ("Battlefield Thaumaturge", "Each instant and sorcery spell you cast costs {1} less to cast for each creature it targets.\nHeroic — Whenever you cast a spell that targets this creature, this creature gains hexproof until end of turn.", &["Creature"] as &[&str], &["Human","Wizard"] as &[&str], 0usize),
+        ("Blaster Hulk", "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.", &["Artifact","Creature"] as &[&str], &["Pirate"] as &[&str], 0usize),
+        ("Hinata, Dawn-Crowned", "Flying, trample\nSpells you cast cost {1} less to cast for each target.\nSpells your opponents cast cost {1} more to cast for each target.", &["Creature"] as &[&str], &["Kirin","Spirit"] as &[&str], 1usize),
+        ("Korvold, Gleeful Glutton", "This spell costs {1} less to cast for each card type among permanents you've sacrificed this turn.\nFlying, trample, haste\nWhenever Korvold deals combat damage to a player, put X +1/+1 counters on Korvold and draw X cards, where X is the number of permanent types among cards in your graveyard.", &["Creature"] as &[&str], &["Dragon","Noble"] as &[&str], 0usize),
+        ("Lumbering Megasloth", "This spell costs {1} less to cast for each counter among players and permanents.\nTrample\nThis creature enters tapped.", &["Creature"] as &[&str], &["Sloth","Mutant"] as &[&str], 0usize),
+        ("Obsidian Charmaw", "This spell costs {1} less to cast for each land your opponents control that could produce {C}.\nFlying\nWhen this creature enters, destroy target nonbasic land an opponent controls.", &["Creature"] as &[&str], &["Dragon"] as &[&str], 0usize),
+        ("Seal of the Guildpact", "As this artifact enters, choose two colors.\nEach spell you cast costs {1} less to cast for each of the chosen colors it is.", &["Artifact"] as &[&str], &[] as &[&str], 1usize),
+        ("The Balrog, Durin's Bane", "This spell costs {1} less to cast for each permanent sacrificed this turn.\nHaste\nThe Balrog can't be blocked except by legendary creatures.\nWhen The Balrog dies, destroy target artifact or creature an opponent controls.", &["Creature"] as &[&str], &["Avatar","Demon"] as &[&str], 0usize),
+        ("Thrasta, Tempest's Roar", "This spell costs {3} less to cast for each other spell cast this turn.\nTrample, haste\nTrample over planeswalkers (This creature can deal excess combat damage to the controller of the planeswalker it's attacking.)\nThrasta has hexproof as long as it entered this turn.", &["Creature"] as &[&str], &["Dinosaur"] as &[&str], 0usize),
+        ("Valiant Changeling", "This spell costs {1} less to cast for each creature type among creatures you control. This effect can't reduce the amount of mana this spell costs by more than {5}.\nChangeling (This card is every creature type.)\nDouble strike", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], 0usize),
+        ("Amped Up", "This spell costs {1} less to cast for each electrical socket in a wall or floor you can see from your seat.\nGain control of target creature until end of turn. Untap that creature. Until end of turn, it gets +3/+0 and gains haste.", &["Sorcery"] as &[&str], &[] as &[&str], 0usize),
+        ("Astral Confrontation", "This spell costs {1} less to cast for each opponent you're attacking.\nExile target creature.", &["Instant"] as &[&str], &[] as &[&str], 0usize),
+        ("Delightful Discovery", "This spell costs {1} less to cast for each spell your opponents have cast this turn.\nScry 2, then draw two cards. (To scry 2, look at the top two cards of your library, then put any number of them on the bottom and the rest on top in any order.)", &["Instant"] as &[&str], &[] as &[&str], 0usize),
+        ("Eunuchs' Intrigues", "Target opponent chooses a creature they control. Other creatures they control can't block this turn.", &["Sorcery"] as &[&str], &[] as &[&str], 0usize),
+        ("Goblin War Cry", "Target opponent chooses a creature they control. Other creatures they control can't block this turn.", &["Sorcery"] as &[&str], &[] as &[&str], 0usize),
+        ("Mark for Death", "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.", &["Sorcery"] as &[&str], &[] as &[&str], 0usize),
+        ("Absorb Energy", "Counter target spell. Cards in your hand that share a card type with that spell perpetually gain \"This spell costs {1} less to cast.\"", &["Instant"] as &[&str], &[] as &[&str], 0usize),
+        ("Blood Sun", "When this enchantment enters, draw a card.\nAll lands lose all abilities except mana abilities.", &["Enchantment"] as &[&str], &[] as &[&str], 1usize),
+        ("Conspicuous Snoop", "Play with the top card of your library revealed.\nYou may cast Goblin spells from the top of your library.\nAs long as the top card of your library is a Goblin card, this creature has all activated abilities of that card.", &["Creature"] as &[&str], &["Goblin","Rogue"] as &[&str], 2usize),
+        ("Dark Matter Manipulator", "When this creature enters, mill three cards.\nThis creature gets +2/+0 for every seven cards in your graveyard.", &["Creature"] as &[&str], &["Human","Warlock"] as &[&str], 1usize),
+        ("Marina Vendrell's Grimoire", "When Marina Vendrell's Grimoire enters, if you cast it, draw five cards.\nYou have no maximum hand size and don't lose the game for having 0 or less life.\nWhenever you gain life, draw that many cards.\nWhenever you lose life, discard that many cards. Then if you have no cards in hand, you lose the game.", &["Artifact"] as &[&str], &["Book"] as &[&str], 1usize),
+        ("Mine, Mine, Mine!", "When this enchantment enters, each player puts their library into their hand.\nPlayers have no maximum hand size and don't lose the game for drawing from an empty library.\nEach player can't cast more than one spell each turn.\nWhen this enchantment leaves the battlefield, each player shuffles their hand and graveyard into their library.", &["Enchantment"] as &[&str], &[] as &[&str], 1usize),
+        ("Rising Chicane", "If you were the starting player, this land enters tapped.\nStart your engines!\n{T}: Add {C}.\nMax speed — At the beginning of combat on your turn, this land becomes a 2/2 Construct creature in addition to its other types until end of turn.", &["Artifact","Land"] as &[&str], &[] as &[&str], 0usize),
+        ("Skill Borrower", "Play with the top card of your library revealed.\nAs long as the top card of your library is an artifact or creature card, this creature has all activated abilities of that card. (If any of the abilities use that card's name, use this creature's name instead.)", &["Artifact","Creature"] as &[&str], &["Human","Wizard"] as &[&str], 1usize),
+        ("The Knight of Weeks", "Lifelink, vigilance, first strike\nAt the beginning of your combat step and whenever another Knight enters the battlefield under your control, put a day counter on The Knight of Weeks.\nThe Knight of Weeks gets +7/+7 for every seven day counters on it.", &["Creature"] as &[&str], &["Human","Knight"] as &[&str], 2usize),
+        ("Varchild, Betrayer of Kjeldor", "Whenever Varchild deals combat damage to a player, that player creates that many 1/1 red Survivor creature tokens.\nSurvivors your opponents control can't block, and they can't attack you or planeswalkers you control.\nWhen Varchild leaves the battlefield, gain control of all Survivors.", &["Creature"] as &[&str], &["Human","Knight"] as &[&str], 1usize),
+        ("Void Winnower", "Your opponents can't cast spells with even mana values. (Zero is even.)\nYour opponents can't block with creatures with even mana values.", &["Creature"] as &[&str], &["Eldrazi"] as &[&str], 1usize),
+        ("Tinfoil Helm", "Equipped creature has +2/+2 and has protection from Aliens, Birds, Eldrazi, Lizards, Mutants, Robots, Yetis, and hybrid mana.\nWhenever equipped creature deals damage to a player with a conspiracy in their command zone, draw a card.\nEquip {2}", &["Artifact"] as &[&str], &["Equipment"] as &[&str], 0usize),
+        ("Mystic Doom Sandwich", "{TK}{TK} — Lifelink\n{TK}{TK}{TK} — This creature must be blocked if able. Whenever this creature becomes blocked, it gets +1/+1 until end of turn for each creature blocking it.\n{TK}{TK} — 1/4\n{TK}{TK}{TK}{TK}{TK} — 6/8", &["Stickers"] as &[&str], &[] as &[&str], 1usize),
+        ("Eight-and-a-Half-Tails Avatar", "{1}: Until end of turn, target permanent you control gains protection from a color chosen at random from colors it doesn't have protection from.", &["Vanguard"] as &[&str], &[] as &[&str], 0usize),
+        ("Tarelily, Lovestruck Archer", "Elves and/or Dwarf spells you cast cost {1} less to cast.\nSoulbond (You may pair this creature with another unpaired creature when either enters. They remain paired for as long as you control both of them.)\nAs long as this creature is paired with another creature, both creatures have reach. If that creature is a Dwarf, both creatures have lifelink.", &["Creature"] as &[&str], &["Elf","Archer"] as &[&str], 2usize),
+        ("Buzzing Whack-a-Doodle", "As this artifact enters, you and an opponent each secretly choose Whack or Doodle. Then those choices are revealed. If the choices match, this artifact has that ability. Otherwise, it has Buzz.\n• Whack — {T}: Target player loses 2 life.\n• Doodle — {T}: You gain 3 life.\n• Buzz — {2}, {T}: Draw a card.", &["Artifact"] as &[&str], &[] as &[&str], 0usize),
+    ] {
+        let types = types.iter().map(|s| (*s).into()).collect::<Vec<String>>();
+        let subtypes = subtypes.iter().map(|s| (*s).into()).collect::<Vec<String>>();
+        let printed = text.lines().nth(line_number).unwrap();
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, text);
+        let source_items = doc.items.iter().filter(|item| item.source.fragment() == Some(printed)).collect::<Vec<_>>();
+        assert!(!source_items.is_empty(), "exact printed source identity: {name}: {doc:#?}");
+        assert!(source_items.iter().all(|item| item.source.span().first_line == line_number + 1), "{name}");
+        let mut direct_payloads = Vec::new();
+        for item in &source_items {
+            let span = item.source.span();
+            assert_eq!(span.last_line, line_number + 1, "{name}: exact owning physical line");
+            assert_eq!(span.precision, crate::parser::oracle_ir::doc::SpanPrecision::Exact);
+            assert!(span.start_byte < span.end_byte);
+            if let OracleNodeIr::Unsupported { unsupported, .. } = &item.node {
+                use crate::parser::oracle_ir::doc::UnsupportedAbilityCategory;
+                let prefix = match unsupported.category {
+                    UnsupportedAbilityCategory::Unknown => "",
+                    UnsupportedAbilityCategory::TriggerStructure => "Trigger prefix matched but line failed trigger parser: ",
+                    UnsupportedAbilityCategory::StaticStructure => "Static pattern matched but line failed static parser: ",
+                    UnsupportedAbilityCategory::ReplacementStructure => "Replacement pattern matched but line failed replacement parser: ",
+                    UnsupportedAbilityCategory::EffectStructure => "Effect sentence candidate but line failed effect parser: ",
+                };
+                let normalized = crate::parser::oracle_special::normalize_self_refs_for_static(printed, name);
+                assert!(unsupported.description == printed || unsupported.description == normalized,
+                    "{name}: specific printed refusal description: {unsupported:#?}");
+                assert_eq!(unsupported.fragment, format!("{prefix}{}", unsupported.description),
+                    "{name}: exact structural reason and offending text");
+                direct_payloads.push((unsupported.category.legacy_name().to_owned(), unsupported.fragment.clone()));
+            }
+        }
+        let direct_gap = !direct_payloads.is_empty();
+        let positions = doc.items.iter().map(|item| (item.source.span().first_line, item.source.span().ordinal_within_span)).collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] <= pair[1]), "{name}: source order");
+        assert_eq!(doc.items.iter().map(|item| item.id).collect::<std::collections::HashSet<_>>().len(), doc.items.len());
+        let parsed = lower_oracle_ir(&mut doc);
+        let value = serde_json::to_value(&parsed).unwrap();
+        complete_publication_assert_independent_printed_units(name, text, &types, &subtypes, &parsed);
+        let mut residuals = Vec::new(); complete_publication_gap_fragments(&value, &mut residuals);
+        let mut payloads = Vec::new(); complete_publication_gap_payloads(&value, &mut payloads);
+        for payload in &direct_payloads {
+            assert_eq!(payloads.iter().filter(|actual| *actual == payload).count(), 1,
+                "{name}: exact typed reason/fragment survives lowering exactly once: {payload:?}");
+        }
+        let normalized = crate::parser::oracle_special::normalize_self_refs_for_static(printed, name);
+        let stripped = crate::parser::oracle_util::strip_reminder_text(&normalized);
+        // These are specific semantic continuations, never an arbitrary gap elsewhere.
+        let missing = match name {
+            "Sinister Concierge" => "Each card exiled this way that doesn't have suspend gains suspend.",
+            "Absorb Energy" => "Cards in your hand that share a card type with that spell perpetually gain \"This spell costs {1} less to cast.\"",
+            "Eunuchs' Intrigues" | "Goblin War Cry" => "Other creatures they control can't block this turn.",
+            "Mark for Death" => "Other creatures that player controls can't block this turn.",
+            "Tarelily, Lovestruck Archer" => "If that creature is a Dwarf, both creatures have lifelink.",
+            _ => stripped.as_str(),
+        };
+        let exact_nested_gap = residuals.iter().any(|fragment| *fragment == printed || *fragment == normalized || *fragment == stripped || *fragment == missing);
+        assert!(direct_gap || exact_nested_gap, "specific whole compound/missing member {name}: {printed:?}: {residuals:#?}");
+        if exact_nested_gap {
+            let mut unit_doc = parse_oracle_ir(printed, name, &[], &types, &subtypes);
+            let unit = lower_oracle_ir(&mut unit_doc);
+            let mut unit_payloads = Vec::new(); complete_publication_gap_payloads(&serde_json::to_value(&unit).unwrap(), &mut unit_payloads);
+            let expected = unit_payloads.into_iter().filter(|(_, fragment)| fragment == printed || fragment == &normalized || fragment == &stripped || fragment == missing).collect::<Vec<_>>();
+            assert!(!expected.is_empty(), "{name}: precise missing member has its own public reason");
+            for payload in expected {
+                assert!(!payload.0.is_empty());
+                assert_eq!(payloads.iter().filter(|actual| **actual == payload).count(), 1,
+                    "{name}: complete nested reason and exact offending member survive whole-document publication: {payload:?}");
+            }
+        }
+        let face = if matches!(name, "Tinfoil Helm" | "Mystic Doom Sandwich") {
+            complete_publication_native_face(name, text, &types, &subtypes)
+        } else {
+            crate::types::card::CardFace {
+                name: name.into(), oracle_text: Some(text.into()), keywords: parsed.extracted_keywords.clone(),
+                abilities: parsed.abilities.clone(), triggers: parsed.triggers.clone(), static_abilities: parsed.statics.clone(),
+                replacements: parsed.replacements.clone(), ..Default::default()
+            }
+        };
+        assert!(crate::game::coverage::card_face_has_unimplemented_parts(&face), "specific unsupported semantics remain red: {name}");
+        match name {
+            "Possessed Aven" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]),
+            "Possessed Barbarian" => assert_eq!(parsed.extracted_keywords, vec![Keyword::FirstStrike]),
+            "Possessed Centaur" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Trample]),
+            "Possessed Nomad" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Vigilance]),
+            "Wayward Angel" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying, Keyword::Vigilance]),
+            "Undercover Skrull" => {
+                assert_eq!(parsed.abilities.len(), 1); assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Tap));
+                assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Mana { .. }));
+            }
+            "Spark Rupture" | "Blood Sun" => {
+                assert_eq!(parsed.triggers.len(), 1);
+                assert!(matches!(parsed.triggers[0].execute.as_ref().unwrap().effect.as_ref(), Effect::Draw { .. }));
+            }
+            "Tinfoil Helm" => {
+                assert_eq!(parsed.triggers.len(), 1, "independent conspiracy damage trigger");
+                assert!(parsed.extracted_keywords.contains(&Keyword::Equip(crate::types::mana::ManaCost::generic(2))));
+                assert!(parsed.statics.iter().all(|definition| definition.modifications.iter().all(|modification| !matches!(modification,
+                    ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. } | ContinuousModification::AddKeyword { keyword: Keyword::Protection(_) }))));
+            }
+            "Mystic Doom Sandwich" => assert!(parsed.statics.iter().all(|definition| !definition.modifications.contains(&ContinuousModification::AddPower { value: 1 })), "triggered sticker pump must not become hosted"),
+            "Astral Confrontation" => assert!(parsed.abilities.iter().any(|definition| matches!(definition.effect.as_ref(), Effect::ChangeZone { destination: Zone::Exile, .. })), "independent exile survives"),
+            "Absorb Energy" => assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Counter { .. })),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
+    for (card_name, face_name, side, text, types, subtypes) in [
+        ("Lier, Disciple of the Drowned", "Lier, Disciple of the Drowned", "", "Spells can't be countered.\nEach instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.", &["Creature"] as &[&str], &["Human","Wizard"] as &[&str]),
+        ("Underworld Breach", "Underworld Breach", "", "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)\nAt the beginning of the end step, sacrifice this enchantment.", &["Enchantment"] as &[&str], &[] as &[&str]),
+        ("Norman Osborn // Green Goblin", "Green Goblin", "b", "Flying, menace\nSpells you cast from your graveyard cost {2} less to cast.\nGoblin Formula — Each nonland card in your graveyard has mayhem. The mayhem cost is equal to its mana cost. (You may cast a card from your graveyard for its mayhem cost if you discarded it this turn. Timing rules still apply.)", &["Creature"] as &[&str], &["Goblin","Human","Villain"] as &[&str]),
+        ("Varolz, the Scar-Striped", "Varolz, the Scar-Striped", "", "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost. (Exile a creature card from your graveyard and pay its mana cost: Put a number of +1/+1 counters equal to that card's power on target creature. Scavenge only as a sorcery.)\nSacrifice another creature: Regenerate Varolz.", &["Creature"] as &[&str], &["Troll","Warrior"] as &[&str]),
+        ("Wire Surgeons", "Wire Surgeons", "", "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nEach artifact creature card in your graveyard has encore. Its encore cost is equal to its mana cost. (Exile it and pay its mana cost: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)", &["Creature"] as &[&str], &["Human","Artificer"] as &[&str]),
+        ("Sliver Gravemother", "Sliver Gravemother", "", "The \"legend rule\" doesn't apply to Slivers you control.\nEach Sliver creature card in your graveyard has encore {X}, where X is its mana value.\nEncore {5} ({5}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)", &["Creature"] as &[&str], &["Sliver"] as &[&str]),
+        ("Naktamun", "Naktamun", "", "Each creature card in your graveyard has embalm. Its embalm cost is equal to its mana cost. (Exile a creature card from your graveyard and pay its embalm cost: Create a token that's a copy of it, except it's a white Zombie in addition to its other types with no mana cost. Embalm only as a sorcery.)\nWhenever chaos ensues, you may discard a card. If you do, draw a card.", &["Plane"] as &[&str], &["Amonkhet"] as &[&str]),
+        ("Dream Devourer", "Dream Devourer", "", "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}. (During your turn, you may pay {2} and exile it from your hand face down. Cast it on a later turn for its foretell cost.)\nWhenever you foretell a card, this creature gets +2/+0 until end of turn.", &["Creature"] as &[&str], &["Demon","Cleric"] as &[&str]),
+        ("Aminatou, Veil Piercer", "Aminatou, Veil Piercer", "", "At the beginning of your upkeep, surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)\nEach enchantment card in your hand has miracle. Its miracle cost is equal to its mana cost reduced by {4}. (You may cast a card for its miracle cost when you draw it if it's the first card you drew this turn.)", &["Creature"] as &[&str], &["Human","Wizard"] as &[&str]),
+    ] {
+        let types = types.iter().map(|s| (*s).into()).collect::<Vec<String>>();
+        let subtypes = subtypes.iter().map(|s| (*s).into()).collect::<Vec<String>>();
+        if side == "b" { assert_eq!((card_name, face_name), ("Norman Osborn // Green Goblin", "Green Goblin")); }
+        if card_name == "Naktamun" { assert_eq!(types, vec!["Plane"]); }
+        let mut doc = parse_oracle_ir(text, face_name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, text);
+        assert!(!doc.items.iter().any(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })), "{card_name}: {doc:#?}");
+        let parsed = lower_oracle_ir(&mut doc);
+        let expected_keyword = match face_name {
+            "Lier, Disciple of the Drowned" => Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+            "Underworld Breach" => granted_escape_cost(3),
+            "Green Goblin" => Keyword::Mayhem(ManaCost::SelfManaCost),
+            "Varolz, the Scar-Striped" => Keyword::Scavenge(ManaCost::SelfManaCost),
+            "Wire Surgeons" => Keyword::Encore(ManaCost::SelfManaCost),
+            "Sliver Gravemother" => Keyword::Encore(ManaCost::SelfManaValue),
+            "Naktamun" => Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(ManaCost::SelfManaCost)),
+            "Dream Devourer" => Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }),
+            "Aminatou, Veil Piercer" => Keyword::Miracle(ManaCost::SelfManaCostReduced { reduction: 4 }),
+            _ => unreachable!(),
+        };
+        let static_count = if matches!(face_name, "Lier, Disciple of the Drowned" | "Green Goblin" | "Sliver Gravemother") { 2 } else { 1 };
+        assert_eq!(parsed.statics.len(), static_count, "establish every dedicated source owner before selecting its grant");
+        assert_eq!(parsed.abilities.len(), usize::from(face_name == "Varolz, the Scar-Striped"));
+        assert_eq!(parsed.triggers.len(), usize::from(matches!(face_name, "Underworld Breach" | "Naktamun" | "Dream Devourer" | "Aminatou, Veil Piercer")));
+        complete_publication_assert_independent_printed_units(face_name, text, &types, &subtypes, &parsed);
+        let grant = &parsed.statics[static_count - 1];
+        assert_eq!(grant.mode, StaticMode::Continuous);
+        assert_eq!(grant.condition, None, "none of these printed grants has Return's during-your-turn gate");
+        assert!(!grant.characteristic_defining);
+        assert_eq!(grant.modifications, vec![ContinuousModification::AddKeyword { keyword: expected_keyword.clone() }], "complete own cost: {card_name}");
+        let branches = match grant.affected.as_ref().unwrap() { TargetFilter::Or { filters } => filters.as_slice(), single => std::slice::from_ref(single) };
+        let expected_types = match face_name {
+            "Lier, Disciple of the Drowned" => vec![vec![TypeFilter::Instant], vec![TypeFilter::Sorcery]],
+            "Underworld Breach" | "Green Goblin" | "Dream Devourer" => vec![vec![TypeFilter::Non(Box::new(TypeFilter::Land))]],
+            "Wire Surgeons" => vec![vec![TypeFilter::Artifact, TypeFilter::Creature]],
+            "Sliver Gravemother" => vec![vec![TypeFilter::Subtype("Sliver".into()), TypeFilter::Creature]],
+            "Aminatou, Veil Piercer" => vec![vec![TypeFilter::Enchantment]],
+            _ => vec![vec![TypeFilter::Creature]],
+        };
+        assert_eq!(branches.len(), expected_types.len());
+        for (branch, expected) in branches.iter().zip(expected_types) {
+            let TargetFilter::Typed(filter) = branch else { panic!("exact dedicated typed subject: {branch:#?}"); };
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            // Card is a redundant noun beside the required concrete type(s).
+            let mut actual = filter.type_filters.iter().filter(|kind| **kind != TypeFilter::Card).map(|kind| serde_json::to_string(kind).unwrap()).collect::<Vec<_>>();
+            let mut expected = expected.iter().map(|kind| serde_json::to_string(kind).unwrap()).collect::<Vec<_>>();
+            actual.sort(); expected.sort(); assert_eq!(actual, expected, "{card_name}");
+            let zone = if matches!(face_name, "Dream Devourer" | "Aminatou, Veil Piercer") { Zone::Hand } else { Zone::Graveyard };
+            let mut expected_properties = vec![FilterProp::InZone { zone }];
+            if face_name == "Dream Devourer" { expected_properties.push(FilterProp::WithoutKeywordKind { value: crate::types::keywords::KeywordKind::Foretell }); }
+            assert_eq!(filter.properties, expected_properties, "exact zone/without-kind: {card_name}");
+        }
+        match face_name {
+            "Lier, Disciple of the Drowned" => { assert_eq!(parsed.statics.len(), 2); assert_eq!(parsed.statics[0].mode, StaticMode::CantBeCountered); }
+            "Green Goblin" => { assert_eq!(parsed.statics.len(), 2); assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying, Keyword::Menace]); assert!(matches!(parsed.statics[0].mode, StaticMode::ModifyCost { .. })); }
+            "Varolz, the Scar-Striped" => { assert_eq!(parsed.abilities.len(), 1); assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Regenerate { .. })); }
+            "Wire Surgeons" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Fear]),
+            "Sliver Gravemother" => { assert_eq!(parsed.statics.len(), 2); assert!(parsed.extracted_keywords.contains(&Keyword::Encore(ManaCost::generic(5)))); }
+            "Underworld Breach" | "Naktamun" | "Dream Devourer" | "Aminatou, Veil Piercer" => assert_eq!(parsed.triggers.len(), 1, "full independent trigger"),
+            _ => {}
+        }
+        let face = complete_publication_native_face(face_name, text, &types, &subtypes);
+        let round_trip: crate::types::card::CardFace = serde_json::from_str(&serde_json::to_string(&face).unwrap()).unwrap();
+        assert_eq!(round_trip, face, "every full printed field and nested dedicated/sibling body");
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty(), "full dedicated source {card_name}: {:?}", crate::game::coverage::card_face_gaps(&face));
+        let invalid = "Creatures you control get +1/+1 and have an unexplained keyword.";
+        let combined = format!("{text}\n{invalid}");
+        let mut bad_doc = parse_oracle_ir(&combined, face_name, &[], &types, &subtypes);
+        assert!(bad_doc.items.iter().any(|item| item.source.fragment() == Some(invalid)), "independent bad U3 source");
+        let bad = lower_oracle_ir(&mut bad_doc);
+        let retained = bad.statics.iter().filter(|definition| definition.modifications == grant.modifications && definition.affected == grant.affected).collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1, "the complete dedicated sibling cannot be swallowed by a bad U3 clause: {card_name}");
+        let mut gaps = Vec::new(); let value = serde_json::to_value(&bad).unwrap(); complete_publication_gap_fragments(&value, &mut gaps);
+        assert!(gaps.contains(&invalid) || bad_doc.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == invalid)), "specific independent U3 gap");
+        let grant_line = match face_name {
+            "Lier, Disciple of the Drowned" | "Wire Surgeons" | "Sliver Gravemother" | "Aminatou, Veil Piercer" => 1,
+            "Green Goblin" => 2,
+            _ => 0,
+        };
+        let original = text.lines().nth(grant_line).unwrap();
+        let mut malformed = vec![format!("{original} unexplained")];
+        if original.contains("in your graveyard") {
+            malformed.push(original.replace("in your graveyard", "in an unknown zone"));
+            malformed.push(original.replace("in your graveyard", "in your hand"));
+        } else {
+            malformed.push(original.replace("in your hand", "in an unknown zone"));
+            malformed.push(original.replace("in your hand", "in your graveyard"));
+        }
+        malformed.push(original.replacen("cost is equal to", "cost is an unexplained amount equal to", 1));
+        let (kind, mismatched) = match face_name {
+            "Lier, Disciple of the Drowned" => ("flashback", "encore"),
+            "Underworld Breach" => ("escape", "scavenge"),
+            "Green Goblin" => ("mayhem", "escape"),
+            "Varolz, the Scar-Striped" => ("scavenge", "flashback"),
+            "Wire Surgeons" | "Sliver Gravemother" => ("encore", "flashback"),
+            "Naktamun" => ("embalm", "scavenge"),
+            "Dream Devourer" => ("foretell", "miracle"),
+            "Aminatou, Veil Piercer" => ("miracle", "foretell"),
+            _ => unreachable!(),
+        };
+        if face_name == "Sliver Gravemother" {
+            malformed.push(original.replace("where X is its mana value", "where X is an unexplained value"));
+        } else {
+            malformed.push(original.replacen(&format!("has {kind}"), &format!("has {mismatched}"), 1));
+        }
+        for broken in malformed.into_iter().filter(|broken| broken != original) {
+            let mut lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+            lines[grant_line] = broken.clone();
+            let full = lines.join("\n");
+            let mut refused = parse_oracle_ir(&full, face_name, &[], &types, &subtypes);
+            assert!(refused.items.iter().any(|item| item.source.fragment() == Some(broken.as_str())
+                && item.source.span().first_line == grant_line + 1), "exact bad dedicated source: {face_name}: {broken}");
+            let lowered = lower_oracle_ir(&mut refused);
+            let serialized = serde_json::to_value(&lowered).unwrap();
+            let mut residuals = Vec::new(); complete_publication_gap_fragments(&serialized, &mut residuals);
+            let normalized = crate::parser::oracle_special::normalize_self_refs_for_static(&broken, face_name);
+            let stripped = crate::parser::oracle_util::strip_reminder_text(&normalized);
+            assert!(residuals.iter().any(|fragment| *fragment == broken || *fragment == normalized || *fragment == stripped)
+                || refused.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. }
+                    if unsupported.fragment == broken || unsupported.fragment == normalized || unsupported.fragment == stripped)),
+                "specific complete refused population/kind/cost/tail, not an unrelated sibling: {face_name}: {broken}: {residuals:?}");
+        }
+    }
+}
+
+#[test]
+fn complete_publication_avatar_and_safewright_preserve_the_whole_type_choice_chain() {
+    use crate::types::ability::{ChoiceType, QuantityRef};
+    // SHAPE: Avatar's Vanguard platform is pre-existing unsupported work;
+    // Mirror Entity runtime tests discriminate its new complete member class.
+    for (name, source, types, subtypes) in [
+        ("Mirror Entity Avatar", "{X}: Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.", vec!["Vanguard".into()], vec![]),
+        ("Selfless Safewright", "Flash\nConvoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nWhen this creature enters, choose a creature type. Other permanents you control of that type gain hexproof and indestructible until end of turn.", vec!["Creature".into()], vec!["Elf".into(), "Warrior".into()]),
+    ] {
+        let mut doc = parse_oracle_ir(source, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, source);
+        assert!(doc.items.iter().all(|item| !matches!(item.node, OracleNodeIr::Unsupported { .. })));
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(!parsed_has_unimplemented(&parsed));
+        assert!(parsed.statics.is_empty()); assert!(parsed.replacements.is_empty());
+        let choice = if name == "Mirror Entity Avatar" {
+            assert!(parsed.extracted_keywords.is_empty()); assert!(parsed.triggers.is_empty());
+            assert_eq!(parsed.abilities.len(), 1);
+            assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Mana(crate::parser::oracle_nom::primitives::parse_mana_cost("{X}").unwrap().1)));
+            &parsed.abilities[0]
+        } else {
+            assert_eq!(parsed.extracted_keywords, vec![Keyword::Flash, Keyword::Convoke]);
+            assert!(parsed.abilities.is_empty()); assert_eq!(parsed.triggers.len(), 1);
+            parsed.triggers[0].execute.as_deref().unwrap()
+        };
+        assert!(matches!(choice.effect.as_ref(), Effect::Choose { choice_type: ChoiceType::CreatureType { options }, .. } if options.is_empty()));
+        assert!(choice.multi_target.is_none());
+        let grant = choice.sub_ability.as_deref().expect("the whole preceding choice must survive");
+        let Effect::GenericEffect { static_abilities, target, duration, end_cost } = grant.effect.as_ref() else { panic!("{grant:#?}") };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn)); assert_eq!(grant.duration, Some(Duration::UntilEndOfTurn));
+        assert!(target.is_none()); assert!(end_cost.is_none()); assert!(grant.sub_ability.is_none());
+        assert!(grant.multi_target.is_none()); assert_eq!(static_abilities.len(), 1);
+        let definition = &static_abilities[0];
+        let mut expected = if name == "Mirror Entity Avatar" { TypedFilter::creature() } else {
+            TypedFilter { type_filters: vec![TypeFilter::Permanent], ..Default::default() }
+        };
+        expected.controller = Some(ControllerRef::You);
+        expected.properties = if name == "Mirror Entity Avatar" { vec![FilterProp::IsChosenCreatureType] }
+            else { vec![FilterProp::Another, FilterProp::IsChosenCreatureType] };
+        assert_eq!(definition.affected, Some(TargetFilter::Typed(expected)));
+        assert_eq!(definition.condition, None); assert!(!definition.characteristic_defining);
+        let expected_modifications = if name == "Mirror Entity Avatar" {
+            vec![ContinuousModification::SetPowerDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } },
+                ContinuousModification::SetToughnessDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } },
+                ContinuousModification::AddKeyword { keyword: Keyword::Changeling }]
+        } else { vec![ContinuousModification::AddKeyword { keyword: Keyword::Hexproof }, ContinuousModification::AddKeyword { keyword: Keyword::Indestructible }] };
+        assert_eq!(definition.modifications, expected_modifications);
+        let round_trip: AbilityDefinition = serde_json::from_value(serde_json::to_value(choice).unwrap()).unwrap();
+        assert_eq!(round_trip, *choice);
+    }
+}
+
+// SHAPE: pinned printed metadata accompanies the complete Oracle payload above.
+// This fixture exercises the ordinary native face builder, including independent
+// keyword synthesis; it does not claim Vanguard platform support.
+fn complete_publication_native_face(
+    name: &str,
+    text: &str,
+    types: &[String],
+    subtypes: &[String],
+) -> crate::types::card::CardFace {
+    let metadata = match name {
+        "Almost Perfect" => {
+            r##"{"colorIdentity":["G","W"],"colors":["G","W"],"identifiers":{"scryfallOracleId":"617eae63-b5f8-4014-8269-7c66f4388ac7"},"keywords":["Enchant"],"layout":"normal","manaCost":"{4}{G}{W}","manaValue":6.0,"name":"Almost Perfect","rulings":[{"date":"2024-03-08","text":"Almost Perfect overwrites all previous effects that set the creature’s base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."},{"date":"2024-03-08","text":"Effects that modify a creature’s power and/or toughness, such as the effect of the ability granted by Idolized, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Alpine Moon" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"8b46b50c-f824-4c4e-86de-38065c6f9a64"},"layout":"normal","manaCost":"{R}","manaValue":1.0,"name":"Alpine Moon","rulings":[{"date":"2018-07-13","text":"Alpine Moon’s effect doesn’t affect supertypes or other card types. It won’t remove the artifact card type from an artifact land or remove the legendary supertype from a legendary land."},{"date":"2018-07-13","text":"If an affected land has an ability that causes it to enter the battlefield tapped, it will lose that ability before it applies. The same is also true of any other abilities that modify how a land enters the battlefield or apply “as” a land enters the battlefield."},{"date":"2018-07-13","text":"If an affected land has an ability that triggers “when” it enters the battlefield, it will lose that ability before it triggers."}],"subtypes":[],"supertypes":[],"type":"Enchantment","types":["Enchantment"]}"##
+        }
+        "Archon of the Wild Rose" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"180efbd4-0f77-41cc-8ae2-2e6ccf853d10"},"keywords":["Flying"],"layout":"normal","manaCost":"{2}{W}{W}","manaValue":4.0,"name":"Archon of the Wild Rose","power":"4","rulings":[{"date":"2023-09-01","text":"Archon of the Wild Rose's ability overwrites all previous effects that set the affected creatures' power and/or toughness to specific values. Other effects that set these characteristics to specific values that start to apply after Archon of the Wild Rose enters the battlefield will overwrite this effect."},{"date":"2023-09-01","text":"Effects that modify a creature's power and/or toughness without setting it will apply to the affected creatures no matter when they started to take effect. The same is true for counters that change a creature's power and/or toughness."}],"subtypes":["Archon"],"supertypes":[],"toughness":"4","type":"Creature — Archon","types":["Creature"]}"##
+        }
+        "Aven Mimeomancer" => {
+            r##"{"colorIdentity":["U","W"],"colors":["U","W"],"identifiers":{"scryfallOracleId":"176c0ca2-0ca1-45e2-8412-86de5dbead48"},"keywords":["Flying"],"layout":"normal","manaCost":"{1}{W}{U}","manaValue":3.0,"name":"Aven Mimeomancer","power":"3","rulings":[{"date":"2009-05-01","text":"If all feather counters on a creature are moved to a different creature, the ability doesn't follow them. The first creature stops being affected by the ability because it no longer has a feather counter on it. The second creature is not affected by the ability because Aven Mimeomancer didn't target it."},{"date":"2009-05-01","text":"If the second ability affects a creature, it doesn't cause that creature to lose any of its abilities. It just gives that creature flying as well."},{"date":"2009-05-01","text":"The affected creature remains 3/1 and has flying as long as it has a feather counter on it. The effect continues even if Aven Mimeomancer leaves the battlefield."},{"date":"2009-05-01","text":"You may put a feather counter on a creature that already has a feather counter on it. Doing so has no visible effect unless some other effect has changed the creature's power or toughness, or caused it to lose flying, since the last feather counter was put on it."},{"date":"2009-10-01","text":"The effect from the ability overwrites other effects that set power and/or toughness if and only if those effects existed before the ability resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after the ability resolves. Effects that switch the creature's power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."}],"subtypes":["Bird","Wizard"],"supertypes":[],"toughness":"1","type":"Creature — Bird Wizard","types":["Creature"]}"##
+        }
+        "Azula, Ruthless Firebender" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"7139ead5-86f0-46ae-8a6d-ad66d0408f73"},"keywords":["Firebending"],"layout":"normal","manaCost":"{2}{B}","manaValue":3.0,"name":"Azula, Ruthless Firebender","power":"3","rulings":[{"date":"2025-10-02","text":"\"Firebending N\" is a keyword that represents the ability \"Whenever this creature attacks, add N {R}. Until end of combat, you don't lose this mana as steps end.\""},{"date":"2025-10-02","text":"All experience counters are identical, no matter how you got them. For example, the last ability will count experience counters that you got from the second ability, from another ability, from another copy of Azula, Ruthless Firebender, and so on."},{"date":"2025-10-02","text":"Any other mana you add during combat will still be lost as normal when moving between steps of combat."},{"date":"2025-10-02","text":"Firebending abilities aren't mana abilities. They use the stack and can be responded to."},{"date":"2025-10-02","text":"Mana from firebending abilities isn't lost until you leave combat and go to your second main phase. It can be used at any time during combat, even after combat damage has been dealt."},{"date":"2025-10-02","text":"Multiple instances of firebending on the same creature trigger separately, each granting you the appropriate amount of mana."},{"date":"2025-10-02","text":"The experience counter goes on you, the player, not on Azula. You will keep that counter even if Azula, Ruthless Firebender dies."}],"subtypes":["Human","Noble"],"supertypes":["Legendary"],"toughness":"3","type":"Legendary Creature — Human Noble","types":["Creature"]}"##
+        }
+        "Battlegate Mimic" => {
+            r##"{"colorIdentity":["R","W"],"colors":["R","W"],"identifiers":{"scryfallOracleId":"0af189d3-4de1-483e-aac4-dd5d51a57d9c"},"layout":"normal","manaCost":"{1}{R/W}","manaValue":2.0,"name":"Battlegate Mimic","power":"2","rulings":[{"date":"2008-08-01","text":"Any other abilities the Mimic may have gained are not affected."},{"date":"2008-08-01","text":"If you cast a spell that’s the two appropriate colors for the second time in a turn, the ability triggers again. The Mimic will once again become the power and toughness stated in its ability, which could overwrite power- and toughness-setting effects that have been applied to it in the meantime."},{"date":"2008-08-01","text":"The ability triggers whenever you cast a spell that’s both of its listed colors. It doesn’t matter whether that spell also happens to be any other colors."},{"date":"2009-10-01","text":"The effect from the ability overwrites other effects that set power and/or toughness if and only if those effects existed before the ability resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after the ability resolves. Effects that switch the creature’s power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."}],"subtypes":["Shapeshifter"],"supertypes":[],"toughness":"1","type":"Creature — Shapeshifter","types":["Creature"]}"##
+        }
+        "Blade of the Oni" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"6d9ac636-3c6c-40ca-90f3-1a3387836bb4"},"keywords":["Menace","Reconfigure"],"layout":"normal","manaCost":"{1}{B}","manaValue":2.0,"name":"Blade of the Oni","power":"3","rulings":[{"date":"2022-02-18","text":"Although it causes an Equipment to become attached to a creature, reconfigure is not an “equip ability” for the purpose of cards like Fighter Class and Leonin Shikari."},{"date":"2022-02-18","text":"An Equipment creature can never become attached to itself. If an effect tries to do this, nothing happens."},{"date":"2022-02-18","text":"An Equipment creature with reconfigure can be attached to creatures by effects other than its reconfigure ability, such as the activated ability of Brass Squire."},{"date":"2022-02-18","text":"An Equipment doesn't become tapped when the permanent it's attached to becomes tapped. For example, if you attack with a creature that is equipped with Acquisition Octopus, then use reconfigure to unattach Acquisition Octopus after combat, the Octopus will be untapped and could be used to block during your opponent's turn."},{"date":"2022-02-18","text":"As soon as an Equipment creature with reconfigure stops being a creature, any Equipment and Auras with enchant creature abilities become unattached. Auras that can enchant an Equipment that isn't a creature remain attached to it."},{"date":"2022-02-18","text":"Attaching an Equipment with reconfigure to a creature causes that Equipment to stop being a creature until it becomes unattached. It also loses any creature subtypes it had."},{"date":"2022-02-18","text":"Blade of the Oni will overwrite any previous effects that set the equipped creature's power and toughness to specific numbers. Effects that otherwise modify the equipped creature's power and toughness will still apply no matter when they took effect. The same is true for +1/+1 counters."},{"date":"2022-02-18","text":"If a permanent with reconfigure is somehow still a creature after it becomes attached (perhaps due to an effect like that of March of the Machines), it immediately becomes unattached from the equipped creature."},{"date":"2022-02-18","text":"If an Equipment with reconfigure somehow loses its abilities while it is attached, the effect causing it to not be a creature continues to apply until it becomes unattached."},{"date":"2022-02-18","text":"Reconfigure represents two activated abilities. Reconfigure [cost] means “[Cost]: Attach this permanent to another target creature you control. Activate only as a sorcery,” and “[Cost]: Unattach this permanent. Activate only if this permanent is attached to a creature and only as a sorcery.”"},{"date":"2022-02-18","text":"Similarly, if an Equipment is tapped, its reconfigure abilities may still be activated and it may still become attached to creatures. Becoming attached doesn't untap it. In most cases, an attached Equipment being tapped won't affect gameplay, but it will be relevant if it becomes unattached again before it untaps."}],"subtypes":["Equipment","Demon"],"supertypes":[],"toughness":"1","type":"Artifact Creature — Equipment Demon","types":["Artifact","Creature"]}"##
+        }
+        "Coerced to Kill" => {
+            r##"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"3a007dbd-18fd-44d1-a305-7cc8dd6231eb"},"keywords":["Enchant"],"layout":"normal","manaCost":"{3}{U}{B}","manaValue":5.0,"name":"Coerced to Kill","rulings":[{"date":"2024-02-02","text":"Coerced to Kill overwrites all previous effects that set the creature's base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."},{"date":"2024-02-02","text":"Effects that modify a creature's power and/or toughness, such as the effect of Auspicious Arrival, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Creeperhulk" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"c6423251-759a-48f1-a9ae-b49b98172c08"},"keywords":["Trample"],"layout":"normal","manaCost":"{3}{G}{G}","manaValue":5.0,"name":"Creeperhulk","power":"5","rulings":[{"date":"2014-11-07","text":"Effects that modify the target creature’s power and/or toughness, such as the effect of Giant Growth or Glorious Anthem, will apply to the creature no matter when they started applying. The same is true for counters that affect the target creature’s power and toughness and effects that switch its power and toughness."},{"date":"2014-11-07","text":"The activated ability overwrites all previous effects that set the target creature’s base power and/or toughness to specific values. Other effects that set its base power and/or toughness that start to apply after Creeperhulk’s ability resolves will overwrite Creeperhulk’s effect."}],"subtypes":["Plant","Elemental"],"supertypes":[],"toughness":"5","type":"Creature — Plant Elemental","types":["Creature"]}"##
+        }
+        "Deep Freeze" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"648aead4-dc0b-47bc-911c-8dcd2cfd32d3"},"keywords":["Enchant"],"layout":"normal","manaCost":"{2}{U}","manaValue":3.0,"name":"Deep Freeze","rulings":[{"date":"2018-04-27","text":"Deep Freeze overwrites all previous effects that set the creature’s base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."},{"date":"2018-04-27","text":"Effects that modify a creature’s power and/or toughness, such as the effect of Titanic Growth, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."},{"date":"2018-04-27","text":"If the enchanted creature has an ability that grants abilities to other objects, Deep Freeze’s effect will stop it from doing so. If the enchanted creature gains an ability after Deep Freeze resolves, it will keep that ability."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Dragonblood Twins" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"6eefc7fe-3f9d-45d6-8538-cf2ac1cb7094"},"keywords":["Double team","Flurry"],"layout":"normal","manaCost":"{1}{R}","manaValue":2.0,"name":"Dragonblood Twins","power":"2","subtypes":["Human","Monk"],"supertypes":[],"toughness":"2","type":"Creature — Human Monk","types":["Creature"]}"##
+        }
+        "Eidolon of Astral Winds" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"4c9b8b82-7f61-4dc0-aeac-fba5dc115e91"},"keywords":["Constellation","Vigilance"],"layout":"normal","manaCost":"{2}{W}","manaValue":3.0,"name":"Eidolon of Astral Winds","power":"2","rulings":[{"date":"2024-11-08","text":"If Eidolon of Astral Winds enters at the same time as one or more other enchantments you control, its last ability will trigger for each of those enchantments, including itself."},{"date":"2024-11-08","text":"The effect of Eidolon of Astral Winds's last ability will overwrite any previous effects that set the creature's power and toughness to specific values. Effects that otherwise modify the target creature's power and toughness will still apply no matter when they took effect. The same is true for +1/+1 counters."}],"subtypes":["Spirit"],"supertypes":[],"toughness":"4","type":"Enchantment Creature — Spirit","types":["Enchantment","Creature"]}"##
+        }
+        "Flayer of Loyalties" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"1e9053b5-5cca-486c-9dd8-b198a7b666bf"},"keywords":["Annihilator","Trample"],"layout":"normal","manaCost":"{8}{C}{C}","manaValue":10.0,"name":"Flayer of Loyalties","power":"10","rulings":[{"date":"2023-07-28","text":"Annihilator abilities trigger and resolve during the declare attackers step. The defending player chooses and sacrifices the required number of permanents before they declare blockers. Any creatures sacrificed this way won't be able to block."},{"date":"2023-07-28","text":"If a creature with annihilator    is attacking a planeswalker, and the defending player chooses to sacrifice that planeswalker, the attacking creature continues to attack. It may be blocked. If it isn't blocked, it simply won't deal combat damage to anything."}],"subtypes":["Eldrazi"],"supertypes":[],"toughness":"10","type":"Creature — Eldrazi","types":["Creature"]}"##
+        }
+        "Gigantiform" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"d9e1bae6-2d56-45d1-bdac-2431a18aab3e"},"keywords":["Enchant","Kicker"],"layout":"normal","manaCost":"{3}{G}{G}","manaValue":5.0,"name":"Gigantiform","rulings":[{"date":"2009-10-01","text":"Although the Gigantiform cast as a spell targets a creature, the Gigantiform put onto the battlefield as a result of the first one's triggered ability does not. It may be attached to a creature with shroud, for example. However, it may not be attached to a creature that couldn't be enchanted by it, such as a creature with protection from green. You don't choose which creature it will be attached to until it enters. Once you choose which creature to attach it to, it's too late for players to respond."},{"date":"2009-10-01","text":"Effects that modify the enchanted creature's power or toughness, such as the effects of Giant Growth or Glorious Anthem, will apply to it no matter when they started to take effect. The same is true for counters that change the creature's power or toughness (such as +1/+1 counters) and effects that switch its power and toughness."},{"date":"2009-10-01","text":"Gigantiform overwrites all previous effects that set the enchanted creature's power and toughness to specific values. Other effects that set its power or toughness to specific values that start to apply after Gigantiform becomes attached to it will overwrite Gigantiform."},{"date":"2009-10-01","text":"If the creature targeted by the Gigantiform spell is an illegal target by the time Gigantiform resolves, the spell doesn't resolve. It won't enter, so you won't get to search your library for another Gigantiform."},{"date":"2024-11-08","text":"If a card or token enters as a copy of a permanent, the new permanent isn't kicked, even if the original was."},{"date":"2024-11-08","text":"If a spell's kicker cost was paid, the spell is \"kicked.\""},{"date":"2024-11-08","text":"If you copy a kicked spell on the stack, the copy is also kicked. If the copied spell is a permanent spell, the token the copy of that spell becomes when it enters is also kicked."},{"date":"2024-11-08","text":"If you put a permanent with a kicker ability onto the battlefield without casting it, you can't kick it."},{"date":"2024-11-08","text":"The kicker ability doesn't let you pay a kicker cost more than once."},{"date":"2024-11-08","text":"To determine a spell's total cost, start with the mana cost (or an alternative cost if another card's effect allows you to pay one instead), add any cost increases (such as kicker), then apply any cost reductions. The spell's mana value remains unchanged, no matter what the total cost to cast it was."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Glamer Gifter" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"e67a820b-6249-478e-91db-9827e44aa60a"},"keywords":["Flash","Flying"],"layout":"normal","manaCost":"{1}{U}","manaValue":2.0,"name":"Glamer Gifter","power":"1","rulings":[{"date":"2025-11-17","text":"Effects that modify a creature's power and/or toughness, such as the effect of Appeal to Eirdu, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."},{"date":"2025-11-17","text":"Glamer Gifter's last ability overwrites all previous effects that set the affected creature's base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."}],"subtypes":["Faerie","Wizard"],"supertypes":[],"toughness":"2","type":"Creature — Faerie Wizard","types":["Creature"]}"##
+        }
+        "Greensleeves" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"20b90808-0279-46eb-ae51-6990ac679a83"},"keywords":["Mill"],"layout":"normal","loyalty":"5","manaCost":"{4}{G}{G}","manaValue":6.0,"name":"Greensleeves","subtypes":["Greensleeves"],"supertypes":["Legendary"],"type":"Legendary Planeswalker — Greensleeves","types":["Planeswalker"]}"##
+        }
+        "Hulkbuster Armor" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"abc3f55e-5fc6-44b3-a2f5-b8f49d93249f"},"keywords":["Equip"],"layout":"normal","manaCost":"{4}","manaValue":4.0,"name":"Hulkbuster Armor","subtypes":["Equipment"],"supertypes":["Legendary"],"type":"Legendary Artifact — Equipment","types":["Artifact"]}"##
+        }
+        "Mace of the Valiant" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"881c3dd4-49df-48c3-b514-509990332e25"},"keywords":["Equip"],"layout":"normal","manaCost":"{2}{W}","manaValue":3.0,"name":"Mace of the Valiant","rulings":[{"date":"2019-10-04","text":"The equipped creature has vigilance even if Mace of the Valiant has no charge counters on it."}],"subtypes":["Equipment"],"supertypes":[],"type":"Artifact — Equipment","types":["Artifact"]}"##
+        }
+        "Mirror Entity" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"17e905ca-c0bd-473d-95a7-e180ba5fea43"},"keywords":["Changeling"],"layout":"normal","manaCost":"{2}{W}","manaValue":3.0,"name":"Mirror Entity","power":"1","rulings":[{"date":"2021-03-19","text":"Activating the ability with X = 0 will cause all creatures you control to become 0/0 and be put into the graveyard."},{"date":"2021-03-19","text":"Changeling applies in all zones, not just the battlefield."},{"date":"2021-03-19","text":"Mirror Entity's ability overwrites any effects that previously set a creature's base power and/or toughness. Any existing effects or counters that raise or lower a creature's power and/or toughness continue to apply to the creature's newly-set power and toughness."}],"subtypes":["Shapeshifter"],"supertypes":[],"toughness":"1","type":"Creature — Shapeshifter","types":["Creature"]}"##
+        }
+        "Mirror Entity Avatar" => {
+            r##"{"colorIdentity":[],"colors":[],"hand":"+1","identifiers":{"scryfallOracleId":"a3b19bb9-57a4-4e5f-84b6-0d4d4707871e"},"layout":"vanguard","life":"-2","manaValue":0.0,"name":"Mirror Entity Avatar","subtypes":[],"supertypes":[],"type":"Vanguard","types":["Vanguard"]}"##
+        }
+        "Nightsky Mimic" => {
+            r##"{"colorIdentity":["B","W"],"colors":["B","W"],"identifiers":{"scryfallOracleId":"ed186aea-e0dc-4d88-a619-748b2ebf0c52"},"layout":"normal","manaCost":"{1}{W/B}","manaValue":2.0,"name":"Nightsky Mimic","power":"2","rulings":[{"date":"2008-08-01","text":"Any other abilities the Mimic may have gained are not affected."},{"date":"2008-08-01","text":"If you cast a spell that’s the two appropriate colors for the second time in a turn, the ability triggers again. The Mimic will once again become the power and toughness stated in its ability, which could overwrite power- and toughness-setting effects that have been applied to it in the meantime."},{"date":"2008-08-01","text":"The ability triggers whenever you cast a spell that’s both of its listed colors. It doesn’t matter whether that spell also happens to be any other colors."},{"date":"2009-10-01","text":"The effect from the ability overwrites other effects that set power and/or toughness if and only if those effects existed before the ability resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after the ability resolves. Effects that switch the creature’s power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."}],"subtypes":["Shapeshifter"],"supertypes":[],"toughness":"1","type":"Creature — Shapeshifter","types":["Creature"]}"##
+        }
+        "Nyxborn Hydra" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"4d1b655f-05b8-4b82-9cb9-67660f570a9b"},"keywords":["Bestow","Reach","Trample"],"layout":"normal","manaCost":"{X}{G}","manaValue":1.0,"name":"Nyxborn Hydra","power":"0","rulings":[{"date":"2024-06-07","text":"Auras attached to a creature don't become tapped when the creature becomes tapped. Except in some rare cases, an Aura with bestow remains untapped when it becomes unattached and becomes a creature."},{"date":"2024-06-07","text":"If a permanent with bestow enters the battlefield by any method other than being cast, it will be an enchantment creature. You can't choose to pay the bestow cost and have it become an Aura."},{"date":"2024-06-07","text":"On the stack, a spell with bestow is either a creature spell or an Aura spell. It's never both, although it's an enchantment spell in either case."},{"date":"2024-06-07","text":"Unlike other Aura spells, an Aura spell with bestow isn't countered if its target is illegal as it begins to resolve. Rather, the effect making it an Aura spell ends, it loses enchant creature, it returns to being an enchantment creature spell, and it resolves and enters the battlefield as an enchantment creature."},{"date":"2024-06-07","text":"Unlike other Auras, an Aura with bestow isn't put into its owner's graveyard if it becomes unattached. Rather, the effect making it an Aura ends, it loses enchant creature, and it remains on the battlefield as an enchantment creature. It can attack (and its {T} abilities can be activated, if it has any) on the turn it becomes unattached if it's been under your control continuously, even as an Aura, since your most recent turn began."}],"subtypes":["Hydra"],"supertypes":[],"toughness":"1","type":"Enchantment Creature — Hydra","types":["Enchantment","Creature"]}"##
+        }
+        "Oko, the Trickster" => {
+            r##"{"colorIdentity":["G","U"],"colors":["G","U"],"identifiers":{"scryfallOracleId":"f4bf8bd1-71b0-4eb1-976c-54677238b2a6"},"layout":"normal","loyalty":"4","manaCost":"{4}{G}{U}","manaValue":6.0,"name":"Oko, the Trickster","rulings":[{"date":"2019-10-04","text":"Any effects that modify a creature's power and/or toughness without setting them to a specific number or value will apply after its base power and toughness are set, regardless of the order in which those effects were created. The same is true of counters that modify its power and toughness."},{"date":"2019-10-04","text":"If Oko becomes a creature the same turn he enters the battlefield, you can't attack with him or use any of his {T} abilities (if he gains any)."},{"date":"2019-10-04","text":"If the target creature is an illegal target by the time Oko's second ability tries to resolve, the ability won't resolve. Damage that would be dealt to Oko won't be prevented."},{"date":"2019-10-04","text":"If the target creature is copying something else, then Oko becomes a copy of whatever that creature copied."},{"date":"2019-10-04","text":"Oko copies the printed values of the target creature. It won't copy counters on that creature or effects that have changed its power, toughness, types, color, or so on. Notably, it won't copy effects that made the target creature become a creature if it isn't normally a creature."},{"date":"2019-10-04","text":"Oko's last ability affects only creatures you control at the time it resolves. Creatures you begin to control later in the turn won't be 10/10."},{"date":"2019-10-04","text":"While Oko is a creature, he isn't a planeswalker. Damage dealt to him won't cause him to lose loyalty."}],"subtypes":["Oko"],"supertypes":["Legendary"],"type":"Legendary Planeswalker — Oko","types":["Planeswalker"]}"##
+        }
+        "Phantasmal Form" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"d21facb6-27c2-49cb-9f13-7d6079096eda"},"layout":"normal","manaCost":"{2}{U}","manaValue":3.0,"name":"Phantasmal Form","rulings":[{"date":"2019-06-14","text":"Effects that modify the target creatures' power or toughness (such as the effects of Force of Virtue or Giant Growth) will apply no matter when they started to take effect. The same is true for counters that change the creatures' power or toughness (such as +1/+1 counters)."},{"date":"2019-06-14","text":"Phantasmal Form overwrites all previous effects that set the target creatures' power and toughness to specific values. Other effects that set their power or toughness to specific values that start to apply after Phantasmal Form resolves will overwrite this effect."},{"date":"2019-06-14","text":"You may cast Phantasmal Form without choosing any target creatures. You'll just draw a card. However, if you choose any targets and all of those targets become illegal before the spell tries to resolve, the spell won't resolve and you won't draw a card."}],"subtypes":[],"supertypes":[],"type":"Instant","types":["Instant"]}"##
+        }
+        "Rakdos Riteknife" => {
+            r##"{"colorIdentity":["B","R"],"colors":[],"identifiers":{"scryfallOracleId":"43a2bd01-3fce-4191-a08a-1e379c7770b0"},"keywords":["Equip"],"layout":"normal","manaCost":"{2}","manaValue":2.0,"name":"Rakdos Riteknife","subtypes":["Equipment"],"supertypes":[],"type":"Artifact — Equipment","types":["Artifact"]}"##
+        }
+        "Reaper's Scythe" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"b0f7c2a9-914a-48c1-871c-6f72946d61d8"},"keywords":["Death Sickle","Equip","Job select"],"layout":"normal","manaCost":"{2}{B}","manaValue":3.0,"name":"Reaper's Scythe","rulings":[{"date":"2025-06-06","text":"If the Hero token is destroyed, the Equipment stays on the battlefield."},{"date":"2025-06-06","text":"If the job select ability causes two Hero tokens to be created (due to an effect such as that of Doubling Season), the Equipment becomes attached to only one of them."},{"date":"2025-06-06","text":"The Hero token enters as a 1/1 creature, then the Equipment becomes attached to it. Abilities that trigger when a creature enters the battlefield see that a 1/1 creature entered the battlefield."},{"date":"2025-06-06","text":"You may pay the Equipment's equip cost as normal to move it from the Hero token to another creature you control."}],"subtypes":["Equipment"],"supertypes":[],"type":"Artifact — Equipment","types":["Artifact"]}"##
+        }
+        "Shorecrasher Mimic" => {
+            r##"{"colorIdentity":["G","U"],"colors":["G","U"],"identifiers":{"scryfallOracleId":"3da837db-b3e9-46e4-939d-54ab43af94d9"},"layout":"normal","manaCost":"{1}{G/U}","manaValue":2.0,"name":"Shorecrasher Mimic","power":"2","rulings":[{"date":"2008-08-01","text":"Any other abilities the Mimic may have gained are not affected."},{"date":"2008-08-01","text":"If you cast a spell that’s the two appropriate colors for the second time in a turn, the ability triggers again. The Mimic will once again become the power and toughness stated in its ability, which could overwrite power- and toughness-setting effects that have been applied to it in the meantime."},{"date":"2008-08-01","text":"The ability triggers whenever you cast a spell that’s both of its listed colors. It doesn’t matter whether that spell also happens to be any other colors."},{"date":"2009-10-01","text":"The effect from the ability overwrites other effects that set power and/or toughness if and only if those effects existed before the ability resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after the ability resolves. Effects that switch the creature’s power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."}],"subtypes":["Shapeshifter"],"supertypes":[],"toughness":"1","type":"Creature — Shapeshifter","types":["Creature"]}"##
+        }
+        "Stasis Field" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"83633ea1-a8d5-4351-9047-625d6905386d"},"keywords":["Enchant"],"layout":"normal","manaCost":"{1}{U}","manaValue":2.0,"name":"Stasis Field","rulings":[{"date":"2023-04-14","text":"Effects that modify a creature’s power and/or toughness, such as the effect of Titanic Growth, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."},{"date":"2023-04-14","text":"If the enchanted creature has an ability that grants abilities to other objects, Stasis Field’s effect will stop it from doing so. If the enchanted creature gains an ability after Stasis Field resolves, it will keep that ability."},{"date":"2023-04-14","text":"Stasis Field overwrites all previous effects that set the creature’s base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Super State" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"ab2dfe99-bd77-44d7-92be-81643ea901f0"},"keywords":["Enchant","First strike","Trample"],"layout":"normal","manaCost":"{7}","manaValue":7.0,"name":"Super State","subtypes":["Aura"],"supertypes":["Legendary"],"type":"Legendary Enchantment — Aura","types":["Enchantment"]}"##
+        }
+        "Taranika, Akroan Veteran" => {
+            r##"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"1e3c1920-7bf5-44f9-b1ff-b17d6420e69b"},"keywords":["Vigilance"],"layout":"normal","manaCost":"{1}{W}{W}","manaValue":3.0,"name":"Taranika, Akroan Veteran","power":"3","rulings":[{"date":"2020-01-24","text":"Any effects that modify the target creature's power and/or toughness without setting them to a specific number or value will apply after its base power and toughness are set, regardless of the order in which those effects were created. The same is true of counters that modify its power and toughness."},{"date":"2020-01-24","text":"Taranika's triggered ability can target a creature that's already untapped. It still becomes 4/4 and gains indestructible."},{"date":"2020-01-24","text":"Taranika's triggered ability isn't optional. If your only other creatures are bigger than 4/4, you'll have to shrink one for the turn."},{"date":"2020-01-24","text":"Untapping an attacking creature doesn't remove it from combat."}],"subtypes":["Human","Soldier"],"supertypes":["Legendary"],"toughness":"3","type":"Legendary Creature — Human Soldier","types":["Creature"]}"##
+        }
+        "Turtle-Duck" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"e93782e3-1b93-459a-a7de-06c3b6591e6f"},"layout":"normal","manaCost":"{G}","manaValue":1.0,"name":"Turtle-Duck","power":"0","rulings":[{"date":"2025-10-02","text":"Effects that modify Turtle-Duck's power without setting it will apply no matter when they started to take effect. The same is true for counters that change its power."},{"date":"2025-10-02","text":"Turtle-Duck's ability overwrites all previous effects that set its power to a specific value. Other effects that set its power to a specific value that start to apply after the ability resolves will overwrite that part of the effect."}],"subtypes":["Turtle","Bird"],"supertypes":[],"toughness":"4","type":"Creature — Turtle Bird","types":["Creature"]}"##
+        }
+        "Water Wings" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"17f8e8cb-cd1b-4d94-9efa-ce268e8e7096"},"layout":"normal","manaCost":"{1}{U}","manaValue":2.0,"name":"Water Wings","rulings":[{"date":"2023-09-01","text":"Water Wings overwrites any previous effects that set the creature's power and/or toughness to specific values. Effects that otherwise modify its power and toughness will still apply no matter when they took effect. The same is true for +1/+1 counters."}],"subtypes":[],"supertypes":[],"type":"Instant","types":["Instant"]}"##
+        }
+        "Werewolf Pack Leader" => {
+            r##"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"086a911f-9ed4-4260-ae46-58c9333b95f5"},"keywords":["Pack tactics"],"layout":"normal","manaCost":"{G}{G}","manaValue":2.0,"name":"Werewolf Pack Leader","power":"3","rulings":[{"date":"2021-07-23","text":"The last ability will overwrite any previous effects that set Werewolf Pack Leader's power and toughness to specific numbers. Effects that otherwise modify its power and toughness will still apply no matter when they took effect. The same is true for +1/+1 counters. For example, if you cast a spell that gives Werewolf Pack Leader +1/+1, after that resolves it is a 4/4 creature. If you then activate its last ability, it will be a 6/4 creature."}],"subtypes":["Human","Werewolf"],"supertypes":[],"toughness":"3","type":"Creature — Human Werewolf","types":["Creature"]}"##
+        }
+        "Wings of Velis Vel" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"0bb2b3cc-d3e6-40e9-a5da-d589e8e8f0bd"},"keywords":["Changeling"],"layout":"normal","manaCost":"{1}{U}","manaValue":2.0,"name":"Wings of Velis Vel","rulings":[{"date":"2009-10-01","text":"The power/toughness-setting effect overwrites other effects that set power and toughness only if those effects existed before this spell resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after this spell resolves. Effects that switch the creature's power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."},{"date":"2024-06-07","text":"Kindred is a card type that allows noncreature cards to have creature types. For example, Echoes of Eternity is an Eldrazi (although not a creature) while on the battlefield and an Eldrazi card (although not a creature card) in zones other than the battlefield."},{"date":"2024-06-07","text":"This cards was originally printed with the \"tribal\" card type. That card type has been replaced with \"kindred\". This change does not affect the gameplay function of this card."},{"date":"2024-06-07","text":"While it appears only on cards that already have other card types, kindred is a card type and will be counted by effects that refer to the number of card types among cards in a zone."}],"subtypes":["Shapeshifter"],"supertypes":[],"type":"Kindred Instant — Shapeshifter","types":["Kindred","Instant"]}"##
+        }
+        "Woodlurker Mimic" => {
+            r##"{"colorIdentity":["B","G"],"colors":["B","G"],"identifiers":{"scryfallOracleId":"5f4ddd52-4940-4557-8531-40c66857d4cd"},"layout":"normal","manaCost":"{1}{B/G}","manaValue":2.0,"name":"Woodlurker Mimic","power":"2","rulings":[{"date":"2008-08-01","text":"Any other abilities the Mimic may have gained are not affected."},{"date":"2008-08-01","text":"If you cast a spell that’s the two appropriate colors for the second time in a turn, the ability triggers again. The Mimic will once again become the power and toughness stated in its ability, which could overwrite power- and toughness-setting effects that have been applied to it in the meantime."},{"date":"2008-08-01","text":"The ability triggers whenever you cast a spell that’s both of its listed colors. It doesn’t matter whether that spell also happens to be any other colors."},{"date":"2009-10-01","text":"The effect from the ability overwrites other effects that set power and/or toughness if and only if those effects existed before the ability resolved. It will not overwrite effects that modify power or toughness (whether from a static ability, counters, or a resolved spell or ability), nor will it overwrite effects that set power and toughness which come into existence after the ability resolves. Effects that switch the creature’s power and toughness are always applied after any other power or toughness changing effects, including this one, regardless of the order in which they are created."}],"subtypes":["Shapeshifter"],"supertypes":[],"toughness":"1","type":"Creature — Shapeshifter","types":["Creature"]}"##
+        }
+        "Aurelia, Exemplar of Justice" => {
+            r##"{"colorIdentity":["R","W"],"colors":["R","W"],"identifiers":{"scryfallOracleId":"2e1e0385-1537-4cb6-9d24-e4593d9a8f4a"},"keywords":["Flying","Mentor"],"layout":"normal","manaCost":"{2}{R}{W}","manaValue":4.0,"name":"Aurelia, Exemplar of Justice","power":"2","rulings":[{"date":"2018-10-05","text":"Aurelia’s last ability resolves before attackers are chosen."},{"date":"2018-10-05","text":"If the creature with mentor leaves the battlefield with mentor on the stack, use its power as that creature last existed on the battlefield to determine whether the target creature has less power."},{"date":"2018-10-05","text":"If the target creature’s power is no longer less than the attacking creature’s power as the ability resolves, mentor doesn’t add a +1/+1 counter. For example, if two 3/3 creatures with mentor attack and both mentor triggers target the same 2/2 creature, the first to resolve puts a +1/+1 counter on it and the second does nothing."},{"date":"2018-10-05","text":"Mentor compares the power of the creature with mentor with that of the target creature at two different times: once as the triggered ability is put onto the stack, and once as the triggered ability resolves. If you wish to raise a creature’s power so its mentor ability can target a bigger creature, the last chance you have to do so is during the beginning of combat step."},{"date":"2018-10-05","text":"Once Aurelia’s last ability has resolved, the creature keeps whatever bonuses it got from that ability even if its colors change."},{"date":"2018-10-05","text":"The target creature gains trample and vigilance if it’s both red and white. It gets +2/+0 only once, even if it’s both red and white, and even if it’s neither red nor white."}],"subtypes":["Angel"],"supertypes":["Legendary"],"toughness":"5","type":"Legendary Creature — Angel","types":["Creature"]}"##
+        }
+        "Tinfoil Helm" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"c0c1a8f0-dca3-492a-9ad1-5a1da6d47efe"},"keywords":["Equip"],"layout":"normal","manaCost":"{2}","manaValue":2.0,"name":"Tinfoil Helm","subtypes":["Equipment"],"supertypes":[],"type":"Artifact — Equipment","types":["Artifact"]}"##
+        }
+        "Mystic Doom Sandwich" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"c490157a-cff5-417b-8f83-15f84398e34f"},"keywords":["Lifelink"],"layout":"normal","manaValue":0.0,"name":"Mystic Doom Sandwich","subtypes":[],"supertypes":[],"type":"Stickers","types":["Stickers"]}"##
+        }
+        "Lier, Disciple of the Drowned" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"f224db3d-cdd2-43f2-b625-4b861efa6449"},"layout":"normal","manaCost":"{3}{U}{U}","manaValue":5.0,"name":"Lier, Disciple of the Drowned","power":"3","rulings":[{"date":"2025-06-06","text":"\"Flashback [cost]\" means \"You may cast this card from your graveyard if the resulting spell is an instant or sorcery spell by paying [cost] rather than paying its mana cost\" and \"If the flashback cost was paid, exile this card instead of putting it anywhere else any time it would leave the stack.\""},{"date":"2025-06-06","text":"A spell cast using flashback will always be exiled afterward, whether it resolves, is countered, or leaves the stack in some other way."},{"date":"2025-06-06","text":"If a card has multiple instances of flashback, you may choose any of its flashback costs to pay."},{"date":"2025-06-06","text":"If a card with flashback is put into your graveyard during your turn, you can cast it if it's legal to do so before any other player can take any actions."},{"date":"2025-06-06","text":"If a card with no mana cost gains flashback, it has no flashback cost. It can't be cast this way."},{"date":"2025-06-06","text":"If a split card gains flashback, you pay only the cost of the half you're casting."},{"date":"2025-06-06","text":"If you cast a spell with flashback, you can't pay any alternative costs such as overload costs. You can pay additional costs such as kicker costs. If the spell has any mandatory additional costs, you must pay those to cast the spell with flashback."},{"date":"2025-06-06","text":"If you cast an instant or sorcery with {X} in its mana cost this way, you still choose the value of X as part of casting the spell and pay that cost."},{"date":"2025-06-06","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a flashback cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell is determined only by its mana cost, no matter what the total cost to cast the spell was."},{"date":"2025-06-06","text":"You can cast a spell using flashback even if it was somehow put into your graveyard without having been cast."},{"date":"2025-06-06","text":"You must still follow any timing restrictions and permissions, including those based on the card's type. For instance, you can cast a sorcery using flashback only when you could normally cast a sorcery."},{"date":"2025-10-02","text":"Lier's last ability allows you to cast adventurer cards in your graveyard as Adventures and omen cards in your graveyard as Omens using the flashback it grants. This is because the alternative characteristics of those cards are considered when determining whether or not those spells can legally be cast. Note that only the Adventure or Omen can be cast this way. For example, if you control Lier and you have Bonecrusher Giant in your graveyard, you can cast Stomp with flashback, but not Bonecrusher Giant."}],"subtypes":["Human","Wizard"],"supertypes":["Legendary"],"toughness":"4","type":"Legendary Creature — Human Wizard","types":["Creature"]}"##
+        }
+        "Underworld Breach" => {
+            r##"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"27e0948b-9916-473b-8d8c-a51bdfbc7457"},"layout":"normal","manaCost":"{1}{R}","manaValue":2.0,"name":"Underworld Breach","rulings":[{"date":"2020-01-24","text":"After an escaped spell resolves, it returns to its owner's graveyard if it's not a permanent spell. If it is a permanent spell, it enters the battlefield and will return to its owner's graveyard if it dies later. Perhaps it will escape again—good underworld security is so hard to come by these days."},{"date":"2020-01-24","text":"Escape's permission doesn't change when you may cast the spell from your graveyard."},{"date":"2020-01-24","text":"If a card has multiple abilities giving you permission to cast it, such as two escape abilities or an escape ability and a flashback ability, you choose which one to apply. The others have no effect."},{"date":"2020-01-24","text":"If a card has no mana cost, its escape cost is an unpayable cost, so you can't cast it for that cost."},{"date":"2020-01-24","text":"If a card with escape is put into your graveyard during your turn, you'll be able to cast it right away if it's legal to do so, before an opponent can take any actions."},{"date":"2020-01-24","text":"If a spell you're casting with escape has an additional cost of discarding cards or sacrificing permanents, you may exile cards discarded or sacrificed this way to pay that part of its escape cost."},{"date":"2020-01-24","text":"If you cast a spell with its escape permission, you can't choose to apply any other alternative costs or to cast it without paying its mana cost. If it has any additional costs, you must pay those."},{"date":"2020-01-24","text":"If you're casting an adventurer card or split card with escape, you choose how you wish to cast it, then pay the appropriate cost (for the Adventure, the creature, or the half of the split card you chose) plus exiling three cards."},{"date":"2020-01-24","text":"Once you begin casting a spell with escape, it immediately moves to the stack. Players can't take any other actions until you're done casting the spell."},{"date":"2020-01-24","text":"To determine the total cost of a spell, start with the mana cost or alternative cost you're paying (such as an escape cost), add any cost increases, then apply any cost reductions. The mana value of the spell remains unchanged, no matter what the total cost to cast it was and no matter whether an alternative cost was paid."}],"subtypes":[],"supertypes":[],"type":"Enchantment","types":["Enchantment"]}"##
+        }
+        "Varolz, the Scar-Striped" => {
+            r##"{"colorIdentity":["B","G"],"colors":["B","G"],"identifiers":{"scryfallOracleId":"b6b83b88-0660-4227-895e-78ac43d01b66"},"keywords":["Regenerate"],"layout":"normal","manaCost":"{1}{B}{G}","manaValue":3.0,"name":"Varolz, the Scar-Striped","power":"2","rulings":[{"date":"2013-04-15","text":"Abilities that reduce the cost to cast a creature spell or alternative costs you can pay rather than a card's mana cost don't apply to activating a card's scavenge ability."},{"date":"2013-04-15","text":"Exiling the creature card with scavenge is part of the cost of activating the scavenge ability. Once the ability is activated and the cost is paid, it's too late to stop the ability from being activated by trying to remove the creature card from the graveyard."},{"date":"2013-04-15","text":"If a creature card has multiple instances of scavenge, you can activate either ability (but not both, as the card will be exiled when you activate one of them). Varolz's ability doesn't affect the scavenge cost of a creature's other scavenge ability."},{"date":"2013-04-15","text":"If the creature card you scavenge has {X} in its mana cost, X is 0."},{"date":"2013-04-15","text":"The number of counters that a card's scavenge ability puts on a creature is based on the card's power as it last existed in the graveyard."},{"date":"2013-04-15","text":"While Varolz, the Scar-Striped is on the battlefield, the scavenge cost of a creature card in your graveyard is equal to its mana cost, including any colored mana requirements."}],"subtypes":["Troll","Warrior"],"supertypes":["Legendary"],"toughness":"2","type":"Legendary Creature — Troll Warrior","types":["Creature"]}"##
+        }
+        "Wire Surgeons" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"c51078d9-a53a-49ae-9658-2bc00cce2b81"},"keywords":["Fear"],"layout":"normal","manaCost":"{4}{B}{B}","manaValue":6.0,"name":"Wire Surgeons","power":"6","rulings":[{"date":"2022-10-14","text":"Each token must attack the appropriate player if able."},{"date":"2022-10-14","text":"Exiling the card with encore is a cost to activate the ability. Once you announce that you’re activating it, no player may take actions until you’ve finished. They can’t try to remove the card from your graveyard to stop you from paying the cost."},{"date":"2022-10-14","text":"If an effect stops a token from attacking a specific player, that token can attack any player or planeswalker, or not attack at all. If the effect stops the token from attacking a specific player unless a cost is paid, you don’t have to pay that cost unless you want to attack that player."},{"date":"2022-10-14","text":"If one of the tokens can’t attack for any reason (such as being tapped), then it doesn’t attack. If there’s a cost associated with having it attack, you aren’t forced to pay that cost, so it doesn’t have to attack in that case either."},{"date":"2022-10-14","text":"If one of the tokens somehow is under another player’s control as the delayed triggered ability resolves, you can’t sacrifice that token. It remains on the battlefield indefinitely, even if you regain control of it later."},{"date":"2022-10-14","text":"Opponents who have left the game aren’t counted when determining how many tokens to create."},{"date":"2022-10-14","text":"The tokens copy only what’s on the original card. Effects that modified that creature when it was previously on the battlefield won’t be copied."}],"subtypes":["Human","Artificer"],"supertypes":[],"toughness":"5","type":"Creature — Human Artificer","types":["Creature"]}"##
+        }
+        "Sliver Gravemother" => {
+            r##"{"colorIdentity":["B","G","R","U","W"],"colors":["B","G","R","U","W"],"identifiers":{"scryfallOracleId":"0d59f010-9669-4ad2-9ae9-cd88b85f282c"},"keywords":["Encore"],"layout":"normal","manaCost":"{W}{U}{B}{R}{G}","manaValue":5.0,"name":"Sliver Gravemother","power":"6","rulings":[{"date":"2023-07-28","text":"Each token must attack the appropriate player if able."},{"date":"2023-07-28","text":"Exiling the card with encore is a cost to activate the ability. Once you announce that you're activating it, no player may take actions until you've finished. They can't try to remove the card from your graveyard to stop you from paying the cost."},{"date":"2023-07-28","text":"If an effect stops a token from attacking a specific player, that token can attack any player, planeswalker, or battle, or not attack at all. If the effect stops the token from attacking a specific player unless a cost is paid, you don't have to pay that cost unless you want to attack that player."},{"date":"2023-07-28","text":"If one of the tokens can't attack for any reason (such as being tapped), then it doesn't attack. If there's a cost associated with having it attack, you aren't forced to pay that cost, so it doesn't have to attack in that case either."},{"date":"2023-07-28","text":"If one of the tokens somehow is under another player's control as the delayed triggered ability resolves, you can't sacrifice that token. It remains on the battlefield indefinitely, even if you regain control of it later."},{"date":"2023-07-28","text":"If you control more than one legendary Sliver with the same name and the \"legend rule\" begins applying to them again (perhaps because Sliver Gravemother leaves the battlefield) you'll immediately have to comply with the rule and put all but one of those Slivers into the graveyard."},{"date":"2023-07-28","text":"Opponents who have left the game aren't counted when determining how many tokens to create."},{"date":"2023-07-28","text":"The \"legend rule\" is the rule that states that if a player controls two or more legendary permanents with the same name, that player chooses one of them, and the rest are put into their owners' graveyards."},{"date":"2023-07-28","text":"The tokens copy only what's on the original card. Effects that modified that creature when it was previously on the battlefield won't be copied."},{"date":"2023-07-28","text":"While the \"legend rule\" doesn't apply to Slivers you control, you can control any number of legendary Slivers with the same name and none of them will be put into the graveyard."}],"subtypes":["Sliver"],"supertypes":["Legendary"],"toughness":"6","type":"Legendary Creature — Sliver","types":["Creature"]}"##
+        }
+        "Naktamun" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"a2048704-0d22-435d-b819-269291f2981e"},"layout":"planar","manaValue":0.0,"name":"Naktamun","rulings":[{"date":"2023-04-14","text":"If a spell or ability resolves during your main phase, causing a creature card to be put into your graveyard, you’ll have priority immediately afterward. You can activate the creature card’s embalm ability before any player can exile it, if it’s legal for you to do so."},{"date":"2023-04-14","text":"Once you’ve activated an embalm ability, the card is immediately exiled. Opponents can’t try to stop the ability by exiling the card or quickly getting the heck off of Naktamun."}],"subtypes":["Amonkhet"],"supertypes":[],"type":"Plane — Amonkhet","types":["Plane"]}"##
+        }
+        "Dream Devourer" => {
+            r##"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"0ff7440b-b831-40a9-81c4-99d77bf93b8d"},"layout":"normal","manaCost":"{1}{B}","manaValue":2.0,"name":"Dream Devourer","power":"0","rulings":[{"date":"2021-02-05","text":"Because exiling a card with foretell from your hand is a special action, you can do so any time you have priority during your turn, including in response to spells and abilities. Once you announce you’re taking the action, no other player can respond by trying to remove the card from your hand."},{"date":"2021-02-05","text":"Cards that are foretold by virtue of Dream Devourer’s ability won’t continue to have the foretell ability once they leave your hand, but you can still cast them from exile on a later turn for the foretell costs they were given by Dream Devourer."},{"date":"2021-02-05","text":"Casting a foretold card from exile follows the timing rules for that card. If you foretell an instant card, you can cast it as soon as the next player’s turn. In most cases, if you foretell a card that isn’t an instant (or doesn’t have flash), you’ll have to wait until your next turn to cast it."},{"date":"2021-02-05","text":"If you foretell a modal double-faced card, the foretell cost will be based on the mana cost of the face you cast from exile. For example, if you foretell Kolvori, God of Kinship/The Ringhart Crest, you can cast Kolvori by paying {G}{G} or The Ringhart Crest by paying {G} on a future turn. If you foretell a modal double-faced card whose front face is a nonland face but whose back face is a land face, you can’t play that card as a land."},{"date":"2021-02-05","text":"If you’re casting a foretold card from exile for its foretell cost, you can’t choose to cast it for any other alternative costs. You can, however, pay additional costs, such as kicker costs. If the card has any mandatory additional costs, those must be paid to cast the spell."},{"date":"2021-02-05","text":"It doesn’t matter if Dream Devourer is still on the battlefield or still under your control as you cast the spell from exile."},{"date":"2021-02-05","text":"The last ability triggers when you exile a card from your hand using foretell, not when you cast a foretold card from exile."},{"date":"2021-02-05","text":"The reduction of the foretell cost applies only to generic mana in the foretell cost. It can’t reduce requirements of specific colors of mana. For example, if you foretell a card in your hand with mana cost {1}{G}{G}, its foretell cost will be {G}{G}."}],"subtypes":["Demon","Cleric"],"supertypes":[],"toughness":"3","type":"Creature — Demon Cleric","types":["Creature"]}"##
+        }
+        "Aminatou, Veil Piercer" => {
+            r##"{"colorIdentity":["B","U","W"],"colors":["B","U","W"],"identifiers":{"scryfallOracleId":"bf45f5ee-4d5f-4920-b612-b5492c2f035d"},"keywords":["Surveil"],"layout":"normal","manaCost":"{1}{W}{U}{B}","manaValue":4.0,"name":"Aminatou, Veil Piercer","power":"2","rulings":[{"date":"2024-09-20","text":"If an effect puts a card into your hand without using the word \"draw,\" the card wasn't drawn."},{"date":"2024-09-20","text":"If the card with miracle leaves your hand before the triggered ability resolves, you won't be able to cast it using its miracle ability."},{"date":"2024-09-20","text":"It's important to reveal a card with miracle before it is mixed with the other cards in your hand."},{"date":"2024-09-20","text":"Miracle is an alternative cost to cast the spell with miracle. It can't be combined with other alternative costs, such as casting a spell \"without paying its mana cost.\" You may, however, pay additional costs, such as kicker. If the spell has any mandatory additional costs, those must be paid to cast the spell."},{"date":"2024-09-20","text":"Multiple card draws are always treated as a sequence of individual card draws. For example, if you haven't drawn any cards yet during a turn and cast a spell that instructs you to draw three cards, you'll draw them one at a time. Only the first card drawn this way may be revealed and cast using its miracle ability."},{"date":"2024-09-20","text":"To determine the total cost of a spell, start with the mana cost or alternative cost (such as a miracle cost) you're paying, add any cost increases, then apply any cost reductions. The mana value of the spell remains unchanged, no matter what the total cost to cast it was."},{"date":"2024-09-20","text":"You can cast a card for its miracle cost only as the miracle triggered ability resolves. If you don't want to cast it at that time (or you can't cast it, perhaps because there are no legal targets available), you won't be able to cast it later for the miracle cost."},{"date":"2024-09-20","text":"You can reveal and cast a card with miracle on any turn, not just your own, if it's the first card you've drawn that turn."},{"date":"2024-09-20","text":"You cast the card with miracle during the resolution of the triggered ability. Ignore any timing rules based on the card's type."},{"date":"2024-09-20","text":"You don't have to reveal a drawn card with miracle if you don't wish to cast it at that time."},{"date":"2024-09-20","text":"You still draw the card, whether you use the miracle ability or not. Any ability that triggers whenever you draw a card, for example, will trigger. If you don't cast the card using its miracle ability, it will remain in your hand."}],"subtypes":["Human","Wizard"],"supertypes":["Legendary"],"toughness":"4","type":"Legendary Creature — Human Wizard","types":["Creature"]}"##
+        }
+        "Norman Osborn" => {
+            r##"{"colorIdentity":["B","R","U"],"colors":["U"],"faceName":"Norman Osborn","identifiers":{"scryfallOracleId":"aa5b06a4-90c3-45e7-ab83-cb5c96ded21d"},"keywords":["Connive","Flying","Goblin Formula","Menace","Transform"],"layout":"modal_dfc","manaCost":"{1}{U}","manaValue":2.0,"name":"Norman Osborn // Green Goblin","power":"1","rulings":[{"date":"2025-09-19","text":"A modal double-faced card can be transformed or be put onto the battlefield transformed. This is a change from previous rules. If an effect instructs you to transform a modal double-faced card on the battlefield, it transforms only if its other face has a permanent type (that is, if its other face isn't an instant or sorcery). If it doesn't, it simply won't transform. Similarly, if an effect attempts to put a modal double-faced card onto the battlefield transformed, it will enter transformed if its back face has a permanent type. If it doesn't, it will simply stay in its current zone."},{"date":"2025-09-19","text":"Each double-faced card has an icon in the top-left corner of each face. For modal double-faced cards in this set, these icons are a single black triangle for the front face, and a double white triangle for the back face."},{"date":"2025-09-19","text":"Each face of a double-faced card has its own set of characteristics: name, types, subtypes, abilities, and so on. While a double-faced card is on the stack or battlefield, consider only the characteristics of the face that's currently up. The other set of characteristics is ignored."},{"date":"2025-09-19","text":"Green Goblin's cost-reduction ability doesn't itself allow you to cast any spells from your graveyard. It only reduces the cost of spells that another effect (such as that of Green Goblin's last ability) has allowed you to cast."},{"date":"2025-09-19","text":"Green Goblin's cost-reduction ability reduces only the generic mana component of a spell's cost. For example, if you cast a spell from your graveyard that would normally cost {1}{B}, you will have to pay {B} to cast it."},{"date":"2025-09-19","text":"If a resolving spell or ability instructs a specific creature to connive but that creature has left the battlefield, the creature still connives. If you discard a nonland card this way, you won't put a +1/+1 counter on anything. Abilities that trigger \"when [that creature] connives\" will trigger."},{"date":"2025-09-19","text":"If an effect allows you to play a land or cast a spell from among a group of cards, you may play or cast a modal double-faced card with any face that fits the criteria of that effect."},{"date":"2025-09-19","text":"If an effect allows you to put a card with particular characteristics onto the battlefield without instructing you to play or cast it, you consider only the characteristics of a modal double-faced card's front face to see if that card qualifies. If it does, it enters the battlefield with its front face up."},{"date":"2025-09-19","text":"If an effect instructs a player to choose a card name, the name of either face may be chosen. If that effect or a linked ability refers to a spell with the chosen name being cast and/or a land with the chosen name being played, it considers only the chosen name, not the other face's name."},{"date":"2025-09-19","text":"If no card is discarded, most likely because that player's hand is empty and an effect says they can't draw cards, the conniving creature does not receive a +1/+1 counter."},{"date":"2025-09-19","text":"In the Commander variant, a double-faced card's color identity is determined by the mana costs and mana symbols in the rules text of both faces combined. If either face has a color indicator or basic land type, those are also considered."},{"date":"2025-09-19","text":"Once an ability that causes a creature to connive begins to resolve, no player may take any other actions until it's done. Notably, opponents can't try to remove the conniving creature after you discard a nonland card but before it receives a counter."},{"date":"2025-09-19","text":"One or both faces of a double-faced card may include a reminder about what's on the other face. This reminder text has no effect on gameplay."},{"date":"2025-09-19","text":"The mana value of a modal double-faced card is based on the characteristics of the face that's being considered. On the stack or the battlefield, consider whichever face is up. In all other zones, consider only the front face. This is different than how the mana value of other double-faced cards is determined."},{"date":"2025-09-19","text":"To determine whether it is legal to play a modal double-faced card, consider only the characteristics of the face you're playing and ignore the other face's characteristics."},{"date":"2025-09-19","text":"While a double-faced card isn't on the stack or battlefield, consider only the characteristics of its front face."}],"side":"a","subtypes":["Human","Scientist","Villain"],"supertypes":["Legendary"],"toughness":"1","type":"Legendary Creature — Human Scientist Villain","types":["Creature"]}"##
+        }
+        "Green Goblin" => {
+            r##"{"colorIdentity":["B","R","U"],"colors":["B","R","U"],"faceName":"Green Goblin","identifiers":{"scryfallOracleId":"aa5b06a4-90c3-45e7-ab83-cb5c96ded21d"},"keywords":["Connive","Flying","Goblin Formula","Menace","Transform"],"layout":"modal_dfc","manaCost":"{1}{U}{B}{R}","manaValue":4.0,"name":"Norman Osborn // Green Goblin","power":"3","rulings":[{"date":"2025-09-19","text":"A modal double-faced card can be transformed or be put onto the battlefield transformed. This is a change from previous rules. If an effect instructs you to transform a modal double-faced card on the battlefield, it transforms only if its other face has a permanent type (that is, if its other face isn't an instant or sorcery). If it doesn't, it simply won't transform. Similarly, if an effect attempts to put a modal double-faced card onto the battlefield transformed, it will enter transformed if its back face has a permanent type. If it doesn't, it will simply stay in its current zone."},{"date":"2025-09-19","text":"Each double-faced card has an icon in the top-left corner of each face. For modal double-faced cards in this set, these icons are a single black triangle for the front face, and a double white triangle for the back face."},{"date":"2025-09-19","text":"Each face of a double-faced card has its own set of characteristics: name, types, subtypes, abilities, and so on. While a double-faced card is on the stack or battlefield, consider only the characteristics of the face that's currently up. The other set of characteristics is ignored."},{"date":"2025-09-19","text":"Green Goblin's cost-reduction ability doesn't itself allow you to cast any spells from your graveyard. It only reduces the cost of spells that another effect (such as that of Green Goblin's last ability) has allowed you to cast."},{"date":"2025-09-19","text":"Green Goblin's cost-reduction ability reduces only the generic mana component of a spell's cost. For example, if you cast a spell from your graveyard that would normally cost {1}{B}, you will have to pay {B} to cast it."},{"date":"2025-09-19","text":"If a resolving spell or ability instructs a specific creature to connive but that creature has left the battlefield, the creature still connives. If you discard a nonland card this way, you won't put a +1/+1 counter on anything. Abilities that trigger \"when [that creature] connives\" will trigger."},{"date":"2025-09-19","text":"If an effect allows you to play a land or cast a spell from among a group of cards, you may play or cast a modal double-faced card with any face that fits the criteria of that effect."},{"date":"2025-09-19","text":"If an effect allows you to put a card with particular characteristics onto the battlefield without instructing you to play or cast it, you consider only the characteristics of a modal double-faced card's front face to see if that card qualifies. If it does, it enters the battlefield with its front face up."},{"date":"2025-09-19","text":"If an effect instructs a player to choose a card name, the name of either face may be chosen. If that effect or a linked ability refers to a spell with the chosen name being cast and/or a land with the chosen name being played, it considers only the chosen name, not the other face's name."},{"date":"2025-09-19","text":"If no card is discarded, most likely because that player's hand is empty and an effect says they can't draw cards, the conniving creature does not receive a +1/+1 counter."},{"date":"2025-09-19","text":"In the Commander variant, a double-faced card's color identity is determined by the mana costs and mana symbols in the rules text of both faces combined. If either face has a color indicator or basic land type, those are also considered."},{"date":"2025-09-19","text":"Once an ability that causes a creature to connive begins to resolve, no player may take any other actions until it's done. Notably, opponents can't try to remove the conniving creature after you discard a nonland card but before it receives a counter."},{"date":"2025-09-19","text":"One or both faces of a double-faced card may include a reminder about what's on the other face. This reminder text has no effect on gameplay."},{"date":"2025-09-19","text":"The mana value of a modal double-faced card is based on the characteristics of the face that's being considered. On the stack or the battlefield, consider whichever face is up. In all other zones, consider only the front face. This is different than how the mana value of other double-faced cards is determined."},{"date":"2025-09-19","text":"To determine whether it is legal to play a modal double-faced card, consider only the characteristics of the face you're playing and ignore the other face's characteristics."},{"date":"2025-09-19","text":"While a double-faced card isn't on the stack or battlefield, consider only the characteristics of its front face."}],"side":"b","subtypes":["Goblin","Human","Villain"],"supertypes":["Legendary"],"toughness":"3","type":"Legendary Creature — Goblin Human Villain","types":["Creature"]}"##
+        }
+        _ => panic!("missing complete printed fixture: {name}"),
+    };
+    let mut value: serde_json::Value = serde_json::from_str(metadata).unwrap();
+    assert_eq!(value["types"], serde_json::json!(types));
+    assert_eq!(value["subtypes"], serde_json::json!(subtypes));
+    value["text"] = serde_json::json!(text);
+    let card: crate::database::mtgjson::AtomicCard = serde_json::from_value(value).unwrap();
+    let face = if card.layout == "modal_dfc" {
+        crate::database::synthesis::build_oracle_face_multi(
+            &card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        )
+    } else {
+        crate::database::synthesis::build_oracle_face(
+            &card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        )
+    };
+    assert_eq!(face.name, card.face_name.as_deref().unwrap_or(&card.name));
+    assert_eq!(face.oracle_text.as_deref(), Some(text));
+    assert_eq!(
+        face.mana_cost,
+        card.mana_cost
+            .as_deref()
+            .map(
+                |cost| crate::parser::oracle_nom::primitives::parse_mana_cost(cost)
+                    .unwrap()
+                    .1
+            )
+            .unwrap_or(ManaCost::NoCost)
+    );
+    assert_eq!(
+        face.power,
+        card.power
+            .as_deref()
+            .map(|power| PtValue::Fixed(power.parse::<i32>().unwrap()))
+    );
+    assert_eq!(
+        face.toughness,
+        card.toughness
+            .as_deref()
+            .map(|toughness| PtValue::Fixed(toughness.parse::<i32>().unwrap()))
+    );
+    assert_eq!(face.loyalty, card.loyalty);
+    assert_eq!(face.defense, card.defense);
+    assert_eq!(face.card_type.subtypes, card.subtypes);
+    assert_eq!(
+        face.card_type.supertypes,
+        card.supertypes
+            .iter()
+            .map(|kind| kind
+                .parse::<crate::types::card_type::Supertype>()
+                .expect("complete printed supertype"))
+            .collect::<Vec<_>>()
+    );
+    let core_types = card
+        .types
+        .iter()
+        .filter_map(|kind| match kind.as_str() {
+            // These existing supplemental platforms have no CoreType variant;
+            // full source/metadata preservation does not introduce that platform.
+            "Vanguard" | "Stickers" => None,
+            _ => Some(
+                kind.parse::<crate::types::card_type::CoreType>()
+                    .expect("complete printed core type"),
+            ),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(face.card_type.core_types, core_types);
+    assert_eq!(
+        face.color_identity,
+        card.color_identity
+            .iter()
+            .map(|color| match color.as_str() {
+                "W" => ManaColor::White,
+                "U" => ManaColor::Blue,
+                "B" => ManaColor::Black,
+                "R" => ManaColor::Red,
+                "G" => ManaColor::Green,
+                _ => panic!("printed color identity"),
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+    face
+}
+
+#[test]
+fn complete_publication_aurelia_whole_document_retains_chain_ids_and_target_metadata() {
+    use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
+    use crate::types::ability::{
+        SiblingCondition, SubAbilityLink, TargetReadOrigin, TriggerConstraint,
+    };
+    let source="Flying\nMentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nAt the beginning of combat on your turn, choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
+    let types = vec!["Creature".into()];
+    let subtypes = vec!["Angel".into()];
+    let mut doc = parse_oracle_ir(
+        source,
+        "Aurelia, Exemplar of Justice",
+        &[],
+        &types,
+        &subtypes,
+    );
+    assert_eq!(doc.source_text, source);
+    assert_eq!(doc.items.len(), 3);
+    for (item, (line_number, line)) in doc.items.iter().zip(source.lines().enumerate()) {
+        assert_eq!(item.source.fragment(), Some(line));
+        assert_eq!(item.source.span().first_line, line_number + 1);
+    }
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &doc.items[2].node else {
+        panic!("native trigger decomposition")
+    };
+    let Some(TriggerBody::EffectChain(chain)) = &trigger.body else {
+        panic!("whole target/member chain")
+    };
+    assert_eq!(
+        chain.clauses.len(),
+        2,
+        "one declaration and one complete member instruction"
+    );
+    assert_ne!(chain.clauses[0].id, chain.clauses[1].id);
+    assert!(matches!(
+        chain.clauses[0].parsed.effect,
+        Effect::TargetOnly { .. }
+    ));
+    assert_eq!(
+        chain.clauses[1].target_reads,
+        TargetReadOrigin::ParentAnnouncement
+    );
+    for clause in &chain.clauses {
+        let span = clause.source.span();
+        assert_eq!(
+            span.precision,
+            crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+        );
+        assert!(span.start_byte <= span.end_byte);
+        assert!(span.end_byte <= trigger.source_text.len());
+        assert!(clause.source.fragment().is_some());
+    }
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(
+        parsed.extracted_keywords,
+        vec![Keyword::Flying, Keyword::Mentor]
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.statics.is_empty());
+    assert!(parsed.replacements.is_empty());
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.phase, Some(crate::types::phase::Phase::BeginCombat));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    let declaration = trigger.execute.as_deref().unwrap();
+    assert_eq!(
+        declaration.multi_target.as_ref().unwrap().min,
+        QuantityExpr::Fixed { value: 0 }
+    );
+    assert_eq!(
+        declaration.multi_target.as_ref().unwrap().max,
+        Some(QuantityExpr::Fixed { value: 1 })
+    );
+    let members = std::iter::successors(declaration.sub_ability.as_deref(), |node| {
+        node.sub_ability.as_deref()
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(members.len(), 3);
+    for (index, member) in members.iter().enumerate() {
+        assert_eq!(member.target_reads, TargetReadOrigin::ParentAnnouncement);
+        assert_eq!(member.duration, Some(Duration::UntilEndOfTurn));
+        if index > 0 {
+            assert_eq!(member.sub_link, SubAbilityLink::SequentialSibling);
+            assert_eq!(
+                member.sibling_condition,
+                SiblingCondition::ReplicatedOrBranch
+            );
+        }
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            duration,
+            end_cost,
+        } = member.effect.as_ref()
+        else {
+            panic!("{member:#?}")
+        };
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert!(end_cost.is_none());
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+        assert_eq!(static_abilities[0].condition, None);
+        let expected = match index {
+            0 => vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 0 },
+            ],
+            1 => vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }],
+            2 => vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Vigilance,
+            }],
+            _ => unreachable!(),
+        };
+        assert_eq!(static_abilities[0].modifications, expected);
+    }
+    let native =
+        complete_publication_native_face("Aurelia, Exemplar of Justice", source, &types, &subtypes);
+    assert!(crate::game::coverage::card_face_gaps(&native).is_empty());
+    assert_eq!(
+        native.triggers.len(),
+        2,
+        "full independent synthesized Mentor and printed BeginCombat"
+    );
+    let round_trip: crate::types::card::CardFace =
+        serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
+    assert_eq!(round_trip, native);
+}
+
+// Each independent printed unit is parsed through the same public document
+// entry point on its own, then its ENTIRE typed payload is required in the
+// enclosing card. This checks every field and nested body, rather than finding
+// an arbitrary node of the same effect kind elsewhere on the card.
+fn complete_publication_assert_independent_printed_units(
+    name: &str,
+    text: &str,
+    types: &[String],
+    subtypes: &[String],
+    full: &ParsedAbilities,
+) {
+    for line in text.lines() {
+        let mut independent = parse_oracle_ir(line, name, &[], types, subtypes);
+        let unit = lower_oracle_ir(&mut independent);
+        for keyword in &unit.extracted_keywords {
+            assert!(
+                full.extracted_keywords.contains(keyword),
+                "independent whole keyword {name}: {line}: {keyword:?}"
+            );
+        }
+        for definition in &unit.abilities {
+            assert!(
+                full.abilities.contains(definition),
+                "independent WHOLE ability {name}: {line}: {definition:#?}"
+            );
+        }
+        for definition in &unit.triggers {
+            assert!(
+                full.triggers.contains(definition),
+                "independent WHOLE trigger {name}: {line}: {definition:#?}"
+            );
+        }
+        for definition in &unit.statics {
+            assert!(
+                full.statics.contains(definition),
+                "independent WHOLE static {name}: {line}: {definition:#?}"
+            );
+        }
+        for definition in &unit.replacements {
+            assert!(
+                full.replacements.contains(definition),
+                "independent WHOLE replacement {name}: {line}: {definition:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn complete_publication_actual_modal_dfc_faces_keep_full_values_in_both_loaders() {
+    use crate::database::CardDatabase;
+    let types = vec!["Creature".into()];
+    let front=complete_publication_native_face("Norman Osborn",
+        "Norman Osborn can't be blocked.\nWhenever Norman Osborn deals combat damage to a player, he connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)\n{1}{U}{B}{R}: Transform Norman Osborn. Activate only as a sorcery.",
+        &types,&["Human".into(),"Scientist".into(),"Villain".into()]);
+    let back=complete_publication_native_face("Green Goblin",
+        "Flying, menace\nSpells you cast from your graveyard cost {2} less to cast.\nGoblin Formula — Each nonland card in your graveyard has mayhem. The mayhem cost is equal to its mana cost. (You may cast a card from your graveyard for its mayhem cost if you discarded it this turn. Timing rules still apply.)",
+        &types,&["Goblin".into(),"Human".into(),"Villain".into()]);
+    assert_eq!(front.power, Some(PtValue::Fixed(1)));
+    assert_eq!(front.toughness, Some(PtValue::Fixed(1)));
+    assert_eq!(back.power, Some(PtValue::Fixed(3)));
+    assert_eq!(back.toughness, Some(PtValue::Fixed(3)));
+    assert!(!front.keywords.contains(&Keyword::Flying));
+    assert!(!front.keywords.contains(&Keyword::Menace));
+    assert!(back.keywords.contains(&Keyword::Flying));
+    assert!(back.keywords.contains(&Keyword::Menace));
+    assert_eq!(front.abilities.len(), 1);
+    assert_eq!(front.triggers.len(), 1);
+    assert_eq!(front.static_abilities.len(), 1);
+    assert!(back.abilities.is_empty());
+    assert!(back.triggers.is_empty());
+    assert_eq!(back.static_abilities.len(), 2);
+    assert_eq!(
+        back.static_abilities[1].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Mayhem(ManaCost::SelfManaCost)
+        }]
+    );
+    let mut value = serde_json::Map::new();
+    for (order, face) in [(0, &front), (1, &back)] {
+        let mut entry = serde_json::to_value(face).unwrap();
+        entry["layout"] = serde_json::json!("modal_dfc");
+        entry["face_index"] = serde_json::json!(order);
+        value.insert(face.name.to_lowercase(), entry);
+    }
+    let whole = serde_json::to_string(&value).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        CardDatabase::from_json_str(&whole).unwrap(),
+        CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(database.get_face_by_name("Norman Osborn"), Some(&front));
+        assert_eq!(database.get_face_by_name("Green Goblin"), Some(&back));
+        assert_eq!(
+            database.get_face_by_name("Norman Osborn // Green Goblin"),
+            Some(&front)
+        );
+        let subset = database.export_subset_json(
+            &["Norman Osborn".into(), "Green Goblin".into()]
+                .into_iter()
+                .collect(),
+        );
+        let exported: serde_json::Value = serde_json::from_str(&subset).unwrap();
+        assert_eq!(exported["norman osborn"]["face_index"], 0);
+        assert_eq!(exported["green goblin"]["face_index"], 1);
+        for face in [&front, &back] {
+            let entry = &exported[face.name.to_lowercase()];
+            assert_eq!(entry["layout"], "modal_dfc");
+            let round_trip: crate::types::card::CardFace =
+                serde_json::from_value(entry.clone()).unwrap();
+            assert_eq!(round_trip, *face);
+        }
+    }
+}

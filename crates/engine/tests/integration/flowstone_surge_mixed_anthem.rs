@@ -13,8 +13,18 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::oracle_nom::primitives::parse_mana_cost;
+use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+use nom::{combinator::all_consuming, Parser};
 
 const FLOWSTONE_SURGE: &str = "Creatures you control get +1/-1.";
 
@@ -92,4 +102,5617 @@ fn flowstone_surge_effect_turns_off_when_source_leaves() {
         (2, 2),
         "ally reverts to base 2/2 once the source is gone"
     );
+}
+
+const ALMOST: &str = "Enchant creature\nEnchanted creature has base power and toughness 9/10 and has indestructible.";
+
+const MACE: &str = "Equipped creature gets +1/+1 for each charge counter on this Equipment and has vigilance. (Attacking doesn't cause it to tap.)\nWhenever a creature you control enters, put a charge counter on this Equipment.\nEquip {3}";
+
+const SCYTHE: &str = "Job select\nAt the beginning of your end step, put a soul counter on this Equipment for each player who lost life this turn.\nEquipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.\nDeath Sickle — Equip {2}";
+
+const RITEKNIFE: &str = "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on Rakdos Riteknife.\"\n{B}{R}, Sacrifice this Equipment: Target player sacrifices a permanent of their choice for each blood counter on this Equipment.\nEquip {2}";
+
+const JODAH: &str = "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.\nWhenever you cast a legendary spell from your hand, exile cards from the top of your library until you exile a legendary nonland card with lesser mana value. You may cast that card without paying its mana cost. Put the rest on the bottom of your library in a random order.";
+
+const HANCOCK: &str = "Each other creature you control that's a Zombie or Mutant gets +X/+X, where X is the number of counters on Hancock.\nUndying (When this creature dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)";
+
+const ZINNIA: &str = "Flying\nZinnia gets +X/+0, where X is the number of other creatures you control with base power 1.\nCreature spells you cast gain offspring {2} as you cast them. (You may pay an additional {2} as you cast a creature spell. If you do, when that creature enters, create a 1/1 token copy of it.)";
+
+const DROP_BEAR: &str = "Flash, haste\nDrop Bear has power and toughness each equal to the number of Forests you control plus the number of Bears you control.\nWhen this creature enters, it fights up to one target creature.";
+
+const ELTUREL: &str = "Trample, myriad (Whenever this creature attacks, for each opponent other than defending player, you may create a token copy that's tapped and attacking that player or a planeswalker they control. Exile the tokens at end of combat.)\nAs long as this creature is attacking, it gets +X/+0, where X is the number of lands defending player controls.";
+
+const OYAMINARTOK: &str = "Oyaminartok, Polar Werebear has hexproof if it hasn't dealt damage yet.\nWhenever Oyaminartok deals combat damage to a player, create a Food token.\n{U}, Sacrifice a Food: Draft a card from Oyaminartok's spellbook. When you do, add {U}{U}{U}. Spend this mana only to cast blue creature spells.";
+
+const AURELIA: &str = "Flying\nMentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nAt the beginning of combat on your turn, choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
+
+const ENTITY: &str = "Changeling (This card is every creature type.)\n{X}: Until end of turn, creatures you control have base power and toughness X/X and gain all creature types.";
+
+const SAFEWRIGHT: &str = "Flash\nConvoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nWhen this creature enters, choose a creature type. Other permanents you control of that type gain hexproof and indestructible until end of turn.";
+
+const ARCHON: &str = "Flying\nOther creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.";
+const LENS: &str = "{T}: Target permanent becomes the color of your choice until end of turn.";
+const GREAVES: &str = "Equipped creature has haste and shroud. (It can't be the target of spells or abilities.)\nEquip {0}";
+const BLOOM: &str = "Exile target creature card from a graveyard, then create X 1/1 green Saproling creature tokens, where X is the exiled card's toughness.";
+const VAROLZ: &str = "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost. (Exile a creature card from your graveyard and pay its mana cost: Put a number of +1/+1 counters equal to that card's power on target creature. Scavenge only as a sorcery.)\nSacrifice another creature: Regenerate Varolz.";
+
+#[test]
+fn complete_continuous_archon_attachment_qualifiers_remain_live() {
+    const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let archon = scenario
+        .add_creature_to_hand_from_oracle(P0, "Archon of the Wild Rose", 4, 4, ARCHON)
+        .with_subtypes(vec!["Archon"])
+        .with_mana_cost(complete_publication_cost("{2}{W}{W}"))
+        .id();
+    let own = scenario.add_creature(P0, "Own Aura recipient", 2, 7).id();
+    let foreign_aura_host = scenario
+        .add_creature(P0, "Foreign Aura recipient", 3, 6)
+        .id();
+    let unenchanted = scenario.add_creature(P0, "Unenchanted creature", 6, 7).id();
+    let foreign = scenario
+        .add_creature(P1, "Foreign creature with own Aura", 5, 8)
+        .id();
+    let aura = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pacifism", false, PACIFISM)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{1}{W}"))
+        .id();
+    let foreign_aura = scenario
+        .add_enchantment_from_oracle(P1, "Pacifism", PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{1}{W}"))
+        .id();
+    let other_own_aura = scenario
+        .add_enchantment_from_oracle(P0, "Pacifism", PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{1}{W}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    // Ordinary pre-existing attachment fixtures provide independent controller negatives.
+    engine::game::effects::attach::attach_to(runner.state_mut(), foreign_aura, foreign_aura_host);
+    engine::game::effects::attach::attach_to(runner.state_mut(), other_own_aura, foreign);
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::White]);
+    runner.cast(aura).target_object(own).resolve();
+    assert_eq!(effective_pt(&mut runner, own), (2, 7));
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::White, ManaType::White]);
+    runner.cast(archon).resolve();
+    assert_eq!(effective_pt(&mut runner, own), (4, 4));
+    assert!(runner.state().objects[&own]
+        .keywords
+        .contains(&Keyword::Flying));
+    for (object, expected) in [
+        (foreign_aura_host, (3, 6)),
+        (unenchanted, (6, 7)),
+        (foreign, (5, 8)),
+    ] {
+        assert_eq!(effective_pt(&mut runner, object), expected);
+        assert!(!runner.state().objects[&object]
+            .keywords
+            .contains(&Keyword::Flying));
+    }
+    assert_eq!(effective_pt(&mut runner, archon), (4, 4));
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(aura).resolve();
+    assert_eq!(effective_pt(&mut runner, own), (2, 7));
+    assert!(!runner.state().objects[&own]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert!(runner.state().objects[&archon]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_blade_real_reconfigure_preserves_existing_color_and_types() {
+    use engine::types::ability::Effect;
+    for detach in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let blade = scenario.add_creature_from_oracle(P0, "Blade of the Oni", 3, 1,
+            "Menace\nEquipped creature has base power and toughness 5/5, has menace, and is a black Demon in addition to its other colors and types.\nReconfigure {2}{B}{B} ({2}{B}{B}: Attach to target creature you control; or unattach from a creature. Reconfigure only as a sorcery. While attached, this isn't a creature.)")
+            .as_artifact().as_creature().with_subtypes(vec!["Equipment", "Demon"]).with_mana_cost(complete_publication_cost("{1}{B}")).id();
+        let host = scenario
+            .add_creature(P0, "Red Goblin host", 2, 7)
+            .with_subtypes(vec!["Goblin"])
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let other = scenario.add_creature(P0, "Other host", 4, 6).id();
+        let foreign = scenario.add_creature(P1, "Foreign host", 6, 8).id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        let attach = engine::game::casting::activated_ability_definitions(runner.state(), blade)
+            .into_iter()
+            .find(|(_, definition)| matches!(definition.effect.as_ref(), Effect::Attach { .. }))
+            .unwrap()
+            .0;
+        assert!(runner
+            .act(GameAction::ActivateAbility {
+                source_id: blade,
+                ability_index: attach
+            })
+            .is_err());
+        complete_publication_fund(&mut runner, P0, 2, &[ManaType::Black, ManaType::Black]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: blade,
+                ability_index: attach,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real Reconfigure target");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        assert!(!target_slots[selection.current_slot].optional);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(host)));
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(other)));
+        assert!(!target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(blade)));
+        assert!(!target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(foreign)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, host), (5, 5));
+        assert!(runner.state().objects[&host]
+            .keywords
+            .contains(&Keyword::Menace));
+        assert_eq!(
+            runner.state().objects[&host].color,
+            vec![ManaColor::Red, ManaColor::Black]
+        );
+        assert!(runner.state().objects[&host]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|t| t == "Goblin"));
+        assert!(runner.state().objects[&host]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|t| t == "Demon"));
+        assert!(!runner.state().objects[&blade]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature));
+        assert_eq!(effective_pt(&mut runner, foreign), (6, 8));
+        assert_continuous_complete(runner.state());
+        if detach {
+            let index = engine::game::casting::activated_ability_definitions(runner.state(), blade)
+                .into_iter()
+                .find(|(_, definition)| {
+                    matches!(definition.effect.as_ref(), Effect::UnattachAll { .. })
+                })
+                .unwrap()
+                .0;
+            complete_publication_fund(&mut runner, P0, 2, &[ManaType::Black, ManaType::Black]);
+            runner.activate(blade, index).resolve();
+            assert_eq!(effective_pt(&mut runner, blade), (3, 1));
+            assert!(runner.state().objects[&blade]
+                .keywords
+                .contains(&Keyword::Menace));
+        } else {
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+            runner.cast(bounce).target_object(blade).resolve();
+            assert_eq!(runner.state().objects[&blade].zone, Zone::Hand);
+        }
+        assert_eq!(effective_pt(&mut runner, host), (2, 7));
+        assert!(!runner.state().objects[&host]
+            .keywords
+            .contains(&Keyword::Menace));
+        assert_eq!(runner.state().objects[&host].color, vec![ManaColor::Red]);
+        assert_eq!(
+            runner.state().objects[&host].card_types.subtypes,
+            vec!["Goblin".to_string()]
+        );
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_alpine_named_opponent_land_has_real_mana_grant() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let named = scenario
+        .add_land_from_oracle(P1, "Taiga", "({T}: Add {R} or {G}.)")
+        .with_subtypes(vec!["Mountain", "Forest"])
+        .id();
+    let own = scenario
+        .add_land_from_oracle(P0, "Taiga", "({T}: Add {R} or {G}.)")
+        .with_subtypes(vec!["Mountain", "Forest"])
+        .id();
+    let unmatched = scenario
+        .add_land_from_oracle(P1, "Tropical Island", "({T}: Add {G} or {U}.)")
+        .with_subtypes(vec!["Forest", "Island"])
+        .id();
+    let moon = scenario.add_spell_to_hand_from_oracle(P0, "Alpine Moon", false,
+        "As this enchantment enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"")
+        .as_enchantment().with_mana_cost(complete_publication_cost("{R}")).id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    complete_publication_fund(&mut runner, P0, 0, &[ManaType::Red]);
+    runner.cast(moon).commit();
+    runner.resolve_top();
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("real nonbasic name choice");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        source.as_ref().unwrap().prompt.identity.reference.object_id,
+        moon
+    );
+    assert!(matches!(
+        choice_type,
+        engine::types::ability::ChoiceType::CardName
+    ));
+    assert!(
+        options.is_empty(),
+        "CardName uses the public free-entry domain"
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Taiga".into(),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&named]
+        .card_types
+        .subtypes
+        .is_empty());
+    assert_eq!(
+        runner.state().objects[&own].card_types.subtypes,
+        vec!["Mountain".to_string(), "Forest".to_string()]
+    );
+    assert_eq!(
+        runner.state().objects[&unmatched].card_types.subtypes,
+        vec!["Forest".to_string(), "Island".to_string()]
+    );
+    assert_eq!(runner.state().objects[&named].abilities.len(), 1);
+    assert_continuous_complete(runner.state());
+    runner.act(GameAction::PassPriority).unwrap();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: named,
+            ability_index: 0,
+        })
+        .unwrap();
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: engine::types::game_state::ManaChoicePrompt::SingleColor { options },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual granted mana color choice");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(
+        options,
+        &vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green
+        ]
+    );
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&named].tapped);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 1);
+    assert_eq!(
+        runner.state().players[1]
+            .mana_pool
+            .count_color(ManaType::Blue),
+        1
+    );
+    assert_continuous_complete(runner.state());
+    runner.act(GameAction::PassPriority).unwrap();
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(moon).resolve();
+    assert_eq!(
+        runner.state().objects[&named].card_types.subtypes,
+        vec!["Mountain".to_string(), "Forest".to_string()]
+    );
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_phantasmal_optional_targets_and_all_illegal_resolution() {
+    use engine::types::actions::CastPaymentMode;
+    for (choose, all_illegal) in [(false, false), (true, false), (true, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario
+            .add_creature(P0, "First red Goblin", 2, 7)
+            .with_subtypes(vec!["Goblin"])
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let second = scenario
+            .add_creature(P1, "Second green Bear", 6, 8)
+            .with_subtypes(vec!["Bear"])
+            .with_color(vec![ManaColor::Green])
+            .id();
+        let untouched = scenario.add_creature(P0, "Untouched creature", 5, 6).id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Phantasmal Form", true,
+            "Until end of turn, up to two target creatures each have base power and toughness 3/3, gain flying, and become blue Illusions in addition to their other colors and types.\nDraw a card.")
+            .with_mana_cost(complete_publication_cost("{2}{U}")).id();
+        let bounce = [0, 1].map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Unsummon",
+                    true,
+                    "Return target creature to its owner's hand.",
+                )
+                .with_mana_cost(complete_publication_cost("{U}"))
+                .id()
+        });
+        let draw = scenario.add_card_to_library_top(P0, "Specific draw witness");
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::default(),
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Phantasmal optional target announcement");
+        };
+        assert_eq!(*player, P0);
+        assert!(target_slots[selection.current_slot].optional);
+        for id in [first, second, untouched] {
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(id)));
+        }
+        if choose {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(first)),
+                })
+                .unwrap();
+            let WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("second nondefault target");
+            };
+            assert_eq!(*player, P0);
+            assert!(target_slots[selection.current_slot].optional);
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(second)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(second)),
+                })
+                .unwrap();
+        } else {
+            runner
+                .act(GameAction::ChooseTarget { target: None })
+                .unwrap();
+        }
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(
+            runner.state().stack[0].ability().unwrap().targets.len(),
+            if choose { 2 } else { 0 }
+        );
+        if all_illegal {
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue, ManaType::Blue]);
+            runner.cast(bounce[0]).target_object(first).commit();
+            runner.cast(bounce[1]).target_object(second).commit();
+            assert_eq!(
+                runner.state().stack.len(),
+                3,
+                "both public removals are above the original spell"
+            );
+        }
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&draw].zone,
+            if all_illegal {
+                Zone::Library
+            } else {
+                Zone::Hand
+            }
+        );
+        assert_eq!(effective_pt(&mut runner, untouched), (5, 6));
+        if all_illegal {
+            for id in [first, second] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
+            }
+        } else if choose {
+            for id in [first, second] {
+                assert_eq!(effective_pt(&mut runner, id), (3, 3));
+                assert!(runner.state().objects[&id]
+                    .keywords
+                    .contains(&Keyword::Flying));
+                assert!(runner.state().objects[&id].color.contains(&ManaColor::Blue));
+                assert!(runner.state().objects[&id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|t| t == "Illusion"));
+            }
+            assert!(runner.state().objects[&first]
+                .color
+                .contains(&ManaColor::Red));
+            assert!(runner.state().objects[&first]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|t| t == "Goblin"));
+            assert!(runner.state().objects[&second]
+                .color
+                .contains(&ManaColor::Green));
+            assert!(runner.state().objects[&second]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|t| t == "Bear"));
+        } else {
+            assert_eq!(effective_pt(&mut runner, first), (2, 7));
+            assert_eq!(effective_pt(&mut runner, second), (6, 8));
+            for id in [first, second] {
+                assert!(!runner.state().objects[&id]
+                    .keywords
+                    .contains(&Keyword::Flying));
+            }
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_archetypes_deny_later_hosted_grants_and_resume_after_departure() {
+    for (name, power, toughness, cost, text, keyword, grant_name, grant_cost, grant_text) in [
+        ("Archetype of Courage", 2, 2, "{1}{W}{W}", "Creatures you control have first strike.\nCreatures your opponents control lose first strike and can't have or gain first strike.", Keyword::FirstStrike,
+            "Knighthood", "{2}{W}", "Creatures you control have first strike."),
+        ("Archetype of Imagination", 3, 2, "{4}{U}{U}", "Creatures you control have flying.\nCreatures your opponents control lose flying and can't have or gain flying.", Keyword::Flying,
+            "Levitation", "{2}{U}{U}", "Creatures you control have flying."),
+        ("Archetype of Finality", 2, 3, "{4}{B}{B}", "Creatures you control have deathtouch.\nCreatures your opponents control lose deathtouch and can't have or gain deathtouch.", Keyword::Deathtouch,
+            "Ogre Slumlord", "{3}{B}{B}", "Whenever another nontoken creature dies, you may create a 1/1 black Rat creature token.\nRats you control have deathtouch."),
+        ("Archetype of Aggression", 3, 2, "{1}{R}{R}", "Creatures you control have trample.\nCreatures your opponents control lose trample and can't have or gain trample.", Keyword::Trample,
+            "Primal Rage", "{1}{G}", "Creatures you control have trample. (A creature with trample can deal excess combat damage to the player or planeswalker it's attacking.)"),
+        ("Archetype of Endurance", 6, 5, "{6}{G}{G}", "Creatures you control have hexproof.\nCreatures your opponents control lose hexproof and can't have or gain hexproof.", Keyword::Hexproof,
+            "Asceticism", "{3}{G}{G}", "Creatures you control have hexproof. (They can't be the targets of spells or abilities your opponents control.)\n{1}{G}: Regenerate target creature."),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let subtypes = match name {
+            "Archetype of Courage" => vec!["Human", "Soldier"],
+            "Archetype of Imagination" => vec!["Human", "Wizard"],
+            "Archetype of Finality" => vec!["Gorgon"],
+            "Archetype of Aggression" => vec!["Human", "Warrior"],
+            "Archetype of Endurance" => vec!["Boar"],
+            _ => unreachable!(),
+        };
+        let source = scenario.add_creature_from_oracle(P1, name, power, toughness, text)
+            .as_enchantment().as_creature().with_subtypes(subtypes.clone()).with_mana_cost(complete_publication_cost(cost)).id();
+        let opposing_copy = scenario.add_creature_to_hand_from_oracle(P0, name, power, toughness, text)
+            .as_enchantment().as_creature().with_subtypes(subtypes).with_mana_cost(complete_publication_cost(cost)).id();
+        let own = scenario.add_creature(P0, "Own Rat with printed keyword", 2, 3)
+            .with_subtypes(vec!["Rat"]).with_keyword(keyword.clone()).id();
+        let late = scenario.add_creature(P0, "Own Rat without printed keyword", 3, 4)
+            .with_subtypes(vec!["Rat"]).id();
+        let foreign = scenario.add_creature(P1, "Opposing Rat", 4, 5).with_subtypes(vec!["Rat"]).id();
+        let grant = if grant_name == "Ogre Slumlord" {
+            scenario.add_creature_to_hand_from_oracle(P0, grant_name, 3, 3, grant_text)
+                .with_subtypes(vec!["Ogre", "Rogue"]).with_mana_cost(complete_publication_cost(grant_cost)).id()
+        } else {
+            scenario.add_spell_to_hand_from_oracle(P0, grant_name, false, grant_text)
+                .as_enchantment().with_mana_cost(complete_publication_cost(grant_cost)).id()
+        };
+        let bounce = scenario.add_spell_to_hand_from_oracle(P0, "Disperse", true,
+            "Return target nonland permanent to its owner's hand.")
+            .with_mana_cost(complete_publication_cost("{1}{U}")).id();
+        let steal = scenario.add_spell_to_hand_from_oracle(P0, "Turn Against", true,
+            "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+            .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+        for player in [P0, P1] { for _ in 0..4 { scenario.add_card_to_library_top(player, "Draw buffer"); } }
+        let mut runner = scenario.build();
+        effective_pt(&mut runner, own);
+        assert!(!runner.state().objects[&own].keywords.contains(&keyword), "{name}: remove existing");
+        assert!(runner.state().objects[&foreign].keywords.contains(&keyword), "{name}: own grant positive");
+        assert!(runner.state().objects[&source].keywords.contains(&keyword), "{name}: source included");
+        // The later grant is a real paid permanent spell on its controller's turn.
+        complete_publication_fund(&mut runner, P0, 8, &[ManaType::White, ManaType::White,
+            ManaType::Blue, ManaType::Blue, ManaType::Black, ManaType::Black, ManaType::Green, ManaType::Green]);
+        runner.cast(grant).resolve();
+        assert_eq!(runner.state().objects[&grant].zone, Zone::Battlefield);
+        assert!(!runner.state().objects[&late].keywords.contains(&keyword), "{name}: deny later grant");
+        assert!(!runner.state().objects[&own].keywords.contains(&keyword), "{name}: cannot regrant");
+        assert_continuous_complete(runner.state());
+        let (generic, color) = match name {
+            "Archetype of Courage" => (1, ManaType::White),
+            "Archetype of Imagination" => (4, ManaType::Blue),
+            "Archetype of Finality" => (4, ManaType::Black),
+            "Archetype of Aggression" => (1, ManaType::Red),
+            "Archetype of Endurance" => (6, ManaType::Green),
+            _ => unreachable!(),
+        };
+        complete_publication_fund(&mut runner, P0, generic, &[color, color]);
+        runner.cast(opposing_copy).resolve();
+        for object in [source, opposing_copy, own, late, foreign] {
+            assert!(!runner.state().objects[&object].keywords.contains(&keyword),
+                "{name}: two real opposing sources deny both controllers");
+        }
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 4, &[ManaType::Red]);
+        runner.cast(steal).target_object(source).resolve();
+        assert_eq!(runner.state().objects[&source].owner, P1);
+        assert_eq!(runner.state().objects[&source].controller, P0);
+        for object in [source, opposing_copy, own, late] {
+            assert!(runner.state().objects[&object].keywords.contains(&keyword), "{name}: live controller changes both grant and denial");
+        }
+        assert!(!runner.state().objects[&foreign].keywords.contains(&keyword));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(source).resolve();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+        assert!(runner.state().objects[&late].keywords.contains(&keyword), "{name}: later hosted grant resumes");
+        assert!(runner.state().objects[&own].keywords.contains(&keyword), "{name}: original ability resumes");
+        assert!(!runner.state().objects[&foreign].keywords.contains(&keyword), "{name}: departed source grant ends");
+        assert_eq!(effective_pt(&mut runner, late), (3, 4));
+        assert_continuous_complete(runner.state());
+        let departed_epoch = runner.state().objects[&source].incarnation;
+        runner.advance_to_combat(); runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step(); runner.pass_both_players(); runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(runner.state().active_player, P1);
+        complete_publication_fund(&mut runner, P1, generic, &[color, color]);
+        runner.cast(source).resolve();
+        assert_ne!(runner.state().objects[&source].incarnation, departed_epoch);
+        assert_eq!(runner.state().objects[&source].controller, P1);
+        for object in [source, opposing_copy, own, late, foreign] {
+            assert!(!runner.state().objects[&object].keywords.contains(&keyword), "{name}: real recast restores opposing denial");
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_hosted_loss_preserves_same_instruction_defender() {
+    for (name, cost, text, toughness, blue_wall) in [
+        ("Deep Freeze", "{2}{U}", "Enchant creature\nEnchanted creature has base power and toughness 0/4, has defender, loses all other abilities, and is a blue Wall in addition to its other colors and types.", 4, true),
+        ("Stasis Field", "{1}{U}", "Enchant creature\nEnchanted creature has base power and toughness 0/2, has defender, and loses all other abilities.", 2, false),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario.add_creature_from_oracle(P1, "Archon of the Wild Rose", 4, 4, ARCHON)
+            .with_subtypes(vec!["Archon"]).with_color(vec![ManaColor::White])
+            .with_plus_counters(1).with_mana_cost(complete_publication_cost("{2}{W}{W}")).id();
+        let unaffected = scenario.add_creature(P1, "Unaffected creature", 6, 7).with_keyword(Keyword::Flying).id();
+        let aura = scenario.add_spell_to_hand_from_oracle(P0, name, false, text)
+            .as_enchantment().with_subtypes(vec!["Aura"]).with_mana_cost(complete_publication_cost(cost)).id();
+        let bounce = scenario.add_spell_to_hand_from_oracle(P0, "Disperse", true,
+            "Return target nonland permanent to its owner's hand.")
+            .with_mana_cost(complete_publication_cost("{1}{U}")).id();
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 3, &[ManaType::Blue, ManaType::Blue]);
+        runner.cast(aura).target_object(target).resolve();
+        assert_eq!(effective_pt(&mut runner, target), (1, toughness + 1));
+        assert!(runner.state().objects[&target].keywords.contains(&Keyword::Defender));
+        assert!(!runner.state().objects[&target].keywords.contains(&Keyword::Flying));
+        assert!(runner.state().objects[&target].static_definitions.is_empty(), "printed anthem is removed");
+        assert_eq!(runner.state().objects[&target].color.contains(&ManaColor::Blue), blue_wall);
+        assert_eq!(runner.state().objects[&target].card_types.subtypes.iter().any(|t| t == "Wall"), blue_wall);
+        assert!(runner.state().objects[&target].card_types.subtypes.iter().any(|t| t == "Archon"));
+        assert_eq!(effective_pt(&mut runner, unaffected), (6, 7));
+        assert!(runner.state().objects[&unaffected].keywords.contains(&Keyword::Flying));
+        assert_continuous_complete(runner.state());
+        runner.cast(bounce).target_object(aura).resolve();
+        assert_eq!(effective_pt(&mut runner, target), (5, 5));
+        assert!(runner.state().objects[&target].keywords.contains(&Keyword::Flying));
+        assert!(!runner.state().objects[&target].keywords.contains(&Keyword::Defender));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_paid_native_activations_preserve_companions_and_other_axis() {
+    for (name, power, toughness, cost, text, subtypes, generic, colors, expected) in [
+        ("Creeperhulk", 5, 5, "{3}{G}{G}", "Trample\n{1}{G}: Until end of turn, target creature you control has base power and toughness 5/5 and gains trample.", vec!["Plant", "Elemental"], 1, vec![ManaType::Green], (6, 6)),
+        ("Turtle-Duck", 0, 4, "{G}", "{3}: Until end of turn, this creature has base power 4 and gains trample.", vec!["Turtle", "Bird"], 3, vec![], (5, 5)),
+        ("Werewolf Pack Leader", 3, 3, "{G}{G}", "Pack tactics — Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.\n{3}{G}: Until end of turn, this creature has base power and toughness 5/3, gains trample, and isn't a Human.", vec!["Human", "Werewolf"], 3, vec![ManaType::Green], (6, 4)),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature_from_oracle(P0, name, power, toughness, text)
+            .with_subtypes(subtypes).with_mana_cost(complete_publication_cost(cost)).with_plus_counters(1).id();
+        let ally = scenario.add_creature(P0, "Unequal ally", 2, 7).with_plus_counters(1).id();
+        let foreign = scenario.add_creature(P1, "Foreign control", 6, 8).id();
+        for player in [P0, P1] { for _ in 0..4 { scenario.add_card_to_library_top(player, "Turn buffer"); } }
+        let mut runner = scenario.build();
+        let recipient = if name == "Creeperhulk" { ally } else { source };
+        assert!(runner.act(GameAction::ActivateAbility { source_id: source, ability_index: 0 })
+            .is_err(), "unfunded activation {name}");
+        complete_publication_fund(&mut runner, P0, generic, &colors);
+        if name == "Creeperhulk" { runner.activate(source, 0).target_object(ally).resolve(); }
+        else { runner.activate(source, 0).resolve(); }
+        assert_eq!(effective_pt(&mut runner, recipient), expected, "{name}");
+        assert!(runner.state().objects[&recipient].keywords.contains(&Keyword::Trample));
+        if name == "Werewolf Pack Leader" {
+            assert!(!runner.state().objects[&source].card_types.subtypes.iter().any(|t| t == "Human"));
+            assert!(runner.state().objects[&source].card_types.subtypes.iter().any(|t| t == "Werewolf"));
+        }
+        assert_eq!(effective_pt(&mut runner, foreign), (6, 8));
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat(); runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step(); runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, recipient), if name == "Creeperhulk" { (3, 8) } else { (power + 1, toughness + 1) });
+        assert!(!runner.state().objects[&recipient].keywords.contains(&Keyword::Trample));
+        if name == "Werewolf Pack Leader" { assert!(runner.state().objects[&source].card_types.subtypes.iter().any(|t| t == "Human")); }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_drop_bear_all_zone_current_and_departure() {
+    for consumer in ["Bloom", "Scavenge", "Scavenge fizzle", "Swords"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario
+            .add_creature(P0, "Forest Bear", 1, 6)
+            .as_land()
+            .as_creature()
+            .with_subtypes(vec!["Forest", "Bear"]);
+        let recipient = scenario
+            .add_creature(P0, "Other Bear", 2, 4)
+            .with_subtypes(vec!["Bear"])
+            .id();
+        for _ in 0..5 {
+            scenario.add_basic_land(P1, ManaColor::Green);
+            scenario
+                .add_creature(P1, "Foreign Bear", 2, 4)
+                .with_subtypes(vec!["Bear"]);
+        }
+        let bear = scenario
+            .add_creature_to_hand_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+            .with_subtypes(vec!["Koala", "Bear", "Horror"])
+            .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+            .id();
+        let remotes = [Zone::Library, Zone::Hand, Zone::Graveyard, Zone::Exile].map(|zone| {
+            let id = scenario
+                .add_creature_to_hand_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+                .with_subtypes(vec!["Koala", "Bear", "Horror"])
+                .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+                .id();
+            (id, zone)
+        });
+        let bloom = scenario
+            .add_spell_to_hand_from_oracle(P0, "Morbid Bloom", false, BLOOM)
+            .with_mana_cost(complete_publication_cost("{4}{B}{G}"))
+            .id();
+        scenario
+            .add_creature_from_oracle(P0, "Varolz, the Scar-Striped", 2, 2, VAROLZ)
+            .as_legendary()
+            .with_subtypes(vec!["Troll", "Warrior"])
+            .with_mana_cost(complete_publication_cost("{1}{B}{G}"));
+        let growth = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Giant Growth",
+                true,
+                "Target creature gets +3/+3 until end of turn.",
+            )
+            .with_mana_cost(complete_publication_cost("{G}"))
+            .id();
+        let swords = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Swords to Plowshares",
+                true,
+                "Exile target creature. Its controller gains life equal to its power.",
+            )
+            .with_mana_cost(complete_publication_cost("{W}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{U}"))
+            .id();
+        let mut runner = scenario.build();
+        for &(id, zone) in &remotes {
+            if zone != Zone::Hand {
+                engine::game::zones::move_to_zone(runner.state_mut(), id, zone, &mut vec![]);
+            }
+        }
+        engine::game::layers::flush_layers(runner.state_mut());
+        for &(id, zone) in &remotes {
+            let object = &runner.state().objects[&id];
+            assert_eq!(object.zone, zone);
+            assert_eq!((object.power, object.toughness), (Some(4), Some(4)));
+            assert_eq!(
+                (object.layer_base_power, object.layer_base_toughness),
+                (Some(4), Some(4))
+            );
+            assert_eq!(
+                (object.base_power, object.base_toughness),
+                (Some(0), Some(0))
+            );
+        }
+        assert_continuous_complete(runner.state());
+        if consumer == "Bloom" {
+            let grave = remotes[2].0;
+            complete_publication_fund(&mut runner, P0, 4, &[ManaType::Black, ManaType::Green]);
+            runner.cast(bloom).target_object(grave).resolve();
+            let tokens = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token)
+                .collect::<Vec<_>>();
+            assert_eq!(tokens.len(), 4);
+            for token in tokens {
+                assert_eq!(token.zone, Zone::Battlefield);
+                assert_eq!((token.owner, token.controller), (P0, P0));
+                assert_eq!((token.power, token.toughness), (Some(1), Some(1)));
+                assert_eq!(token.color, vec![ManaColor::Green]);
+                assert_eq!(token.card_types.subtypes, vec!["Saproling".to_string()]);
+            }
+            assert_eq!(runner.state().objects[&grave].zone, Zone::Exile);
+            assert_eq!(effective_pt(&mut runner, grave), (4, 4));
+        } else if consumer == "Scavenge" || consumer == "Scavenge fizzle" {
+            let grave = remotes[2].0;
+            let (index, definition) =
+                engine::game::casting::activated_ability_definitions(runner.state(), grave)
+                    .into_iter()
+                    .find(|(_, definition)| {
+                        matches!(
+                            definition.effect.as_ref(),
+                            engine::types::ability::Effect::PutCounter { .. }
+                        )
+                    })
+                    .expect("full Varolz supplies real paid Scavenge");
+            assert_eq!(
+                definition.cost,
+                Some(engine::types::ability::AbilityCost::Composite {
+                    costs: vec![
+                        engine::types::ability::AbilityCost::Mana {
+                            cost: complete_publication_cost("{3}{R}{G}")
+                        },
+                        engine::types::ability::AbilityCost::Exile {
+                            count: 1,
+                            zone: Some(Zone::Graveyard),
+                            filter: Some(engine::types::ability::TargetFilter::SelfRef)
+                        },
+                    ]
+                })
+            );
+            let epoch = runner.state().objects[&grave].incarnation;
+            assert!(
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: grave,
+                        ability_index: index
+                    })
+                    .is_err(),
+                "the full 3RG Scavenge cost must actually be payable"
+            );
+            complete_publication_fund(&mut runner, P0, 3, &[ManaType::Red, ManaType::Green]);
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: grave,
+                    ability_index: index,
+                })
+                .unwrap();
+            let WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                selection,
+                pending_cast,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("required Scavenge target")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(pending_cast.ability.source_incarnation, Some(epoch));
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(recipient)));
+            assert!(target_slots[selection.current_slot].legal_targets.len() > 1);
+            assert!(!target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(remotes[3].0)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(recipient)),
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&grave].zone, Zone::Exile);
+            assert_eq!(
+                runner
+                    .state()
+                    .stack
+                    .last()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .source_incarnation,
+                Some(epoch)
+            );
+            if consumer == "Scavenge fizzle" {
+                complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue]);
+                runner.cast(bounce).target_object(recipient).commit();
+                runner.resolve_top();
+                assert_eq!(runner.state().objects[&recipient].zone, Zone::Hand);
+                assert_eq!(
+                    runner.state().stack.len(),
+                    1,
+                    "the real paid Scavenge is still below the removal"
+                );
+                runner.advance_until_stack_empty();
+                assert!(!runner.state().objects[&recipient]
+                    .counters
+                    .contains_key(&CounterType::Plus1Plus1));
+                assert_eq!(effective_pt(&mut runner, recipient), (2, 4));
+            } else {
+                runner.advance_until_stack_empty();
+                assert_eq!(
+                    runner.state().objects[&recipient]
+                        .counters
+                        .get(&CounterType::Plus1Plus1),
+                    Some(&4)
+                );
+            }
+            assert_eq!(
+                effective_pt(&mut runner, grave),
+                if consumer == "Scavenge fizzle" {
+                    (3, 3)
+                } else {
+                    (4, 4)
+                }
+            );
+        } else {
+            complete_publication_fund(&mut runner, P0, 3, &[ManaType::Red, ManaType::Green]);
+            runner.cast(bear).commit();
+            assert_eq!(runner.state().objects[&bear].zone, Zone::Stack);
+            assert_eq!(effective_pt(&mut runner, bear), (4, 4));
+            runner.pass_both_players();
+            let WaitingFor::TriggerTargetSelection {
+                player,
+                source_id,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("required actual ETB fight")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, Some(bear));
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(recipient)));
+            runner
+                .act(GameAction::ChooseTarget { target: None })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(effective_pt(&mut runner, bear), (5, 5));
+            assert_continuous_complete(runner.state());
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Green]);
+            runner.cast(growth).target_object(bear).resolve();
+            assert_eq!(effective_pt(&mut runner, bear), (8, 8));
+            assert_eq!(runner.state().objects[&bear].layer_base_power, Some(5));
+            assert_continuous_complete(runner.state());
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::White]);
+            runner
+                .cast(swords)
+                .target_object(bear)
+                .resolve()
+                .assert_life_delta(P0, 8);
+            assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+            assert_eq!(effective_pt(&mut runner, bear), (4, 4));
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_aurelia_colors_latch_and_target_incarnation_is_pinned() {
+    for blink in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let aurelia = scenario
+            .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+            .as_legendary()
+            .with_color(vec![ManaColor::Red, ManaColor::White])
+            .with_subtypes(vec!["Angel"])
+            .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+            .id();
+        let chosen = scenario
+            .add_creature(P0, "Chosen", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let decoy = scenario
+            .add_creature(P0, "Other choice", 3, 3)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let lenses = [0, 1].map(|_| {
+            scenario
+                .add_artifact_from_oracle(P0, "Distorting Lens", LENS)
+                .with_mana_cost(complete_publication_cost("{2}"))
+                .id()
+        });
+        let cloudshift = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+            "Exile target creature you control, then return that card to the battlefield under your control.")
+            .with_mana_cost(complete_publication_cost("{W}")).id();
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::BeginCombat);
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Aurelia trigger target")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(aurelia));
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(chosen)));
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(decoy)));
+        let epoch = runner.state().objects[&chosen].incarnation;
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .unwrap();
+        assert_eq!(runner.state().stack.len(), 1);
+        if blink {
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::White]);
+            runner.cast(cloudshift).target_object(chosen).resolve();
+            assert_ne!(runner.state().objects[&chosen].incarnation, epoch);
+            assert_eq!(effective_pt(&mut runner, chosen), (2, 2));
+            assert!(!runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Trample));
+            assert!(!runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Vigilance));
+        } else {
+            for (index, color) in [(0, "White"), (1, "Red")] {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: lenses[index],
+                        ability_index: 0,
+                    })
+                    .unwrap();
+                let WaitingFor::TargetSelection {
+                    player,
+                    target_slots,
+                    selection,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("Lens target")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(target_slots.len(), 1);
+                assert!(target_slots[selection.current_slot]
+                    .legal_targets
+                    .contains(&TargetRef::Object(chosen)));
+                assert!(target_slots[selection.current_slot]
+                    .legal_targets
+                    .contains(&TargetRef::Object(decoy)));
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(chosen)),
+                    })
+                    .unwrap();
+                runner.resolve_top();
+                let WaitingFor::NamedChoice {
+                    player, options, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("Lens color")
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(
+                    options,
+                    &vec![
+                        "White".to_string(),
+                        "Blue".into(),
+                        "Black".into(),
+                        "Red".into(),
+                        "Green".into()
+                    ]
+                );
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: color.into(),
+                    })
+                    .unwrap();
+                if index == 0 {
+                    // This is an intermediate Lens completion: Aurelia still waits below it.
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(runner.state().resolution_stack.is_empty());
+                    assert_eq!(runner.state().stack.len(), 1);
+                    assert_eq!(
+                        runner.state().stack[0].ability().unwrap().source_id,
+                        aurelia
+                    );
+                    assert_eq!(effective_pt(&mut runner, chosen), (2, 2));
+                    runner.advance_until_stack_empty();
+                }
+                assert_eq!(effective_pt(&mut runner, chosen), (4, 2));
+                assert!(runner.state().objects[&chosen]
+                    .keywords
+                    .contains(&Keyword::Vigilance));
+                assert!(!runner.state().objects[&chosen]
+                    .keywords
+                    .contains(&Keyword::Trample));
+                assert_continuous_complete(runner.state());
+            }
+            assert_eq!(runner.state().objects[&chosen].color, vec![ManaColor::Red]);
+        }
+        assert_eq!(effective_pt(&mut runner, decoy), (3, 3));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, chosen), (2, 2));
+        assert!(!runner.state().objects[&chosen]
+            .keywords
+            .contains(&Keyword::Vigilance));
+        assert!(!runner.state().objects[&chosen]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_aurelia_empty_legal_targets_uses_real_greaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aurelia = scenario
+        .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+        .as_legendary()
+        .with_subtypes(vec!["Angel"])
+        .with_color(vec![ManaColor::Red, ManaColor::White])
+        .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+        .id();
+    let greaves = scenario
+        .add_artifact_from_oracle(P0, "Lightning Greaves", GREAVES)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(complete_publication_cost("{2}"))
+        .id();
+    scenario.add_creature(P1, "Foreign target", 2, 2);
+    let mut runner = scenario.build();
+    let mut legal_twin = GameRunner::from_state(runner.state().clone());
+    legal_twin.advance_to_phase(Phase::BeginCombat);
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        source_id,
+        target_slots,
+        selection,
+        ..
+    } = &legal_twin.state().waiting_for
+    else {
+        panic!("unshrouded positive trigger");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, Some(aurelia));
+    assert_eq!(
+        target_slots[selection.current_slot].legal_targets,
+        vec![TargetRef::Object(aurelia)]
+    );
+    legal_twin
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(aurelia)),
+        })
+        .unwrap();
+    legal_twin.advance_until_stack_empty();
+    assert_eq!(effective_pt(&mut legal_twin, aurelia), (4, 5));
+    assert!(legal_twin.state().objects[&aurelia]
+        .keywords
+        .contains(&Keyword::Trample));
+    assert!(legal_twin.state().objects[&aurelia]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    assert_continuous_complete(legal_twin.state());
+    runner
+        .act(GameAction::Equip {
+            equipment_id: greaves,
+            target_id: aurelia,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&aurelia]
+        .keywords
+        .contains(&Keyword::Shroud));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_phase(Phase::BeginCombat);
+    // The optional target declaration is satisfiable with zero choices.
+    runner.advance_until_stack_empty();
+    assert_eq!(effective_pt(&mut runner, aurelia), (2, 5));
+    assert!(!runner.state().objects[&aurelia]
+        .keywords
+        .contains(&Keyword::Trample));
+    assert!(!runner.state().objects[&aurelia]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_aurelia_two_real_occurrences_choose_distinct_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+        .as_legendary()
+        .with_subtypes(vec!["Angel"])
+        .with_color(vec![ManaColor::Red, ManaColor::White])
+        .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+        .id();
+    let first = scenario
+        .add_creature(P0, "First red recipient", 2, 2)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second white recipient", 3, 4)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let entrant = scenario
+        .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(complete_publication_cost("{1}{G}"))
+        .id();
+    let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+        "Exile target creature you control, then return that card to the battlefield under your control.")
+        .with_mana_cost(complete_publication_cost("{W}")).id();
+    for player in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    let mut epochs = Vec::new();
+    for (occurrence, chosen, expected) in [(0, first, (4, 2)), (1, second, (5, 4))] {
+        assert_eq!(runner.state().active_player, P0);
+        runner.advance_to_phase(Phase::BeginCombat);
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real occurrence {occurrence}");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(source));
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[selection.current_slot].optional);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(first)));
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(second)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        epochs.push(runner.state().objects[&source].incarnation);
+        assert_eq!(effective_pt(&mut runner, chosen), expected);
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Trample),
+            occurrence == 0
+        );
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Vigilance),
+            occurrence == 1
+        );
+        assert_eq!(
+            effective_pt(&mut runner, if occurrence == 0 { second } else { first }),
+            if occurrence == 0 { (3, 4) } else { (2, 2) }
+        );
+        if occurrence == 1 {
+            assert_eq!(effective_pt(&mut runner, entrant), (2, 2));
+        }
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_phase(Phase::PostCombatMain);
+        if occurrence == 0 {
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Green, ManaType::White]);
+            runner.cast(entrant).resolve();
+            assert_eq!(effective_pt(&mut runner, entrant), (2, 2));
+            assert!(!runner.state().objects[&entrant]
+                .keywords
+                .contains(&Keyword::Trample));
+            runner.cast(blink).target_object(source).resolve();
+            assert_eq!(
+                effective_pt(&mut runner, first),
+                (4, 2),
+                "resolved grant survives source reentry"
+            );
+            assert_continuous_complete(runner.state());
+        }
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, first), (2, 2));
+        assert_eq!(effective_pt(&mut runner, second), (3, 4));
+        assert!(!runner.state().objects[&first]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert!(!runner.state().objects[&second]
+            .keywords
+            .contains(&Keyword::Vigilance));
+        assert_continuous_complete(runner.state());
+        if occurrence == 0 {
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_eq!(runner.state().active_player, P1);
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            runner.pass_both_players();
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_eq!(runner.state().active_player, P0);
+            assert_continuous_complete(runner.state());
+        }
+    }
+    assert_ne!(
+        epochs[0], epochs[1],
+        "second event uses returned source incarnation"
+    );
+}
+
+#[test]
+fn complete_continuous_aurelia_control_changes_preserve_the_trigger_and_latched_recipient() {
+    for (steal_source, after_resolution) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+            .as_legendary()
+            .with_subtypes(vec!["Angel"])
+            .with_color(vec![ManaColor::Red, ManaColor::White])
+            .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+            .id();
+        let recipient = scenario
+            .add_creature(P0, "White recipient", 2, 2)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let other = scenario
+            .add_creature(P0, "Untouched red recipient", 6, 7)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let theft = scenario.add_spell_to_hand_from_oracle(P1, "Turn Against", true,
+            "Devoid (This card has no color.)\nGain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+            .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+        for player in [P0, P1] {
+            for _ in 0..4 {
+                scenario.add_card_to_library_top(player, "Turn buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::BeginCombat);
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual BeginCombat target");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(source));
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[selection.current_slot].optional);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(recipient)));
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(other)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            })
+            .unwrap();
+        if after_resolution {
+            runner.advance_until_stack_empty();
+            assert_eq!(effective_pt(&mut runner, recipient), (4, 2));
+            assert!(runner.state().objects[&recipient]
+                .keywords
+                .contains(&Keyword::Vigilance));
+            assert_continuous_complete(runner.state());
+        }
+        complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+        runner.act(GameAction::PassPriority).unwrap();
+        let stolen = if steal_source { source } else { recipient };
+        runner.cast(theft).target_object(stolen).resolve();
+        assert_eq!(runner.state().objects[&stolen].controller, P1);
+        assert_eq!(runner.state().objects[&stolen].owner, P0);
+        let applies = steal_source || after_resolution;
+        // The announced target is revalidated; a completed transient keeps its recipient.
+        assert_eq!(
+            effective_pt(&mut runner, recipient),
+            if applies { (4, 2) } else { (2, 2) }
+        );
+        assert_eq!(
+            runner.state().objects[&recipient]
+                .keywords
+                .contains(&Keyword::Vigilance),
+            applies
+        );
+        assert!(!runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert_eq!(effective_pt(&mut runner, other), (6, 7));
+        assert!(!runner.state().objects[&other]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(runner.state().objects[&stolen].controller, P0);
+        assert_eq!(effective_pt(&mut runner, recipient), (2, 2));
+        assert!(!runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Vigilance));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_water_wings_and_gifter_use_paid_spell_and_real_entry() {
+    for (gifter, decline) in [(false, false), (true, false), (true, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(P0, "Chosen creature", 2, 7)
+            .with_plus_counters(1)
+            .id();
+        let other = scenario.add_creature(P0, "Other creature", 6, 8).id();
+        let foreign = scenario.add_creature(P1, "Foreign creature", 8, 6).id();
+        let spell = if gifter {
+            scenario.add_creature_to_hand_from_oracle(P0, "Glamer Gifter", 1, 2,
+                "Flash\nFlying\nWhen this creature enters, choose up to one other target creature. Until end of turn, that creature has base power and toughness 4/4 and gains all creature types.")
+                .with_subtypes(vec!["Faerie", "Wizard"]).with_mana_cost(complete_publication_cost("{1}{U}")).id()
+        } else {
+            scenario.add_spell_to_hand_from_oracle(P0, "Water Wings", true,
+                "Until end of turn, target creature you control has base power and toughness 4/4 and gains flying and hexproof. (It can't be the target of spells or abilities your opponents control.)")
+                .with_mana_cost(complete_publication_cost("{1}{U}")).id()
+        };
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        if gifter {
+            runner.cast(spell).commit();
+            runner.pass_both_players();
+            let WaitingFor::TriggerTargetSelection {
+                player,
+                source_id,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("Gifter ETB target");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, Some(spell));
+            assert_eq!(target_slots.len(), 1);
+            let slot = &target_slots[selection.current_slot];
+            assert!(slot.optional);
+            for target in [chosen, other, foreign] {
+                assert!(slot.legal_targets.contains(&TargetRef::Object(target)));
+            }
+            assert!(
+                !slot.legal_targets.contains(&TargetRef::Object(spell)),
+                "other excludes actual ETB source"
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: if decline {
+                        None
+                    } else {
+                        Some(TargetRef::Object(chosen))
+                    },
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        } else {
+            runner.cast(spell).target_object(chosen).resolve();
+        }
+        assert_eq!(
+            effective_pt(&mut runner, chosen),
+            if decline { (3, 8) } else { (5, 5) }
+        );
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Changeling),
+            gifter && !decline
+        );
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Flying),
+            !gifter
+        );
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            !gifter
+        );
+        assert_eq!(effective_pt(&mut runner, other), (6, 8));
+        assert_eq!(effective_pt(&mut runner, foreign), (8, 6));
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+fn complete_publication_cost(text: &str) -> ManaCost {
+    all_consuming(parse_mana_cost).parse(text).unwrap().1
+}
+
+fn complete_publication_pool(generic: usize, colors: &[ManaType]) -> Vec<ManaUnit> {
+    colors
+        .iter()
+        .copied()
+        .chain(std::iter::repeat_n(ManaType::Colorless, generic))
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn assert_continuous_complete(state: &GameState) {
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        state.waiting_for
+    );
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+}
+
+fn complete_publication_fund(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    generic: usize,
+    colors: &[ManaType],
+) {
+    for mana in complete_publication_pool(generic, colors) {
+        runner.state_mut().add_mana_to_pool(player, mana).unwrap();
+    }
+}
+
+#[test]
+fn complete_continuous_members_reach_layers_and_end_with_aura_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ally = scenario.add_creature(P0, "Host", 2, 3).id();
+    let foreign = scenario.add_creature(P1, "Foreign", 7, 8).id();
+    let aura = scenario
+        .add_spell_to_hand_from_oracle(P0, "Almost Perfect", false, ALMOST)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{4}{G}{W}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        complete_publication_pool(5, &[ManaType::Green, ManaType::White, ManaType::Blue]),
+    );
+    let mut runner = scenario.build();
+    runner.cast(aura).target_object(ally).resolve();
+    // CR 613.4b + CR 613.1f: both base axes AND the keyword must survive.
+    assert_eq!(effective_pt(&mut runner, ally), (9, 10));
+    assert!(runner.state().objects[&ally]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    assert_eq!(effective_pt(&mut runner, foreign), (7, 8));
+    assert!(!runner.state().objects[&foreign]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    assert_continuous_complete(runner.state());
+    runner.cast(bounce).target_object(aura).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Hand);
+    // CR 611.3a: the live hosted effect ends with its source.
+    assert_eq!(effective_pt(&mut runner, ally), (2, 3));
+    assert!(!runner.state().objects[&ally]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_equipment_companions_follow_their_own_source() {
+    for (name, text, counter, keyword, subtype) in [
+        (
+            "Mace of the Valiant",
+            MACE,
+            CounterType::Generic("charge".into()),
+            Some(Keyword::Vigilance),
+            None,
+        ),
+        (
+            "Reaper's Scythe",
+            SCYTHE,
+            CounterType::Generic("soul".into()),
+            None,
+            Some("Assassin"),
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, name, text)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost(
+                if name == "Mace of the Valiant" {
+                    "{2}{W}"
+                } else {
+                    "{2}{B}"
+                },
+            ))
+            .id();
+        let other_source = scenario
+            .add_artifact_from_oracle(P0, name, text)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost(
+                if name == "Mace of the Valiant" {
+                    "{2}{W}"
+                } else {
+                    "{2}{B}"
+                },
+            ))
+            .id();
+        scenario.with_counter(source, counter.clone(), 2);
+        scenario.with_counter(source, CounterType::Generic("unrelated".into()), 7);
+        scenario.with_counter(other_source, counter, 5);
+        let first = scenario.add_creature(P0, "First host", 2, 3).id();
+        let second = scenario.add_creature(P0, "Second host", 4, 5).id();
+        let opponent = scenario.add_creature(P1, "Illegal foreign host", 6, 7).id();
+        scenario.with_mana_pool(P0, complete_publication_pool(20, &[]));
+        let mut runner = scenario.build();
+        assert!(runner
+            .act(GameAction::Equip {
+                equipment_id: source,
+                target_id: opponent
+            })
+            .is_err());
+        runner
+            .act(GameAction::Equip {
+                equipment_id: source,
+                target_id: first,
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, first), (4, 5));
+        if let Some(keyword) = &keyword {
+            assert!(runner.state().objects[&first].keywords.contains(keyword));
+        }
+        if let Some(subtype) = subtype {
+            assert!(runner.state().objects[&first]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s == subtype));
+        }
+        assert_eq!(effective_pt(&mut runner, second), (4, 5));
+        assert_continuous_complete(runner.state());
+        runner
+            .act(GameAction::Equip {
+                equipment_id: other_source,
+                target_id: second,
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, second), (9, 10));
+        runner
+            .act(GameAction::Equip {
+                equipment_id: source,
+                target_id: second,
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, first), (2, 3));
+        assert_eq!(effective_pt(&mut runner, second), (11, 12));
+        if let Some(keyword) = &keyword {
+            assert!(!runner.state().objects[&first].keywords.contains(keyword));
+        }
+        if let Some(subtype) = subtype {
+            assert!(!runner.state().objects[&first]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s == subtype));
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_entity_activation_preserves_both_base_axes_and_types() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let entity = scenario
+        .add_creature_from_oracle(P0, "Mirror Entity", 1, 1, ENTITY)
+        .id();
+    let ally = scenario
+        .add_creature(P0, "Ally", 2, 3)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let foreign = scenario.add_creature(P1, "Foreign", 6, 7).id();
+    scenario.with_mana_pool(P0, complete_publication_pool(4, &[]));
+    let mut runner = scenario.build();
+    runner.activate(entity, 0).x(4).resolve();
+    for id in [entity, ally] {
+        assert_eq!(effective_pt(&mut runner, id), (4, 4));
+        assert!(runner.state().objects[&id]
+            .keywords
+            .contains(&Keyword::Changeling));
+        assert!(runner.state().objects[&id].card_types.subtypes.len() > 20);
+    }
+    assert_eq!(effective_pt(&mut runner, foreign), (6, 7));
+    assert!(!runner.state().objects[&foreign]
+        .keywords
+        .contains(&Keyword::Changeling));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    assert_eq!(effective_pt(&mut runner, ally), (2, 3));
+    assert!(!runner.state().objects[&ally]
+        .keywords
+        .contains(&Keyword::Changeling));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_qualified_counts_use_actual_population_and_source_counters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jodah = scenario
+        .add_creature_to_hand_from_oracle(P0, "Jodah, the Unifier", 5, 5, JODAH)
+        .as_legendary()
+        .with_mana_cost(complete_publication_cost("{W}{U}{B}{R}{G}"))
+        .id();
+    let legendary = scenario
+        .add_creature(P0, "Legendary ally", 2, 2)
+        .as_legendary()
+        .id();
+    let ordinary = scenario.add_creature(P0, "Ordinary ally", 2, 2).id();
+    let foreign = scenario
+        .add_creature(P1, "Foreign legend", 7, 7)
+        .as_legendary()
+        .id();
+    let hancock = scenario
+        .add_creature_to_hand_from_oracle(P0, "Hancock, Ghoulish Mayor", 2, 1, HANCOCK)
+        .as_legendary()
+        .with_subtypes(vec!["Zombie", "Mutant"])
+        .with_mana_cost(complete_publication_cost("{2}{B}"))
+        .id();
+    let zombie = scenario
+        .add_creature(P0, "Zombie", 2, 2)
+        .with_subtypes(vec!["Zombie"])
+        .id();
+    let mutant = scenario
+        .add_creature(P0, "Mutant", 2, 2)
+        .with_subtypes(vec!["Mutant"])
+        .id();
+    let both = scenario
+        .add_creature(P0, "Both", 2, 2)
+        .with_subtypes(vec!["Zombie", "Mutant"])
+        .id();
+    let foreign_zombie = scenario
+        .add_creature(P1, "Foreign Zombie", 3, 3)
+        .with_subtypes(vec!["Zombie"])
+        .id();
+    let donor = scenario.add_creature(P0, "Counter donor", 2, 3).id();
+    scenario.with_counter(donor, CounterType::Generic("charge".into()), 2);
+    scenario.with_counter(donor, CounterType::Generic("blood".into()), 1);
+    let transfer = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Fate Transfer",
+            true,
+            "Move all counters from target creature onto another target creature.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U/B}"))
+        .id();
+    let remove = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Fate Transfer",
+            true,
+            "Move all counters from target creature onto another target creature.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U/B}"))
+        .id();
+    scenario.with_counter(zombie, CounterType::Generic("charge".into()), 7);
+    scenario.with_mana_pool(
+        P0,
+        complete_publication_pool(
+            3,
+            &[
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+                ManaType::Black,
+                ManaType::Blue,
+            ],
+        ),
+    );
+    let mut runner = scenario.build();
+    runner.cast(hancock).resolve();
+    assert_eq!(effective_pt(&mut runner, hancock), (2, 1));
+    for object in [zombie, mutant, both] {
+        assert_eq!(
+            effective_pt(&mut runner, object),
+            (2, 2),
+            "zero source counters grant no numeric bonus"
+        );
+    }
+    assert_continuous_complete(runner.state());
+    runner.cast(jodah).resolve();
+    assert_continuous_complete(runner.state());
+    runner
+        .cast(transfer)
+        .target_objects(&[donor, hancock])
+        .resolve();
+    assert!(runner.state().objects[&donor].counters.is_empty());
+    assert_eq!(
+        runner.state().objects[&hancock]
+            .counters
+            .get(&CounterType::Generic("charge".into())),
+        Some(&2)
+    );
+    assert_eq!(
+        runner.state().objects[&hancock]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&1)
+    );
+    // CR 109.4: only controlled legendary creatures enter Jodah's live count.
+    assert_eq!(effective_pt(&mut runner, jodah), (8, 8));
+    assert_eq!(effective_pt(&mut runner, legendary), (5, 5));
+    assert_eq!(effective_pt(&mut runner, ordinary), (2, 2));
+    assert_eq!(effective_pt(&mut runner, foreign), (7, 7));
+    // CR 122.1: all SOURCE counters; Zombie-or-Mutant membership counts once.
+    for id in [zombie, mutant, both] {
+        assert_eq!(effective_pt(&mut runner, id), (5, 5));
+    }
+    assert_eq!(effective_pt(&mut runner, hancock), (5, 4));
+    assert_eq!(effective_pt(&mut runner, foreign_zombie), (3, 3));
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner
+        .cast(remove)
+        .target_objects(&[hancock, donor])
+        .resolve();
+    assert!(runner.state().objects[&hancock].counters.is_empty());
+    assert_eq!(
+        runner.state().objects[&donor]
+            .counters
+            .get(&CounterType::Generic("charge".into())),
+        Some(&2)
+    );
+    assert_eq!(
+        runner.state().objects[&donor]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&1)
+    );
+    for id in [zombie, mutant, both] {
+        assert_eq!(
+            effective_pt(&mut runner, id),
+            (2, 2),
+            "live source counter removal ends the whole union bonus"
+        );
+    }
+    assert_eq!(effective_pt(&mut runner, hancock), (5, 4));
+    assert_eq!(effective_pt(&mut runner, jodah), (8, 8));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_zinnia_reads_base_power_after_setters_before_additive_effects() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let zinnia = scenario
+        .add_creature_to_hand_from_oracle(P0, "Zinnia, Valley's Voice", 1, 3, ZINNIA)
+        .as_legendary()
+        .with_mana_cost(complete_publication_cost("{U}{R}{W}"))
+        .id();
+    let base_one = scenario
+        .add_creature(P0, "Base one currently three", 1, 4)
+        .with_plus_counters(2)
+        .id();
+    let base_two = scenario
+        .add_creature(P0, "Base two currently one", 2, 4)
+        .with_minus_counters(1)
+        .id();
+    scenario.add_creature(P1, "Foreign base one", 1, 4);
+    let set_one = scenario.add_creature(P0, "Setter recipient", 5, 5).id();
+    let maro = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Maro",
+            0,
+            0,
+            "Maro's power and toughness are each equal to the number of cards in your hand.",
+        )
+        .with_subtypes(vec!["Elemental"])
+        .with_mana_cost(complete_publication_cost("{2}{G}{G}"))
+        .id();
+    let frog = scenario.add_spell_to_hand_from_oracle(P0, "Turn to Frog", true,
+        "Until end of turn, target creature loses all abilities and becomes a blue Frog with base power and toughness 1/1.")
+        .with_mana_cost(complete_publication_cost("{1}{U}")).id();
+    scenario.add_card_to_hand(P0, "Hand count witness");
+    scenario.with_mana_pool(
+        P0,
+        complete_publication_pool(0, &[ManaType::Blue, ManaType::Red, ManaType::White]),
+    );
+    let mut runner = scenario.build();
+    runner.cast(zinnia).resolve();
+    assert_continuous_complete(runner.state());
+    assert_eq!(effective_pt(&mut runner, maro), (2, 2));
+    assert_eq!(effective_pt(&mut runner, zinnia), (2, 3));
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(frog).target_object(set_one).resolve();
+    assert_eq!(effective_pt(&mut runner, base_one), (3, 6));
+    assert_eq!(effective_pt(&mut runner, base_two), (1, 3));
+    assert_eq!(effective_pt(&mut runner, set_one), (1, 1));
+    assert_eq!(effective_pt(&mut runner, maro), (1, 1));
+    // CR 208.4b: ignore additive modifiers/counters, include base setters; exclude self.
+    assert_eq!(effective_pt(&mut runner, zinnia), (4, 3));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_aurelia_four_colors_decline_and_departing_source() {
+    for colors in [
+        vec![],
+        vec![ManaColor::Red],
+        vec![ManaColor::White],
+        vec![ManaColor::Red, ManaColor::White],
+    ] {
+        for (decline, departing_source) in [(false, false), (true, false), (false, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+                .as_legendary()
+                .with_subtypes(vec!["Angel"])
+                .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+                .with_color(vec![ManaColor::Red, ManaColor::White])
+                .id();
+            let chosen = scenario
+                .add_creature(P0, "Chosen target", 2, 2)
+                .with_color(colors.clone())
+                .id();
+            let other = scenario
+                .add_creature(P0, "Other own target", 6, 6)
+                .with_color(vec![ManaColor::Red, ManaColor::White])
+                .id();
+            let foreign = scenario
+                .add_creature(P1, "Foreign target", 2, 2)
+                .with_color(vec![ManaColor::Red, ManaColor::White])
+                .id();
+            let removal = scenario
+                .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+                .with_mana_cost(complete_publication_cost("{1}{B}{B}"))
+                .id();
+            for player in [P0, P1] {
+                for _ in 0..4 {
+                    scenario.add_card_to_library_top(player, "Draw buffer");
+                }
+            }
+            let mut runner = scenario.build();
+            // The ordinary phase transition produces the actual source trigger.
+            runner.advance_to_phase(Phase::BeginCombat);
+            let WaitingFor::TriggerTargetSelection {
+                player,
+                source_id,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required Aurelia target prompt: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, Some(source));
+            assert_eq!(target_slots.len(), 1);
+            let slot = &target_slots[selection.current_slot];
+            assert!(slot.legal_targets.contains(&TargetRef::Object(chosen)));
+            assert!(slot.legal_targets.contains(&TargetRef::Object(other)));
+            assert!(!slot.legal_targets.contains(&TargetRef::Object(foreign)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: (!decline).then_some(TargetRef::Object(chosen)),
+                })
+                .unwrap();
+            if departing_source {
+                complete_publication_fund(&mut runner, P0, 1, &[ManaType::Black, ManaType::Black]);
+                runner.cast(removal).target_object(source).resolve();
+            } else {
+                runner.advance_until_stack_empty();
+            }
+            // CR 608.2c + CR 611.2c: exactly one unconditional pump, followed
+            // by two independent resolution-time recipient color decisions.
+            assert_eq!(
+                effective_pt(&mut runner, chosen),
+                if decline { (2, 2) } else { (4, 2) }
+            );
+            assert_eq!(
+                runner.state().objects[&chosen]
+                    .keywords
+                    .contains(&Keyword::Trample),
+                !decline && colors.contains(&ManaColor::Red)
+            );
+            assert_eq!(
+                runner.state().objects[&chosen]
+                    .keywords
+                    .contains(&Keyword::Vigilance),
+                !decline && colors.contains(&ManaColor::White)
+            );
+            assert_eq!(effective_pt(&mut runner, other), (6, 6));
+            assert!(!runner.state().objects[&other]
+                .keywords
+                .contains(&Keyword::Trample));
+            assert_eq!(effective_pt(&mut runner, foreign), (2, 2));
+            if departing_source {
+                assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+            } else {
+                assert_eq!(effective_pt(&mut runner, source), (2, 5));
+            }
+            assert_continuous_complete(runner.state());
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            runner.pass_both_players();
+            // CR 611.2a: every installed member expires at the stated cleanup.
+            assert_eq!(effective_pt(&mut runner, chosen), (2, 2));
+            assert!(!runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Trample));
+            assert!(!runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Vigilance));
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn complete_continuous_drop_bear_sum_cda_paid_entry_and_fight_choices() {
+    for (fight, victim_controller) in [(false, P1), (true, P1), (true, P0)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        // A Forest Bear contributes to BOTH independent summands.
+        scenario
+            .add_creature(P0, "Forest Bear", 1, 6)
+            .as_land()
+            .as_creature()
+            .with_subtypes(vec!["Forest", "Bear"]);
+        scenario
+            .add_creature(P0, "Other Bear", 2, 4)
+            .with_subtypes(vec!["Bear"]);
+        scenario.add_basic_land(P1, ManaColor::Green);
+        scenario
+            .add_creature(P1, "Foreign Bear", 2, 4)
+            .with_subtypes(vec!["Bear"]);
+        let victim = scenario
+            .add_creature(victim_controller, "Fight target", 1, 1)
+            .id();
+        let bear = scenario
+            .add_creature_to_hand_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+            .with_subtypes(vec!["Koala", "Bear", "Horror"])
+            .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+            .id();
+        let counter = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Battlegrowth",
+                true,
+                "Put a +1/+1 counter on target creature.",
+            )
+            .with_mana_cost(complete_publication_cost("{G}"))
+            .id();
+        let forest = scenario
+            .add_land_to_hand(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            complete_publication_pool(3, &[ManaType::Red, ManaType::Green]),
+        );
+        let mut runner = scenario.build();
+        runner.cast(bear).commit();
+        runner.pass_both_players();
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required fight target: {:?}", runner.state().waiting_for)
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(bear));
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[selection.current_slot].optional);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(victim)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: fight.then_some(TargetRef::Object(victim)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, bear), (5, 5));
+        assert!(runner.state().objects[&bear]
+            .keywords
+            .contains(&Keyword::Flash));
+        assert!(runner.state().objects[&bear]
+            .keywords
+            .contains(&Keyword::Haste));
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if fight {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_continuous_complete(runner.state());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner
+            .act(GameAction::PlayLand {
+                object_id: forest,
+                card_id: runner.state().objects[&forest].card_id,
+            })
+            .unwrap();
+        assert_eq!(effective_pt(&mut runner, bear), (6, 6));
+        complete_publication_fund(&mut runner, P0, 0, &[ManaType::Green]);
+        runner.cast(counter).target_object(bear).resolve();
+        // CR 604.3a + CR 613.4c: the live defining sum precedes counters.
+        assert_eq!(effective_pt(&mut runner, bear), (7, 7));
+        assert_eq!(runner.state().objects[&bear].layer_base_power, Some(6));
+        assert_eq!(runner.state().objects[&bear].layer_base_toughness, Some(6));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_rakdos_granted_cost_retains_granting_equipment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let knife = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let other = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    scenario.with_counter(other, CounterType::Generic("blood".into()), 5);
+    let host = scenario.add_creature(P0, "Equipped host", 2, 3).id();
+    let second_host = scenario.add_creature(P0, "Other host", 4, 5).id();
+    let fodder = scenario.add_creature(P0, "Sacrifice choice", 1, 1).id();
+    scenario.with_mana_pool(P0, complete_publication_pool(4, &[]));
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::Equip {
+            equipment_id: knife,
+            target_id: host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    runner
+        .act(GameAction::Equip {
+            equipment_id: other,
+            target_id: second_host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(effective_pt(&mut runner, second_host), (9, 5));
+    let index = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|definition| {
+            definition
+                .granting_object
+                .is_some_and(|object| object.object_id == knife)
+        })
+        .expect("actual parsed granted ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: index,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("required sacrifice cost: {:?}", runner.state().waiting_for)
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert!(choices.contains(&fodder));
+    assert!(choices.contains(&host));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    // CR 301.5d: host pays tap/sacrifice; the by-name body counters its granter.
+    assert!(runner.state().objects[&host].tapped);
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&knife]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&1)
+    );
+    assert_eq!(
+        runner.state().objects[&other]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&5)
+    );
+    assert!(!runner.state().objects[&host]
+        .counters
+        .contains_key(&CounterType::Generic("blood".into())));
+    assert_eq!(effective_pt(&mut runner, host), (3, 3));
+    assert_eq!(effective_pt(&mut runner, second_host), (9, 5));
+    assert_continuous_complete(runner.state());
+    assert!(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: host,
+                ability_index: index
+            })
+            .is_err(),
+        "tapped host cannot pay again"
+    );
+}
+
+#[test]
+fn complete_continuous_elturel_counts_each_actual_player_and_planeswalker_defender() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::player::PlayerId;
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 1803);
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..2 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    for _ in 0..5 {
+        scenario.add_basic_land(p2, ManaColor::Blue);
+    }
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let walker = scenario
+        .add_planeswalker_from_oracle(p2, "Defending walker", "Jace", 20, "")
+        .id();
+    let first = scenario
+        .add_creature_from_oracle(P0, "Elturel Survivors", 0, 4, ELTUREL)
+        .id();
+    let second = scenario
+        .add_creature_from_oracle(P0, "Elturel Survivors", 0, 4, ELTUREL)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(effective_pt(&mut runner, first), (0, 4));
+    assert_eq!(effective_pt(&mut runner, second), (0, 4));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Planeswalker(walker)),
+        ])
+        .unwrap();
+    for _ in 0..2 {
+        runner.advance_until_stack_empty();
+        let WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required myriad option: {:?}", runner.state().waiting_for)
+        };
+        assert_eq!(*player, P0);
+        assert!([first, second].contains(source_id));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+    }
+    runner.advance_until_stack_empty();
+    // CR 508.1b: each source's actual defender, including the walker's controller.
+    assert_eq!(effective_pt(&mut runner, first), (2, 4));
+    assert_eq!(effective_pt(&mut runner, second), (5, 4));
+    assert!(runner.state().objects[&first]
+        .keywords
+        .contains(&Keyword::Trample));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    for expected in [P1, p2] {
+        let WaitingFor::DeclareBlockers { player, .. } = runner.state().waiting_for else {
+            panic!(
+                "required defender blockers: {:?}",
+                runner.state().waiting_for
+            )
+        };
+        assert_eq!(player, expected);
+        runner.declare_blockers(&[]).unwrap();
+    }
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert_eq!(effective_pt(&mut runner, first), (0, 4));
+    assert_eq!(effective_pt(&mut runner, second), (0, 4));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_source_damage_history_drives_real_target_legality_and_new_incarnation() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::game_state::CastPaymentMode;
+    for prevented in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(P0, "Oyaminartok, Polar Werebear", 4, 5, OYAMINARTOK)
+            .as_legendary()
+            .with_mana_cost(complete_publication_cost("{2}{G}{G}"))
+            .id();
+        let untouched = scenario
+            .add_creature_from_oracle(P1, "Oyaminartok, Polar Werebear", 4, 5, OYAMINARTOK)
+            .as_legendary()
+            .id();
+        let decoy = scenario
+            .add_creature(P0, "Unprotected legal control", 2, 2)
+            .id();
+        let initial_bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{U}"))
+            .id();
+        let later_bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{U}"))
+            .id();
+        let fog = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Fog",
+                true,
+                "Prevent all combat damage that would be dealt this turn.",
+            )
+            .with_mana_cost(complete_publication_cost("{G}"))
+            .id();
+        let mut runner = scenario.build();
+        effective_pt(&mut runner, source);
+        assert!(runner.state().objects[&source]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        complete_publication_fund(&mut runner, P1, 0, &[ManaType::Blue]);
+        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: initial_bounce,
+                card_id: runner.state().objects[&initial_bounce].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::default(),
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required target prompt: {:?}", runner.state().waiting_for)
+        };
+        assert_eq!(*player, P1);
+        assert!(!target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(source)));
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(decoy)));
+        assert!(runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(source))
+            })
+            .is_err());
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(decoy)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(source, AttackTarget::Player(P1))])
+            .unwrap();
+        if prevented {
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Green]);
+            runner.cast(fog).resolve();
+        }
+        runner.advance_to_phase(Phase::DeclareBlockers);
+        let WaitingFor::DeclareBlockers { player, .. } = runner.state().waiting_for else {
+            panic!("blockers")
+        };
+        assert_eq!(player, P1);
+        runner.declare_blockers(&[]).unwrap();
+        runner.advance_to_phase(Phase::PostCombatMain);
+        effective_pt(&mut runner, source);
+        // CR 120.3: prevention produces no dealt-damage history; the other source never dealt damage.
+        assert_eq!(
+            runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            prevented
+        );
+        assert!(runner.state().objects[&untouched]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        let food = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Food")
+            })
+            .count();
+        assert_eq!(food, usize::from(!prevented));
+        assert_continuous_complete(runner.state());
+        if !prevented {
+            complete_publication_fund(&mut runner, P1, 0, &[ManaType::Blue]);
+            runner.act(GameAction::PassPriority).unwrap();
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: later_bounce,
+                    card_id: runner.state().objects[&later_bounce].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::default(),
+                })
+                .unwrap();
+            let WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("later target prompt")
+            };
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(source)));
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(untouched)));
+            let incarnation = runner.state().objects[&source].incarnation;
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(source)),
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+            for mana in complete_publication_pool(2, &[ManaType::Green, ManaType::Green]) {
+                runner.state_mut().add_mana_to_pool(P0, mana).unwrap();
+            }
+            runner.cast(source).resolve();
+            effective_pt(&mut runner, source);
+            // CR 400.7: the returned incarnation starts with no old damage history.
+            assert_ne!(runner.state().objects[&source].incarnation, incarnation);
+            assert!(runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof));
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn complete_continuous_mimics_retain_both_local_durations_from_real_dual_color_casts() {
+    for (name, cost, text, spell_name, spell_cost, spell_text, spell_types, first_color, second_color, power, toughness, keyword) in [
+        ("Battlegate Mimic", "{1}{R/W}", "Whenever you cast a spell that's both red and white, this creature has base power and toughness 4/2 until end of turn and gains first strike until end of turn.", "Boros Recruit", "{R/W}", "({R/W} can be paid with either {R} or {W}.)\nFirst strike", vec!["Goblin","Soldier"], ManaColor::Red, ManaColor::White, 4, 2, Keyword::FirstStrike),
+        ("Nightsky Mimic", "{1}{W/B}", "Whenever you cast a spell that's both white and black, this creature has base power and toughness 4/4 until end of turn and gains flying until end of turn.", "Nip Gwyllion", "{W/B}", "Lifelink (Damage dealt by this creature also causes you to gain that much life.)", vec!["Hag"], ManaColor::White, ManaColor::Black, 4, 4, Keyword::Flying),
+        ("Shorecrasher Mimic", "{1}{G/U}", "Whenever you cast a spell that's both green and blue, this creature has base power and toughness 5/3 until end of turn and gains trample until end of turn.", "Slippery Bogle", "{G/U}", "Hexproof (This creature can't be the target of spells or abilities your opponents control.)", vec!["Beast"], ManaColor::Green, ManaColor::Blue, 5, 3, Keyword::Trample),
+        ("Woodlurker Mimic", "{1}{B/G}", "Whenever you cast a spell that's both black and green, this creature has base power and toughness 4/5 until end of turn and gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)", "Odious Trow", "{B/G}", "{1}{B/G}: Regenerate this creature.", vec!["Troll"], ManaColor::Black, ManaColor::Green, 4, 5, Keyword::Wither),
+    ] {
+        let mut scenario = GameScenario::new(); scenario.at_phase(Phase::PreCombatMain);
+        let mimic = scenario.add_creature_from_oracle(P0, name, 2, 1, text).with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(complete_publication_cost(cost)).with_plus_counters(1).id();
+        let foreign = scenario.add_creature_from_oracle(P1, name, 2, 1, text).with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(complete_publication_cost(cost)).id();
+        let spell = scenario.add_creature_to_hand_from_oracle(P0, spell_name, 1, 1, spell_text)
+            .with_subtypes(spell_types).with_color(vec![first_color, second_color]).with_mana_cost(complete_publication_cost(spell_cost)).id();
+        let monocolor = scenario.add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"]).with_color(vec![ManaColor::Green]).with_mana_cost(complete_publication_cost("{1}{G}")).id();
+        for player in [P0, P1] { for _ in 0..4 { scenario.add_card_to_library_top(player, "Turn buffer"); } }
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Green]);
+        runner.cast(monocolor).resolve();
+        assert_eq!(effective_pt(&mut runner, mimic), (3, 2));
+        assert!(!runner.state().objects[&mimic].keywords.contains(&keyword));
+        assert_continuous_complete(runner.state());
+        let mana = match first_color { ManaColor::White => ManaType::White, ManaColor::Blue => ManaType::Blue,
+            ManaColor::Black => ManaType::Black, ManaColor::Red => ManaType::Red, ManaColor::Green => ManaType::Green };
+        complete_publication_fund(&mut runner, P0, 0, &[mana]);
+        runner.cast(spell).commit();
+        assert_eq!(runner.state().stack.len(), 2, "cast spell plus actual Mimic trigger: {name}");
+        assert_eq!(runner.state().stack.last().unwrap().ability().unwrap().source_id, mimic);
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, mimic), (power + 1, toughness + 1));
+        assert!(runner.state().objects[&mimic].keywords.contains(&keyword));
+        assert_eq!(effective_pt(&mut runner, foreign), (2, 1));
+        assert!(!runner.state().objects[&foreign].keywords.contains(&keyword));
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat(); runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step(); runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, mimic), (3, 2));
+        assert!(!runner.state().objects[&mimic].keywords.contains(&keyword));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_aven_feather_duration_survives_source_and_ends_on_exact_recipient() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let source = scenario.add_creature_from_oracle(P0, "Aven Mimeomancer", 3, 1,
+            "Flying\nAt the beginning of your upkeep, you may put a feather counter on target creature. If you do, that creature has base power and toughness 3/1 and has flying for as long as it has a feather counter on it.")
+            .with_subtypes(vec!["Bird", "Wizard"]).with_mana_cost(complete_publication_cost("{1}{W}{U}")).id();
+        let recipient = scenario
+            .add_creature(P0, "Chosen unequal creature", 2, 7)
+            .id();
+        let other = scenario.add_creature(P1, "Counter receiver", 6, 8).id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let transfer = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Fate Transfer",
+                true,
+                "Move all counters from target creature onto another target creature.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U/B}"))
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_upkeep();
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual upkeep target: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(source));
+        assert_eq!(target_slots.len(), 1);
+        assert!(!target_slots[selection.current_slot].optional);
+        for object in [source, recipient, other] {
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(object)));
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            })
+            .unwrap();
+        runner.resolve_top();
+        let WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required feather optional decision");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, source);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            effective_pt(&mut runner, recipient),
+            if accept { (3, 1) } else { (2, 7) }
+        );
+        assert_eq!(
+            runner.state().objects[&recipient]
+                .keywords
+                .contains(&Keyword::Flying),
+            accept
+        );
+        assert_eq!(
+            runner.state().objects[&recipient]
+                .counters
+                .get(&CounterType::Generic("feather".into()))
+                .copied()
+                .unwrap_or(0),
+            u32::from(accept)
+        );
+        assert_eq!(effective_pt(&mut runner, other), (6, 8));
+        assert_continuous_complete(runner.state());
+        if accept {
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+            runner.cast(bounce).target_object(source).resolve();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+            assert_eq!(effective_pt(&mut runner, recipient), (3, 1));
+            assert!(runner.state().objects[&recipient]
+                .keywords
+                .contains(&Keyword::Flying));
+            assert_continuous_complete(runner.state());
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+            runner
+                .cast(transfer)
+                .target_objects(&[recipient, other])
+                .resolve();
+            assert_eq!(effective_pt(&mut runner, recipient), (2, 7));
+            assert!(!runner.state().objects[&recipient]
+                .keywords
+                .contains(&Keyword::Flying));
+            assert_eq!(
+                runner.state().objects[&other]
+                    .counters
+                    .get(&CounterType::Generic("feather".into())),
+                Some(&1)
+            );
+            assert_eq!(effective_pt(&mut runner, other), (6, 8));
+            assert!(!runner.state().objects[&other]
+                .keywords
+                .contains(&Keyword::Flying));
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+// CR 608.2d + CR 611.2c: each real ETB chooses for its own controller and
+// fixes the matching recipients when it resolves, independently of later choices.
+#[test]
+fn complete_continuous_safewright_two_public_type_choices_keep_exact_permanents() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_to_hand_from_oracle(P0, "Selfless Safewright", 4, 2, SAFEWRIGHT)
+        .with_subtypes(vec!["Elf", "Warrior"])
+        .with_color(vec![ManaColor::Green])
+        .with_mana_cost(complete_publication_cost("{3}{G}{G}"))
+        .id();
+    let second = scenario
+        .add_creature_to_hand_from_oracle(P1, "Selfless Safewright", 4, 2, SAFEWRIGHT)
+        .with_subtypes(vec!["Elf", "Warrior"])
+        .with_color(vec![ManaColor::Green])
+        .with_mana_cost(complete_publication_cost("{3}{G}{G}"))
+        .id();
+    let own_elf = scenario
+        .add_creature(P0, "Own Elf", 2, 3)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    let own_goblin = scenario
+        .add_creature(P0, "Own Goblin", 3, 4)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let foreign_elf = scenario
+        .add_creature(P1, "Foreign Elf", 4, 5)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    let foreign_goblin = scenario
+        .add_creature(P1, "Foreign Goblin", 5, 6)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let kindred = scenario.add_enchantment_from_oracle(P0, "Prowess of the Fair",
+        "Whenever another nontoken Elf is put into your graveyard from the battlefield, you may create a 1/1 green Elf Warrior creature token.")
+        .with_subtypes(vec!["Elf"]).with_color(vec![ManaColor::Black]).with_mana_cost(complete_publication_cost("{1}{B}")).id();
+    let foreign_kindred = scenario.add_enchantment_from_oracle(P1, "Prowess of the Fair",
+        "Whenever another nontoken Elf is put into your graveyard from the battlefield, you may create a 1/1 green Elf Warrior creature token.")
+        .with_subtypes(vec!["Elf"]).with_color(vec![ManaColor::Black]).with_mana_cost(complete_publication_cost("{1}{B}")).id();
+    let late = scenario
+        .add_creature_to_hand_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+        .with_subtypes(vec!["Elf", "Druid"])
+        .with_color(vec![ManaColor::Green])
+        .with_mana_cost(complete_publication_cost("{G}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    for object in [kindred, foreign_kindred] {
+        let printed = runner.state_mut().objects.get_mut(&object).unwrap();
+        printed
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Kindred);
+        printed.base_card_types = printed.card_types.clone();
+        assert!(!printed
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature));
+    }
+    for (source, player, answer) in [(first, P0, "Elf"), (second, P1, "Goblin")] {
+        if player == P1 {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        complete_publication_fund(&mut runner, player, 3, &[ManaType::Green, ManaType::Green]);
+        runner.cast(source).resolve();
+        let WaitingFor::NamedChoice {
+            player: actor,
+            choice_type,
+            options,
+            source: authority,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "actual paid Safewright ETB choice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*actor, player);
+        assert!(matches!(
+            choice_type,
+            engine::types::ability::ChoiceType::CreatureType { .. }
+        ));
+        assert!(options.len() > 20);
+        assert!(options.iter().any(|option| option == "Elf"));
+        assert!(options.iter().any(|option| option == "Goblin"));
+        assert_ne!(options.first().map(String::as_str), Some(answer));
+        assert_eq!(
+            authority
+                .as_ref()
+                .unwrap()
+                .prompt
+                .identity
+                .reference
+                .object_id,
+            source
+        );
+        runner
+            .act(GameAction::ChooseOption {
+                choice: answer.into(),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().players[player.0 as usize].mana_pool.total(),
+            0
+        );
+        effective_pt(&mut runner, own_elf);
+        for (object, expected) in [
+            (own_elf, true),
+            (own_goblin, false),
+            (foreign_elf, false),
+            (foreign_goblin, player == P1),
+            (kindred, true),
+            (foreign_kindred, false),
+            (first, false),
+            (source, false),
+        ] {
+            for keyword in [Keyword::Hexproof, Keyword::Indestructible] {
+                assert_eq!(
+                    runner.state().objects[&object].keywords.contains(&keyword),
+                    expected,
+                    "{answer}: {object:?} {keyword:?}"
+                );
+            }
+        }
+        assert_continuous_complete(runner.state());
+    }
+    // The second controller's answer cannot replace the first resolved answer.
+    if runner.state().priority_player != P0 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Green, ManaType::Blue]);
+    runner.cast(late).resolve();
+    for keyword in [Keyword::Hexproof, Keyword::Indestructible] {
+        assert!(!runner.state().objects[&late].keywords.contains(&keyword));
+        assert!(runner.state().objects[&own_elf].keywords.contains(&keyword));
+        assert!(runner.state().objects[&kindred].keywords.contains(&keyword));
+        assert!(runner.state().objects[&foreign_goblin]
+            .keywords
+            .contains(&keyword));
+    }
+    runner.cast(bounce).target_object(first).resolve();
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    for keyword in [Keyword::Hexproof, Keyword::Indestructible] {
+        assert!(runner.state().objects[&own_elf].keywords.contains(&keyword));
+        assert!(runner.state().objects[&foreign_goblin]
+            .keywords
+            .contains(&keyword));
+    }
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    for object in [
+        own_elf,
+        own_goblin,
+        foreign_elf,
+        foreign_goblin,
+        kindred,
+        foreign_kindred,
+        late,
+        second,
+    ] {
+        for keyword in [Keyword::Hexproof, Keyword::Indestructible] {
+            assert!(!runner.state().objects[&object].keywords.contains(&keyword));
+        }
+    }
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_entity_x_zero_two_and_lifetime_hostiles() {
+    for x in [0, 2] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(P0, "Mirror Entity", 1, 1, ENTITY)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(complete_publication_cost("{2}{W}"))
+            .id();
+        let plain = scenario
+            .add_creature(P0, "Plain recipient", 2, 3)
+            .with_subtypes(vec!["Bear"])
+            .id();
+        let countered = scenario
+            .add_creature(P0, "Counter recipient", 2, 3)
+            .with_plus_counters(1)
+            .id();
+        let foreign = scenario.add_creature(P1, "Foreign recipient", 6, 7).id();
+        let late = scenario
+            .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(complete_publication_cost("{1}{G}"))
+            .id();
+        let growth = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Giant Growth",
+                true,
+                "Target creature gets +3/+3 until end of turn.",
+            )
+            .with_mana_cost(complete_publication_cost("{G}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+            "Exile target creature you control, then return that card to the battlefield under your control.")
+            .with_mana_cost(complete_publication_cost("{W}")).id();
+        for player in [P0, P1] {
+            for _ in 0..4 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        scenario.with_mana_pool(P0, complete_publication_pool(x as usize, &[]));
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .unwrap();
+        let WaitingFor::ChooseXValue {
+            player, min, max, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("announced X prompt")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*min, 0);
+        assert_eq!(*max, x);
+        assert!(
+            runner.act(GameAction::ChooseX { value: 4 }).is_err(),
+            "unfunded announced X"
+        );
+        runner.act(GameAction::ChooseX { value: x }).unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        // CR 704.5f: X=0 actually kills unmodified recipients; +1 counters
+        // remain in layer 7c and save the countered recipient at 1/1.
+        if x == 0 {
+            assert_eq!(runner.state().objects[&plain].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+            assert_eq!(effective_pt(&mut runner, countered), (1, 1));
+        } else {
+            assert_eq!(effective_pt(&mut runner, plain), (2, 2));
+            assert_eq!(effective_pt(&mut runner, source), (2, 2));
+            assert_eq!(effective_pt(&mut runner, countered), (3, 3));
+        }
+        assert!(runner.state().objects[&countered]
+            .keywords
+            .contains(&Keyword::Changeling));
+        assert!(runner.state().objects[&countered].card_types.subtypes.len() > 20);
+        assert_eq!(effective_pt(&mut runner, foreign), (6, 7));
+        assert!(!runner.state().objects[&foreign]
+            .keywords
+            .contains(&Keyword::Changeling));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(
+            &mut runner,
+            P0,
+            2,
+            &[
+                ManaType::Green,
+                ManaType::Green,
+                ManaType::Blue,
+                ManaType::White,
+            ],
+        );
+        runner.cast(growth).target_object(countered).resolve();
+        assert_eq!(
+            effective_pt(&mut runner, countered),
+            (x as i32 + 4, x as i32 + 4)
+        );
+        runner.cast(late).resolve();
+        assert_eq!(effective_pt(&mut runner, late), (2, 2));
+        assert!(!runner.state().objects[&late]
+            .keywords
+            .contains(&Keyword::Changeling));
+        if x == 2 {
+            runner.cast(bounce).target_object(source).resolve();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+            assert_eq!(effective_pt(&mut runner, plain), (2, 2));
+            assert!(runner.state().objects[&plain]
+                .keywords
+                .contains(&Keyword::Changeling));
+            let before = runner.state().objects[&plain].incarnation;
+            runner.cast(blink).target_object(plain).resolve();
+            assert_ne!(runner.state().objects[&plain].incarnation, before);
+            assert_eq!(effective_pt(&mut runner, plain), (2, 3));
+            assert!(!runner.state().objects[&plain]
+                .keywords
+                .contains(&Keyword::Changeling));
+        }
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, countered), (3, 4));
+        assert!(!runner.state().objects[&countered]
+            .keywords
+            .contains(&Keyword::Changeling));
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_paid_aura_classes_keep_companions_control_and_source_lifetime() {
+    for (name, cost, text, generic, colors, expected, keywords, assassin, steals) in [
+        ("Coerced to Kill", "{3}{U}{B}", "Enchant creature\nYou control enchanted creature.\nEnchanted creature has base power and toughness 1/1, has deathtouch, and is an Assassin in addition to its other types.", 3, vec![ManaType::Blue, ManaType::Black], (1,1), vec![Keyword::Deathtouch], true, true),
+        ("Gigantiform", "{3}{G}{G}", "Kicker {4}\nEnchant creature\nEnchanted creature has base power and toughness 8/8 and has trample.\nWhen this Aura enters, if it was kicked, you may search your library for a card named Gigantiform, put it onto the battlefield, then shuffle.", 3, vec![ManaType::Green, ManaType::Green], (8,8), vec![Keyword::Trample], false, false),
+        ("Super State", "{7}", "Enchant creature you control\nEnchanted creature has base power and toughness 9/9 and has flying, first strike, trample, and haste.\nWhenever enchanted creature deals combat damage to an opponent, it deals that much damage to each other opponent.", 7, vec![], (9,9), vec![Keyword::Flying, Keyword::FirstStrike, Keyword::Trample, Keyword::Haste], false, false),
+    ] {
+        let mut scenario = GameScenario::new(); scenario.at_phase(Phase::PreCombatMain);
+        let host_owner = if steals { P1 } else { P0 };
+        let host = scenario.add_creature(host_owner, "Unequal Goblin host", 2, 3).with_subtypes(vec!["Goblin"]).with_plus_counters(1).id();
+        let decoy = scenario.add_creature(P1, "Foreign unenchanted", 6, 7).id();
+        let mut aura_builder = scenario.add_spell_to_hand_from_oracle(P0, name, false, text);
+        aura_builder.as_enchantment().with_subtypes(vec!["Aura"]).with_mana_cost(complete_publication_cost(cost));
+        if name == "Super State" { aura_builder.as_legendary(); }
+        let source = aura_builder.id();
+        let bounce = scenario.add_spell_to_hand_from_oracle(P0, "Disperse", true,
+            "Return target nonland permanent to its owner's hand.").with_mana_cost(complete_publication_cost("{1}{U}")).id();
+        let mut runner = scenario.build();
+        assert!(runner.cast(source).target_object(host).try_resolve().is_err(), "unfunded full cast {name}");
+        complete_publication_fund(&mut runner, P0, generic, &colors);
+        runner.cast(source).target_object(host).resolve();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(effective_pt(&mut runner, host), (expected.0+1, expected.1+1));
+        assert_eq!(runner.state().objects[&host].owner, host_owner);
+        assert_eq!(runner.state().objects[&host].controller, P0);
+        for keyword in &keywords { assert!(runner.state().objects[&host].keywords.contains(keyword)); assert!(!runner.state().objects[&decoy].keywords.contains(keyword)); }
+        assert!(runner.state().objects[&host].card_types.subtypes.iter().any(|subtype| subtype == "Goblin"));
+        assert_eq!(runner.state().objects[&host].card_types.subtypes.iter().any(|subtype| subtype == "Assassin"), assassin);
+        assert_eq!(effective_pt(&mut runner, decoy), (6,7));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(source).resolve();
+        assert_eq!(effective_pt(&mut runner, host), (3,4));
+        assert_eq!(runner.state().objects[&host].controller, host_owner);
+        for keyword in &keywords { assert!(!runner.state().objects[&host].keywords.contains(keyword)); }
+        assert!(!runner.state().objects[&host].card_types.subtypes.iter().any(|subtype| subtype == "Assassin"));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_hulkbuster_and_bestowed_hydra_use_paid_attachments() {
+    use engine::types::actions::AlternativeCastDecision;
+    for hydra in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_creature(P0, "Unequal host", 2, 3).id();
+        let decoy = scenario.add_creature(P0, "Second host", 4, 6).id();
+        let foreign = scenario.add_creature(P1, "Foreign host", 7, 8).id();
+        let source = if hydra {
+            scenario.add_creature_to_hand_from_oracle(P0, "Nyxborn Hydra", 0, 1,
+                "Bestow {X}{G}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nReach, trample\nThis permanent enters with X +1/+1 counters on it.\nEnchanted creature gets +1/+1 for each +1/+1 counter on this Aura and has reach and trample.")
+                .as_enchantment().as_creature().with_subtypes(vec!["Hydra"]).with_mana_cost(complete_publication_cost("{X}{G}")).id()
+        } else {
+            scenario.add_artifact_to_hand_from_oracle(P0, "Hulkbuster Armor",
+                "Equipped creature has base power and toughness 9/9 and has flying.\nEquip Hero {3}\nEquip {6}")
+                .as_legendary().with_subtypes(vec!["Equipment"]).with_mana_cost(complete_publication_cost("{4}")).id()
+        };
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        if hydra {
+            complete_publication_fund(&mut runner, P0, 2, &[ManaType::Green, ManaType::Green]);
+            runner
+                .cast(source)
+                .alternative_cast(AlternativeCastDecision::Alternative)
+                .x(2)
+                .target_object(host)
+                .resolve();
+            assert_eq!(
+                runner.state().objects[&source]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&2)
+            );
+            assert_eq!(effective_pt(&mut runner, host), (4, 5));
+            for keyword in [Keyword::Reach, Keyword::Trample] {
+                assert!(runner.state().objects[&host].keywords.contains(&keyword));
+            }
+        } else {
+            complete_publication_fund(&mut runner, P0, 4, &[]);
+            runner.cast(source).resolve();
+            assert!(runner
+                .act(GameAction::Equip {
+                    equipment_id: source,
+                    target_id: host
+                })
+                .is_err());
+            complete_publication_fund(&mut runner, P0, 6, &[]);
+            runner
+                .act(GameAction::Equip {
+                    equipment_id: source,
+                    target_id: host,
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(effective_pt(&mut runner, host), (9, 9));
+            assert!(runner.state().objects[&host]
+                .keywords
+                .contains(&Keyword::Flying));
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(effective_pt(&mut runner, decoy), (4, 6));
+        assert_eq!(effective_pt(&mut runner, foreign), (7, 8));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(source).resolve();
+        assert_eq!(effective_pt(&mut runner, host), (2, 3));
+        for keyword in [Keyword::Flying, Keyword::Reach, Keyword::Trample] {
+            assert!(!runner.state().objects[&host].keywords.contains(&keyword));
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_rakdos_self_sacrifice_keeps_granter_and_printed_br_body() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let knife = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(complete_publication_cost("{2}"))
+        .id();
+    let host = scenario
+        .add_creature(P0, "Sole controlled creature", 2, 3)
+        .id();
+    let first = scenario
+        .add_creature(P1, "First sacrifice option", 3, 4)
+        .id();
+    let second = scenario
+        .add_creature(P1, "Nondefault sacrifice option", 5, 6)
+        .id();
+    scenario.with_mana_pool(P0, complete_publication_pool(2, &[]));
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::Equip {
+            equipment_id: knife,
+            target_id: host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    let index = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|definition| {
+            definition
+                .granting_object
+                .is_some_and(|reference| reference.object_id == knife)
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: index,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("sole-host sacrifice cost")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(choices, &vec![host]);
+    runner
+        .act(GameAction::SelectCards { cards: vec![host] })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    // CR 201.5a + CR 301.5d: the host may pay by sacrificing itself while
+    // the granting Equipment remains to receive its specifically named counter.
+    assert_eq!(runner.state().objects[&host].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&knife].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&knife]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&1)
+    );
+    assert_continuous_complete(runner.state());
+    assert!(runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: index
+        })
+        .is_err());
+    assert!(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: knife,
+                ability_index: 0
+            })
+            .is_err(),
+        "unfunded printed BR ability"
+    );
+    complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue, ManaType::Blue]);
+    assert!(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: knife,
+                ability_index: 0
+            })
+            .is_err(),
+        "wrong colors cannot pay BR"
+    );
+    complete_publication_fund(&mut runner, P0, 0, &[ManaType::Black, ManaType::Red]);
+    runner.activate(knife, 0).target_player(P1).resolve();
+    assert_eq!(
+        runner.state().objects[&knife].zone,
+        Zone::Graveyard,
+        "real source sacrifice paid before body"
+    );
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        min_count,
+        up_to,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("printed targeted-player sacrifice")
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(*count, 1);
+    assert_eq!(*min_count, 1);
+    assert!(!up_to);
+    assert_eq!(cards.len(), 2);
+    assert!(cards.contains(&first));
+    assert!(cards.contains(&second));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![second],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_taranika_actual_attack_untaps_and_preserves_indestructible() {
+    use engine::game::combat::AttackTarget;
+    for attacking_recipient in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature_from_oracle(P0, "Taranika, Akroan Veteran", 3, 3,
+            "Vigilance\nWhenever Taranika attacks, untap another target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains indestructible.")
+            .as_legendary().with_subtypes(vec!["Human", "Soldier"]).with_color(vec![ManaColor::White])
+            .with_mana_cost(complete_publication_cost("{1}{W}{W}")).id();
+        let recipient = scenario
+            .add_creature(P0, "Unequal countered recipient", 2, 7)
+            .with_plus_counters(1)
+            .id();
+        let other = scenario.add_creature(P0, "Other legal creature", 6, 8).id();
+        let foreign = scenario
+            .add_creature(P1, "Foreign illegal creature", 4, 6)
+            .id();
+        for player in [P0, P1] {
+            for _ in 0..4 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        let mut attackers = vec![(source, AttackTarget::Player(P1))];
+        if attacking_recipient {
+            attackers.push((recipient, AttackTarget::Player(P1)));
+        }
+        runner.declare_attackers(&attackers).unwrap();
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual attack target")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, Some(source));
+        assert_eq!(target_slots.len(), 1);
+        let slot = &target_slots[selection.current_slot];
+        assert!(!slot.optional);
+        assert!(slot.legal_targets.contains(&TargetRef::Object(recipient)));
+        assert!(slot.legal_targets.contains(&TargetRef::Object(other)));
+        assert!(!slot.legal_targets.contains(&TargetRef::Object(source)));
+        assert!(!slot.legal_targets.contains(&TargetRef::Object(foreign)));
+        assert_eq!(
+            runner.state().objects[&recipient].tapped,
+            attacking_recipient
+        );
+        assert!(runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(foreign))
+            })
+            .is_err());
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert!(!runner.state().objects[&recipient].tapped);
+        assert_eq!(effective_pt(&mut runner, recipient), (5, 5));
+        assert!(runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Indestructible));
+        assert_eq!(effective_pt(&mut runner, other), (6, 8));
+        assert!(!runner.state().objects[&other]
+            .keywords
+            .contains(&Keyword::Indestructible));
+        assert_eq!(effective_pt(&mut runner, foreign), (4, 6));
+        assert_eq!(effective_pt(&mut runner, source), (3, 3));
+        assert!(!runner.state().objects[&source].tapped);
+        assert!(runner.state().objects[&source]
+            .keywords
+            .contains(&Keyword::Vigilance));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_phase(Phase::DeclareBlockers);
+        runner.declare_blockers(&[]).unwrap();
+        runner.advance_to_phase(Phase::PostCombatMain);
+        assert_continuous_complete(runner.state());
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, recipient), (3, 8));
+        assert!(!runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Indestructible));
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_equipment_paid_entry_and_real_counter_producers() {
+    for scythe in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let name = if scythe {
+            "Reaper's Scythe"
+        } else {
+            "Mace of the Valiant"
+        };
+        let source = scenario
+            .add_artifact_to_hand_from_oracle(P0, name, if scythe { SCYTHE } else { MACE })
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost(if scythe {
+                "{2}{B}"
+            } else {
+                "{2}{W}"
+            }))
+            .id();
+        let host = scenario
+            .add_creature(P0, "Unequal equipped creature", 2, 3)
+            .id();
+        let foreign = scenario
+            .add_creature(P1, "Unaffected foreign creature", 4, 6)
+            .id();
+        let entrant = scenario
+            .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(complete_publication_cost("{1}{G}"))
+            .id();
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .with_mana_cost(complete_publication_cost("{R}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        complete_publication_fund(
+            &mut runner,
+            P0,
+            2,
+            &[if scythe {
+                ManaType::Black
+            } else {
+                ManaType::White
+            }],
+        );
+        runner.cast(source).resolve();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        if scythe {
+            let heroes = runner
+                .state()
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|object| {
+                    let object = &runner.state().objects[object];
+                    object.is_token
+                        && object.controller == P0
+                        && object
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|subtype| subtype == "Hero")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                heroes.len(),
+                1,
+                "actual Job select token from paid source ETB"
+            );
+            assert_eq!(effective_pt(&mut runner, heroes[0]), (1, 1));
+            assert!(runner.state().objects[&heroes[0]]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Assassin"));
+        }
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, if scythe { 2 } else { 3 }, &[]);
+        runner
+            .act(GameAction::Equip {
+                equipment_id: source,
+                target_id: host,
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, host), (2, 3));
+        if scythe {
+            assert!(runner.state().objects[&host]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Assassin"));
+        } else {
+            assert!(runner.state().objects[&host]
+                .keywords
+                .contains(&Keyword::Vigilance));
+        }
+        assert_eq!(effective_pt(&mut runner, foreign), (4, 6));
+        assert_continuous_complete(runner.state());
+        if scythe {
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Red]);
+            runner.cast(bolt).target_player(P1).resolve();
+            assert_continuous_complete(runner.state());
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            runner.advance_until_stack_empty();
+        } else {
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Green]);
+            runner.cast(entrant).resolve();
+        }
+        let counter = CounterType::Generic(if scythe { "soul" } else { "charge" }.into());
+        assert_eq!(
+            runner.state().objects[&source].counters.get(&counter),
+            Some(&1)
+        );
+        assert_eq!(
+            effective_pt(&mut runner, host),
+            (3, 4),
+            "actual ETB/end-step source counter updates both axes"
+        );
+        assert_eq!(effective_pt(&mut runner, foreign), (4, 6));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(source).resolve();
+        assert_eq!(effective_pt(&mut runner, host), (2, 3));
+        if scythe {
+            assert!(!runner.state().objects[&host]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Assassin"));
+        } else {
+            assert!(!runner.state().objects[&host]
+                .keywords
+                .contains(&Keyword::Vigilance));
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_source_history_noncombat_zero_and_later_turns() {
+    use engine::types::game_state::CastPaymentMode;
+    for zero in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(P0, "Oyaminartok, Polar Werebear", 4, 5, OYAMINARTOK)
+            .as_legendary()
+            .with_subtypes(vec!["Giant", "Bear"])
+            .with_mana_cost(complete_publication_cost("{2}{G}{G}"))
+            .id();
+        let foreign = scenario
+            .add_creature_from_oracle(P1, "Oyaminartok, Polar Werebear", 4, 5, OYAMINARTOK)
+            .as_legendary()
+            .with_subtypes(vec!["Giant", "Bear"])
+            .with_mana_cost(complete_publication_cost("{2}{G}{G}"))
+            .id();
+        let fire = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Soul's Fire",
+                true,
+                "Target creature you control deals damage equal to its power to any target.",
+            )
+            .with_mana_cost(complete_publication_cost("{2}{R}"))
+            .id();
+        let surge = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Hydrosurge",
+                true,
+                "Target creature gets -5/-0 until end of turn.",
+            )
+            .with_mana_cost(complete_publication_cost("{U}"))
+            .id();
+        let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+            "Exile target creature you control, then return that card to the battlefield under your control.")
+            .with_mana_cost(complete_publication_cost("{W}")).id();
+        let steal = scenario.add_spell_to_hand_from_oracle(P1, "Turn Against", true,
+            "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+            .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+        for player in [P0, P1] {
+            for _ in 0..8 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        assert_eq!(effective_pt(&mut runner, source), (4, 5));
+        assert!(runner.state().objects[&source]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        if zero {
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue]);
+            runner.cast(surge).target_object(source).resolve();
+            assert_eq!(effective_pt(&mut runner, source), (-1, 5));
+            assert_continuous_complete(runner.state());
+        }
+        let before = runner.state().players[1].life;
+        complete_publication_fund(&mut runner, P0, 2, &[ManaType::Red]);
+        runner
+            .cast(fire)
+            .target_object(source)
+            .target_player(P1)
+            .resolve();
+        assert_eq!(
+            runner.state().players[1].life,
+            before - if zero { 0 } else { 4 }
+        );
+        assert_eq!(
+            runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            zero
+        );
+        assert!(runner.state().objects[&foreign]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        assert!(
+            !runner
+                .state()
+                .battlefield
+                .iter()
+                .any(|id| runner.state().objects[id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Food")),
+            "noncombat and zero damage never create combat-damage Food"
+        );
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(runner.state().active_player, P1);
+        assert_eq!(effective_pt(&mut runner, source), (4, 5));
+        assert_eq!(
+            runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            zero,
+            "new turn does not reset source history"
+        );
+        assert_continuous_complete(runner.state());
+        let stable_epoch = runner.state().objects[&source].incarnation;
+        complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+        runner
+            .act(GameAction::CastSpell {
+                object_id: steal,
+                card_id: runner.state().objects[&steal].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::default(),
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real history-sensitive control target")
+        };
+        assert_eq!(*player, P1);
+        assert_eq!(target_slots.len(), 1);
+        let slot = &target_slots[selection.current_slot];
+        assert!(!slot.optional);
+        assert!(
+            slot.legal_targets.contains(&TargetRef::Object(foreign)),
+            "own second authority is always legal"
+        );
+        assert_eq!(
+            slot.legal_targets.contains(&TargetRef::Object(source)),
+            !zero
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(if zero { foreign } else { source })),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&source].owner, P0);
+        assert_eq!(
+            runner.state().objects[&source].controller,
+            if zero { P0 } else { P1 }
+        );
+        assert_eq!(runner.state().objects[&source].incarnation, stable_epoch);
+        assert_eq!(
+            runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            zero
+        );
+        assert!(runner.state().objects[&foreign]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(runner.state().objects[&source].controller, P0);
+        assert_eq!(
+            runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Hexproof),
+            zero
+        );
+        let epoch = runner.state().objects[&source].incarnation;
+        complete_publication_fund(&mut runner, P0, 0, &[ManaType::White]);
+        runner.cast(blink).target_object(source).resolve();
+        assert_ne!(runner.state().objects[&source].incarnation, epoch);
+        assert!(runner.state().objects[&source]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        assert!(runner.state().objects[&foreign]
+            .keywords
+            .contains(&Keyword::Hexproof));
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_native_loyalty_members_pay_counters_and_outlive_source() {
+    for (name, subtype, printed_loyalty, paid_loyalty, cost, text, size) in [
+        ("Greensleeves", "Greensleeves", 5, 8, "{4}{G}{G}", "[+2]: Create a Giant Badger token. (It's a {1}{G}{G} 2/2 Badger creature with \"Whenever this token blocks, it gets +2/+2 until end of turn.\")\n[−3]: Mill three cards. Put all permanent cards from among them into your hand.\n[−8]: Until end of turn, creatures you control have base power and toughness 8/8 and gain trample.\nGreensleeves can be your commander.", 8),
+        ("Oko, the Trickster", "Oko", 4, 7, "{4}{G}{U}", "[+1]: Put two +1/+1 counters on up to one target creature you control.\n[0]: Until end of turn, Oko becomes a copy of target creature you control. Prevent all damage that would be dealt to him this turn.\n[−7]: Until end of turn, each creature you control has base power and toughness 10/10 and gains trample.", 10),
+    ] {
+        let mut scenario = GameScenario::new(); scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_planeswalker_from_oracle(P0, name, subtype, printed_loyalty, text)
+            .as_legendary().with_mana_cost(complete_publication_cost(cost)).id();
+        scenario.with_counter(source, CounterType::Loyalty, paid_loyalty);
+        let own = scenario.add_creature(P0, "Countered unequal recipient", 2, 7).with_plus_counters(1).id();
+        let other = scenario.add_creature(P0, "Other unequal recipient", 4, 6).id();
+        let foreign = scenario.add_creature(P1, "Foreign recipient", 6, 8).id();
+        let entrant = scenario.add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"]).with_mana_cost(complete_publication_cost("{1}{G}")).id();
+        for player in [P0, P1] { for _ in 0..4 { scenario.add_card_to_library_top(player, "Draw buffer"); } }
+        let mut runner = scenario.build();
+        runner.activate(source, 2).resolve();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard, "actual loyalty cost consumes the source's last counters");
+        assert_eq!(effective_pt(&mut runner, own), (size+1,size+1)); assert_eq!(effective_pt(&mut runner, other), (size,size));
+        for object in [own,other] { assert!(runner.state().objects[&object].keywords.contains(&Keyword::Trample)); }
+        assert_eq!(effective_pt(&mut runner, foreign), (6,8)); assert!(!runner.state().objects[&foreign].keywords.contains(&Keyword::Trample));
+        assert_continuous_complete(runner.state());
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Green]); runner.cast(entrant).resolve();
+        assert_eq!(effective_pt(&mut runner, entrant), (2,2)); assert!(!runner.state().objects[&entrant].keywords.contains(&Keyword::Trample));
+        assert_eq!(effective_pt(&mut runner, own), (size+1,size+1)); assert_continuous_complete(runner.state());
+        runner.advance_to_combat(); runner.declare_attackers(&[]).unwrap(); runner.advance_to_end_step(); runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, own), (3,8)); assert_eq!(effective_pt(&mut runner, other), (4,6));
+        for object in [own,other,entrant] { assert!(!runner.state().objects[&object].keywords.contains(&Keyword::Trample)); }
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_dragonblood_second_cast_and_eidolon_actual_entry() {
+    for eidolon in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let text = if eidolon {
+            "Vigilance\nConstellation — Whenever this creature or another enchantment you control enters, choose target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains flying."
+        } else {
+            "Double team\nFlurry — Whenever you cast your second spell each turn, until end of turn, this creature has base power and toughness 4/4 and gains flying."
+        };
+        let source = if eidolon {
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Eidolon of Astral Winds", 2, 4, text)
+                .as_enchantment()
+                .as_creature()
+                .with_subtypes(vec!["Spirit"])
+                .with_mana_cost(complete_publication_cost("{2}{W}"))
+                .id()
+        } else {
+            scenario
+                .add_creature_from_oracle(P0, "Dragonblood Twins", 2, 2, text)
+                .with_subtypes(vec!["Human", "Monk"])
+                .with_mana_cost(complete_publication_cost("{1}{R}"))
+                .id()
+        };
+        let own = scenario
+            .add_creature(P0, "Unequal chosen creature", 2, 7)
+            .with_plus_counters(1)
+            .id();
+        let other = scenario.add_creature(P0, "Other legal creature", 6, 8).id();
+        let foreign = scenario
+            .add_creature(P1, "Foreign illegal recipient", 5, 6)
+            .id();
+        let first = scenario
+            .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(complete_publication_cost("{1}{G}"))
+            .id();
+        let second = scenario
+            .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(complete_publication_cost("{1}{G}"))
+            .id();
+        for player in [P0, P1] {
+            for _ in 0..4 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        let recipient = if eidolon { own } else { source };
+        if eidolon {
+            complete_publication_fund(&mut runner, P0, 2, &[ManaType::White]);
+            runner.cast(source).commit();
+            runner.pass_both_players();
+            let WaitingFor::TriggerTargetSelection {
+                player,
+                source_id,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("actual Constellation ETB target")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, Some(source));
+            assert_eq!(target_slots.len(), 1);
+            let slot = &target_slots[selection.current_slot];
+            assert!(!slot.optional);
+            assert!(slot.legal_targets.contains(&TargetRef::Object(own)));
+            assert!(slot.legal_targets.contains(&TargetRef::Object(other)));
+            assert!(!slot.legal_targets.contains(&TargetRef::Object(foreign)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(own)),
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        } else {
+            complete_publication_fund(&mut runner, P0, 2, &[ManaType::Green, ManaType::Green]);
+            runner.cast(first).resolve();
+            assert_eq!(effective_pt(&mut runner, source), (2, 2));
+            assert!(!runner.state().objects[&source]
+                .keywords
+                .contains(&Keyword::Flying));
+            assert_continuous_complete(runner.state());
+            runner.cast(second).commit();
+            assert_eq!(runner.state().stack.len(), 2);
+            assert_eq!(
+                runner
+                    .state()
+                    .stack
+                    .last()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .source_id,
+                source
+            );
+            runner.advance_until_stack_empty();
+        }
+        assert_eq!(
+            effective_pt(&mut runner, recipient),
+            if eidolon { (5, 5) } else { (4, 4) }
+        );
+        assert!(runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Flying));
+        assert_eq!(effective_pt(&mut runner, other), (6, 8));
+        assert!(!runner.state().objects[&other]
+            .keywords
+            .contains(&Keyword::Flying));
+        assert_eq!(effective_pt(&mut runner, foreign), (5, 6));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(
+            effective_pt(&mut runner, recipient),
+            if eidolon { (3, 8) } else { (2, 2) }
+        );
+        assert!(!runner.state().objects[&recipient]
+            .keywords
+            .contains(&Keyword::Flying));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_flayer_paid_cast_trigger_preserves_control_untap_and_companions() {
+    use engine::types::game_state::CastPaymentMode;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source=scenario.add_creature_to_hand_from_oracle(P0,"Flayer of Loyalties",10,10,
+        "When you cast this spell, gain control of target creature until end of turn. Untap that creature. Until end of turn, it has base power and toughness 10/10 and gains trample, annihilator 2, and haste.\nAnnihilator 2 (Whenever this creature attacks, defending player sacrifices two permanents of their choice.)\nTrample")
+        .with_subtypes(vec!["Eldrazi"]).with_mana_cost(complete_publication_cost("{8}{C}{C}")).id();
+    let chosen = scenario
+        .add_creature(P1, "Chosen foreign creature", 2, 7)
+        .id();
+    let other = scenario
+        .add_creature(P1, "Other foreign creature", 4, 6)
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    scenario.with_mana_pool(P0, complete_publication_pool(10, &[]));
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&chosen).unwrap().tapped = true;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: source,
+            card_id: runner.state().objects[&source].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::default(),
+        })
+        .unwrap();
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        source_id,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "actual Flayer cast target: {:?}",
+            runner.state().waiting_for
+        )
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, Some(source));
+    assert_eq!(target_slots.len(), 1);
+    let slot = &target_slots[selection.current_slot];
+    assert!(!slot.optional);
+    assert!(slot.legal_targets.contains(&TargetRef::Object(chosen)));
+    assert!(slot.legal_targets.contains(&TargetRef::Object(other)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(chosen)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(runner.state().objects[&chosen].owner, P1);
+    assert_eq!(runner.state().objects[&chosen].controller, P0);
+    assert!(!runner.state().objects[&chosen].tapped);
+    assert_eq!(effective_pt(&mut runner, chosen), (10, 10));
+    for keyword in [Keyword::Trample, Keyword::Annihilator(2), Keyword::Haste] {
+        assert!(runner.state().objects[&chosen].keywords.contains(&keyword));
+    }
+    assert_eq!(effective_pt(&mut runner, other), (4, 6));
+    assert_eq!(runner.state().objects[&other].controller, P1);
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    assert_eq!(effective_pt(&mut runner, chosen), (2, 7));
+    assert_eq!(runner.state().objects[&chosen].controller, P1);
+    for keyword in [Keyword::Trample, Keyword::Annihilator(2), Keyword::Haste] {
+        assert!(!runner.state().objects[&chosen].keywords.contains(&keyword));
+    }
+    assert!(runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Trample));
+    assert_continuous_complete(runner.state());
+}
+#[test]
+fn complete_continuous_azula_experience_is_controller_scoped_and_wings_targets_either_controller() {
+    use engine::types::player::PlayerCounterKind;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    const AZULA:&str="Firebending 1 (Whenever this creature attacks, add {R}. This mana lasts until end of combat.)\nWhenever Azula attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: Until end of turn, Azula gets +1/+1 for each experience counter you have and gains menace.";
+    let source = scenario
+        .add_creature_from_oracle(P0, "Azula, Ruthless Firebender", 3, 3, AZULA)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Noble"])
+        .with_mana_cost(complete_publication_cost("{2}{B}"))
+        .id();
+    let foreign = scenario
+        .add_creature_from_oracle(P1, "Azula, Ruthless Firebender", 3, 3, AZULA)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Noble"])
+        .with_mana_cost(complete_publication_cost("{2}{B}"))
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().players[0]
+        .player_counters
+        .insert(PlayerCounterKind::Experience, 2);
+    runner.state_mut().players[1]
+        .player_counters
+        .insert(PlayerCounterKind::Experience, 5);
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Black]);
+    runner.activate(source, 0).resolve();
+    assert_eq!(effective_pt(&mut runner, source), (5, 5));
+    assert!(runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Menace));
+    assert_eq!(effective_pt(&mut runner, foreign), (3, 3));
+    assert!(!runner.state().objects[&foreign]
+        .keywords
+        .contains(&Keyword::Menace));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    assert_eq!(effective_pt(&mut runner, source), (3, 3));
+    assert!(!runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Menace));
+    assert_continuous_complete(runner.state());
+    for owner in [P0, P1] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(owner, "Unequal countered target", 2, 7)
+            .with_plus_counters(1)
+            .with_subtypes(vec!["Goblin"])
+            .id();
+        let other = scenario.add_creature(P0, "Untargeted control", 4, 6).id();
+        let spell=scenario.add_spell_to_hand_from_oracle(P0,"Wings of Velis Vel",true,
+            "Changeling (This card is every creature type.)\nUntil end of turn, target creature has base power and toughness 4/4, gains all creature types, and gains flying.")
+            .with_subtypes(vec!["Shapeshifter"]).with_mana_cost(complete_publication_cost("{1}{U}")).id();
+        for player in [P0, P1] {
+            for _ in 0..4 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        // Printed kindred is fixture setup; neither a target nor an effect is seeded.
+        let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+        object
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Kindred);
+        object.base_card_types = object.card_types.clone();
+        complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+        runner.cast(spell).target_object(chosen).resolve();
+        assert_eq!(effective_pt(&mut runner, chosen), (5, 5));
+        for keyword in [Keyword::Changeling, Keyword::Flying] {
+            assert!(runner.state().objects[&chosen].keywords.contains(&keyword));
+        }
+        assert!(runner.state().objects[&chosen].card_types.subtypes.len() > 20);
+        assert_eq!(effective_pt(&mut runner, other), (4, 6));
+        assert!(!runner.state().objects[&other]
+            .keywords
+            .contains(&Keyword::Flying));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, chosen), (3, 8));
+        for keyword in [Keyword::Changeling, Keyword::Flying] {
+            assert!(!runner.state().objects[&chosen].keywords.contains(&keyword));
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_elturel_paid_cast_myriad_accept_and_two_player_empty_population() {
+    use engine::game::combat::AttackTarget;
+    let p2 = PlayerId(2);
+    for seats in [2, 3] {
+        let mut scenario = GameScenario::new_n_player(seats, 2020);
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Green);
+        }
+        if seats == 3 {
+            for _ in 0..5 {
+                scenario.add_basic_land(p2, ManaColor::Blue);
+            }
+        }
+        let source = scenario
+            .add_creature_to_hand_from_oracle(P0, "Elturel Survivors", 0, 4, ELTUREL)
+            .with_subtypes(vec!["Tiefling", "Peasant"])
+            .with_color(vec![ManaColor::Red])
+            .with_mana_cost(complete_publication_cost("{3}{R}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{U}"))
+            .id();
+        for seat in 0..seats {
+            let player = PlayerId(seat as u8);
+            scenario.with_life(player, 100);
+            for _ in 0..8 {
+                scenario.add_card_to_library_top(player, "Draw buffer");
+            }
+        }
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 3, &[ManaType::Red]);
+        runner.cast(source).resolve();
+        assert_eq!(effective_pt(&mut runner, source), (0, 4));
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+        // The real paid creature waits through a complete cycle before attacking.
+        for seat in 0..seats {
+            assert_eq!(runner.state().active_player, PlayerId(seat as u8));
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            for _ in 0..seats {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_continuous_complete(runner.state());
+        }
+        assert_eq!(runner.state().active_player, P0);
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(source, AttackTarget::Player(P1))])
+            .unwrap();
+        runner.advance_until_stack_empty();
+        if seats == 3 {
+            let WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("real Myriad decision")
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, source);
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        }
+        assert_eq!(effective_pt(&mut runner, source), (2, 4));
+        let copies = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                runner.state().objects[id].is_token
+                    && runner.state().objects[id].name == "Elturel Survivors"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), usize::from(seats == 3));
+        if seats == 3 {
+            let token = copies[0];
+            assert_eq!(effective_pt(&mut runner, token), (5, 4));
+            assert!(runner.state().objects[&token].tapped);
+            assert!(runner.state().objects[&token]
+                .keywords
+                .contains(&Keyword::Trample));
+            let attacker = runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == token)
+                .unwrap();
+            assert_eq!(attacker.defending_player, p2);
+            complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue]);
+            runner.cast(bounce).target_object(source).resolve();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+            assert_eq!(
+                effective_pt(&mut runner, source),
+                (0, 4),
+                "conditional attacking static is not an all-zone CDA"
+            );
+            assert_eq!(
+                effective_pt(&mut runner, token),
+                (5, 4),
+                "real Myriad token retains its own defender and lifetime after source leaves"
+            );
+        }
+        assert_continuous_complete(runner.state());
+        runner.advance_to_phase(Phase::DeclareBlockers);
+        for seat in 1..seats {
+            let WaitingFor::DeclareBlockers { player, .. } = runner.state().waiting_for else {
+                panic!("actual defender blockers")
+            };
+            assert_eq!(player, PlayerId(seat as u8));
+            runner.declare_blockers(&[]).unwrap();
+        }
+        runner.advance_to_phase(Phase::PostCombatMain);
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, source), (0, 4));
+        for token in copies {
+            assert!(!runner.state().battlefield.contains(&token));
+            assert!(runner
+                .state()
+                .objects
+                .get(&token)
+                .is_none_or(|object| object.zone != Zone::Battlefield));
+        }
+        assert_continuous_complete(runner.state());
+    }
+}
+#[test]
+fn complete_continuous_aurelia_two_actual_sources_keep_controller_and_recipient_authorities() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_from_oracle(P0, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+        .as_legendary()
+        .with_subtypes(vec!["Angel"])
+        .with_color(vec![ManaColor::Red, ManaColor::White])
+        .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+        .id();
+    let second = scenario
+        .add_creature_from_oracle(P1, "Aurelia, Exemplar of Justice", 2, 5, AURELIA)
+        .as_legendary()
+        .with_subtypes(vec!["Angel"])
+        .with_color(vec![ManaColor::Red, ManaColor::White])
+        .with_mana_cost(complete_publication_cost("{2}{R}{W}"))
+        .id();
+    let red = scenario
+        .add_creature(P0, "Red chosen recipient", 2, 2)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let white = scenario
+        .add_creature(P1, "White chosen recipient", 3, 4)
+        .with_color(vec![ManaColor::White])
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..6 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    for (actor, source, chosen, foreign, expected, keyword) in [
+        (P0, first, red, white, (4, 2), Keyword::Trample),
+        (P1, second, white, red, (5, 4), Keyword::Vigilance),
+    ] {
+        runner.advance_to_phase(Phase::BeginCombat);
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            source_id,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual source-specific BeginCombat")
+        };
+        assert_eq!(*player, actor);
+        assert_eq!(*source_id, Some(source));
+        assert_eq!(target_slots.len(), 1);
+        let slot = &target_slots[selection.current_slot];
+        assert!(slot.optional);
+        assert!(slot.legal_targets.contains(&TargetRef::Object(chosen)));
+        assert!(slot.legal_targets.contains(&TargetRef::Object(source)));
+        assert!(!slot.legal_targets.contains(&TargetRef::Object(foreign)));
+        assert!(runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(foreign))
+            })
+            .is_err());
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(effective_pt(&mut runner, chosen), expected);
+        assert!(runner.state().objects[&chosen].keywords.contains(&keyword));
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Trample),
+            actor == P0
+        );
+        assert_eq!(
+            runner.state().objects[&chosen]
+                .keywords
+                .contains(&Keyword::Vigilance),
+            actor == P1
+        );
+        assert_eq!(
+            effective_pt(&mut runner, foreign),
+            if actor == P0 { (3, 4) } else { (2, 2) }
+        );
+        for object in [first, second] {
+            assert_eq!(effective_pt(&mut runner, object), (2, 5));
+        }
+        assert_continuous_complete(runner.state());
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        assert_eq!(effective_pt(&mut runner, red), (2, 2));
+        assert_eq!(effective_pt(&mut runner, white), (3, 4));
+        assert!(!runner.state().objects[&red]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert!(!runner.state().objects[&white]
+            .keywords
+            .contains(&Keyword::Vigilance));
+        assert_continuous_complete(runner.state());
+        runner.advance_to_phase(Phase::PreCombatMain);
+    }
+}
+#[test]
+fn complete_continuous_jodah_real_legendary_cast_offer_preserves_random_bottom_siblings() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let jodah = scenario
+            .add_creature_from_oracle(P0, "Jodah, the Unifier", 5, 5, JODAH)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Wizard"])
+            .with_mana_cost(complete_publication_cost("{W}{U}{B}{R}{G}"))
+            .id();
+        let hancock = scenario
+            .add_creature_to_hand_from_oracle(P0, "Hancock, Ghoulish Mayor", 2, 1, HANCOCK)
+            .as_legendary()
+            .with_subtypes(vec!["Zombie", "Mutant", "Advisor"])
+            .with_mana_cost(complete_publication_cost("{2}{B}"))
+            .id();
+        let unreached = scenario
+            .add_land_to_library_top(P0, "Island")
+            .with_subtypes(vec!["Island"])
+            .id();
+        let hit = scenario
+            .add_spell_to_library_top(P0, "Isamaru, Hound of Konda", false)
+            .as_creature()
+            .as_legendary()
+            .with_subtypes(vec!["Dog"])
+            .with_mana_cost(complete_publication_cost("{W}"))
+            .id();
+        let miss_one = scenario
+            .add_land_to_library_top(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let miss_two = scenario
+            .add_land_to_library_top(P0, "Mountain")
+            .with_subtypes(vec!["Mountain"])
+            .id();
+        let mut runner = scenario.build();
+        // Exact printed characteristics of the initial library fixture.
+        let object = runner.state_mut().objects.get_mut(&hit).unwrap();
+        object.base_power = Some(2);
+        object.base_toughness = Some(2);
+        object.power = Some(2);
+        object.toughness = Some(2);
+        assert_eq!(effective_pt(&mut runner, jodah), (6, 6));
+        complete_publication_fund(&mut runner, P0, 2, &[ManaType::Black]);
+        runner.cast(hancock).commit().stop_at_optional().resolve();
+        let WaitingFor::OptionalEffectChoice {
+            player, source_id, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual Jodah cast offer")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, jodah);
+        assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&miss_one].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&miss_two].zone, Zone::Exile);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&hancock].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&hit].zone,
+            if accept {
+                Zone::Battlefield
+            } else {
+                Zone::Exile
+            }
+        );
+        assert_eq!(
+            effective_pt(&mut runner, jodah),
+            if accept { (8, 8) } else { (7, 7) }
+        );
+        assert_eq!(
+            effective_pt(&mut runner, hancock),
+            if accept { (5, 4) } else { (4, 3) }
+        );
+        let library = runner.state().players[0]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(library.len(), 3);
+        assert_eq!(library[0], unreached);
+        assert!(library[1..].contains(&miss_one));
+        assert!(library[1..].contains(&miss_two));
+        assert_eq!(runner.state().objects[&miss_one].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&miss_two].zone, Zone::Library);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_zinnia_real_offspring_zero_one_and_decrease() {
+    use engine::types::ability::AdditionalCostOrigin;
+    use engine::types::game_state::CastPaymentMode;
+    for pay in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let zinnia = scenario
+            .add_creature_from_oracle(P0, "Zinnia, Valley's Voice", 1, 3, ZINNIA)
+            .as_legendary()
+            .with_subtypes(vec!["Bird", "Bard"])
+            .with_mana_cost(complete_publication_cost("{U}{R}{W}"))
+            .id();
+        let foreign = scenario
+            .add_creature(P1, "Foreign base-one control", 1, 4)
+            .id();
+        let parent = scenario
+            .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(complete_publication_cost("{1}{G}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(complete_publication_cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(effective_pt(&mut runner, zinnia), (1, 3));
+        complete_publication_fund(&mut runner, P0, if pay { 3 } else { 1 }, &[ManaType::Green]);
+        runner
+            .act(GameAction::CastSpell {
+                object_id: parent,
+                card_id: runner.state().objects[&parent].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::default(),
+            })
+            .unwrap();
+        let WaitingFor::OptionalCostChoice {
+            player,
+            origin,
+            times_kicked,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual cast-time granted Offspring")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*origin, AdditionalCostOrigin::Offspring);
+        assert_eq!(*times_kicked, 0);
+        runner.act(GameAction::DecideOptionalCost { pay }).unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&parent].zone, Zone::Battlefield);
+        assert_eq!(effective_pt(&mut runner, parent), (2, 2));
+        let offspring = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                runner.state().objects[id].is_token
+                    && runner.state().objects[id].name == "Runeclaw Bear"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(offspring.len(), usize::from(pay));
+        if pay {
+            assert_eq!(effective_pt(&mut runner, offspring[0]), (1, 1));
+        }
+        assert_eq!(
+            effective_pt(&mut runner, zinnia),
+            if pay { (2, 3) } else { (1, 3) }
+        );
+        assert_eq!(effective_pt(&mut runner, foreign), (1, 4));
+        assert_continuous_complete(runner.state());
+        if pay {
+            complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+            runner.cast(bounce).target_object(offspring[0]).resolve();
+            assert!(!runner.state().battlefield.contains(&offspring[0]));
+            assert_eq!(effective_pt(&mut runner, zinnia), (1, 3));
+            assert!(runner.state().objects[&zinnia]
+                .keywords
+                .contains(&Keyword::Flying));
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn complete_continuous_almost_no_legal_target_two_sources_and_paid_reentry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_spell_to_hand_from_oracle(P0, "Almost Perfect", false, ALMOST)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{4}{G}{W}"))
+        .id();
+    let second = scenario
+        .add_spell_to_hand_from_oracle(P0, "Almost Perfect", false, ALMOST)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{4}{G}{W}"))
+        .id();
+    let host = scenario
+        .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(complete_publication_cost("{1}{G}"))
+        .id();
+    let next = scenario
+        .add_creature_to_hand_from_oracle(P0, "Runeclaw Bear", 2, 2, "")
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(complete_publication_cost("{1}{G}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    complete_publication_fund(&mut runner, P0, 4, &[ManaType::Green, ManaType::White]);
+    assert!(
+        runner.cast(first).try_resolve().is_err(),
+        "funded Aura still needs a legal creature"
+    );
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Green, ManaType::Green]);
+    runner.cast(host).resolve();
+    runner.cast(next).resolve();
+    runner.cast(first).target_object(host).resolve();
+    assert_eq!(effective_pt(&mut runner, host), (9, 10));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(
+        runner
+            .cast(second)
+            .target_object(host)
+            .try_resolve()
+            .is_err(),
+        "a proven legal Aura target cannot bypass the unfunded printed cost"
+    );
+    assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 4, &[ManaType::Green, ManaType::White]);
+    runner.cast(second).target_object(host).resolve();
+    assert_eq!(effective_pt(&mut runner, host), (9, 10));
+    assert!(runner.state().objects[&host]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    assert_eq!(effective_pt(&mut runner, next), (2, 2));
+    assert!(!runner.state().objects[&next]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    let epoch = runner.state().objects[&first].incarnation;
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(first).resolve();
+    assert_eq!(effective_pt(&mut runner, host), (9, 10));
+    assert!(runner.state().objects[&host]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    complete_publication_fund(&mut runner, P0, 4, &[ManaType::Green, ManaType::White]);
+    runner.cast(first).target_object(next).resolve();
+    assert_ne!(runner.state().objects[&first].incarnation, epoch);
+    for object in [host, next] {
+        assert_eq!(effective_pt(&mut runner, object), (9, 10));
+        assert!(runner.state().objects[&object]
+            .keywords
+            .contains(&Keyword::Indestructible));
+    }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_continuous_complete(runner.state());
+}
+#[test]
+fn complete_continuous_rakdos_granter_reentry_invalidates_only_old_activation() {
+    use engine::types::game_state::CastPaymentMode;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let knife = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(complete_publication_cost("{2}"))
+        .id();
+    let decoy = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(complete_publication_cost("{2}"))
+        .id();
+    scenario.with_counter(decoy, CounterType::Generic("blood".into()), 5);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    let host = scenario.add_creature(P0, "Granted host", 2, 3).id();
+    let fodder = scenario.add_creature(P0, "Sacrifice choice", 1, 1).id();
+    let flicker=scenario.add_spell_to_hand_from_oracle(P0,"Ghostly Flicker",true,
+        "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.")
+        .with_mana_cost(complete_publication_cost("{2}{U}")).id();
+    let untap = scenario
+        .add_spell_to_hand_from_oracle(P0, "Refocus", true, "Untap target creature.\nDraw a card.")
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    scenario.add_card_to_library_top(P0, "Draw buffer");
+    let mut runner = scenario.build();
+    complete_publication_fund(&mut runner, P0, 2, &[]);
+    runner
+        .act(GameAction::Equip {
+            equipment_id: knife,
+            target_id: host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    let old_epoch = runner.state().objects[&knife].incarnation;
+    let index = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|definition| {
+            definition
+                .granting_object
+                .is_some_and(|object| object.object_id == knife)
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: index,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("real sacrifice cost")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert!(choices.contains(&host));
+    assert!(choices.contains(&fodder));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    complete_publication_fund(&mut runner, P0, 2, &[ManaType::Blue]);
+    runner
+        .act(GameAction::CastSpell {
+            object_id: flicker,
+            card_id: runner.state().objects[&flicker].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::default(),
+        })
+        .unwrap();
+    for chosen in [land, knife] {
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real two-object Flicker announcement")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 2);
+        assert!(!target_slots[selection.current_slot].optional);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(chosen)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            })
+            .unwrap();
+    }
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "old granted activation remains after real Flicker"
+    );
+    assert_eq!(runner.state().stack[0].ability().unwrap().source_id, host);
+    assert_ne!(runner.state().objects[&knife].incarnation, old_epoch);
+    runner.advance_until_stack_empty();
+    assert!(!runner.state().objects[&knife]
+        .counters
+        .contains_key(&CounterType::Generic("blood".into())));
+    assert_eq!(
+        runner.state().objects[&decoy]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&5)
+    );
+    assert_eq!(effective_pt(&mut runner, host), (2, 3));
+    assert!(runner.state().objects[&host].tapped);
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 3, &[ManaType::Blue]);
+    runner
+        .act(GameAction::Equip {
+            equipment_id: knife,
+            target_id: host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    runner.cast(untap).target_object(host).resolve();
+    assert!(!runner.state().objects[&host].tapped);
+    assert_continuous_complete(runner.state());
+    let new_index = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|definition| {
+            definition
+                .granting_object
+                .is_some_and(|object| object.object_id == knife)
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: new_index,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("new actual grant cost")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(choices, &vec![host]);
+    runner
+        .act(GameAction::SelectCards { cards: vec![host] })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&host].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&knife]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&1)
+    );
+    assert_eq!(
+        runner.state().objects[&decoy]
+            .counters
+            .get(&CounterType::Generic("blood".into())),
+        Some(&5)
+    );
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_equipment_control_is_independent_of_recipient_and_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let equipment = scenario
+        .add_artifact_from_oracle(P1, "Mace of the Valiant", MACE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(complete_publication_cost("{2}{W}"))
+        .id();
+    scenario.with_counter(equipment, CounterType::Generic("charge".into()), 2);
+    scenario.with_counter(equipment, CounterType::Generic("blood".into()), 7);
+    let old_host = scenario
+        .add_creature(P1, "Existing foreign host", 2, 3)
+        .id();
+    let own_host = scenario.add_creature(P0, "New host", 4, 5).id();
+    let theft = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Confiscate",
+            false,
+            "Enchant permanent\nYou control enchanted permanent.",
+        )
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(complete_publication_cost("{4}{U}{U}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), equipment, old_host);
+    assert_eq!(effective_pt(&mut runner, old_host), (4, 5));
+    assert!(runner.state().objects[&old_host]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    complete_publication_fund(&mut runner, P0, 4, &[ManaType::Blue, ManaType::Blue]);
+    runner.cast(theft).target_object(equipment).resolve();
+    assert_eq!(runner.state().objects[&equipment].owner, P1);
+    assert_eq!(runner.state().objects[&equipment].controller, P0);
+    assert_eq!(runner.state().objects[&old_host].controller, P1);
+    assert_eq!(effective_pt(&mut runner, old_host), (4, 5));
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 3, &[]);
+    runner
+        .act(GameAction::Equip {
+            equipment_id: equipment,
+            target_id: own_host,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(effective_pt(&mut runner, own_host), (6, 7));
+    assert!(runner.state().objects[&own_host]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    assert_eq!(effective_pt(&mut runner, old_host), (2, 3));
+    assert!(!runner.state().objects[&old_host]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(theft).resolve();
+    assert_eq!(runner.state().objects[&equipment].controller, P1);
+    assert_eq!(runner.state().objects[&own_host].controller, P0);
+    assert_eq!(effective_pt(&mut runner, own_host), (6, 7));
+    assert!(runner.state().objects[&own_host]
+        .keywords
+        .contains(&Keyword::Vigilance));
+    complete_publication_fund(&mut runner, P0, 3, &[]);
+    assert!(
+        runner
+            .act(GameAction::Equip {
+                equipment_id: equipment,
+                target_id: own_host
+            })
+            .is_err(),
+        "host controller cannot activate another player's Equipment"
+    );
+    assert_continuous_complete(runner.state());
+}
+#[test]
+fn complete_continuous_qualified_counts_follow_control_then_source_departure() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jodah = scenario
+        .add_creature_from_oracle(P0, "Jodah, the Unifier", 5, 5, JODAH)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Wizard"])
+        .with_mana_cost(complete_publication_cost("{W}{U}{B}{R}{G}"))
+        .id();
+    let hancock = scenario
+        .add_creature_from_oracle(P0, "Hancock, Ghoulish Mayor", 2, 1, HANCOCK)
+        .as_legendary()
+        .with_subtypes(vec!["Zombie", "Mutant", "Advisor"])
+        .with_mana_cost(complete_publication_cost("{2}{B}"))
+        .id();
+    scenario.with_counter(hancock, CounterType::Generic("charge".into()), 2);
+    scenario.with_counter(hancock, CounterType::Generic("blood".into()), 1);
+    let own = scenario
+        .add_creature(P0, "Own Zombie", 2, 3)
+        .with_subtypes(vec!["Zombie"])
+        .id();
+    let foreign = scenario
+        .add_creature(P1, "Foreign Mutant", 5, 7)
+        .with_subtypes(vec!["Mutant"])
+        .id();
+    let theft=scenario.add_spell_to_hand_from_oracle(P1,"Turn Against",true,
+        "Devoid (This card has no color.)\nGain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+        .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    assert_eq!(effective_pt(&mut runner, jodah), (7, 7));
+    assert_eq!(effective_pt(&mut runner, own), (5, 6));
+    let epoch = runner.state().objects[&hancock].incarnation;
+    complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.cast(theft).target_object(hancock).resolve();
+    assert_eq!(runner.state().objects[&hancock].owner, P0);
+    assert_eq!(runner.state().objects[&hancock].controller, P1);
+    assert_eq!(runner.state().objects[&hancock].incarnation, epoch);
+    assert_eq!(effective_pt(&mut runner, jodah), (6, 6));
+    assert_eq!(effective_pt(&mut runner, hancock), (2, 1));
+    assert_eq!(effective_pt(&mut runner, own), (2, 3));
+    assert_eq!(effective_pt(&mut runner, foreign), (8, 10));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    assert_eq!(runner.state().objects[&hancock].controller, P0);
+    assert_eq!(effective_pt(&mut runner, jodah), (7, 7));
+    assert_eq!(effective_pt(&mut runner, own), (5, 6));
+    assert_eq!(effective_pt(&mut runner, foreign), (5, 7));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_phase(Phase::PreCombatMain);
+    if runner.state().priority_player != P0 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(hancock).resolve();
+    assert_eq!(runner.state().objects[&hancock].zone, Zone::Hand);
+    assert_eq!(effective_pt(&mut runner, jodah), (6, 6));
+    assert_eq!(effective_pt(&mut runner, own), (2, 3));
+    assert_eq!(effective_pt(&mut runner, foreign), (5, 7));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_drop_bear_zero_and_owner_former_controller_departure() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+        .with_subtypes(vec!["Koala", "Bear", "Horror"])
+        .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+        .id();
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let foreign_bear = scenario
+        .add_creature(P1, "Foreign Bear", 2, 4)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let theft=scenario.add_spell_to_hand_from_oracle(P1,"Turn Against",true,
+        "Devoid (This card has no color.)\nGain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+        .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+    let swords = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Swords to Plowshares",
+            true,
+            "Exile target creature. Its controller gains life equal to its power.",
+        )
+        .with_mana_cost(complete_publication_cost("{W}"))
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(effective_pt(&mut runner, source), (0, 0));
+    assert_eq!(runner.state().objects[&source].layer_base_power, Some(0));
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Hand,
+        "known off-zone zero is not a battlefield SBA death"
+    );
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id: runner.state().objects[&forest].card_id,
+        })
+        .unwrap();
+    assert_eq!(effective_pt(&mut runner, source), (1, 1));
+    complete_publication_fund(&mut runner, P0, 3, &[ManaType::Red, ManaType::Green]);
+    runner.cast(source).commit();
+    runner.pass_both_players();
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        source_id,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual Bear entry choice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, Some(source));
+    assert_eq!(target_slots.len(), 1);
+    assert!(target_slots[selection.current_slot].optional);
+    assert!(target_slots[selection.current_slot]
+        .legal_targets
+        .contains(&TargetRef::Object(foreign_bear)));
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(effective_pt(&mut runner, source), (2, 2));
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.cast(theft).target_object(source).resolve();
+    assert_eq!(runner.state().objects[&source].owner, P0);
+    assert_eq!(runner.state().objects[&source].controller, P1);
+    assert_eq!(effective_pt(&mut runner, source), (5, 5));
+    let life = runner.state().players[1].life;
+    complete_publication_fund(&mut runner, P0, 0, &[ManaType::White]);
+    if runner.state().priority_player != P0 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    runner.cast(swords).target_object(source).resolve();
+    assert_eq!(
+        runner.state().players[1].life,
+        life + 5,
+        "departure controller gains last battlefield power"
+    );
+    assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+    assert_eq!(
+        effective_pt(&mut runner, source),
+        (1, 1),
+        "current exile value uses its owner population"
+    );
+    assert_eq!(runner.state().objects[&source].layer_base_power, Some(1));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_drop_bear_phasing_preserves_epoch_and_live_populations() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    for _ in 0..3 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let first = scenario
+        .add_creature_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+        .with_subtypes(vec!["Koala", "Bear", "Horror"])
+        .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+        .id();
+    let second = scenario
+        .add_creature_from_oracle(P0, "Drop Bear", 0, 0, DROP_BEAR)
+        .with_subtypes(vec!["Koala", "Bear", "Horror"])
+        .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+        .id();
+    let foreign = scenario
+        .add_creature_from_oracle(P1, "Drop Bear", 0, 0, DROP_BEAR)
+        .with_subtypes(vec!["Koala", "Bear", "Horror"])
+        .with_mana_cost(complete_publication_cost("{3}{R}{G}"))
+        .id();
+    let ripple=scenario.add_spell_to_hand_from_oracle(P0,"Reality Ripple",true,
+        "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)")
+        .with_mana_cost(complete_publication_cost("{1}{U}")).id();
+    for player in [P0, P1] {
+        for _ in 0..6 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    assert_eq!(effective_pt(&mut runner, first), (3, 3));
+    assert_eq!(effective_pt(&mut runner, second), (3, 3));
+    assert_eq!(effective_pt(&mut runner, foreign), (4, 4));
+    let epoch = runner.state().objects[&first].incarnation;
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(ripple).target_object(first).resolve();
+    // CR 702.26b + CR 702.26d: phased-out Bears leave the count without a
+    // new incarnation or a zone-change/entry event.
+    assert!(runner.state().objects[&first].is_phased_out());
+    assert_eq!(runner.state().objects[&first].incarnation, epoch);
+    assert_eq!(effective_pt(&mut runner, second), (2, 2));
+    assert_eq!(effective_pt(&mut runner, foreign), (4, 4));
+    assert_continuous_complete(runner.state());
+    for active in [P0, P1] {
+        assert_eq!(runner.state().active_player, active);
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.pass_both_players();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_continuous_complete(runner.state());
+    }
+    assert_eq!(runner.state().active_player, P0);
+    assert!(!runner.state().objects[&first].is_phased_out());
+    assert_eq!(runner.state().objects[&first].incarnation, epoch);
+    assert_eq!(effective_pt(&mut runner, first), (3, 3));
+    assert_eq!(effective_pt(&mut runner, second), (3, 3));
+    assert_eq!(effective_pt(&mut runner, foreign), (4, 4));
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_history_full_food_draft_reflexive_and_restricted_mana() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::mana::ManaRestriction;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Oyaminartok, Polar Werebear", 4, 5, OYAMINARTOK)
+        .as_legendary()
+        .with_subtypes(vec!["Giant", "Bear"])
+        .with_mana_cost(complete_publication_cost("{2}{G}{G}"))
+        .id();
+    let divination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+        .with_color(vec![ManaColor::Blue])
+        .with_mana_cost(complete_publication_cost("{2}{U}"))
+        .id();
+    let atlas = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Walking Atlas",
+            1,
+            1,
+            "{T}: You may put a land card from your hand onto the battlefield.",
+        )
+        .as_artifact()
+        .as_creature()
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(complete_publication_cost("{2}"))
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    // Initial printed data: the complete pinned relatedCards.spellbook list.
+    let spellbook = [
+        "Archipelagore",
+        "Junk Winder",
+        "Moat Piranhas",
+        "Mystic Skyfish",
+        "Nadir Kraken",
+        "Nezahal, Primal Tide",
+        "Pouncing Shoreshark",
+        "Pursued Whale",
+        "Riptide Turtle",
+        "Ruin Crab",
+        "Sea-Dasher Octopus",
+        "Sigiled Starfish",
+        "Spined Megalodon",
+        "Stinging Lionfish",
+        "Voracious Greatshark",
+    ];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .spellbook = spellbook.iter().map(|name| (*name).into()).collect();
+    let printed: engine::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
+        "name":"Moat Piranhas", "text":"Defender (This creature can't attack.)", "manaCost":"{1}{U}",
+        "manaValue":2.0, "power":"3", "toughness":"3", "types":["Creature"], "subtypes":["Fish"],
+        "supertypes":[], "type":"Creature — Fish", "colors":["U"], "colorIdentity":["U"],
+        "keywords":["Defender"], "layout":"normal", "identifiers":{}
+    })).unwrap();
+    let face = engine::database::synthesis::build_oracle_face(&printed, None);
+    std::sync::Arc::make_mut(&mut runner.state_mut().card_face_registry)
+        .insert("moat piranhas".into(), face);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(source, AttackTarget::Player(P1))])
+        .unwrap();
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    runner.declare_blockers(&[]).unwrap();
+    runner.advance_to_phase(Phase::PostCombatMain);
+    runner.advance_until_stack_empty();
+    assert!(!runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Hexproof));
+    let food = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects[id].is_token
+                && runner.state().objects[id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Food")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(food.len(), 1);
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual Food sacrifice cost")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(choices, &food);
+    runner
+        .act(GameAction::SelectCards {
+            cards: food.clone(),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    let WaitingFor::SpellbookDraft {
+        player,
+        source_id,
+        options,
+        destination,
+        tapped,
+    } = &runner.state().waiting_for
+    else {
+        panic!("full printed draft body")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, source);
+    assert_eq!(*destination, Zone::Hand);
+    assert!(!tapped);
+    assert_eq!(
+        options,
+        &spellbook
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    assert!(runner
+        .act(GameAction::SubmitSpellbookDraft {
+            card: "Divination".into()
+        })
+        .is_err());
+    runner
+        .act(GameAction::SubmitSpellbookDraft {
+            card: "Moat Piranhas".into(),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&food[0]].zone, Zone::Graveyard);
+    let drafted = runner.state().players[0]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Moat Piranhas")
+        .unwrap();
+    assert_eq!(effective_pt(&mut runner, drafted), (3, 3));
+    assert!(runner.state().objects[&drafted]
+        .keywords
+        .contains(&Keyword::Defender));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    for unit in runner.state().players[0].mana_pool.units() {
+        assert_eq!(unit.color, ManaType::Blue);
+        assert_eq!(unit.source_id, source);
+        assert!(unit
+            .restrictions
+            .contains(&ManaRestriction::OnlyForSpellType("Creature".into())));
+        assert!(unit
+            .restrictions
+            .contains(&ManaRestriction::OnlyForSpellColor(ManaColor::Blue)));
+    }
+    assert_continuous_complete(runner.state());
+    assert!(
+        runner.cast(divination).try_resolve().is_err(),
+        "three blue mana cannot pay for a blue noncreature spell"
+    );
+    assert!(
+        runner.cast(atlas).try_resolve().is_err(),
+        "three blue mana cannot pay for a colorless creature spell"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    runner.cast(drafted).resolve();
+    assert_eq!(runner.state().objects[&drafted].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_rakdos_pending_grant_keeps_equipment_after_detach_or_control_change() {
+    use engine::types::game_state::CastPaymentMode;
+    for steal in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let knife = scenario
+            .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(complete_publication_cost("{2}"))
+            .id();
+        let host = scenario
+            .add_creature(P0, "Original granted host", 2, 3)
+            .id();
+        let fodder = scenario.add_creature(P0, "Sacrifice choice", 1, 1).id();
+        let next = scenario
+            .add_creature(P1, "Foreign replacement host", 5, 6)
+            .id();
+        let actor = if steal { P1 } else { P0 };
+        let response = if steal {
+            scenario.add_spell_to_hand_from_oracle(actor, "Word of Seizing", true,
+                "Split second (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)\nUntap target permanent and gain control of it until end of turn. It gains haste until end of turn.")
+                .with_mana_cost(complete_publication_cost("{3}{R}{R}")).id()
+        } else {
+            scenario.add_spell_to_hand_from_oracle(actor, "Magnetic Theft", true,
+                "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)")
+                .with_mana_cost(complete_publication_cost("{R}")).id()
+        };
+        let mut runner = scenario.build();
+        complete_publication_fund(&mut runner, P0, 2, &[]);
+        runner
+            .act(GameAction::Equip {
+                equipment_id: knife,
+                target_id: host,
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let epoch = runner.state().objects[&knife].incarnation;
+        let index = runner.state().objects[&host]
+            .abilities
+            .iter()
+            .position(|definition| {
+                definition
+                    .granting_object
+                    .is_some_and(|reference| reference.object_id == knife)
+            })
+            .unwrap();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: host,
+                ability_index: index,
+            })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("granted sacrifice")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(choices.contains(&host));
+        assert!(choices.contains(&fodder));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![fodder],
+            })
+            .unwrap();
+        assert_eq!(runner.state().stack.len(), 1);
+        if actor == P1 {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        complete_publication_fund(
+            &mut runner,
+            actor,
+            if steal { 3 } else { 0 },
+            if steal {
+                &[ManaType::Red, ManaType::Red]
+            } else {
+                &[ManaType::Red]
+            },
+        );
+        runner
+            .act(GameAction::CastSpell {
+                object_id: response,
+                card_id: runner.state().objects[&response].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::default(),
+            })
+            .unwrap();
+        let expected = if steal {
+            vec![knife]
+        } else {
+            vec![knife, next]
+        };
+        for (slot_index, chosen) in expected.iter().enumerate() {
+            let WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("real response announcement")
+            };
+            assert_eq!(*player, actor);
+            assert_eq!(target_slots.len(), expected.len());
+            assert_eq!(selection.current_slot, slot_index);
+            let slot = &target_slots[selection.current_slot];
+            assert!(!slot.optional);
+            assert!(slot.legal_targets.contains(&TargetRef::Object(*chosen)));
+            if !steal && slot_index == 0 {
+                assert!(!slot.legal_targets.contains(&TargetRef::Object(host)));
+            }
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(*chosen)),
+                })
+                .unwrap();
+        }
+        assert_eq!(runner.state().stack.len(), 2);
+        runner.resolve_top();
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().stack[0].ability().unwrap().source_id, host);
+        assert_eq!(runner.state().objects[&knife].incarnation, epoch);
+        assert_eq!(runner.state().objects[&knife].owner, P0);
+        assert_eq!(
+            runner.state().objects[&knife].controller,
+            if steal { P1 } else { P0 }
+        );
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&knife]
+                .counters
+                .get(&CounterType::Generic("blood".into())),
+            Some(&1)
+        );
+        assert_eq!(
+            effective_pt(&mut runner, host),
+            if steal { (3, 3) } else { (2, 3) }
+        );
+        assert_eq!(
+            effective_pt(&mut runner, next),
+            if steal { (5, 6) } else { (6, 6) }
+        );
+        assert_eq!(runner.state().objects[&host].controller, P0);
+        assert_eq!(runner.state().objects[&next].controller, P1);
+        let recipient = if steal { host } else { next };
+        assert!(runner.state().objects[&recipient]
+            .abilities
+            .iter()
+            .any(|definition| definition
+                .granting_object
+                .is_some_and(|reference| reference.object_id == knife)));
+        assert_continuous_complete(runner.state());
+    }
+}
+
+// SHAPE: this constructed conditional grammar control complements the five
+// complete real Archetype sources above. Turn changes drive its live predicate.
+#[test]
+fn complete_continuous_hosted_member_condition_and_denial_are_live_each_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_spell_to_hand_from_oracle(P0, "Conditional denial grammar control", false,
+        "During your turn, creatures your opponents control lose flying and can't have or gain flying.")
+        .as_enchantment().with_mana_cost(complete_publication_cost("{1}{W}")).id();
+    let own = scenario
+        .add_creature(P0, "Own flying guard", 2, 3)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let foreign = scenario
+        .add_creature(P1, "Opposing printed flying", 3, 4)
+        .with_keyword(Keyword::Flying)
+        .id();
+    let later = scenario
+        .add_creature(P1, "Opposing later recipient", 4, 5)
+        .id();
+    let grant = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Levitation",
+            false,
+            "Creatures you control have flying.",
+        )
+        .as_enchantment()
+        .with_mana_cost(complete_publication_cost("{2}{U}{U}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(complete_publication_cost("{1}{U}"))
+        .id();
+    for player in [P0, P1] {
+        for _ in 0..5 {
+            scenario.add_card_to_library_top(player, "Draw buffer");
+        }
+    }
+    let mut runner = scenario.build();
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::White]);
+    runner.cast(source).resolve();
+    assert!(runner.state().objects[&own]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert!(!runner.state().objects[&foreign]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    effective_pt(&mut runner, foreign);
+    assert!(runner.state().objects[&foreign]
+        .keywords
+        .contains(&Keyword::Flying));
+    complete_publication_fund(&mut runner, P1, 2, &[ManaType::Blue, ManaType::Blue]);
+    runner.cast(grant).resolve();
+    assert!(runner.state().objects[&later]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    effective_pt(&mut runner, foreign);
+    assert!(runner.state().objects[&own]
+        .keywords
+        .contains(&Keyword::Flying));
+    for object in [foreign, later] {
+        assert!(!runner.state().objects[&object]
+            .keywords
+            .contains(&Keyword::Flying));
+    }
+    assert_continuous_complete(runner.state());
+    complete_publication_fund(&mut runner, P0, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(source).resolve();
+    for object in [foreign, later] {
+        assert!(runner.state().objects[&object]
+            .keywords
+            .contains(&Keyword::Flying));
+    }
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
+fn complete_continuous_zinnia_counts_follow_recipient_and_source_controllers_until_cleanup() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Zinnia, Valley's Voice", 1, 3, ZINNIA)
+        .as_legendary()
+        .with_subtypes(vec!["Bird", "Bard"])
+        .with_mana_cost(complete_publication_cost("{U}{R}{W}"))
+        .id();
+    let own = scenario
+        .add_creature(P0, "Own base-one with counters", 1, 4)
+        .with_plus_counters(2)
+        .id();
+    let another = scenario
+        .add_creature(P0, "Other base-one recipient", 1, 5)
+        .id();
+    let excluded = scenario
+        .add_creature(P0, "Current-one base-two control", 2, 4)
+        .with_minus_counters(1)
+        .id();
+    let foreign = scenario.add_creature(P1, "Foreign base-one", 1, 6).id();
+    let take_recipient = scenario.add_spell_to_hand_from_oracle(P0, "Turn Against", true,
+        "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+        .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+    let take_source = scenario.add_spell_to_hand_from_oracle(P1, "Turn Against", true,
+        "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.")
+        .with_mana_cost(complete_publication_cost("{4}{R}")).id();
+    let mut runner = scenario.build();
+    assert_eq!(effective_pt(&mut runner, source), (3, 3));
+    assert_eq!(effective_pt(&mut runner, own), (3, 6));
+    assert_eq!(effective_pt(&mut runner, excluded), (1, 3));
+    complete_publication_fund(&mut runner, P0, 4, &[ManaType::Red]);
+    runner.cast(take_recipient).target_object(foreign).resolve();
+    assert_eq!(runner.state().objects[&foreign].owner, P1);
+    assert_eq!(runner.state().objects[&foreign].controller, P0);
+    assert_eq!(effective_pt(&mut runner, source), (4, 3));
+    assert_continuous_complete(runner.state());
+    let epoch = runner.state().objects[&source].incarnation;
+    runner.act(GameAction::PassPriority).unwrap();
+    complete_publication_fund(&mut runner, P1, 4, &[ManaType::Red]);
+    runner.cast(take_source).target_object(source).resolve();
+    assert_eq!(runner.state().objects[&source].owner, P0);
+    assert_eq!(runner.state().objects[&source].controller, P1);
+    assert_eq!(runner.state().objects[&source].incarnation, epoch);
+    assert_eq!(
+        effective_pt(&mut runner, source),
+        (1, 3),
+        "current controller has no OTHER base-one creatures"
+    );
+    assert_eq!(effective_pt(&mut runner, another), (1, 5));
+    assert!(runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert_continuous_complete(runner.state());
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.pass_both_players();
+    assert_eq!(runner.state().objects[&source].controller, P0);
+    assert_eq!(runner.state().objects[&foreign].controller, P1);
+    assert_eq!(effective_pt(&mut runner, source), (3, 3));
+    assert_continuous_complete(runner.state());
 }

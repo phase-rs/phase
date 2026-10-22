@@ -1775,13 +1775,16 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
 /// further label, so `strip_ability_word_with_name` yields `None` on the retry
 /// and the recursion terminates after a single hop.
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
-    let defs = parse_static_line_multi_dispatch(text);
+    let mut defs = parse_static_line_multi_dispatch(text);
     if !defs.is_empty() {
+        append_cant_have_keyword_denials(text, &mut defs);
         return defs;
     }
     if let Some((ability_word, body)) = super::oracle_modal::strip_ability_word_with_name(text) {
         if super::oracle_modal::is_known_ability_word(&ability_word) {
-            return parse_static_line_multi_dispatch(&body);
+            let mut defs = parse_static_line_multi_dispatch(&body);
+            append_cant_have_keyword_denials(&body, &mut defs);
+            return defs;
         }
     }
     defs
@@ -2605,6 +2608,47 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
 
+    // CR 611.3a: hosted member predicates stay live, with their own complete
+    // recipient and board gates. No prefix is published on a refused member.
+    if let Some(definitions) = parse_continuous_subject_predicate(&tp, |subject, predicate| {
+        let affected = parse_continuous_subject_filter(subject)?;
+        let members = super::keyword_grant::parse_complete_continuous_members(predicate)?;
+        if members.len() < 2
+            || members.iter().any(|(_, _, _, duration)| duration.is_some())
+            || !members
+                .iter()
+                .any(|(_, condition, recipient, _)| condition.is_some() || recipient.is_some())
+        {
+            return None;
+        }
+        Some(
+            members
+                .into_iter()
+                .map(|(modifications, condition, recipient, _)| {
+                    let mut definition = StaticDefinition::continuous()
+                        .affected(affected.clone())
+                        .modifications(modifications)
+                        .description(text.to_string());
+                    definition.condition = match (condition, recipient) {
+                        (Some(condition), Some(filter)) => Some(StaticCondition::And {
+                            conditions: vec![
+                                condition,
+                                StaticCondition::RecipientMatchesFilter { filter },
+                            ],
+                        }),
+                        (condition, None) => condition,
+                        (None, Some(filter)) => {
+                            Some(StaticCondition::RecipientMatchesFilter { filter })
+                        }
+                    };
+                    definition
+                })
+                .collect::<Vec<_>>(),
+        )
+    }) {
+        return definitions;
+    }
+
     // CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
     // control" — two scoped statics (defender-scoped CantAttack + BlockRestriction).
     // Must precede generic combat-rule dispatch, which would collapse the whole
@@ -3177,19 +3221,61 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     }
 
     // Fall back to the single-return parser.
-    let mut defs: Vec<StaticDefinition> = parse_static_line(text).into_iter().collect();
-    append_cant_have_keyword_denials(text, &mut defs);
-    defs
+    parse_static_line(text).into_iter().collect()
 }
 
 /// CR 613.1f / CR 702: "... can't have or gain [keyword]" (Theros Archetype cycle,
-/// Arcane Lighthouse) both strips the keyword now — a `RemoveKeyword` continuous
-/// modification on the base `Continuous` static — AND denies it going forward, so a
-/// concurrent anthem can't grant it back. The forward denial is a Layer 6
+/// Arcane Lighthouse) denies that keyword going forward. A separately printed
+/// "lose" clause owns the current removal; it may name a different keyword.
+/// The forward denial is a Layer 6
 /// `StaticMode::CantHaveKeyword` static (enforced by `apply_cant_have_keyword_denials`
 /// in `layers.rs`). Emit it as a sibling of the continuous static, reusing that
 /// static's `affected`/`condition` so it covers exactly the same objects.
 fn append_cant_have_keyword_denials(text: &str, defs: &mut Vec<StaticDefinition>) {
+    // CR 613.1f: promote typed recipient-local denial members to the hosted
+    // static's exact scope and condition. This preserves a separately printed
+    // removal's keyword and normalizes every successful publication path once.
+    let mut promoted = Vec::new();
+    let mut empty_promoted = Vec::new();
+    for (index, def) in defs.iter_mut().enumerate() {
+        if !matches!(def.mode, StaticMode::Continuous) {
+            continue;
+        }
+        let mut keywords = Vec::new();
+        def.modifications.retain(|modification| {
+            if let ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantHaveKeyword { keyword },
+            } = modification
+            {
+                keywords.push(keyword.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !keywords.is_empty() && def.modifications.is_empty() {
+            empty_promoted.push(index);
+        }
+        for keyword in keywords {
+            promoted.push(StaticDefinition {
+                mode: StaticMode::CantHaveKeyword { keyword },
+                modifications: Vec::new(),
+                ..def.clone()
+            });
+        }
+    }
+    for index in empty_promoted.into_iter().rev() {
+        defs.remove(index);
+    }
+    for denial in promoted {
+        if !defs.iter().any(|def| {
+            def.mode == denial.mode
+                && def.affected == denial.affected
+                && def.condition == denial.condition
+        }) {
+            defs.push(denial);
+        }
+    }
     // Identify the SPECIFIC keyword the line denies, parsed from the clause
     // "... can't have or gain [keyword]" / "... can't have [keyword]". Keying the
     // emission off any `RemoveKeyword` alone would mis-target a line that removes
@@ -3203,12 +3289,17 @@ fn append_cant_have_keyword_denials(text: &str, defs: &mut Vec<StaticDefinition>
         if !matches!(def.mode, StaticMode::Continuous) {
             continue;
         }
-        // Reuse the affected/condition scope of the continuous static that strips
-        // the denied keyword now, so the forward denial covers identical objects.
-        let strips_denied = def.modifications.iter().any(|m| {
-            matches!(m, ContinuousModification::RemoveKeyword { keyword } if *keyword == denied)
+        // Reuse the separately printed removal's affected/condition scope.
+        let removes_keyword = def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::RemoveKeyword { .. }));
+        let already_present = defs.iter().chain(siblings.iter()).any(|sibling| {
+            matches!(&sibling.mode, StaticMode::CantHaveKeyword { keyword } if *keyword == denied)
+                && sibling.affected == def.affected
+                && sibling.condition == def.condition
         });
-        if strips_denied {
+        if removes_keyword && !already_present {
             siblings.push(StaticDefinition {
                 mode: StaticMode::CantHaveKeyword {
                     keyword: denied.clone(),
@@ -3233,7 +3324,41 @@ fn parse_cant_have_or_gain_keyword(lower: &str) -> Option<Keyword> {
         } else {
             return None;
         };
-    crate::parser::oracle_keyword::parse_granted_keyword_fragment(tail.trim().trim_end_matches('.'))
+    super::grammar::map_keyword_complete(tail.trim().trim_end_matches('.'))
+}
+
+#[cfg(test)]
+mod complete_publication_finalization_tests {
+    use super::*;
+
+    #[test]
+    fn complete_publication_denial_finalization_is_idempotent_and_keyword_specific() {
+        let source = "Creatures your opponents control lose flying and can't have or gain trample.";
+        let mut definitions = parse_static_line_multi_dispatch(source);
+        append_cant_have_keyword_denials(source, &mut definitions);
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(
+            definitions[0].modifications,
+            vec![ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying
+            }]
+        );
+        assert_eq!(
+            definitions[1].mode,
+            StaticMode::CantHaveKeyword {
+                keyword: Keyword::Trample
+            }
+        );
+        assert!(definitions[1].modifications.is_empty());
+        assert_eq!(definitions[0].affected, definitions[1].affected);
+        assert_eq!(definitions[0].condition, definitions[1].condition);
+        let once = definitions.clone();
+        append_cant_have_keyword_denials(source, &mut definitions);
+        assert_eq!(
+            definitions, once,
+            "the common finalizer does not duplicate an existing denial"
+        );
+    }
 }
 
 pub(crate) fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
@@ -4883,6 +5008,11 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     let lower = trimmed.to_lowercase();
     let tp = TextPair::new(trimmed, &lower);
 
+    let (base, attachment) = strip_attachment_relative_clause(trimmed);
+    if let Some(property) = attachment {
+        return parse_continuous_subject_filter(base).map(|filter| add_property(filter, property));
+    }
+
     // Strip "Each " / "All " quantifier prefixes — "Each creature you control" and
     // "All Sliver creatures" are semantically identical to the bare type phrase for
     // filter purposes (CR 205.3 / CR 700.1). Without this, "All Sliver creatures"
@@ -5035,8 +5165,9 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     // directly against the zone a card sits in, so an off-battlefield filter is
     // meaningful there), but every OTHER caller of this function feeds a
     // `Continuous` static whose modifications apply through the Layer system —
-    // which only iterates battlefield objects. `game/off_zone_characteristics.rs`
-    // is the sole off-battlefield continuous-effect path, and its
+    // whose keyword materialization boundary includes Battlefield, Hand and
+    // Stack. Own numeric CDAs have a separate exact-source all-zone authority.
+    // `game/off_zone_characteristics.rs` owns on-demand keyword reads in other zones; its
     // `supports_off_zone_keyword_query` allowlist is keyword-only (`AddKeyword`
     // and its siblings) — it has no notion of `AddSubtype`/`AddType`/etc. Folding
     // an off-battlefield conjunct into a general filter here would let a
@@ -6029,8 +6160,17 @@ fn parse_attachment_relative_clause_nom(input: &str) -> OracleResult<'_, (&str, 
     let (input, _) = tag(" that").parse(input)?;
     let (input, _) = opt(alt((tag("'s"), tag(" is"), tag(" are")))).parse(input)?;
     let (input, kind) = alt((
-        value(AttachmentKind::Aura, tag(" enchanted by an aura")),
-        value(AttachmentKind::Equipment, tag(" equipped by an equipment")),
+        value(
+            AttachmentKind::Aura,
+            preceded(tag(" enchanted by "), alt((tag("an aura"), tag("auras")))),
+        ),
+        value(
+            AttachmentKind::Equipment,
+            preceded(
+                tag(" equipped by "),
+                alt((tag("an equipment"), tag("equipment"))),
+            ),
+        ),
     ))
     .parse(input)?;
     let (input, _) = tag(" you control").parse(input)?;

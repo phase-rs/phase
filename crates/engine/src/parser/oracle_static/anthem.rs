@@ -442,7 +442,7 @@ pub(crate) fn parse_complete_continuous_predicate(
 ) -> Option<StaticDefinition> {
     let lower = predicate.to_lowercase();
     let tp = TextPair::new(predicate, &lower);
-    for (marker, negative) in [(" as long as ", false), (" unless ", true)] {
+    for (marker, negative) in [(" if ", false), (" as long as ", false), (" unless ", true)] {
         if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
             let condition = parse_affected_scoped_static_condition(
                 gate.original.trim().trim_end_matches('.'),
@@ -1480,7 +1480,11 @@ pub(crate) fn parse_base_pt_each_equal_dynamic(lower: &str) -> Option<QuantityEx
     // Everything else routes through the shared CDA quantity grammar so the
     // dynamic base-P/T set composes over every count/aggregate phrase the
     // engine already recognizes (e.g. "the number of creatures you control").
-    parse_cda_quantity(tail)
+    all_consuming(nom_quantity::parse_quantity)
+        .parse(tail)
+        .ok()
+        .map(|(_, value)| value)
+        .or_else(|| parse_cda_quantity(tail))
 }
 
 /// Back-compat shim: the historical name used by callers that only need the

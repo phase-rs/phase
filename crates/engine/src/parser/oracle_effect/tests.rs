@@ -89833,3 +89833,281 @@ fn prior_controller_paragraph_modal_and_unknown_suffix_refuse() {
         assert!(card_face_has_unimplemented_parts(&face), "{text}: {face:#?}");
     }
 }
+
+#[test]
+fn complete_publication_conditional_members_precede_suffix_peeling_in_both_modes() {
+    let source = "Choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
+    for chain in [
+        parse_effect_chain(source, AbilityKind::Spell),
+        parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default()),
+    ] {
+        assert!(matches!(*chain.effect, Effect::TargetOnly { .. }));
+        let members = std::iter::successors(chain.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(members.len(), 3, "{chain:#?}");
+        assert_eq!(
+            chain.multi_target.as_ref().unwrap().min,
+            QuantityExpr::Fixed { value: 0 }
+        );
+        assert_eq!(
+            chain.multi_target.as_ref().unwrap().max,
+            Some(QuantityExpr::Fixed { value: 1 })
+        );
+        for member in &members {
+            assert_eq!(member.target_reads, TargetReadOrigin::ParentAnnouncement);
+            assert_eq!(member.duration, Some(Duration::UntilEndOfTurn));
+            let Effect::GenericEffect {
+                static_abilities,
+                target,
+                duration,
+                ..
+            } = member.effect.as_ref()
+            else {
+                panic!("{member:#?}");
+            };
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(*target, Some(TargetFilter::ParentTarget));
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTarget)
+            );
+            assert_eq!(static_abilities[0].condition, None);
+            assert!(!static_abilities[0].characteristic_defining);
+        }
+        assert_eq!(
+            members[0].condition,
+            Some(AbilityCondition::HasObjectTarget)
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = members[0].effect.as_ref()
+        else {
+            panic!("{chain:#?}")
+        };
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 0 }
+            ]
+        );
+        for (member, color, keyword) in [
+            (members[1], ManaColor::Red, Keyword::Trample),
+            (members[2], ManaColor::White, Keyword::Vigilance),
+        ] {
+            assert_eq!(member.sub_link, SubAbilityLink::SequentialSibling);
+            assert_eq!(
+                member.sibling_condition,
+                SiblingCondition::ReplicatedOrBranch
+            );
+            assert_eq!(member.duration, Some(Duration::UntilEndOfTurn));
+            let AbilityCondition::And { conditions } = member.condition.as_ref().unwrap() else {
+                panic!("{member:#?}")
+            };
+            assert_eq!(
+                *conditions,
+                vec![
+                    AbilityCondition::HasObjectTarget,
+                    AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::default().properties(vec![FilterProp::HasColor { color }])
+                        ),
+                        use_lki: false,
+                        subject_slot: None,
+                    }
+                ]
+            );
+            let Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } = member.effect.as_ref()
+            else {
+                panic!("{member:#?}")
+            };
+            assert_eq!(*target, Some(TargetFilter::ParentTarget));
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTarget)
+            );
+            assert_eq!(
+                static_abilities[0].modifications,
+                vec![ContinuousModification::AddKeyword { keyword }]
+            );
+        }
+    }
+}
+
+#[test]
+fn complete_publication_resolving_companions_are_not_discarded_by_pump_lowering() {
+    for (source, expected, scope) in [
+        ("Until end of turn, target creature you control has base power and toughness 5/5 and gains trample.",
+            vec![ContinuousModification::SetPower { value: 5 }, ContinuousModification::SetToughness { value: 5 }, ContinuousModification::AddKeyword { keyword: Keyword::Trample }],
+            TargetFilter::ParentTarget),
+        ("Until end of turn, creatures you control have base power and toughness X/X and gain all creature types.",
+            vec![ContinuousModification::SetPowerDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } }, ContinuousModification::SetToughnessDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } }, ContinuousModification::AddKeyword { keyword: Keyword::Changeling }],
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))),
+        ("Target creature gets +2/+0 and gains vigilance until end of turn.",
+            vec![ContinuousModification::AddPower { value: 2 }, ContinuousModification::AddToughness { value: 0 }, ContinuousModification::AddKeyword { keyword: Keyword::Vigilance }], TargetFilter::ParentTarget),
+    ] {
+        let chain = parse_effect_chain(source, AbilityKind::Spell);
+        let Effect::GenericEffect { static_abilities, .. } = chain.effect.as_ref() else { panic!("{source}: {chain:#?}") };
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].modifications, expected);
+        assert_eq!(static_abilities[0].affected, Some(scope));
+        assert_eq!(static_abilities[0].condition, None);
+        assert_eq!(chain.duration, Some(Duration::UntilEndOfTurn));
+        assert!(chain.sub_ability.is_none());
+    }
+}
+
+#[test]
+fn complete_publication_failed_conditional_tail_is_transactional_and_strict() {
+    let positive = "Choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
+    let good = parse_effect_chain(positive, AbilityKind::Spell);
+    assert!(!card_face_has_unimplemented_parts(&CardFace {
+        abilities: vec![good],
+        ..Default::default()
+    }));
+    for tail in [
+        " and unexplained",
+        " and draw two cards",
+        " and",
+        " if it's an unknown color",
+        " until end of an unknown turn",
+    ] {
+        let source = format!("{}{tail}.", positive.trim_end_matches('.'));
+        for definition in [
+            parse_effect_chain(&source, AbilityKind::Spell),
+            parse_effect_chain_with_context(
+                &source,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            ),
+        ] {
+            let face = CardFace {
+                abilities: vec![definition],
+                ..Default::default()
+            };
+            assert!(
+                card_face_has_unimplemented_parts(&face),
+                "the entire unowned tail remains red: {source}: {face:#?}"
+            );
+        }
+    }
+    let mut context = ParseContext::default();
+    let before = format!("{context:?}");
+    assert!(super::subject::try_parse_conditional_protection_grant_clause(
+        "Until end of turn, target creature gets +2/+0 and gains trample if it's an unknown color.", &mut context).is_none());
+    assert_eq!(
+        format!("{context:?}"),
+        before,
+        "a declined natural owner must not claim target registry state"
+    );
+}
+
+#[test]
+fn complete_publication_prior_declaration_and_ordinary_condition_compatibility() {
+    let body="Tap target artifact. Choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.";
+    for definition in [
+        parse_effect_chain(body, AbilityKind::Spell),
+        parse_effect_chain_with_context(body, AbilityKind::Spell, &mut ParseContext::default()),
+    ] {
+        let nodes = std::iter::successors(Some(&definition), |node| node.sub_ability.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nodes.len(),
+            5,
+            "earlier instruction, real optional declaration, and three members"
+        );
+        assert!(matches!(
+            nodes[0].effect.as_ref(),
+            Effect::SetTapState {
+                state: crate::types::ability::TapStateChange::Tap,
+                ..
+            }
+        ));
+        assert!(matches!(
+            nodes[1].effect.as_ref(),
+            Effect::TargetOnly { .. }
+        ));
+        assert_eq!(
+            nodes[1].multi_target.as_ref().unwrap().min,
+            QuantityExpr::Fixed { value: 0 }
+        );
+        assert_eq!(
+            nodes[1].multi_target.as_ref().unwrap().max,
+            Some(QuantityExpr::Fixed { value: 1 })
+        );
+        for member in &nodes[2..] {
+            assert_eq!(member.target_reads, TargetReadOrigin::ParentAnnouncement);
+            let Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } = member.effect.as_ref()
+            else {
+                panic!("{member:#?}")
+            };
+            assert_eq!(*target, Some(TargetFilter::ParentTarget));
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTarget)
+            );
+        }
+        assert_eq!(nodes[2].condition, Some(AbilityCondition::HasObjectTarget));
+        assert_eq!(
+            nodes[3].sibling_condition,
+            SiblingCondition::ReplicatedOrBranch
+        );
+        assert_eq!(
+            nodes[4].sibling_condition,
+            SiblingCondition::ReplicatedOrBranch
+        );
+    }
+    let ir = parse_effect_chain_ir(body, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 3);
+    let ids = ir
+        .clauses
+        .iter()
+        .map(|clause| clause.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        ir.clauses[2].target_reads,
+        TargetReadOrigin::ParentAnnouncement
+    );
+    for clause in &ir.clauses {
+        assert!(clause.source.fragment().is_some());
+    }
+    let ordinary="Until end of turn, target creature gets +2/+0 and gains vigilance if you control a Forest.";
+    let definition = parse_effect_chain(ordinary, AbilityKind::Spell);
+    let members = std::iter::successors(Some(&definition), |node| node.sub_ability.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(members.len(), 2);
+    for member in &members {
+        assert_eq!(member.duration, Some(Duration::UntilEndOfTurn));
+    }
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = members[0].effect.as_ref()
+    else {
+        panic!("unconditional first member")
+    };
+    assert_eq!(static_abilities[0].condition, None);
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = members[1].effect.as_ref()
+    else {
+        panic!("board-gated sibling")
+    };
+    assert!(static_abilities[0].condition.is_some());
+    assert_eq!(
+        members[1].sibling_condition,
+        SiblingCondition::ReplicatedOrBranch
+    );
+}

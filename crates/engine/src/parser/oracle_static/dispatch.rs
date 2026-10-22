@@ -2002,6 +2002,32 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 604.3a: an unconditional definition of this source's own printed
+    // characteristics is a CDA; another recipient's base setter is not.
+    if let Some(((), predicate)) = nom_on_lower(&text, &lower, |input| {
+        let (input, ()) = parse_self_reference_subject(input)?;
+        value((), tag::<_, _, OracleError<'_>>(" has ")).parse(input)
+    }) {
+        let predicate_lower = predicate.to_lowercase();
+        if tag::<_, _, OracleError<'_>>("power and ")
+            .parse(predicate_lower.as_str())
+            .is_ok()
+        {
+            if let Some(value) = parse_base_pt_mana_value_dynamic(predicate_lower.as_str()) {
+                let mut definition = StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![
+                        ContinuousModification::SetDynamicPower {
+                            value: value.clone(),
+                        },
+                        ContinuousModification::SetDynamicToughness { value },
+                    ])
+                    .description(text.to_string());
+                definition.characteristic_defining = true;
+                return Some(definition);
+            }
+        }
+    }
     if let Some(def) = parse_subject_continuous_static(&text) {
         return Some(def);
     }
