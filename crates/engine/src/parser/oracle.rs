@@ -6629,10 +6629,10 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
-        // are CR 614.1c replacement effects, not triggered abilities — despite
-        // the "whenever"/"when" framing. Intercept before the generic trigger
-        // dispatch routes them through the SpellCast / ChangesZone matcher.
+        // Priority 5-pre: claim typed/counted "… enters with" frames before
+        // generic trigger dispatch. Cast-framed forms are CR 603.1 triggers
+        // whose resolution installs a CR 614.1c entry replacement; they must
+        // never be lowered as object-hosted static replacements.
         //
         // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
         // counter on it, <consequence>") watches for ANY (untyped) counter and
@@ -6666,8 +6666,8 @@ fn parse_normalized_oracle_ir(
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
             // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing; Torgal
-            // and Boreal Outrider are NOT recognized here; the self-exile form, Dark
-            // Intimations, is recognized only to fail closed below) is a TRIGGERED
+            // and Boreal Outrider are NOT recognized here; Dark Intimations
+            // composes a mandatory self-exile before the installer) is a TRIGGERED
             // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
             // effect must survive the source leaving the battlefield after the
@@ -6687,10 +6687,8 @@ fn parse_normalized_oracle_ir(
                 // object-hosted replacement — publishing a partial ability AND
                 // giving it the wrong lifetime, since the effect must outlive the
                 // source leaving the battlefield. Fail the line closed instead,
-                // so the unsupported clause is reported honestly. The self-exile
-                // form ("…, exile this card from your graveyard. That … enters
-                // with …") always lands here, as one unsupported line: neither the
-                // exile nor the rider is published without the other.
+                // so the unsupported clause is reported honestly. A self-exile
+                // prelude and its rider are published together or not at all.
                 CastEntersWithOutcome::ShapeUnsupported => {
                     emitter.unsupported_at(item_line, line.clone());
                     i += 1;

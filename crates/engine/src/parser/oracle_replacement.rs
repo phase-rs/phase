@@ -45,6 +45,7 @@ use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
     parse_type_phrase_folding, parse_type_phrase_union,
 };
+use super::oracle_trigger::self_recursion_trigger_zone;
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
@@ -59,8 +60,8 @@ use crate::types::ability::{
     PermissionGrantee, PlayerFilter, PreventionAmount, PreventionFormula, QuantityExpr,
     QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
-    RoundingMode, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    RoundingMode, SourceExclusion, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -660,8 +661,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // NOTE: "When/Whenever you cast [spell], that [subject] enters with ...
     // counter(s) on it" (Wildgrowth Archaic, Runadi, Communal Brewing) is NOT
     // handled here, and neither is its self-exile form ("…, exile this card from
-    // your graveyard. That [type] enters with …", Dark Intimations), which the
-    // same interceptor fails closed as one unsupported line.
+    // your graveyard. That [type] enters with …", Dark Intimations). Both forms
+    // belong to the dedicated cast-trigger interceptor, not this static route.
     // CR 603.1 + CR 603.3: it IS a triggered ability that goes on the stack —
     // the effect it creates must survive the source leaving the battlefield
     // before the cast spell resolves (issue #6492 review). Modeled as a
@@ -6200,15 +6201,9 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 /// above (CR 603.1 + CR 603.3: the effect must outlive the source leaving the
 /// battlefield). Answering both from one parse keeps the grammar in one place.
 ///
-/// Two lead forms: the rider directly after the trigger condition (", that …"),
-/// which the payload builder reads, or — only when the line contains no
-/// ", that " at all — a self-exile instruction sentence first ("…, exile this
-/// card from your graveyard. That …", Dark Intimations), which this recognizer
-/// owns but does not build (see [`CastEntersWithShape::SelfExilePrelude`]). The
-/// rider form is taken whenever ", that " appears anywhere, so a prelude-form
-/// line whose later text also contains ", that " has its spell filter read up
-/// to that later occurrence; when that filter fails to parse, the line declines
-/// here and the prelude form is not retried.
+/// The first ", " separates the spell filter from either a direct "that …"
+/// rider or a self-exile sentence followed by ". That …"; a spell filter
+/// containing a comma is not this shape.
 ///
 /// The entry frame after the subject is "enters with " / "enters the
 /// battlefield with " (CR 614.12: the same replacement frame — boon inners
@@ -6237,72 +6232,78 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
     .parse(rest)
     .ok()?;
 
-    // Spell filter — split on ", that " to isolate the filter text from the subject.
-    // `split_once_on` returns `Ok(("", (prefix, suffix)))`.
-    let (spell_filter_text, after_that_text) = match nom_primitives::split_once_on(rest, ", that ")
-    {
-        Ok((_, split)) => split,
-        Err(_) => {
-            return is_self_exile_prelude_rider(rest)
-                .then_some(CastEntersWithShape::SelfExilePrelude)
-        }
-    };
-    let spell_filter = parse_cast_spell_filter(spell_filter_text)?;
+    let (_, (spell_filter_text, after_condition)) =
+        nom_primitives::split_once_on(rest, ", ").ok()?;
+    let spell_filter = parse_cast_spell_filter(spell_filter_text);
+    let (after_that_text, prelude) =
+        if let Ok((rider, _)) = tag::<_, _, OracleError<'_>>("that ").parse(after_condition) {
+            (rider, CastEntersWithPrelude::None)
+        } else {
+            let (_, (instruction, rider)) =
+                nom_primitives::split_once_on(after_condition, ". that ").ok()?;
+            (
+                rider,
+                parse_self_exile_from_graveyard(instruction)
+                    .map(|instruction| CastEntersWithPrelude::SelfExile(Box::new(instruction)))
+                    .unwrap_or(CastEntersWithPrelude::Unsupported),
+            )
+        };
 
-    // Subject — "creature", "permanent", or "spell" — and the enters frame.
+    // Subject and entry frame are shared by direct and self-exile riders.
     // CR 614.12: "enters with" and "enters the battlefield with" are the same
     // replacement frame (boon inners print both: March Toward Perfection vs
     // Tenacious Pup); "enters tapped and with" (Loch Larent's boon) adds a tap
     // rider. Longest frame first.
-    let (rest, _subject) = alt((
-        tag::<_, _, OracleError<'_>>("creature "),
-        tag("permanent "),
-        tag("spell "),
-    ))
-    .parse(after_that_text)
-    .ok()?;
-    let (payload, tapped) = alt((
-        value(
-            true,
-            tag::<_, _, OracleError<'_>>("enters tapped and with "),
-        ),
-        value(false, parse_plain_enters_with),
-    ))
-    .parse(rest)
-    .ok()?;
+    let rider = (
+        alt((
+            tag::<_, _, OracleError<'_>>("creature "),
+            tag("permanent "),
+            tag("planeswalker "),
+            tag("spell "),
+        )),
+        alt((
+            value(
+                true,
+                tag::<_, _, OracleError<'_>>("enters tapped and with "),
+            ),
+            value(false, parse_plain_enters_with),
+        )),
+    )
+        .parse(after_that_text)
+        .ok()
+        .map(|(payload, (_, tapped))| (tapped, payload));
+    // A recognized self-exile still owns an entry rider whose subject/frame
+    // the payload builder cannot support. Never publish only its exile.
+    if rider.is_none()
+        && (!matches!(prelude, CastEntersWithPrelude::SelfExile(_))
+            || nom_primitives::scan_at_word_boundaries(after_that_text, parse_entry_verb_with)
+                .is_none())
+    {
+        return None;
+    }
 
-    Some(CastEntersWithShape::Rider {
+    Some(CastEntersWithShape {
         spell_filter,
-        tapped,
-        payload,
+        rider,
+        prelude,
     })
 }
 
-/// What the cast-enters SHAPE half recognized.
-enum CastEntersWithShape<'a> {
-    /// ", that <subject> enters with …": the rider the payload builder reads.
-    Rider {
-        /// The controller-constrained spell filter of the trigger condition.
-        spell_filter: TypedFilter,
-        /// CR 614.1c: the frame was "enters tapped and with " — the entering
-        /// permanent is tapped as it enters, ahead of the counters.
-        tapped: bool,
-        /// The text after "enters with ".
-        payload: &'a str,
-    },
-    /// CR 603.1 + CR 608.2c: "<spell filter>, exile this card from your
-    /// graveyard. That <type> enters with …" — a cast trigger whose first
-    /// instruction exiles its source and whose second gives the triggering
-    /// spell's permanent its counters. The line is owned here so it fails closed
-    /// whole: no part of it is built. The floating rider binds the triggering
-    /// spell only by object id and re-checks the trigger's "you cast" spell
-    /// filter as the permanent enters. A spell that leaves the stack after the
-    /// trigger resolves and is cast again is a new object (CR 400.7) that could
-    /// still pick up the counter, and the original spell would lose it if
-    /// another player gained control of it before it resolved. Until the rider
-    /// carries the exact triggering spell, this form stays unsupported;
-    /// publishing the exile alone would drop the second instruction.
-    SelfExilePrelude,
+/// Once the head matches, the frame owns its line when the rider's subject and frame
+/// are recognized, or when a recognized self-exile prelude precedes any entry-with
+/// sentence; its filter or prelude may still be unsupported (the line then fails closed).
+struct CastEntersWithShape<'a> {
+    spell_filter: Option<TypedFilter>,
+    /// A recognized entry with an unsupported subject/frame has no payload.
+    rider: Option<(bool, &'a str)>,
+    prelude: CastEntersWithPrelude,
+}
+
+/// An invalid prelude must not fall through and publish a partial instruction.
+enum CastEntersWithPrelude {
+    None,
+    SelfExile(Box<AbilityDefinition>),
+    Unsupported,
 }
 
 /// CR 601.2 + CR 603.1: the spell filter of a "when[ever] you cast a/an
@@ -6334,35 +6335,14 @@ fn is_bare_spell_noun_remainder(rest: &str) -> bool {
     .is_ok()
 }
 
-/// CR 603.1 + CR 608.2c: the text after the cast head's article is
-/// "<spell filter>, <self-exile>. that <subject> <entry verb> with …" — the
-/// [`CastEntersWithShape::SelfExilePrelude`] form. The spell filter is read by
-/// the same reader as the rider form, the instruction by
-/// [`is_self_exile_from_graveyard`], and the sentence after "that " must carry
-/// an enters-with frame (`parse_entry_verb_with`).
-fn is_self_exile_prelude_rider(after_article: &str) -> bool {
-    let Ok((_, (spell_filter_text, after_condition))) =
-        nom_primitives::split_once_on(after_article, ", ")
-    else {
-        return false;
-    };
-    let Ok((_, (instruction_text, rider_text))) =
-        nom_primitives::split_once_on(after_condition, ". that ")
-    else {
-        return false;
-    };
-    parse_cast_spell_filter(spell_filter_text).is_some()
-        && is_self_exile_from_graveyard(instruction_text)
-        && nom_primitives::scan_at_word_boundaries(rider_text, parse_entry_verb_with).is_some()
-}
-
-/// CR 608.2c: "exile this card from your graveyard" — the effect parser reads
-/// the instruction as exactly one unconditional, mandatory `ChangeZone` of the
-/// source from the graveyard to exile. Anything else (an optional, compound, or
-/// other-zone instruction) is not this instruction.
-fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
+/// CR 608.2c: parse the mandatory self-exile instruction once, through the
+/// existing effect-chain authority, before composing the independent entry rider.
+///
+/// Optional, conditional, compound, non-self and other-zone instructions are
+/// unsupported preludes; none may publish only half of the cast-trigger body.
+fn parse_self_exile_from_graveyard(instruction_text: &str) -> Option<AbilityDefinition> {
     let instruction = parse_effect_chain(instruction_text, AbilityKind::Spell);
-    matches!(
+    let supported = matches!(
         &*instruction.effect,
         Effect::ChangeZone {
             origin: Some(Zone::Graveyard),
@@ -6373,7 +6353,8 @@ fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
     ) && instruction.sub_ability.is_none()
         && instruction.else_ability.is_none()
         && instruction.condition.is_none()
-        && !instruction.optional
+        && !instruction.optional;
+    supported.then_some(instruction)
 }
 
 /// CR 614.1c + CR 601.2: Parse "When/Whenever you cast a [spell], that
@@ -6382,8 +6363,7 @@ fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
 /// payload for this shape. Wildgrowth Archaic, Runadi and Communal Brewing
 /// share this shape; Torgal (an ordinal "your first …" head) and Boreal
 /// Outrider (an intervening "if" before the rider) do not, and are not read
-/// here. The self-exile form (Dark Intimations) is recognized by the shape half
-/// but never built ([`CastEntersWithShape::SelfExilePrelude`]).
+/// here. A mandatory self-exile prelude uses this same counter payload builder.
 ///
 /// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
 /// stack — the entering-with-counters EFFECT (CR 614.1c/614.12) only applies
@@ -6396,22 +6376,24 @@ fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
 /// that survives the source leaving the battlefield (issue #6492 review).
 ///
 /// Composition:
-///   "when[ever] you cast " → spell filter → ", that " → subject →
+///   "when[ever] you cast " → spell filter → ", " → ("that " | self-exile ". that ") → subject →
 ///   " enters with " → count-prefix → counter-type → " counter(s) on it"
 ///   [", where x is " → quantity ref] [trailing punctuation]
 fn parse_whenever_you_cast_enters_with(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
-    // The self-exile form has no payload this builder may publish; the outcome
-    // dispatcher fails it closed through the shape half.
-    let CastEntersWithShape::Rider {
+) -> Option<(ReplacementDefinition, Option<AbilityDefinition>)> {
+    let CastEntersWithShape {
         spell_filter: spell_typed,
-        tapped,
-        payload: rest,
-    } = parse_cast_enters_with_prefix(norm_lower)?
-    else {
-        return None;
+        rider,
+        prelude,
+    } = parse_cast_enters_with_prefix(norm_lower)?;
+    let spell_typed = spell_typed?;
+    let (tapped, rest) = rider?;
+    let prelude = match prelude {
+        CastEntersWithPrelude::None => None,
+        CastEntersWithPrelude::SelfExile(instruction) => Some(*instruction),
+        CastEntersWithPrelude::Unsupported => return None,
     };
 
     // CR 614.12a + CR 608.2d: "… enters with your choice of <counter-list> on
@@ -6454,13 +6436,14 @@ fn parse_whenever_you_cast_enters_with(
         );
         choice.description = Some("your choice of counter".to_string());
         let execute = compose_cast_enters_with_tap(choice, tapped);
-        return Some(
+        return Some((
             ReplacementDefinition::new(ReplacementEvent::ChangeZone)
                 .execute(execute)
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
-        );
+            prelude,
+        ));
     }
 
     // A CONJOINED counter list ("an additional +1/+1 counter and deathtouch
@@ -6502,7 +6485,7 @@ fn parse_whenever_you_cast_enters_with(
         if !counter_list_remainder_is_exhausted(after_list) {
             return None;
         }
-        return Some(
+        return Some((
             ReplacementDefinition::new(ReplacementEvent::ChangeZone)
                 .execute(compose_cast_enters_with_tap(
                     build_enters_counter_ability(entries),
@@ -6511,7 +6494,8 @@ fn parse_whenever_you_cast_enters_with(
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
-        );
+            prelude,
+        ));
     }
 
     // Count prefix: "an additional" | "N additional" | plain "N" | "x additional" | "x".
@@ -6593,13 +6577,14 @@ fn parse_whenever_you_cast_enters_with(
 
     // CR 614.12: External ETB counter placement — use ChangeZone so tokens
     // entering the battlefield also receive counters (Metallic Mimic + creature tokens).
-    Some(
+    Some((
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(compose_cast_enters_with_tap(put_counter, tapped))
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
-    )
+        prelude,
+    ))
 }
 
 /// CR 614.1c: compose the "enters tapped" rider ahead of the entering-with
@@ -6655,8 +6640,9 @@ fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> Abilit
 /// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
 /// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
 /// object named by `state.current_trigger_event` (this trigger's own
-/// originating `SpellCast` event — CR 603.2) at install time, so only that
-/// exact spell's entry can ever satisfy it.
+/// originating `SpellCast` event — CR 603.2) at install time, so an interloping
+/// spell cannot consume it. The binding is by `ObjectId` (see the known-limitation
+/// note in `parse_whenever_you_cast_enters_with_trigger`).
 /// CR 603.1 + CR 603.3: What the dispatcher learned about a
 /// `"Whenever you cast …, that … enters with …"` line.
 ///
@@ -6676,8 +6662,7 @@ pub(crate) enum CastEntersWithOutcome {
     /// The cast-enters shape, fully parsed.
     Parsed(Box<TriggerDefinition>),
     /// The cast-enters shape, but its clause carries something this recognizer
-    /// does not support (e.g. a trailing rider the counter list cannot consume,
-    /// or the self-exile form, which is never built).
+    /// does not support (e.g. an unsupported prelude or unconsumed counter tail).
     /// The caller MUST fail the line closed rather than fall through.
     ShapeUnsupported,
 }
@@ -6714,7 +6699,7 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
 
-    let mut replacement = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
+    let (mut replacement, prelude) = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
     let spell_filter = replacement.valid_card.clone()?;
     // CR 614.1c: one qualifying entry, then gone — this floating install must
     // never persist to affect a second, later cast of the same shape.
@@ -6725,6 +6710,9 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
     // spell's id (or `ObjectId(0)`, matching nothing) by
     // `Effect::AddTargetReplacement`'s resolve function at install time.
+    // Known limitation (upstream #9991 remaining items): the binding is by
+    // ObjectId and re-checks 'you cast' at entry, so a recast after a zone change,
+    // or a control change before resolution, is not yet handled for this whole family.
     replacement.valid_card = Some(TargetFilter::And {
         filters: vec![
             spell_filter.clone(),
@@ -6734,20 +6722,33 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
         ],
     });
 
-    let install = AbilityDefinition::new(
+    let mut install = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
             target: TargetFilter::None,
         },
     );
+    // CR 608.2c + CR 609.3: exile first, then install even if exile is impossible.
+    // A period starts a sibling instruction; the exile result is not the spell
+    // referent, so neither instruction forwards its result to the other.
+    let execute = if let Some(mut prelude) = prelude {
+        install.sub_link = SubAbilityLink::SequentialSibling;
+        prelude.sub_ability = Some(Box::new(install));
+        prelude
+    } else {
+        install
+    };
+    // CR 113.6m: a self-moving source functions only in its specified origin zone.
+    let trigger_zone =
+        self_recursion_trigger_zone(&execute, &norm_lower).unwrap_or(Zone::Battlefield);
 
     Some(
         TriggerDefinition::new(TriggerMode::SpellCast)
             .valid_card(spell_filter)
             .valid_target(TargetFilter::Controller)
-            .trigger_zones(vec![Zone::Battlefield])
-            .execute(install)
+            .trigger_zones(vec![trigger_zone])
+            .execute(execute)
             .description(text.to_string()),
     )
 }
@@ -29021,28 +29022,11 @@ mod tests {
         );
     }
 
-    /// CR 603.1 + CR 608.2c: Dark Intimations' second paragraph is a cast
-    /// trigger whose instructions exile the card from the graveyard and then give
-    /// the cast Bolas planeswalker an additional loyalty counter. The cast-enters
-    /// recognizer owns the line but does not build it, so the whole paragraph is
-    /// one unsupported item: no exile trigger, no install, and no `Moved`/`SelfRef`
-    /// loyalty replacement on the sorcery. Paragraph 1 stays the spell's effect
-    /// chain.
+    /// SHAPE: the full card retains paragraph one and one graveyard cast trigger.
+    /// CR 113.6m + CR 608.2c: self-exile determines the functioning zone and
+    /// precedes the independent floating entry-counter instruction.
     #[test]
-    fn dark_intimations_second_paragraph_is_one_unsupported_line() {
-        assert!(matches!(
-            parse_whenever_you_cast_enters_with_outcome(
-                DARK_INTIMATIONS_CAST_LINE,
-                "Dark Intimations"
-            ),
-            CastEntersWithOutcome::ShapeUnsupported
-        ));
-        assert!(parse_whenever_you_cast_enters_with_trigger(
-            DARK_INTIMATIONS_CAST_LINE,
-            "Dark Intimations"
-        )
-        .is_none());
-
+    fn dark_intimations_second_paragraph_is_a_graveyard_cast_trigger() {
         let parsed = parse_oracle_text(
             DARK_INTIMATIONS_ORACLE,
             "Dark Intimations",
@@ -29050,152 +29034,200 @@ mod tests {
             &["Sorcery".to_string()],
             &[],
         );
-        // Reach guard: paragraph 1 is the spell's effect chain, with no gap.
-        let spell = parsed
-            .abilities
+        assert_eq!(parsed.abilities.len(), 1, "{parsed:?}");
+        assert!(matches!(
+            &*parsed.abilities[0].effect,
+            Effect::Sacrifice { .. }
+        ));
+        assert!(!has_unimplemented_in_chain(&parsed.abilities[0]));
+        assert_self_exile_cast_shape(DARK_INTIMATIONS_CAST_LINE, CounterType::Loyalty, 1);
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+        assert!(parsed.replacements.is_empty(), "{parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.trigger_zones, vec![Zone::Graveyard]);
+        assert!(!has_unimplemented_in_chain(
+            trigger.execute.as_deref().unwrap()
+        ));
+        let TargetFilter::Typed(filter) = trigger.valid_card.as_ref().unwrap() else {
+            panic!("typed Bolas spell filter: {trigger:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
             .iter()
-            .find(|def| matches!(&*def.effect, Effect::Sacrifice { .. }))
-            .unwrap_or_else(|| panic!("paragraph 1 is the spell, got {:?}", parsed.abilities));
-        assert!(!has_unimplemented_in_chain(spell), "{spell:?}");
-        assert_eq!(parsed.abilities.len(), 2, "got {:?}", parsed.abilities);
-        assert_whole_line_gap(&parsed, DARK_INTIMATIONS_CAST_LINE);
+            .any(|f| matches!(f, TypeFilter::Planeswalker)));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Bolas")));
     }
 
-    /// The self-exile form fails closed whole along each of its printed axes:
-    /// trigger word, count, cast spell type with its subject, and a trailing
-    /// rider.
+    fn assert_self_exile_cast_shape(line: &str, expected_kind: CounterType, expected_count: i32) {
+        let parsed = parse_oracle_text(line, "Filler", &[], &["Sorcery".to_string()], &[]);
+        assert!(parsed.abilities.is_empty(), "{line}: {parsed:?}");
+        assert!(parsed.replacements.is_empty(), "{line}: {parsed:?}");
+        assert_eq!(parsed.triggers.len(), 1, "{line}: {parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.trigger_zones, vec![Zone::Graveyard]);
+        let exile = trigger.execute.as_deref().unwrap();
+        assert!(!has_unimplemented_in_chain(exile), "{line}: {exile:?}");
+        assert!(
+            matches!(
+                &*exile.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "{exile:?}"
+        );
+        assert!(!exile.optional && exile.condition.is_none() && exile.else_ability.is_none());
+        assert!(!exile.forward_result);
+        let install = exile.sub_ability.as_deref().expect("exile then install");
+        assert_eq!(install.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(!install.forward_result);
+        assert!(!install.optional && install.condition.is_none() && install.else_ability.is_none());
+        assert!(install.sub_ability.is_none());
+        let replacement = cast_enters_install(install);
+        let counter = replacement.execute.as_deref().unwrap();
+        assert!(
+            matches!(&*counter.effect, Effect::PutCounter {
+            counter_type, count: QuantityExpr::Fixed { value }, target: TargetFilter::SelfRef,
+        } if counter_type == &expected_kind && *value == expected_count),
+            "{counter:?}"
+        );
+    }
+
+    /// SHAPE: synthetic grammar rows vary trigger word, subtype, subject, count,
+    /// and counter kind without introducing a card-specific parser branch.
     #[test]
-    fn self_exile_cast_lines_fail_closed_on_every_printed_axis() {
-        for line in [
-            DARK_INTIMATIONS_CAST_LINE,
-            "Whenever you cast a Bolas planeswalker spell, exile this card from your graveyard. \
-             That planeswalker enters with an additional loyalty counter on it.",
-            "When you cast a Bolas planeswalker spell, exile this card from your graveyard. \
-             That planeswalker enters with two additional loyalty counters on it.",
-            "When you cast a creature spell, exile this card from your graveyard. That creature \
-             enters with an additional +1/+1 counter on it.",
-            "When you cast a Bolas planeswalker spell, exile this card from your graveyard. \
-             That planeswalker enters with an additional loyalty counter on it and with haste.",
+    fn self_exile_cast_lines_parameterize_the_entry_rider() {
+        for (line, kind, count) in [
+            (DARK_INTIMATIONS_CAST_LINE, CounterType::Loyalty, 1),
+            ("Whenever you cast a Chandra planeswalker spell, exile this card from your graveyard. \
+              That planeswalker enters with two additional loyalty counters on it.", CounterType::Loyalty, 2),
+            ("When you cast an Elf creature spell, exile this card from your graveyard. That creature \
+              enters with three additional +1/+1 counters on it.", CounterType::Plus1Plus1, 3),
+            ("When you cast an artifact spell, exile this card from your graveyard. That permanent \
+              enters with an additional charge counter on it.", CounterType::Generic("charge".to_string()), 1),
         ] {
-            assert!(
-                matches!(
-                    parse_whenever_you_cast_enters_with_outcome(line, "Filler"),
-                    CastEntersWithOutcome::ShapeUnsupported
-                ),
-                "{line:?}"
-            );
-            let parsed = parse_oracle_text(line, "Filler", &[], &["Sorcery".to_string()], &[]);
-            assert_whole_line_gap(&parsed, line);
+            assert_self_exile_cast_shape(line, kind, count);
         }
+        let immediate = "When you cast a Bolas planeswalker spell, that planeswalker enters with \
+                         two additional loyalty counters on it.";
+        let parsed = parse_oracle_text(immediate, "Filler", &[], &["Enchantment".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+        assert_eq!(parsed.triggers[0].trigger_zones, vec![Zone::Battlefield]);
+        let install = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(!has_unimplemented_in_chain(install));
+        assert!(matches!(
+            cast_enters_install(install)
+                .execute
+                .as_deref()
+                .unwrap()
+                .effect
+                .as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Loyalty,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
     }
 
-    /// Hostile cast-trigger lines next to the self-exile form. The shape half
-    /// owns a self-exile line only when its first instruction is exactly "exile
-    /// this card from your graveyard" and the sentence after it is an enters-with
-    /// rider; every other line here declines, and no line publishes a rider.
+    /// SHAPE: unsupported preludes and tails never publish exile-only or
+    /// installer-only abilities. Every hostile row has the accepted frame above.
     #[test]
-    fn self_exile_lookalike_cast_lines_decline() {
-        fn outcome(text: &str) -> CastEntersWithOutcome {
-            parse_whenever_you_cast_enters_with_outcome(text, "Filler")
-        }
-        // An instruction that is not exactly "exile this card from your graveyard".
+    fn self_exile_cast_lines_fail_closed_on_unsupported_instructions() {
+        assert_self_exile_cast_shape(DARK_INTIMATIONS_CAST_LINE, CounterType::Loyalty, 1);
         for prelude in [
             "sacrifice this card",
             "you may exile this card from your graveyard",
             "exile this card from your graveyard and draw a card",
             "exile this card from your hand",
+            "exile target card from your graveyard",
+            "if you control a creature, exile this card from your graveyard",
         ] {
-            let text = format!(
-                "When you cast a Bolas planeswalker spell, {prelude}. That planeswalker enters \
-                 with an additional loyalty counter on it."
+            let line = format!(
+                "When you cast a Bolas planeswalker spell, {prelude}. \
+                That planeswalker enters with an additional loyalty counter on it."
             );
+            let parsed = parse_oracle_text(&line, "Filler", &[], &["Sorcery".to_string()], &[]);
+            assert_whole_line_gap(&parsed, &line);
+        }
+        for tail in [
+            " and with haste.",
+            ", that planeswalker gains haste until end of turn.",
+            " for each unsupported thing.",
+        ] {
+            let line = format!(
+                "When you cast a Bolas planeswalker spell, exile this card from your \
+                graveyard. That planeswalker enters with an additional loyalty counter on it{tail}"
+            );
+            let parsed = parse_oracle_text(&line, "Filler", &[], &["Sorcery".to_string()], &[]);
+            assert_whole_line_gap(&parsed, &line);
+        }
+        let malformed = "When you cast a Bolas planeswalker spell x, exile this card from your \
+            graveyard. That planeswalker enters with an additional loyalty counter on it.";
+        let parsed = parse_oracle_text(malformed, "Filler", &[], &["Sorcery".to_string()], &[]);
+        assert_whole_line_gap(&parsed, malformed);
+
+        assert_self_exile_cast_shape(DARK_INTIMATIONS_CAST_LINE, CounterType::Loyalty, 1);
+        let off_list_subject = "When you cast an artifact spell, exile this card from your \
+            graveyard. That artifact enters with an additional charge counter on it.";
+        assert!(matches!(
+            parse_whenever_you_cast_enters_with_outcome(off_list_subject, "Filler"),
+            CastEntersWithOutcome::ShapeUnsupported
+        ));
+        let parsed = parse_oracle_text(
+            off_list_subject,
+            "Filler",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert_whole_line_gap(&parsed, off_list_subject);
+    }
+
+    #[test]
+    fn self_exile_lookalike_cast_lines_decline() {
+        for line in [
+            "When an opponent casts a Bolas planeswalker spell, exile this card from your \
+             graveyard. That planeswalker enters with an additional loyalty counter on it.",
+            "When you cast a Bolas planeswalker spell, exile this card from your graveyard. \
+             That planeswalker gains hexproof until end of turn.",
+            "Whenever you cast a Bolas planeswalker spell, if {S} of any of that spell's \
+             colors was spent to cast it, that planeswalker enters with an additional \
+             loyalty counter on it.",
+        ] {
+            assert_self_exile_cast_shape(DARK_INTIMATIONS_CAST_LINE, CounterType::Loyalty, 1);
             assert!(
-                matches!(outcome(&text), CastEntersWithOutcome::NotThisShape),
-                "{prelude:?} is not the self-exile instruction"
+                matches!(
+                    parse_whenever_you_cast_enters_with_outcome(line, "Filler"),
+                    CastEntersWithOutcome::NotThisShape
+                ),
+                "{line}"
             );
-            let parsed = parse_oracle_text(&text, "Filler", &[], &["Sorcery".to_string()], &[]);
-            assert!(
-                parsed.replacements.is_empty(),
-                "{prelude:?}: {:?}",
-                parsed.replacements
-            );
+            let parsed = parse_oracle_text(line, "Filler", &[], &["Sorcery".to_string()], &[]);
+            assert!(parsed.replacements.is_empty(), "{line}: {parsed:?}");
             assert!(
                 parsed
-                    .triggers
+                    .abilities
                     .iter()
-                    .filter_map(|t| t.execute.as_deref())
-                    .all(|exec| !chain_has_effect(exec, |e| matches!(
-                        e,
-                        Effect::AddTargetReplacement { .. } | Effect::PutCounter { .. }
+                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                    .all(|def| !chain_has_effect(def, |effect| matches!(
+                        effect,
+                        Effect::AddTargetReplacement { .. }
+                            | Effect::PutCounter { .. }
+                            | Effect::AddPendingETBCounters { .. }
                     ))),
-                "{prelude:?}: no install or put may be published, got {:?}",
-                parsed.triggers
-            );
-            assert!(
-                parsed
-                    .triggers
-                    .iter()
-                    .filter_map(|t| t.execute.as_deref())
-                    .chain(parsed.abilities.iter())
-                    .any(has_unimplemented_in_chain),
-                "{prelude:?}: the rider stays an explicit gap"
+                "{line}: no counter carrier anywhere, got {parsed:?}"
             );
         }
-        // The sentence after the self-exile is not an enters-with rider.
-        assert!(matches!(
-            outcome(
-                "When you cast a Bolas planeswalker spell, exile this card from your graveyard. \
-                 That planeswalker gains hexproof until end of turn."
-            ),
-            CastEntersWithOutcome::NotThisShape
-        ));
-        // The cast must be "you cast".
-        assert!(matches!(
-            outcome(
-                "When an opponent casts a Bolas planeswalker spell, exile this card from your \
-                 graveyard. That planeswalker enters with an additional loyalty counter on it."
-            ),
-            CastEntersWithOutcome::NotThisShape
-        ));
-        // An intervening "if" before the rider (the Boreal Outrider shape).
-        assert!(matches!(
-            outcome(
-                "When you cast a Bolas planeswalker spell, if you control a Bolas planeswalker, \
-                 that planeswalker enters with an additional loyalty counter on it."
-            ),
-            CastEntersWithOutcome::NotThisShape
-        ));
-        // An immediate "that planeswalker" rider is not a subject the rider form
-        // reads, so it is not built either: it stays a gap on the trigger route.
-        let immediate = "When you cast a Bolas planeswalker spell, that planeswalker enters with \
-                         two additional loyalty counters on it.";
-        assert!(matches!(
-            outcome(immediate),
-            CastEntersWithOutcome::NotThisShape
-        ));
-        let parsed = parse_oracle_text(immediate, "Filler", &[], &["Sorcery".to_string()], &[]);
-        assert!(parsed.replacements.is_empty(), "{:?}", parsed.replacements);
-        assert!(
-            parsed
-                .triggers
-                .iter()
-                .filter_map(|t| t.execute.as_deref())
-                .chain(parsed.abilities.iter())
-                .all(|def| !chain_has_effect(def, |e| matches!(
-                    e,
-                    Effect::AddTargetReplacement { .. } | Effect::PutCounter { .. }
-                ))),
-            "no install or put, got {parsed:?}"
-        );
-        assert!(
-            parsed
-                .triggers
-                .iter()
-                .filter_map(|t| t.execute.as_deref())
-                .chain(parsed.abilities.iter())
-                .any(has_unimplemented_in_chain),
-            "the rider stays an explicit gap, got {parsed:?}"
-        );
     }
 
     /// The cast-trigger rider class: Wildgrowth Archaic, Runadi and Communal
