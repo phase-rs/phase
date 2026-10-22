@@ -78,8 +78,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context, parse_windowed_replacement_install_ir,
-    rewrite_condition_keyword, target_filter_controller_ref,
+    parse_effect_chain, parse_effect_chain_with_context, parse_phase_name_set,
+    parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -5675,8 +5675,10 @@ fn parse_normalized_oracle_ir(
             //    branches) — every one of them a CR 608.2 resolution-tree field.
             //    The shell stamps NONE of them: it writes cost, cost_reduction,
             //    activation restrictions and the other CR 602.1 envelope fields
-            //    only. So the pre-shell and post-shell lowerings still agree on
-            //    this predicate.
+            //    only. Once that envelope is complete, the linked-paid-cast
+            //    mana-composition fence can additionally refuse unsupported
+            //    inline work; the pre-shell trial has no activation cost and
+            //    deliberately does not classify that composition yet.
             //
             // Cost: one extra lowering per LEVEL-block activated line (two or
             // three rather than one or two). It is intrinsic, not laziness — the
@@ -11949,6 +11951,9 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// turn-role and turn-window axes are consumed by their own sub-combinators, so
 /// the four role×window gates come from four small tags instead of eight
 /// enumerated phrases (and a new spelling on either axis is a one-tag change).
+/// The unscoped determiner×step arm ("during the <step> step" / "during any
+/// <step> step") shares the same prefix and still lowers to the existing
+/// `RequiresCondition` variant.
 fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     alt((
         value(
@@ -12213,13 +12218,27 @@ fn parse_activation_turn_window(i: &str) -> OracleResult<'_, ActivationTurnWindo
     .parse(i)
 }
 
-/// CR 602.1b: the composed `during <role> <window>` activation gate — the
-/// shared prefix is consumed once, then each axis by its own sub-combinator.
+/// The unscoped step-determiner axis of a `during ...` activation gate:
+/// "the" / "any" name a step with no turn owner. Plumbing only — the rules
+/// reading lives in `named_step_activation_restriction`. The trailing space is
+/// load-bearing: "their" (a turn-role possessive) cannot match "the ".
+fn parse_unscoped_step_determiner(i: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag::<_, _, OracleError<'_>>("the "), tag("any ")))).parse(i)
+}
+
+/// CR 602.1b: the composed `during ...` activation gate — the shared prefix is
+/// consumed once, then either the unscoped determiner×step axes ("during the
+/// <step> step" / "during any <step> step", via the shared step-name grammar
+/// `parse_phase_name_set`) or the `<role> <window>` axes, each by its own
+/// sub-combinator. Every arm emits an EXISTING `ActivationRestriction` variant.
 fn parse_activation_during_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     preceded(
         tag::<_, _, OracleError<'_>>("during "),
         alt((
-            value(any_upkeep_activation_restriction(), tag("any upkeep step")),
+            map(
+                preceded(parse_unscoped_step_determiner, parse_phase_name_set),
+                named_step_activation_restriction,
+            ),
             map(
                 (parse_activation_turn_role, parse_activation_turn_window),
                 |(role, window)| activation_turn_gate(role, window),
@@ -12269,25 +12288,28 @@ fn opponents_turn_activation_condition() -> ParsedCondition {
 /// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
 /// gates activation to the upkeep step of an opponent's turn (Trade Caravan).
 /// Composed from the same team-aware opponent-turn leaf as
-/// `opponents_turn_activation_condition` plus the `IsDuringUpkeep` step
-/// predicate, so the opponent scope reuses the existing composition idiom
-/// instead of a dedicated `DuringOpponents*` restriction sibling per step.
+/// `opponents_turn_activation_condition` plus the step predicate
+/// `CurrentPhaseIs { phases: [Upkeep] }`, so the opponent scope reuses the
+/// existing composition idiom instead of a dedicated `DuringOpponents*`
+/// restriction sibling per step.
 fn opponents_upkeep_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(ParsedCondition::And {
             conditions: vec![
                 opponents_turn_activation_condition(),
-                ParsedCondition::IsDuringUpkeep,
+                ParsedCondition::CurrentPhaseIs {
+                    phases: vec![Phase::Upkeep],
+                },
             ],
         }),
     }
 }
 
-/// CR 602.1b + CR 503.1: activation instructions can restrict activation to
-/// the upkeep step. "Any upkeep" imposes no active-player restriction.
-fn any_upkeep_activation_restriction() -> ActivationRestriction {
+/// CR 602.1b + CR 500.1 + CR 506.1: "during the <step> step" / "during any <step>
+/// step" names one turn step with no turn owner.
+fn named_step_activation_restriction(phases: Vec<Phase>) -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
-        condition: Some(ParsedCondition::IsDuringUpkeep),
+        condition: Some(ParsedCondition::CurrentPhaseIs { phases }),
     }
 }
 

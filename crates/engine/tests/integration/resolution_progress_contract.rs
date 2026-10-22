@@ -113,7 +113,7 @@ fn restore(runner: &mut GameRunner) {
     runner.state_mut().capture_rng_word_pos();
     let json =
         serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap();
-    assert_eq!(json["resolution_state_version"], 8);
+    assert_eq!(json["resolution_state_version"], 9);
     assert!(!json.to_string().contains("ResolutionProgress"));
     let restored = serde_json::from_value::<PersistedGameState>(json)
         .expect("live resolution decodes")

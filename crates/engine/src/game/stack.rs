@@ -220,9 +220,14 @@ fn push_to_stack_with_firing(
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
         if let Some(ability) = entry.ability_mut() {
-            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
-            // activated or triggered ability, including non-transforming
-            // permanents. The transformation guard below has a narrower scope.
+            // CR 400.7 + CR 113.7a: Capture the as-placed source incarnation for
+            // every activated or triggered ability, including non-transforming
+            // permanents — the epoch after any self-moving cost was paid, which
+            // is what the source-reconstruction consumers reconstruct from. The
+            // announcement epoch rides its own field
+            // (`announced_source_incarnation`), captured by
+            // `record_activation_announcement` and never restamped here. The
+            // transformation guard below has a narrower scope.
             if ability.source_incarnation.is_none() {
                 ability
                     .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
@@ -4623,6 +4628,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_id: _,
         cast_occurrence,
         source_incarnation,
+        announced_source_incarnation,
         trigger_source,
         trigger_definition_ref,
         delayed_origin: _,
@@ -4706,6 +4712,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && reads_return_result.is_none()
         && cast_occurrence.is_none()
         && source_incarnation.is_none()
+        && announced_source_incarnation.is_none()
         && trigger_source.is_none()
         && trigger_definition_ref.is_none()
         && original_controller.is_none()
@@ -4873,6 +4880,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -5103,6 +5111,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -5411,6 +5420,7 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut out = ability.clone();
     out.source_id = ObjectId(0);
     out.source_incarnation = None;
+    out.announced_source_incarnation = None;
     out.trigger_source = None;
     out.trigger_definition_ref = None;
     out.may_trigger_origin = None;
@@ -5442,6 +5452,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -5529,6 +5540,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,

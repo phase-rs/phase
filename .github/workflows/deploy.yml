@@ -683,6 +683,10 @@ jobs:
           workingDirectory: lobby-worker
           command: deploy --env preview
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
       - name: Assert the preview lobby advertises this commit's protocol versions
         # Guards the exact regression this job exists to prevent: a preview
         # client that cannot handshake with the preview lobby. Compares the
@@ -698,10 +702,9 @@ jobs:
         # allowed to drift from the tree.
         run: |
           set -euo pipefail
-          expected=$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
-            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
-          expected_lobby=$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
-            crates/lobby-broker/src/protocol.rs | grep -oE '[0-9]+$')
+          versions=$(node scripts/protocol-versions.mjs show --json)
+          expected=$(jq -er '.full' <<< "$versions")
+          expected_lobby=$(jq -er '.lobby' <<< "$versions")
           if [ -z "$expected" ] || [ -z "$expected_lobby" ]; then
             echo "::error::Could not read protocol constants from the tree."
             exit 1

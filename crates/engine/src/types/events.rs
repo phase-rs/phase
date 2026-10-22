@@ -809,6 +809,16 @@ impl EventObjectSnapshot {
             // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
             // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
             FilterProp::Goaded
+            // CR 722.3a: prepared is a designation on the LIVE permanent
+            // (`GameObject::prepared`). The departure ledger carries it
+            // (`LKISnapshot` / `ZoneChangeRecord::was_prepared`, read by the
+            // runtime), but the event-subject projection (`EventObjectSnapshot`)
+            // this reach gate walks does not, so an event-subject prepared
+            // filter cannot be answered from a snapshot. Classify Unsupported so
+            // a future prepared event-subject filter fails the reach gate LOUDLY
+            // rather than silently reading an unprepared projection. Deferred
+            // follow-up (option a): snapshot prepared onto EventObjectSnapshot.
+            | FilterProp::Prepared
             | FilterProp::WasPlayed
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
@@ -2399,6 +2409,25 @@ mod tests {
             properties: vec![FilterProp::Goaded],
         });
         assert_eq!(classify(&goaded), Unsupported);
+    }
+
+    /// CR 722.3a: prepared is a designation on the LIVE permanent. The
+    /// departure ledger now carries it (`LKISnapshot` / `ZoneChangeRecord::
+    /// was_prepared`, read by the runtime), but the event-subject projection
+    /// (`EventObjectSnapshot`) still does not. The reach-gate classifier must
+    /// AGREE: a prepared event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently
+    /// certifying unprepared.
+    /// Revert-probe: returning Prepared to the Supported group makes classify
+    /// yield Supported, flipping this assertion.
+    #[test]
+    fn prepared_subject_filter_is_unsupported() {
+        let prepared = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Prepared],
+        });
+        assert_eq!(classify(&prepared), Unsupported);
     }
 
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole

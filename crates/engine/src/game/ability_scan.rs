@@ -264,6 +264,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         source_id: _,              // object id
         cast_occurrence: _,        // finalized-cast provenance, no dynamic read
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        announced_source_incarnation: _, // announcement-time source epoch, no dynamic read
         noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
@@ -4923,6 +4924,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation read; it scans no
         // board/object axis.

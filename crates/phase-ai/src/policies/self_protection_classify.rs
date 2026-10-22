@@ -17,6 +17,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 
+use engine::game::ability_utils::declared_targets_in_chain;
 use engine::game::combat::get_valid_block_targets_for_player;
 use engine::game::combat_damage::participates_in_pending_combat_damage_substep;
 use engine::game::effects::effect::generic_effect_application_filter;
@@ -32,10 +33,10 @@ use crate::ability_chain::collect_chain_effects;
 use crate::eval::threat_level;
 use crate::features::landfall::ability_searches_library_for_land;
 use crate::features::mana_ramp::target_filter_references_land;
-use crate::policies::context::collect_ability_effects;
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, lethal_to_creature, EffectPolarity,
 };
+use crate::policies::stack_awareness::{damage_kills, node_damage, nodes_acting_on};
 
 /// Threat-level threshold above which protection casts/activations are unblocked.
 pub(crate) const THREAT_FLOOR: f64 = 0.45;
@@ -394,45 +395,69 @@ fn any_stack_harmful_answerable_by_grants(
         if entry.controller == ai_player {
             return false;
         }
-        let Some(ability) = entry.ability() else {
-            return false;
-        };
-        ability.targets.iter().any(|t| {
-            let TargetRef::Object(obj_id) = t else {
-                return false;
-            };
-            let Some(obj) = state.objects.get(obj_id) else {
-                return false;
-            };
-            if obj.controller != ai_player
-                || !obj.card_types.core_types.contains(&CoreType::Creature)
-            {
-                return false;
-            }
-            collect_ability_effects(ability).iter().any(|effect| {
+        let declared_targets = entry
+            .ability()
+            .map(declared_targets_in_chain)
+            .unwrap_or_default();
+        let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(state, entry);
+        reaches.iter().any(|reach| {
+            reach.acted_on.iter().any(|t| {
+                let TargetRef::Object(obj_id) = t else {
+                    return false;
+                };
+                let Some(obj) = state.objects.get(obj_id) else {
+                    return false;
+                };
+                if obj.controller != ai_player
+                    || !obj.card_types.core_types.contains(&CoreType::Creature)
+                {
+                    return false;
+                }
+                // Whether the stack's damage kills the creature: `None` when a
+                // damage node's amount is not fixed.
+                let lethal = nodes_acting_on(state, *obj_id)
+                    .iter()
+                    .filter(|other| matches!(other.node.effect, Effect::DealDamage { .. }))
+                    .map(|other| node_damage(state, other.node, obj))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|dealt| damage_kills(obj, &dealt, 0));
                 harmful_effect_answerable_by_grants(
-                    effect,
+                    state,
+                    &reach.node.effect,
                     grants,
                     obj,
                     state.objects.get(&entry.source_id),
+                    lethal,
+                    &declared_targets,
                 )
             })
         })
     })
 }
 
+/// Whether a grant `protected` does not already have answers the harmful
+/// `effect`. A prevention grant answers damage unless `lethal` says the damage
+/// does not kill `protected`. `declared_targets` are the targets of the stack
+/// entry `effect` belongs to.
 fn harmful_effect_answerable_by_grants(
+    state: &GameState,
     effect: &Effect,
     grants: &[DefensiveGrant],
     protected: &engine::game::game_object::GameObject,
     source: Option<&engine::game::game_object::GameObject>,
+    lethal: Option<bool>,
+    declared_targets: &[TargetRef],
 ) -> bool {
     if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
         return false;
     }
     grants
         .iter()
-        .any(|grant| grant_answers_harmful_effect(grant, effect, protected, source))
+        .filter(|grant| !grant_already_effective(state, protected.id, grant))
+        .filter(|grant| !matches!(grant, DefensiveGrant::PreventDamage) || lethal != Some(false))
+        .any(|grant| {
+            grant_answers_harmful_effect(grant, effect, protected, source, declared_targets)
+        })
 }
 
 fn grant_answers_harmful_effect(
@@ -440,30 +465,45 @@ fn grant_answers_harmful_effect(
     effect: &Effect,
     protected: &engine::game::game_object::GameObject,
     source: Option<&engine::game::game_object::GameObject>,
+    declared_targets: &[TargetRef],
 ) -> bool {
+    let targeted = effect_targets(effect, protected.id, declared_targets);
     match grant {
-        DefensiveGrant::CantBeTargeted => harmful_effect_uses_object_targeting(effect),
+        DefensiveGrant::CantBeTargeted => targeted,
         DefensiveGrant::HexproofFrom(filter) => {
-            harmful_effect_uses_object_targeting(effect)
+            targeted
                 && source.is_some_and(|src| hexproof_from_blocks_source(filter, protected, src))
         }
         DefensiveGrant::Protection(pt) => {
-            harmful_effect_uses_object_targeting(effect)
-                && source.is_some_and(|src| source_matches_protection_target(pt, protected, src))
+            source.is_some_and(|src| source_matches_protection_target(pt, protected, src))
+                && protection_stops(effect, targeted)
         }
         DefensiveGrant::Indestructible => matches!(effect, Effect::Destroy { .. }),
         DefensiveGrant::PreventDamage => matches!(effect, Effect::DealDamage { .. }),
     }
 }
 
-/// Harmful SINGLE-TARGET effects that select a permanent (answered by shroud /
-/// hexproof / protection when the source is not exempt). Mass/untargeted
-/// effects — `DestroyAll` (CR 115.10a: an affected object is not a target) —
-/// are excluded: targeting immunity grants (CR 702.11/702.16/702.18) save
-/// nothing from a wipe. `extract_target_filter` is target-only, so it already
-/// returns `None` for `DestroyAll` (a wipe has no selectable target), making
-/// the `.is_some()` check below false — mass effects are thus excluded by the
-/// extraction itself, with no separate match needed.
+/// CR 115.10a: an object the effect acts on is a target only if the entry
+/// declared it as one.
+fn effect_targets(effect: &Effect, object: ObjectId, declared_targets: &[TargetRef]) -> bool {
+    declared_targets.contains(&TargetRef::Object(object))
+        && harmful_effect_uses_object_targeting(effect)
+}
+
+/// True for a targeted effect (CR 702.16b) and for a `DealDamage` its own source deals, targeted or not (CR 702.16e).
+fn protection_stops(effect: &Effect, targeted: bool) -> bool {
+    targeted
+        || matches!(
+            effect,
+            Effect::DealDamage {
+                damage_source: None,
+                ..
+            }
+        )
+}
+
+/// Whether `effect` has a target filter that is not `Player`. A filter does
+/// not make an object a target: `SelfRef` and event references pass.
 fn harmful_effect_uses_object_targeting(effect: &Effect) -> bool {
     !matches!(extract_target_filter(effect), Some(TargetFilter::Player))
         && extract_target_filter(effect).is_some()
@@ -701,6 +741,7 @@ fn stack_payoff_for_opportunity(
         let Some(root) = entry.ability() else {
             continue;
         };
+        let declared_targets = declared_targets_in_chain(root);
         let source = state.objects.get(&entry.source_id);
         let mut node = Some(root);
         while let Some(ability) = node {
@@ -722,6 +763,7 @@ fn stack_payoff_for_opportunity(
                         &ability.effect,
                         *recipient_id,
                         source,
+                        &declared_targets,
                     ) {
                         Some(true) => return Some(true),
                         Some(false) => {}
@@ -770,6 +812,7 @@ fn grant_answers_targeted_effect(
     effect: &Effect,
     recipient_id: ObjectId,
     source: Option<&engine::game::game_object::GameObject>,
+    declared_targets: &[TargetRef],
 ) -> Option<bool> {
     if matches!(
         effect,
@@ -794,32 +837,34 @@ fn grant_answers_targeted_effect(
             {
                 return None;
             }
+            let aimed = declared_targets.contains(&TargetRef::Object(recipient_id));
             return match grant {
-                DefensiveGrant::CantBeTargeted => Some(true),
+                DefensiveGrant::CantBeTargeted => Some(aimed),
                 DefensiveGrant::HexproofFrom(filter) => {
-                    Some(hexproof_from_blocks_source(filter, protected, source))
+                    Some(aimed && hexproof_from_blocks_source(filter, protected, source))
                 }
-                DefensiveGrant::Protection(protection) => Some(source_matches_protection_target(
-                    protection, protected, source,
-                )),
+                DefensiveGrant::Protection(protection) => {
+                    Some(aimed && source_matches_protection_target(protection, protected, source))
+                }
                 DefensiveGrant::Indestructible | DefensiveGrant::PreventDamage => None,
             };
         }
         EffectPolarity::Harmful => {}
     }
+    let targeted = effect_targets(effect, recipient_id, declared_targets);
     match grant {
-        DefensiveGrant::CantBeTargeted => Some(harmful_effect_uses_object_targeting(effect)),
+        DefensiveGrant::CantBeTargeted => Some(targeted),
         DefensiveGrant::HexproofFrom(filter) => Some(
-            harmful_effect_uses_object_targeting(effect)
+            targeted
                 && source
                     .is_some_and(|source| hexproof_from_blocks_source(filter, protected, source)),
         ),
         DefensiveGrant::Protection(protection) => {
-            let targeting_answer = harmful_effect_uses_object_targeting(effect)
+            let answer = protection_stops(effect, targeted)
                 && source.is_some_and(|source| {
                     source_matches_protection_target(protection, protected, source)
                 });
-            if targeting_answer {
+            if answer {
                 Some(true)
             } else if matches!(
                 effect,
@@ -860,7 +905,7 @@ fn grant_answers_targeted_effect(
 
 /// CR 702.2b + CR 704.5h: damage from a deathtouch source destroys a
 /// positive-toughness creature as an SBA, which indestructible can prevent.
-fn source_has_effective_deathtouch(
+pub(super) fn source_has_effective_deathtouch(
     state: &GameState,
     source: Option<&engine::game::game_object::GameObject>,
 ) -> bool {
@@ -882,7 +927,7 @@ fn damage_may_make_indestructible_relevant(
 /// CR 120.3d-e: wither/infect damage to creatures becomes -1/-1 counters;
 /// other creature damage is marked. CR 702.12b does not let indestructible
 /// prevent a creature from dying for having toughness 0 or less.
-fn damage_becomes_marked(
+pub(super) fn damage_becomes_marked(
     state: &GameState,
     source: Option<&engine::game::game_object::GameObject>,
 ) -> Option<bool> {
@@ -1731,6 +1776,7 @@ mod tests {
                 &effect,
                 recipient,
                 state.objects.get(&source),
+                &[],
             ),
             None
         );
@@ -2020,5 +2066,698 @@ mod tests {
             None,
             "double strike blocker still participates in regular damage"
         );
+    }
+
+    #[test]
+    fn shroud_answers_a_fight_that_reaches_the_creature_through_a_later_slot() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaColor, ManaCost};
+        const TAIL_SWIPE: &str = "Choose target creature you control and target creature you don't control. If you cast this spell during your main phase, the creature you control gets +1/+1 until end of turn. Then those creatures fight each other. (Each deals damage equal to its power to the other.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let theirs = scenario.add_creature(P1, "Theirs", 3, 3).id();
+        let ai_creature = scenario.add_creature(P0, "Ai", 2, 2).id();
+        let swipe = scenario
+            .add_spell_to_hand_from_oracle(P1, "Tail Swipe", true, TAIL_SWIPE)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Green);
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner
+            .cast(swipe)
+            .target_objects(&[theirs, ai_creature])
+            .commit();
+        let state = runner.state();
+        let entry = state.stack.back().expect("Tail Swipe");
+        assert_eq!(entry.controller, P1, "reach guard: an opposing entry");
+        assert!(
+            !entry
+                .ability()
+                .is_some_and(|root| root.targets.contains(&TargetRef::Object(ai_creature))),
+            "reach guard: the root does not target the AI's creature"
+        );
+        assert!(any_stack_harmful_answerable_by_grants(
+            state,
+            P0,
+            &[DefensiveGrant::CantBeTargeted]
+        ));
+    }
+
+    /// P1 casts `text` at P0's creature (`toughness`, `keywords`).
+    fn opponent_spell_at_ai_creature(
+        name: &str,
+        text: &str,
+        cost: engine::types::mana::ManaCost,
+        toughness: i32,
+        keywords: &[Keyword],
+        targets_own_creature_first: bool,
+    ) -> (engine::game::scenario::GameRunner, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::ManaColor;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ai_creature = {
+            let mut builder = scenario.add_creature(P0, "Ai", 3, toughness);
+            for keyword in keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let own = scenario.add_creature(P1, "Own", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P1, name, true, text)
+            .with_mana_cost(cost)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Black);
+        }
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        let targets: &[ObjectId] = if targets_own_creature_first {
+            &[own, ai_creature]
+        } else {
+            &[ai_creature]
+        };
+        runner.cast(spell).target_objects(targets).commit();
+        (runner, ai_creature)
+    }
+
+    const MURDER: &str = "Destroy target creature.";
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const SELF_DESTRUCT: &str = "Target creature you control deals X damage to any other target and X damage to itself, where X is its power.";
+
+    #[test]
+    fn a_grant_the_creature_already_has_answers_nothing() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaCost;
+        for indestructible in [false, true] {
+            let keywords: &[Keyword] = if indestructible {
+                &[Keyword::Indestructible]
+            } else {
+                &[]
+            };
+            let (runner, _) = opponent_spell_at_ai_creature(
+                "Murder",
+                MURDER,
+                ManaCost::generic(2),
+                3,
+                keywords,
+                false,
+            );
+            assert_eq!(
+                any_stack_harmful_answerable_by_grants(
+                    runner.state(),
+                    P0,
+                    &[DefensiveGrant::Indestructible]
+                ),
+                !indestructible
+            );
+        }
+    }
+
+    #[test]
+    fn prevention_answers_only_damage_that_would_kill_the_creature() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaCost;
+        let answerable = |runner: &engine::game::scenario::GameRunner| {
+            any_stack_harmful_answerable_by_grants(
+                runner.state(),
+                P0,
+                &[DefensiveGrant::PreventDamage],
+            )
+        };
+        let (runner, _) =
+            opponent_spell_at_ai_creature("Shock", SHOCK, ManaCost::generic(1), 2, &[], false);
+        assert!(
+            answerable(&runner),
+            "control: 2 damage kills a 2-toughness creature"
+        );
+        let (runner, _) =
+            opponent_spell_at_ai_creature("Shock", SHOCK, ManaCost::generic(1), 3, &[], false);
+        assert!(!answerable(&runner));
+        // Self-Destruct's damage is X, which is not judged, so the grant
+        // still answers it.
+        let (runner, _) = opponent_spell_at_ai_creature(
+            "Self-Destruct",
+            SELF_DESTRUCT,
+            ManaCost::generic(2),
+            4,
+            &[],
+            true,
+        );
+        assert!(answerable(&runner));
+    }
+
+    #[test]
+    fn prevention_is_judged_against_the_damage_of_every_stack_entry() {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaColor, ManaCost};
+        // P1 casts two Shocks at P0's creature, each its own stack entry.
+        for toughness in [3, 5] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ai_creature = scenario.add_creature(P0, "Ai", 3, toughness).id();
+            let shocks: Vec<ObjectId> = (0..2)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+                        .with_mana_cost(ManaCost::generic(1))
+                        .id()
+                })
+                .collect();
+            for _ in 0..2 {
+                scenario.add_basic_land(P1, ManaColor::Red);
+            }
+            let mut runner = scenario.build();
+            {
+                let state = runner.state_mut();
+                state.active_player = P1;
+                state.priority_player = P1;
+                state.waiting_for = WaitingFor::Priority { player: P1 };
+            }
+            for shock in shocks {
+                runner.cast(shock).target_object(ai_creature).commit();
+            }
+            let state = runner.state();
+            assert!(
+                state.stack.len() == 2
+                    && state.stack.iter().all(|entry| {
+                        stack_entry_node_reach(state, entry)
+                            .iter()
+                            .any(|reach| reach.acted_on == vec![TargetRef::Object(ai_creature)])
+                    }),
+                "reach guard: each Shock is its own stack entry acting on the creature"
+            );
+            assert_eq!(
+                any_stack_harmful_answerable_by_grants(state, P0, &[DefensiveGrant::PreventDamage]),
+                toughness == 3,
+                "4 damage kills a 3-toughness creature and not a 5-toughness one"
+            );
+        }
+    }
+
+    const PSIONIC_ENTITY: &str =
+        "{T}: This creature deals 2 damage to any target and 3 damage to itself.";
+    const RAY_OF_COMMAND: &str = "Untap target creature an opponent controls and gain control of it until end of turn. That creature gains haste until end of turn. When you lose control of the creature, tap it.";
+    const KARPLUSAN_YETI: &str = "{T}: This creature deals damage equal to its power to target creature. That creature deals damage equal to its power to this creature.";
+    const GHYRSON_STARN: &str = "Ward {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)\nThree Autostubs — Whenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn deals 2 damage to that permanent or player.";
+    const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+    const SABOTAGE_STRATEGIST: &str = "Flying, vigilance\nWhenever one or more creatures attack you, those creatures get -1/-0 until end of turn.\nExhaust — {5}{U}{U}: Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)";
+
+    /// The built scenario with P1 active and holding priority.
+    fn p1_priority(
+        scenario: engine::game::scenario::GameScenario,
+    ) -> engine::game::scenario::GameRunner {
+        use engine::game::scenario::P1;
+        use engine::types::game_state::WaitingFor;
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        runner
+    }
+
+    /// The player with priority activates `source`'s first ability at `targets`.
+    fn activate_first_ability(
+        runner: &mut engine::game::scenario::GameRunner,
+        source: ObjectId,
+        targets: &[TargetRef],
+    ) {
+        use engine::types::actions::GameAction;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("source")
+            .summoning_sick = false;
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("activate");
+        for target in targets {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(target.clone()),
+                })
+                .expect("choose a target");
+        }
+    }
+
+    /// Gives `object` `keyword`, resolves the stack, and returns the zone
+    /// `object` ends in.
+    fn zone_after_the_stack_resolves(
+        mut runner: engine::game::scenario::GameRunner,
+        object: ObjectId,
+        keyword: Keyword,
+    ) -> engine::types::zones::Zone {
+        let state = runner.state_mut();
+        let target = state.objects.get_mut(&object).expect("object");
+        target.keywords.push(keyword.clone());
+        target.base_keywords.push(keyword);
+        state.layers_dirty.mark_full();
+        runner.advance_until_stack_empty();
+        runner.state().objects[&object].zone
+    }
+
+    /// P1's creature `name` (`color`) activates its first ability at
+    /// `aim(creature, P1's green 2/2)`, then P0's Ray of Command takes the
+    /// creature while the ability waits on the stack.
+    fn ability_of_a_creature_the_ai_took(
+        name: &str,
+        text: &str,
+        color: engine::types::mana::ManaColor,
+        aim: impl Fn(ObjectId, ObjectId) -> Vec<TargetRef>,
+    ) -> (engine::game::scenario::GameRunner, ObjectId) {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::actions::GameAction;
+        use engine::types::mana::{ManaColor, ManaCost};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = {
+            let mut builder = scenario.add_creature_from_oracle(P1, name, 2, 2, text);
+            builder.with_color(vec![color]);
+            builder.id()
+        };
+        let bear = {
+            let mut builder = scenario.add_creature(P1, "Bear", 2, 2);
+            builder.with_color(vec![ManaColor::Green]);
+            builder.id()
+        };
+        let ray = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ray of Command", true, RAY_OF_COMMAND)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = p1_priority(scenario);
+        activate_first_ability(&mut runner, creature, &aim(creature, bear));
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+        runner.cast(ray).target_object(creature).commit();
+        runner.resolve_top();
+        let state = runner.state();
+        assert!(
+            state.objects[&creature].controller == P0
+                && state.stack.len() == 1
+                && state.stack[0].controller == P1
+                && stack_entry_node_reach(state, &state.stack[0])
+                    .iter()
+                    .any(|reach| reach.acted_on == vec![TargetRef::Object(creature)]),
+            "reach guard: P1's ability acts on the creature P0 now controls"
+        );
+        (runner, creature)
+    }
+
+    #[test]
+    fn targeting_immunity_does_not_answer_damage_an_ability_deals_to_its_source() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaColor;
+        use engine::types::zones::Zone;
+        let entity_aimed_at = |itself: bool| {
+            ability_of_a_creature_the_ai_took(
+                "Psionic Entity",
+                PSIONIC_ENTITY,
+                ManaColor::Blue,
+                move |entity, _| {
+                    if itself {
+                        vec![TargetRef::Object(entity)]
+                    } else {
+                        vec![TargetRef::Player(P0)]
+                    }
+                },
+            )
+        };
+        let answers = |runner: &engine::game::scenario::GameRunner, grant: DefensiveGrant| {
+            any_stack_harmful_answerable_by_grants(runner.state(), P0, &[grant])
+        };
+        let blue = ProtectionTarget::Color(ManaColor::Blue);
+
+        let (runner, entity) = entity_aimed_at(false);
+        assert!(!answers(&runner, DefensiveGrant::CantBeTargeted));
+        assert!(!answers(
+            &runner,
+            DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue))
+        ));
+        assert!(answers(&runner, DefensiveGrant::Protection(blue.clone())));
+        assert_eq!(
+            zone_after_the_stack_resolves(entity_aimed_at(false).0, entity, Keyword::Shroud),
+            Zone::Graveyard,
+            "engine: shroud does not stop the damage the Entity deals to itself"
+        );
+        assert_eq!(
+            zone_after_the_stack_resolves(
+                entity_aimed_at(false).0,
+                entity,
+                Keyword::Protection(blue)
+            ),
+            Zone::Battlefield,
+            "engine: protection from blue prevents it"
+        );
+
+        let (runner, _) = entity_aimed_at(true);
+        assert!(
+            answers(&runner, DefensiveGrant::CantBeTargeted),
+            "control: the Entity is the ability's target"
+        );
+    }
+
+    #[test]
+    fn protection_does_not_answer_untargeted_damage_another_object_deals() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaColor;
+        use engine::types::zones::Zone;
+        // P1's Karplusan Yeti (red) aimed at P1's green 2/2, which then deals
+        // damage to the Yeti.
+        let yeti = || {
+            ability_of_a_creature_the_ai_took(
+                "Karplusan Yeti",
+                KARPLUSAN_YETI,
+                ManaColor::Red,
+                |_, bear| vec![TargetRef::Object(bear)],
+            )
+        };
+        let red = ProtectionTarget::Color(ManaColor::Red);
+        let (runner, id) = yeti();
+        assert!(!any_stack_harmful_answerable_by_grants(
+            runner.state(),
+            P0,
+            &[DefensiveGrant::Protection(red.clone())]
+        ));
+        assert_eq!(
+            zone_after_the_stack_resolves(yeti().0, id, Keyword::Protection(red)),
+            Zone::Graveyard,
+            "engine: the green 2/2's damage is not prevented"
+        );
+    }
+
+    /// P1's Prodigal Pyromancer pings P0's 3/3, and P1's Ghyrson Starn (blue and
+    /// red) triggers on that damage.
+    fn ghyrson_starn_trigger_at_the_ai_creature() -> (engine::game::scenario::GameRunner, ObjectId)
+    {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::actions::GameAction;
+        use engine::types::game_state::StackEntryKind;
+        use engine::types::mana::ManaColor;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ai_creature = scenario.add_creature(P0, "Ai", 3, 3).id();
+        {
+            let mut builder = scenario.add_creature(P1, "Ghyrson Starn, Kelermorph", 3, 2);
+            builder.from_oracle_text_with_keywords(&["Three Autostubs", "Ward"], GHYRSON_STARN);
+            builder.with_color(vec![ManaColor::Blue, ManaColor::Red]);
+        }
+        let pyromancer = scenario
+            .add_creature_from_oracle(P1, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER)
+            .id();
+        let mut runner = p1_priority(scenario);
+        activate_first_ability(&mut runner, pyromancer, &[TargetRef::Object(ai_creature)]);
+        for _ in 0..4 {
+            if runner
+                .state()
+                .stack
+                .back()
+                .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("P1 and P0 pass priority");
+        }
+        let state = runner.state();
+        let entry = state.stack.back().expect("Ghyrson Starn's trigger");
+        assert!(
+            matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                && entry.controller == P1
+                && stack_entry_node_reach(state, entry)
+                    .iter()
+                    .any(|reach| reach.acted_on == vec![TargetRef::Object(ai_creature)]),
+            "reach guard: P1's trigger acts on the AI's creature"
+        );
+        (runner, ai_creature)
+    }
+
+    #[test]
+    fn targeting_immunity_does_not_answer_damage_to_the_object_a_trigger_names() {
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaColor;
+        use engine::types::zones::Zone;
+        let (runner, ai_creature) = ghyrson_starn_trigger_at_the_ai_creature();
+        let answers = |grant: DefensiveGrant| {
+            any_stack_harmful_answerable_by_grants(runner.state(), P0, &[grant])
+        };
+        let red = ProtectionTarget::Color(ManaColor::Red);
+        assert!(!answers(DefensiveGrant::CantBeTargeted));
+        assert!(!answers(DefensiveGrant::HexproofFrom(
+            HexproofFilter::Color(ManaColor::Red)
+        )));
+        assert!(answers(DefensiveGrant::Protection(red.clone())));
+        assert_eq!(
+            zone_after_the_stack_resolves(
+                ghyrson_starn_trigger_at_the_ai_creature().0,
+                ai_creature,
+                Keyword::Shroud
+            ),
+            Zone::Graveyard,
+            "engine: shroud does not stop the trigger's damage"
+        );
+        assert_eq!(
+            zone_after_the_stack_resolves(
+                ghyrson_starn_trigger_at_the_ai_creature().0,
+                ai_creature,
+                Keyword::Protection(red)
+            ),
+            Zone::Battlefield,
+            "engine: protection from red prevents it"
+        );
+    }
+
+    #[test]
+    fn targeting_immunity_does_not_answer_an_attack_trigger_that_targets_nothing() {
+        use engine::game::ability_utils::flatten_targets_in_chain;
+        use engine::game::combat::AttackTarget;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::actions::GameAction;
+        use engine::types::mana::ManaColor;
+        // P0's 2/2 attacks P1, whose Sabotage Strategist (blue) triggers.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let strategist = {
+            let mut builder = scenario.add_creature(P1, "Sabotage Strategist", 2, 2);
+            builder.from_oracle_text_with_keywords(
+                &["Exhaust", "Flying", "Vigilance"],
+                SABOTAGE_STRATEGIST,
+            );
+            builder.with_color(vec![ManaColor::Blue]);
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        for _ in 0..4 {
+            if runner
+                .state()
+                .stack
+                .iter()
+                .any(|e| e.source_id == strategist)
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        let state = runner.state();
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == strategist
+                && entry.ability().is_some_and(|root| {
+                    flatten_targets_in_chain(root) == vec![TargetRef::Object(attacker)]
+                })),
+            "reach guard: P1's trigger holds the attacker"
+        );
+        for grant in [
+            DefensiveGrant::CantBeTargeted,
+            DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+            DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Blue)),
+        ] {
+            assert!(
+                !any_stack_harmful_answerable_by_grants(state, P0, std::slice::from_ref(&grant)),
+                "{grant:?}"
+            );
+            assert_eq!(
+                stack_payoff_for_opportunity(
+                    state,
+                    P0,
+                    &DefensiveOpportunity {
+                        grant: grant.clone(),
+                        recipients: vec![attacker],
+                    },
+                ),
+                Some(false),
+                "{grant:?}"
+            );
+        }
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&attacker)
+            .expect("attacker");
+        object.keywords.push(Keyword::Shroud);
+        object.base_keywords.push(Keyword::Shroud);
+        runner.state_mut().layers_dirty.mark_full();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&attacker].power,
+            Some(1),
+            "engine: shroud does not stop the -1/-0"
+        );
+    }
+
+    #[test]
+    fn targeting_immunity_answers_a_spell_that_targets_the_creature() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::mana::{ManaColor, ManaCost};
+        use engine::types::zones::Zone;
+        // P1's Murder (black) at P0's 2/2.
+        let murder_at_the_ai_creature = || {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ai_creature = scenario.add_creature(P0, "Bear", 2, 2).id();
+            let murder = {
+                let mut builder = scenario.add_spell_to_hand_from_oracle(
+                    P1,
+                    "Murder",
+                    true,
+                    "Destroy target creature.",
+                );
+                builder.with_mana_cost(ManaCost::zero());
+                builder.with_color(vec![ManaColor::Black]);
+                builder.id()
+            };
+            let mut runner = p1_priority(scenario);
+            runner.cast(murder).target_objects(&[ai_creature]).commit();
+            (runner, ai_creature)
+        };
+        let black = ProtectionTarget::Color(ManaColor::Black);
+        let (runner, ai_creature) = murder_at_the_ai_creature();
+        for grant in [
+            DefensiveGrant::CantBeTargeted,
+            DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+            DefensiveGrant::Protection(black.clone()),
+        ] {
+            assert!(
+                any_stack_harmful_answerable_by_grants(
+                    runner.state(),
+                    P0,
+                    std::slice::from_ref(&grant)
+                ),
+                "{grant:?}"
+            );
+            assert_eq!(
+                stack_payoff_for_opportunity(
+                    runner.state(),
+                    P0,
+                    &DefensiveOpportunity {
+                        grant: grant.clone(),
+                        recipients: vec![ai_creature],
+                    },
+                ),
+                Some(true),
+                "{grant:?}"
+            );
+        }
+        assert_eq!(
+            zone_after_the_stack_resolves(
+                murder_at_the_ai_creature().0,
+                ai_creature,
+                Keyword::Protection(black)
+            ),
+            Zone::Battlefield,
+            "engine: protection from black makes Murder's target illegal"
+        );
+    }
+
+    #[test]
+    fn targeting_immunity_answers_an_aura_spell_only_at_its_chosen_target() {
+        use engine::types::ability::{ChosenTargetSlots, ResolvedAbility};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::CardId;
+        use engine::types::mana::ManaColor;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opponent = PlayerId(1);
+        let recipient = create_test_creature(&mut state, ai);
+        let aura_id = engine::game::zones::create_object(
+            &mut state,
+            CardId(88),
+            opponent,
+            "Opposing Aura".to_string(),
+            Zone::Stack,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.card_types.core_types.push(CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        aura.color = vec![ManaColor::Blue];
+        // The Aura spell holds the creature; `chosen` says whether it was
+        // chosen as the spell's target.
+        for chosen in [vec![0], vec![]] {
+            let mut ability = ResolvedAbility::new(
+                Effect::unimplemented("aura spell", "Enchant creature"),
+                vec![TargetRef::Object(recipient)],
+                aura_id,
+                opponent,
+            );
+            ability.chosen_target_slots = ChosenTargetSlots::Recorded(chosen.clone());
+            let mut board = state.clone();
+            board.stack.push_back(StackEntry {
+                id: aura_id,
+                source_id: aura_id,
+                controller: opponent,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(88),
+                    ability: Some(Box::new(ability)),
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                },
+            });
+            for grant in [
+                DefensiveGrant::CantBeTargeted,
+                DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+                DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Blue)),
+            ] {
+                assert_eq!(
+                    stack_payoff_for_opportunity(
+                        &board,
+                        ai,
+                        &DefensiveOpportunity {
+                            grant: grant.clone(),
+                            recipients: vec![recipient],
+                        },
+                    ),
+                    Some(!chosen.is_empty()),
+                    "{grant:?}, chosen {chosen:?}"
+                );
+            }
+        }
     }
 }

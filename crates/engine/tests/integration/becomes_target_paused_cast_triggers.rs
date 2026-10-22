@@ -1216,6 +1216,13 @@ fn a_caster_leaving_at_a_cost_replacement_choice_still_puts_the_target_trigger_o
             assert!(runner.state().players[P0.0 as usize].is_eliminated);
             assert!(!spell_on_stack(&runner, spell), "the announcement is gone");
             assert!(runner.state().deferred_triggers.is_empty());
+            assert!(
+                serde_json::to_value(runner.state())
+                    .unwrap()
+                    .get("spell_cast_reversal")
+                    .is_none(),
+                "the abandoned caster retains no payment undo authority"
+            );
         } else {
             assert!(spell_on_stack(&runner, spell));
         }

@@ -339,6 +339,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -893,6 +894,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::OtherThanTriggerObject
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
@@ -1138,6 +1140,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
@@ -2322,6 +2325,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -2689,6 +2693,7 @@ fn filter_prop_grammar_any(
             | FilterProp::Suspected
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::Prepared
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
             | FilterProp::InTrackedSet { .. }
@@ -3310,6 +3315,7 @@ fn filter_prop_contains_input(
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected
+            | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
             | FilterProp::ToughnessGTPower
@@ -4087,6 +4093,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -4615,6 +4622,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
         | FilterProp::PrepareSpell
+        | FilterProp::Prepared
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
@@ -4965,6 +4973,7 @@ fn rewrite_filter_prop(
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -7124,6 +7133,121 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
     )
 }
 
+/// CR 603.4 + CR 608.2h + CR 113.7a: the single authority for a source-subject
+/// filter predicate evaluated against its captured [`TriggerSourceContext`].
+/// Shared by the trigger intervening-if recheck
+/// (`TriggerCondition::SourceMatchesFilter`) and the resolution-time
+/// effect-condition gate (`AbilityCondition::SourceMatchesFilter`) so both
+/// semantic consumers answer from the same exact source epoch.
+///
+/// The subject is read through [`TriggerSourceContext::source_read`]: the LIVE
+/// object only while it is still the captured incarnation in its expected zone
+/// — a same-id return is never a substitute (CR 400.7) — otherwise the
+/// incarnation's EXIT last-known information (`lki_by_incarnation`), falling
+/// back to the trigger-time snapshot when no exit record survives for the
+/// incarnation (step-scoped LKI has already rolled, or the departure predates
+/// capture).
+pub(crate) fn source_subject_matches_filter(
+    state: &GameState,
+    source: &TriggerSourceContext,
+    filter: &TargetFilter,
+) -> bool {
+    let context = FilterContext::from_trigger_source(source);
+    match source.source_read(state) {
+        crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+            matches_target_filter(state, object.id, filter, &context)
+        }
+        crate::types::game_state::TriggerSourceRead::Latched(_) => {
+            // Prefer the exact-incarnation EXIT snapshot over the trigger-time
+            // appearance. A designation gained after triggering but before
+            // departure (a prepared source removed before its pending ability
+            // resolves) must be visible to the resolution read, or the ability
+            // would act against a condition that is no longer true. Falls back
+            // to the trigger-time snapshot when no exit record survives for the
+            // incarnation.
+            let exit_lki = exit_lki_for_incarnation(
+                state,
+                source.identity.reference.object_id,
+                source.identity.reference.incarnation,
+            );
+            match exit_lki {
+                Some(lki) => matches_target_filter_on_lki_snapshot(
+                    state,
+                    source.identity.reference.object_id,
+                    lki,
+                    filter,
+                    &context,
+                ),
+                None => matches_target_filter_on_lki_snapshot(
+                    state,
+                    source.identity.reference.object_id,
+                    &source.lki,
+                    filter,
+                    &context,
+                ),
+            }
+        }
+    }
+}
+
+/// CR 400.7 + CR 608.2h: The exit last-known information recorded for one exact
+/// object incarnation, if any survives. `lki_by_incarnation` is written as an
+/// object leaves the battlefield, exile, or the stack, and rolls at step
+/// transitions, so a missing entry means no record survives — never that a
+/// later object at the same storage id may answer in the captured
+/// incarnation's place.
+fn exit_lki_for_incarnation(
+    state: &GameState,
+    object_id: ObjectId,
+    incarnation: u64,
+) -> Option<&LKISnapshot> {
+    state
+        .lki_by_incarnation
+        .get(&object_id)
+        .and_then(|history| history.get(&incarnation))
+}
+
+/// CR 113.7a + CR 608.2h + CR 400.7: The activation-epoch sibling of
+/// [`source_subject_matches_filter`] — the live-or-exit read for a resolving
+/// stack ability that carries no trigger projection, only the source
+/// incarnation captured when its activation reached the stack
+/// (`ResolvedAbility::source_incarnation`, stamped by the stack-push boundary).
+/// Consumed by the resolution-time effect-condition gate
+/// (`AbilityCondition::SourceMatchesFilter`), so an activated "if this
+/// creature is[n't] prepared" answers from the same exact source epoch a
+/// triggered one does: while the activation is on the stack, the source can be
+/// destroyed or blinked in response, and the predicate must read the object
+/// the activation was made for — never the later object at the same storage id.
+///
+/// The LIVE object answers only while it is still the captured incarnation:
+/// every zone change bumps the incarnation (CR 400.7), so a departed or
+/// blinked source can never satisfy the live branch. Otherwise the captured
+/// incarnation's EXIT last-known information is the answer (CR 113.7a: "its
+/// last known information is used"). With no surviving exit record — a
+/// hidden-zone departure records none — the incarnation cannot be affirmed and
+/// the read fails closed. The resolution-source relatch (CR 400.7j, an object
+/// moved by the ability's own resolution) is deliberately not consulted here,
+/// mirroring the trigger authority: this is a source-fact look-back, not an
+/// effect's referent lookup.
+pub(crate) fn source_incarnation_matches_filter(
+    state: &GameState,
+    object_id: ObjectId,
+    incarnation: u64,
+    filter: &TargetFilter,
+    context: &FilterContext<'_>,
+) -> bool {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.incarnation == incarnation)
+    {
+        return matches_target_filter(state, object_id, filter, context);
+    }
+    exit_lki_for_incarnation(state, object_id, incarnation).is_some_and(|lki| {
+        matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, context)
+    })
+}
+
 /// CR 400.7 + CR 608.2h: Evaluate a target filter against LKI for a known
 /// incarnation. The synthesized record preserves the proven incarnation so
 /// record-side identity predicates such as `OtherThanTriggerObject` do not
@@ -7186,6 +7310,10 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // CR 701.60b: Carry suspected status from the LKI snapshot so
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
+        // CR 722.3a + CR 608.2h: Carry the exit-time prepared designation so
+        // `FilterProp::Prepared` reads last known information for a departed
+        // source's intervening-if recheck (CR 603.4).
+        was_prepared: lki.was_prepared,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -9617,6 +9745,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::MatchesLastChosenCardPredicate
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
         | FilterProp::Goaded
@@ -9915,6 +10044,7 @@ fn source_context_from_filter<'a>(
                     counters: HashMap::new(),
                     tapped: false,
                     is_suspected: false,
+                    was_prepared: false,
                     attachments: Vec::new(),
                 });
             (
@@ -11070,6 +11200,8 @@ fn matches_filter_prop(
         ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
+        // CR 722.3a: Match permanents with the prepared designation.
+        FilterProp::Prepared => obj.prepared.is_some(),
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
         // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
@@ -11860,6 +11992,12 @@ fn zone_change_record_matches_property(
         // was suspected" reads the cost-paid LKI, taken before the sacrifice
         // zone-change reset the flag).
         FilterProp::Suspected => record.is_suspected,
+        // CR 722.3a + CR 608.2h: Prepared status as of the zone change,
+        // snapshotted onto the record. A departed source's "isn't prepared"
+        // intervening-if recheck (CR 603.4) reads the exit-time value —
+        // a preparation after triggering but before departure suppresses the
+        // ability at resolution.
+        FilterProp::Prepared => record.was_prepared,
         // CR 702.171b + CR 508.1m: saddled is no longer snapshotted onto
         // zone-change records — the "attacks while saddled" attack gate is a
         // declaration-time subject match folded into the trigger's `valid_card`
@@ -12249,14 +12387,16 @@ fn evaluate_shares_quality(
     let shares = reference.as_ref().is_none_or(|reference_filter| {
         object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
     });
+    // CR 201.2a: an object with no name doesn't have the same name as any other
+    // object, including another object with no name. `quality_sets_overlap`
+    // already answers "no common value" for an empty value set (face-down
+    // permanent CR 708.2a, fully locked Room CR 709.5), so "doesn't share" is
+    // the exact complement of "shares" for every quality. CR 201.2c's "different
+    // name than" is a distinct predicate (FilterProp::DifferentNameFrom), not
+    // this relation.
     match relation {
         SharedQualityRelation::Shares => shares,
-        SharedQualityRelation::DoesNotShare => {
-            !shares
-                && (!matches!(quality, SharedQuality::Name)
-                    || !object_shared_quality_values(obj, quality, &state.all_creature_types)
-                        .is_empty())
-        }
+        SharedQualityRelation::DoesNotShare => !shares,
     }
 }
 
@@ -12284,6 +12424,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         });
     SourceContext {
@@ -15468,6 +15609,7 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -18825,6 +18967,91 @@ mod tests {
         assert!(matches_target_filter(&state, different, &filter, source));
     }
 
+    /// CR 201.2a: an object with no name doesn't have the same name as any other
+    /// object, including another object with no name — so a nameless object
+    /// satisfies "doesn't share a name" vacuously.
+    ///
+    /// The compared object is a nameless library card (the Central Elevator
+    /// shape: a card the ability is searching for), and the reference population
+    /// is the battlefield, which holds a nameless face-down creature (CR 708.2a)
+    /// next to a named one. Fails on revert: the pre-fix `DoesNotShare` arm also
+    /// required the compared object's name set to be non-empty, so a nameless
+    /// candidate could never qualify.
+    #[test]
+    fn shares_quality_name_negated_reference_nameless_object_shares_no_name() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let face_down = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        // CR 708.2a: a face-down permanent has no name.
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down].name, "");
+
+        // Candidates live in the library (the searched-card shape), so they are
+        // outside the battlefield reference pool.
+        let nameless = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            String::new(),
+            Zone::Library,
+        );
+        let same_name = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Library,
+        );
+        let other_name = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Gray Ogre".to_string(),
+            Zone::Library,
+        );
+
+        let shares_name_relation = |relation: SharedQualityRelation| {
+            let reference = TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            );
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(reference)),
+                    relation,
+                },
+            ]))
+        };
+        let does_not_share = shares_name_relation(SharedQualityRelation::DoesNotShare);
+        let shares = shares_name_relation(SharedQualityRelation::Shares);
+
+        assert!(
+            matches_target_filter(&state, nameless, &does_not_share, source),
+            "CR 201.2a: a nameless object shares no name with any other object"
+        );
+        assert!(
+            !matches_target_filter(&state, nameless, &shares, source),
+            "mirror: a nameless object does not share a name either"
+        );
+        // Reach guards on the same filter: the relation still discriminates.
+        assert!(
+            !matches_target_filter(&state, same_name, &does_not_share, source),
+            "a card named after a battlefield creature shares that name"
+        );
+        assert!(
+            matches_target_filter(&state, other_name, &does_not_share, source),
+            "a card named unlike any battlefield creature does not share"
+        );
+    }
+
     #[test]
     fn attacked_this_turn_matches_tracked_creature() {
         let mut state = setup();
@@ -22069,6 +22296,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let filter =
@@ -22117,6 +22345,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let entrant = ObjectId(700);
@@ -22255,6 +22484,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let filter =
@@ -22401,6 +22631,7 @@ mod tests {
             counters: Default::default(),
             tapped,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
 
@@ -23290,6 +23521,7 @@ mod tests {
             turn_zone_change_index: 0,
             recorded_turn_number: 0,
             is_suspected: false,
+            was_prepared: false,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -23383,6 +23615,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let land_lki = LKISnapshot {
@@ -23404,6 +23637,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
 
@@ -23520,6 +23754,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
         let filter = TargetFilter::Typed(
@@ -23663,6 +23898,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -23734,6 +23970,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -24711,6 +24948,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::NotColor { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Suspected
+            | FilterProp::Prepared
             | FilterProp::Renowned
             | FilterProp::Goaded
             | FilterProp::ToughnessGTPower

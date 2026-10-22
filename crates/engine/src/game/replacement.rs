@@ -170,6 +170,13 @@ fn replacement_ability_controller(
         .unwrap_or(state.active_player)
 }
 
+/// CR 113.7a: the object a replacement's host-relative references name — the
+/// anchored installing source for a floating definition, else the storage id
+/// itself.
+fn replacement_source_host(rid: ReplacementId, def: &ReplacementDefinition) -> ObjectId {
+    def.source_object.unwrap_or(rid.source)
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,
@@ -796,8 +803,13 @@ fn apply_granted_keyword_etb_replacement(
                 continue;
             }
         }
-        let modifiers =
-            event_modifiers_for_ability(definition.execute.as_deref(), state, rid.source, &event);
+        let modifiers = event_modifiers_for_ability(
+            definition.execute.as_deref(),
+            state,
+            rid.source,
+            replacement_ability_controller(state, rid, definition),
+            &event,
+        );
         if !modifiers.etb_counters.is_empty() {
             instance_counter_groups.push(modifiers.etb_counters);
         }
@@ -1642,7 +1654,7 @@ fn replacement_choice_definition(
 /// behavior (empty name) exactly, rather than naming some unrelated object.
 fn replacement_choice_display_source(state: &GameState, rid: ReplacementId) -> ObjectId {
     replacement_choice_definition(state, rid)
-        .and_then(|def| def.source_object)
+        .map(|def| replacement_source_host(rid, def))
         .unwrap_or(rid.source)
 }
 
@@ -7129,8 +7141,9 @@ fn evaluate_replacement_condition(
 /// (`valid_card`, `destination_zone`, `condition`) for a replacement against an
 /// event. Factored from the per-object scan (which runs the same three gates
 /// inline) so the global state-level store can run identical logic for
-/// non-damage events. `source` is the replacement's source object (the sentinel
-/// `ObjectId(0)` for a global install); `source_controller` anchors
+/// non-damage events. `source` is the replacement's host: the anchored installing
+/// source (`ReplacementDefinition::source_object`) for an anchored global install,
+/// else the sentinel `ObjectId(0)`; `source_controller` anchors
 /// controller-relative filters/conditions. Returns `true` when all gates pass.
 fn apply_state_level_gates(
     repl_def: &ReplacementDefinition,
@@ -7866,6 +7879,7 @@ fn object_replacement_candidate_applies(
             replacement_mode_decline(&repl_def.mode),
             state,
             obj.id,
+            replacement_ability_controller(state, rid, repl_def),
         )
     {
         // CR 614.7: suppress optional replacements whose decline branch would
@@ -8734,7 +8748,7 @@ pub fn find_applicable_replacements(
                 // host-relative filters, exclusions and conditions refer to. Parity rule:
                 // every argument position that `object_replacement_candidate_applies` fills
                 // with `obj.id`, this scan fills with `source_host`.
-                let source_host = repl_def.source_object.unwrap_or(ObjectId(0));
+                let source_host = replacement_source_host(rid, repl_def);
                 if let ProposedEvent::Damage { .. } = event {
                     // CR 615.3: Check combat scope, target filters, and source filters.
                     // CR 614.1a: Damage source filter — matches the damage *source* object
@@ -9248,6 +9262,7 @@ fn extract_etb_counters(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> Vec<(CounterType, u32)> {
     let mut counters = Vec::new();
@@ -9265,6 +9280,7 @@ fn extract_etb_counters(
             &exec.effect,
             state,
             source_id,
+            controller,
             event,
         ));
         current = exec.sub_ability.as_deref();
@@ -9276,6 +9292,7 @@ fn extract_etb_counters_from_effect(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> Vec<(CounterType, u32)> {
     match effect {
@@ -9305,13 +9322,12 @@ fn extract_etb_counters_from_effect(
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
-                    // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
-                    // is the controller of the permanent as it would exist on the battlefield — the
-                    // resident liminal projection when one is staged.
-                    let controller = state
-                        .entering_or_live_object(source_id)
-                        .map(replacement_source_player)
-                        .unwrap_or(PlayerId(0));
+                    // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
+                    // supplied by `replacement_ability_controller` (for an object-hosted
+                    // replacement, its host's controller -- for an entering object's own
+                    // replacement, as it would exist on the battlefield; for a floating
+                    // rider, the installing ability's controller latched as
+                    // `source_controller`).
                     crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
                 }
@@ -9324,13 +9340,12 @@ fn extract_etb_counters_from_effect(
         } => enter_with_counters
             .iter()
             .map(|(counter_type, count)| {
-                // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
-                // is the controller of the permanent as it would exist on the battlefield — the
-                // resident liminal projection when one is staged.
-                let controller = state
-                    .entering_or_live_object(source_id)
-                    .map(replacement_source_player)
-                    .unwrap_or(PlayerId(0));
+                // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
+                // supplied by `replacement_ability_controller` (for an object-hosted
+                // replacement, its host's controller -- for an entering object's own
+                // replacement, as it would exist on the battlefield; for a floating
+                // rider, the installing ability's controller latched as
+                // `source_controller`).
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
                     ..crate::game::quantity::QuantityContext::new(source_id)
@@ -9440,6 +9455,7 @@ fn event_modifiers_for_ability(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
     event: &ProposedEvent,
 ) -> EventModifiers {
     let mut etb_tap_state = EtbTapState::Unspecified;
@@ -9473,7 +9489,7 @@ fn event_modifiers_for_ability(
         }
         current = def.sub_ability.as_deref();
     }
-    let counters = extract_etb_counters(ability, state, source_id, event);
+    let counters = extract_etb_counters(ability, state, source_id, controller, event);
     EventModifiers {
         etb_tap_state,
         etb_counters: counters,
@@ -9542,8 +9558,13 @@ pub(super) fn current_self_enter_replacement_modifiers(
             continue;
         }
 
-        let modifiers =
-            event_modifiers_for_ability(replacement.execute.as_deref(), state, source_id, &event);
+        let modifiers = event_modifiers_for_ability(
+            replacement.execute.as_deref(),
+            state,
+            source_id,
+            replacement_ability_controller(state, rid, replacement),
+            &event,
+        );
         match modifiers.etb_tap_state {
             EtbTapState::Unspecified => {}
             EtbTapState::Tapped => result.enter_tapped = Some(true),
@@ -9704,6 +9725,7 @@ fn optional_decline_is_noop(
     decline: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
+    controller: PlayerId,
 ) -> bool {
     let Some(current_tapped) = battlefield_entry_current_tapped(event) else {
         return false;
@@ -9723,7 +9745,7 @@ fn optional_decline_is_noop(
         return false;
     }
 
-    let mods = event_modifiers_for_ability(Some(def), state, source_id, event);
+    let mods = event_modifiers_for_ability(Some(def), state, source_id, controller, event);
     let tap_already = match mods.etb_tap_state {
         EtbTapState::Unspecified => true,
         EtbTapState::Tapped => current_tapped,
@@ -10234,8 +10256,13 @@ fn apply_single_replacement(
                         ProposedEvent::CreateToken { .. } | ProposedEvent::ZoneChange { .. }
                     ) && entry_copy.is_some())
                 });
-                let mut modifiers =
-                    event_modifiers_for_ability(ability, state, rid.source, &proposed);
+                let mut modifiers = event_modifiers_for_ability(
+                    ability,
+                    state,
+                    replacement_source_host(rid, repl_def),
+                    replacement_controller,
+                    &proposed,
+                );
                 // CR 110.2a: A self-ETB controller override is carried directly on the
                 // replacement definition (not derived from `execute`), parallel to the
                 // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
@@ -10776,6 +10803,47 @@ fn mana_commute_class(modification: &crate::types::ability::ManaModification) ->
     }
 }
 
+/// CR 616.1 + CR 614.5: commute class of a replacement's EXECUTE-side expression
+/// that rescales the event's own count (`factor × EventContextAmount`).
+///
+/// The execute-side sibling of [`quantity_commute_class`], which classifies the
+/// `null`-execute side field (`quantity_modification`) and therefore cannot take
+/// a `QuantityExpr`. Both effects of this class read the event's live count and
+/// multiply it (`resolve_event_replacement_quantity`), so two of them commute
+/// (×a then ×b == ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f
+/// repeats the choice until none remain) and the affected player's CR 616.1
+/// ordering choice is immaterial — the same call the
+/// engine already makes for the null-execute count doublers (Doubling Season +
+/// Ojer Taq) and for `ManaModification::Multiply` / `DamageModification::Double`.
+///
+/// `None` for every other shape — an overwrite, an offset, a foreign quantity —
+/// which callers treat as order-material (conservative). Any integer `factor`
+/// commutes here, including 0 and negatives: the applier clamps each resolved
+/// product with `max(0)` (`coin_flip_applier` / `proliferate_applier`), so a
+/// non-positive product lands on 0 in either order and 0 × anything stays 0.
+///
+/// The coin-flip population of this class is assumed to mean "ignore all but
+/// one": `flip_coin.rs` fixes `CoinFlipKeepChoice { keep_count: 1 }` for every
+/// multi-flip run, so a count-scaling coin-flip replacement's whole effect is
+/// that count.
+fn event_count_multiplier_commute_class(expr: &QuantityExpr) -> Option<CommuteClass> {
+    match expr {
+        // The shape the parser emits for "proliferate twice instead" (Tekuthal)
+        // and for "instead flip two coins and ignore one" (Krark's Thumb).
+        QuantityExpr::Multiply { inner, .. }
+            if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::EventContextAmount
+                }
+            ) =>
+        {
+            Some(CommuteClass::Multiplicative)
+        }
+        _ => None,
+    }
+}
+
 /// CR 616.1 classification of a single replacement candidate.
 enum CandidateMateriality {
     /// An order-sensitive shape regardless of the other candidates (zone
@@ -11057,21 +11125,47 @@ fn candidate_materiality(
         }
         return CandidateMateriality::Disjoint;
     };
-    // CR 616.1: a proliferate count-doubler ("proliferate twice instead",
-    // Tekuthal) multiplies the proliferate action count via a `Multiply`
-    // `repeat_for`. Two such doublers commute (x2 then x2 == x2 then x2 == x4),
-    // so the ordering is immaterial and they must auto-apply — mirroring the
-    // `QuantityModification::DOUBLE` -> `Multiplicative` count-write path. Without
-    // this they fall to the conservative `Unconditional` default below and force
-    // a degenerate CR 616.1 ordering choice. (A non-`Multiply` `repeat_for` is not
-    // a doubler and correctly falls through to the conservative default.)
-    if matches!(&*execute.effect, Effect::Proliferate)
-        && matches!(execute.repeat_for, Some(QuantityExpr::Multiply { .. }))
-    {
-        return CandidateMateriality::Writes {
-            field: EventField::Count,
-            commute: CommuteClass::Multiplicative,
+    // CR 616.1 + CR 614.5: an execute-side COUNT SCALING replacement reads the
+    // event's own count and multiplies it, so two of them commute (×a then ×b ==
+    // ×b then ×a; CR 614.5 applies each exactly once, and CR 616.1f repeats the
+    // choice until none remain). The ordering choice is therefore immaterial — the same call the `quantity_modification`
+    // doubler path above makes. Two shipped shapes reach here: Tekuthal's
+    // "proliferate twice instead" and Krark's Thumb's "instead flip two coins
+    // and ignore one". Without this arm both fall to the conservative
+    // `Unconditional` default below and force a degenerate CR 616.1 ordering
+    // prompt — which for a CoinFlip event also DROPS the flip, because
+    // `flip_through_replacement`'s `NeedsChoice` arm parks a keep-choice frame
+    // the delivery path cannot serve (see `engine_replacement`'s CoinFlip arm).
+    //
+    // Both arms mirror their applier's read EXACTLY — same `ProposedEvent`, same
+    // `Effect` shape, same `sub_ability.is_none()` gate — so the classifier can
+    // never promise immateriality for a candidate whose applier will not
+    // rescale: `proliferate_applier` reads `repeat_for` only under
+    // `Effect::Proliferate if execute.sub_ability.is_none()`, and
+    // `coin_flip_applier` reads `count` only under a non-single
+    // `CoinFlipRun::Exactly` with no sub-ability. A non-`Multiply` count
+    // expression is not a doubler and correctly falls through to the
+    // conservative default.
+    if execute.sub_ability.is_none() {
+        let count_expr = match (&*execute.effect, proposed) {
+            (Effect::Proliferate, ProposedEvent::Proliferate { .. }) => execute.repeat_for.as_ref(),
+            // A single flip (`is_single_flip`) or an `UntilLoss` run carries no
+            // count to scale, so it is not a count write.
+            (
+                Effect::FlipCoins {
+                    flips: flips @ CoinFlipRun::Exactly { count },
+                    ..
+                },
+                ProposedEvent::CoinFlip { .. },
+            ) if !flips.is_single_flip() => Some(count),
+            _ => None,
         };
+        if let Some(commute) = count_expr.and_then(event_count_multiplier_commute_class) {
+            return CandidateMateriality::Writes {
+                field: EventField::Count,
+                commute,
+            };
+        }
     }
     let mut field: Option<EventField> = None;
     let mut enter_tapped_commute: Option<CommuteClass> = None;
@@ -13737,7 +13831,7 @@ mod tests {
         let event = ProposedEvent::zone_change(ObjectId(1), Zone::Stack, Zone::Battlefield, None);
 
         assert_eq!(
-            extract_etb_counters(Some(&first), &state, ObjectId(1), &event),
+            extract_etb_counters(Some(&first), &state, ObjectId(1), PlayerId(0), &event),
             vec![
                 (CounterType::Plus1Plus1, 1),
                 (CounterType::Generic("shield".to_string()), 1)

@@ -287,6 +287,11 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // CR 701.60b: Capture suspected status at zone exit for
                 // "was suspected" look-back riders.
                 is_suspected: obj.is_suspected,
+                // CR 722.3a + CR 608.2h: Capture the prepared designation at
+                // zone exit, before the move clears it — a departed source's
+                // "isn't prepared" intervening-if recheck (CR 603.4) reads
+                // this exit value, not the trigger-time appearance.
+                was_prepared: obj.prepared.is_some(),
                 // CR 608.2h: The attachment set as it stood BEFORE the departure
                 // sever (CR 701.3d) cleared it, so a source-referential intervening-if
                 // re-checked at resolution ("if this creature is enchanted" — Dreampod

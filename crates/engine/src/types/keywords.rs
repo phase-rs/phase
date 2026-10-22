@@ -4,8 +4,8 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
-use nom::sequence::preceded;
+use nom::combinator::{all_consuming, opt, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -586,6 +586,19 @@ pub enum ProtectionTarget {
     /// behave as protection from every opponent, which the Opponent scope
     /// captures in one variant.
     FromPlayer(super::ability::ControllerRef),
+    /// CR 702.16i: "protection from each [color in set]" — one separate protection
+    /// ability per member color, expanded when the grant is applied
+    /// (`game::keywords::resolve_granted_protection`).
+    EachColor(ProtectionColorSet),
+}
+
+/// CR 702.16i: a set of colors that "protection from each [set]" expands over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtectionColorSet {
+    /// CR 903.4 + CR 903.4f + CR 702.124c: colors of `ManaColor::ALL` outside the combined
+    /// color identity of the granting effect's controller's commander(s); undefined
+    /// (no colors) when that player has no commander.
+    OutsideCommanderColorIdentity,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -3266,6 +3279,11 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // lowercase, so the canonical stored form must be lowercase.
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(lower),
         _ => {
+            // CR 702.16i: "each color that's not in your commander's color identity"
+            // — a dynamic color set, expanded into concrete colors at grant time.
+            if let Some(set) = parse_protection_color_set(&lower) {
+                return ProtectionTarget::EachColor(set);
+            }
             // CR 702.16a + CR 202.3: "mana value N or less/greater" — protection
             // from objects whose mana value satisfies a comparator threshold.
             if let Some(filter) = parse_protection_mana_value_filter(&lower) {
@@ -3274,6 +3292,33 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
             ProtectionTarget::CardType(lower)
         }
     }
+}
+
+/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
+/// identity" (and its "that is not in" / "not in" spellings) into a
+/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
+/// quality splitter can preserve sentence punctuation.
+fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
+    type E<'a> = nom::error::Error<&'a str>;
+
+    all_consuming(terminated(
+        value(
+            ProtectionColorSet::OutsideCommanderColorIdentity,
+            (
+                tag::<_, _, E<'_>>("each color "),
+                alt((
+                    tag("that's not in "),
+                    tag("that is not in "),
+                    tag("not in "),
+                )),
+                crate::parser::oracle_nom::primitives::parse_your_commanders_color_identity,
+            ),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(s)
+    .ok()
+    .map(|(_, set)| set)
 }
 
 /// CR 702.16a + CR 202.3: Parse "mana value N or less/greater" into a
@@ -4736,6 +4781,54 @@ mod tests {
             parse_protection_target("mana value 3 or less from sources"),
             ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
         );
+    }
+
+    /// CR 702.16i + CR 903.4: "each color that's not in your commander's color
+    /// identity" is a dynamic color set, not an untyped card-type string.
+    #[test]
+    fn parse_protection_target_each_color_outside_commander_identity() {
+        let expected =
+            ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity);
+        for phrase in [
+            "each color that's not in your commander's color identity",
+            "each color that is not in your commander's color identity",
+            "each color not in your commander's color identity",
+            "Each color that's not in your commander's color identity",
+            // The keyword quality splitter can preserve a trailing sentence period.
+            "each color that's not in your commander's color identity.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected, "{phrase}");
+        }
+
+        // Roundtrip via Keyword::from_str (MTGJSON colon form) and the serde wire form.
+        let kw = Keyword::from_str(
+            "Protection:each color that's not in your commander's color identity",
+        )
+        .unwrap();
+        assert_eq!(kw, Keyword::Protection(expected));
+        assert_eq!(
+            serde_json::to_value(ProtectionTarget::EachColor(
+                ProtectionColorSet::OutsideCommanderColorIdentity
+            ))
+            .unwrap(),
+            serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
+        );
+    }
+
+    /// Hostile siblings of the color-set phrase stay untyped card-type strings.
+    #[test]
+    fn parse_protection_target_each_color_siblings_stay_card_type() {
+        for phrase in [
+            "each color that's in your commander's color identity",
+            "each color that's not in your commander's color identity and from artifacts",
+            "each color with the most votes",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.to_string()),
+                "{phrase}"
+            );
+        }
     }
 
     #[test]

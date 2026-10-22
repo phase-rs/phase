@@ -197,8 +197,7 @@ fn sprout_broad_matching_observer_still_vetoes_offer() {
         .objects
         .get_mut(&observer)
         .unwrap()
-        .trigger_definitions
-        .push(trig);
+        .push_printed_trigger(trig);
 
     let outcome_a = drive_sprout_cast(state);
     assert!(

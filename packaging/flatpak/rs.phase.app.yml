@@ -19,6 +19,12 @@ runtime-version: '50'
 sdk: org.gnome.Sdk
 command: phase-tauri
 
+# Keep the prebuilt release ELF byte-identical. Flatpak Builder's automatic
+# debuginfo extraction can remove ELF metadata needed by the dynamic loader.
+build-options:
+  strip: false
+  no-debuginfo: true
+
 finish-args:
   # The shell is a thin bootstrap: it navigates the webview to the remote
   # channel origin (client/bootstrap/bootstrap.ts), so the app is inert

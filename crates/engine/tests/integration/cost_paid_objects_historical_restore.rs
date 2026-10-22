@@ -185,6 +185,11 @@ fn finish_resolution(runner: &mut GameRunner, prefer: &[ObjectId]) {
                     return;
                 }
             }
+            WaitingFor::CopyRetarget { .. } => {
+                if runner.act(GameAction::KeepAllCopyTargets).is_err() {
+                    return;
+                }
+            }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
                     return;
@@ -291,7 +296,7 @@ fn historical_multi_id_cost_record_still_excludes_every_paid_object_after_restor
     );
     // Positive reach guards FIRST: the card the historical record will name is
     // really a candidate in the graveyard this spell searches, and the
-    // sacrificed creature really left the battlefield — so the exclusions after
+    // selected creature is reserved for the final payment — so the exclusions after
     // restore are identity decisions, not empty-zone accidents.
     assert!(
         selection
@@ -303,8 +308,8 @@ fn historical_multi_id_cost_record_still_excludes_every_paid_object_after_restor
     );
     assert_eq!(
         runner.state().objects[&fodder].zone,
-        Zone::Graveyard,
-        "reach guard: the sacrificed creature must really have left the battlefield"
+        Zone::Battlefield,
+        "reach guard: the chosen cost creature stays until the entire cost commits"
     );
 
     // The save/restore under test: a historical TWO-id record through the

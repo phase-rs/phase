@@ -3473,10 +3473,6 @@ mod tests {
         }
     }
 
-    /// v160: `ResolvedTokenCreationCommand` gains `entry_choices` (CR 614.12a),
-    /// the entrant's as-enters answers as they rode the entry event; a v159 peer
-    /// silently drops a non-empty latch and replays a payment-creature copy as a
-    /// 0/0 that dies to CR 704.5f, so it must be refused before it receives v160 state.
     /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
     /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
     /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
@@ -3761,13 +3757,9 @@ mod tests {
     /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
     /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
-    /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
-    /// <n>)` under a function named for `<n-1>` is green, so
-    /// `check-protocol-version.mjs` requires the current numeral in this name
-    /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_160_for_token_entry_choices() {
-        assert_eq!(PROTOCOL_VERSION, 160);
+    fn protocol_version_is_owned_by_broker() {
+        assert_eq!(PROTOCOL_VERSION, lobby_broker::PROTOCOL_VERSION);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3778,8 +3770,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_160_for_token_entry_choices` stays
-    /// `protocol_version_is_157_for_total_mana_value_zone_choices` stays
+    /// `protocol_version_is_owned_by_broker` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

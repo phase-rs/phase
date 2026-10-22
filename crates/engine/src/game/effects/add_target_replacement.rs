@@ -8,6 +8,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::zones::Zone;
 
 /// Whether a duration supplies a replacement expiry at the installation seam.
 ///
@@ -565,15 +566,31 @@ pub fn resolve(
     // CR 614.1a: `TargetFilter::None` is the "no per-target binding" signal —
     // the carried replacement is self-contained (its own source/target filters
     // already constrain when it fires) and is pushed directly to the global
-    // pending_damage_replacements. Used by triggered creation of turn-bound
-    // damage-modification replacements (Rankle and Torbran's "If a source
-    // would deal damage to a player or battle this turn..."; I Call for
-    // Slaughter's "If a source you control would deal damage this turn,
-    // it deals that much damage plus 1 instead.").
+    // pending_damage_replacements through `install_floating_damage_replacement`,
+    // the install authority for floating replacements. Used by triggered
+    // creation of turn-bound damage-modification replacements (Rankle and
+    // Torbran's "If a source would deal damage to a player or battle this
+    // turn..."; I Call for Slaughter's "If a source you control would deal
+    // damage this turn, it deals that much damage plus 1 instead.") and of
+    // floating entry-modifier riders (Communal Brewing's "that creature enters
+    // with X additional +1/+1 counters on it").
     if matches!(target, TargetFilter::None) {
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
-        state.pending_damage_replacements.push(replacement);
+        // CR 113.7a + CR 608.2h: the floating rider still refers to its source
+        // ("this enchantment"); anchor that host so the pending scan's host-relative
+        // gates and the entry-modifier quantities (via `replacement_source_host`)
+        // read the installing source, not the ObjectId(0) storage sentinel.
+        // Battlefield only: a source not on the battlefield at resolution keeps
+        // the sentinel; CR 608.2h last-known information for that case is not
+        // implemented here.
+        super::install_floating_damage_replacement(
+            state,
+            replacement,
+            ability.controller,
+            ability.source_id,
+            &[Zone::Battlefield],
+        );
         attached += 1;
     } else {
         for resolved_target in replacement_targets(state, ability, target) {
@@ -1881,6 +1898,258 @@ mod tests {
             owner,
             PlayerId(0),
             "our own token creation must not be redirected by our own Crafty Cutpurse"
+        );
+    }
+
+    /// Fixture for the floating entry-counter rider tests (issue #9991): a source
+    /// `S` on the battlefield controlled by P1 that is neither a Dog nor a Wolf,
+    /// P1's Dog / Dog Wolf / Wolf, P0's Wolf, and P1's creature spell `E` on the
+    /// stack. Returns `(state, S, E)`.
+    fn floating_entry_counter_fixture() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::card_type::CoreType;
+
+        fn creature(
+            state: &mut GameState,
+            card: u64,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            subtypes: &[&str],
+        ) -> ObjectId {
+            let id = create_object(state, CardId(card), owner, name.to_string(), zone);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types
+                .subtypes
+                .extend(subtypes.iter().map(|s| s.to_string()));
+            id
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Rider Source".to_string(),
+            Zone::Battlefield,
+        );
+        creature(
+            &mut state,
+            2,
+            PlayerId(1),
+            "P1 Dog",
+            Zone::Battlefield,
+            &["Dog"],
+        );
+        creature(
+            &mut state,
+            3,
+            PlayerId(1),
+            "P1 Dog Wolf",
+            Zone::Battlefield,
+            &["Dog", "Wolf"],
+        );
+        creature(
+            &mut state,
+            4,
+            PlayerId(1),
+            "P1 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        creature(
+            &mut state,
+            5,
+            PlayerId(0),
+            "P0 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        let entering = creature(
+            &mut state,
+            6,
+            PlayerId(1),
+            "Entering Human",
+            Zone::Stack,
+            &["Human"],
+        );
+        (state, source, entering)
+    }
+
+    /// Resolve a floating cast-enters-with rider shaped like Torgal, A Fine
+    /// Hound's payload ("that creature enters with an additional +1/+1 counter on
+    /// it for each Dog and/or Wolf you control"; the first-Human-each-turn trigger
+    /// gate is omitted) the way a resolving trigger installs it:
+    /// `AddTargetReplacement` with `TargetFilter::None`, a `PutCounter` whose count
+    /// reads the installing controller's board, and a `valid_card` bound to the
+    /// triggering spell.
+    fn install_dog_wolf_entry_rider(state: &mut GameState, source: ObjectId, entering: ObjectId) {
+        use crate::types::ability::{
+            AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+
+        let subtype_you = |subtype: &str| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype(subtype.to_string())
+                    .controller(ControllerRef::You),
+            )
+        };
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Or {
+                                filters: vec![subtype_you("Dog"), subtype_you("Wolf")],
+                            },
+                        },
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    TargetFilter::SpecificObject {
+                        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+                    },
+                ],
+            })
+            .destination_zone(Zone::Battlefield);
+        replacement.consume_on_apply = true;
+
+        // The SpellCast event that triggered the installing ability names the
+        // entering spell (`extract_source_from_event`).
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(6),
+            controller: PlayerId(1),
+            object_id: entering,
+            cast_mana_value: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+    }
+
+    /// Drive the entering spell's stack-to-battlefield event through the
+    /// replacement pipeline and return the counters it will enter with.
+    fn entry_counters(
+        state: &mut GameState,
+        entering: ObjectId,
+    ) -> Vec<(crate::types::counter::CounterType, u32)> {
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(entering, Zone::Stack, Zone::Battlefield, None);
+        let result = replace_event(state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected the entering ZoneChange to execute, got {result:?}");
+        };
+        enter_with_counters
+    }
+
+    /// CR 113.7a + CR 109.5 + CR 614.12 (issue #9991): a floating cast-enters-with
+    /// rider installed by a resolving trigger anchors its SOURCE (`source_object`),
+    /// latches the installing CONTROLLER (`source_controller`), and counts "you"
+    /// from that controller when the creature enters. P1 controls a Dog, a Dog Wolf
+    /// (counted once) and a Wolf; P0 controls one Wolf; so P1's creature enters
+    /// with 3 counters, not P0's 1.
+    ///
+    /// Reverting the install-time anchor leaves `source_object` as `None`, which
+    /// the provenance assertion catches. The controller threading in
+    /// `extract_etb_counters_from_effect` is guarded by
+    /// `floating_entry_counter_rider_you_is_latched_when_source_changes_control`:
+    /// here the anchored source is still P1's, so a reverted live-source read also
+    /// yields P1.
+    #[test]
+    fn floating_entry_counter_rider_counts_installing_controllers_board() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+
+        // Reach guard: exactly one rider, anchored to its installer.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let rider = &state.pending_damage_replacements[0];
+        assert_eq!(rider.source_object, Some(source));
+        assert_eq!(rider.source_controller, Some(PlayerId(1)));
+        assert!(!rider.is_consumed);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)],
+            "'you' is the installing controller (P1: Dog, Dog Wolf, Wolf), not PlayerId(0)"
+        );
+        assert!(
+            state.pending_damage_replacements[0].is_consumed,
+            "the one-shot rider must be consumed once it applies"
+        );
+    }
+
+    /// CR 109.5 hostile sub-case (a), the controller-threading discriminator: "you"
+    /// is the controller of the source when the ability triggered (CR 109.5),
+    /// latched at install as `source_controller`, so a later control change of the
+    /// SOURCE does not move it. The source passes to P0 after install; the rider
+    /// still counts P1's board (3), not P0's (1).
+    #[test]
+    fn floating_entry_counter_rider_you_is_latched_when_source_changes_control() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider is anchored, so the source is the live object below"
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
+        );
+    }
+
+    /// CR 113.7a + CR 109.5 hostile sub-case (b): the triggered ability, and the
+    /// rider its resolution created, exist independently of its source (CR 113.7a),
+    /// so the source leaving the battlefield after install does not change whose
+    /// board "you" counts. The source is OWNED by P0 but controlled by P1: a
+    /// reverted live read of the departed source (which falls back to its owner in
+    /// the graveyard) would count P0's board (1), while the latched controller
+    /// still counts P1's (3).
+    #[test]
+    fn floating_entry_counter_rider_survives_source_leaving_battlefield() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        state.objects.get_mut(&source).unwrap().owner = PlayerId(0);
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider was anchored before its source left"
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
         );
     }
 }

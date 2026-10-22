@@ -34,9 +34,10 @@ use crate::types::zones::Zone;
 /// per WUBRG color so the runtime gets typed `Color(ManaColor)` variants
 /// instead of an opaque string. Bare "each color"/"all colors" only — phrases
 /// like "each color that's not in your commander's color identity" (Commander's
-/// Plate) or "each color with the most votes" (Council Guardian) carry
-/// additional qualifiers and pass through unchanged for a future dynamic
-/// handler.
+/// Plate, typed by `parse_protection_target` as `ProtectionTarget::EachColor` and
+/// expanded at grant time by `game::keywords::resolve_granted_protection`) or
+/// "each color with the most votes" (Council Guardian) carry additional
+/// qualifiers and pass through unexpanded.
 ///
 /// CR 702.16i: also expands a bare comma-list continuation — after a
 /// "protection from A" prefix, subsequent list members that are neither
@@ -4566,8 +4567,10 @@ mod tests {
         // your commander's color identity") and Council Guardian ("protection
         // from each color with the most votes") are dynamic, conditional
         // qualifiers — the "each color" prefix here is NOT the bare 5-WUBRG
-        // shorthand. Expansion must leave them untouched so a future dynamic
-        // handler can interpret them.
+        // shorthand. Expansion must leave them untouched: Plate's phrase is typed
+        // as `ProtectionTarget::EachColor` and expanded at runtime; Council
+        // Guardian's phrase would stay an untyped `CardType` on this path (the
+        // card itself is typed per color by the vote parser).
         let keywords = extract_granted_keyword_list(
             "protection from each color that's not in your commander's color identity",
             &["protection".to_string()],
@@ -4582,10 +4585,17 @@ mod tests {
             1,
             "qualified 'each color' phrase must not expand, got {prots:?}"
         );
-        // Should remain as CardType (or future dynamic variant) — not 5 Color entries.
+        // Stays one typed EachColor entry (expanded at runtime), not 5 Color entries.
         assert!(
             !matches!(prots[0], Keyword::Protection(ProtectionTarget::Color(_))),
             "qualified 'each color' was wrongly expanded to a Color variant: {prots:?}"
+        );
+        assert_eq!(
+            *prots[0],
+            Keyword::Protection(ProtectionTarget::EachColor(
+                crate::types::keywords::ProtectionColorSet::OutsideCommanderColorIdentity
+            )),
+            "Plate's phrase must reach the keyword list as the typed set quality"
         );
     }
 

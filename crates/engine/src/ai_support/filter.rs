@@ -982,6 +982,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
         | FilterProp::Goaded
+        // CR 722.3a: prepared reads `obj.prepared`, which the candidate
+        // fingerprint does not capture at all (unlike `is_suspected` /
+        // `is_renowned`); memoizing it is unsound — POISON for memoization.
+        | FilterProp::Prepared
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -1135,8 +1139,8 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
         | ParsedCondition::ControlsCommander { .. }
-        // CR 503.1: reads only `state.phase`, apply()-constant global state.
-        | ParsedCondition::IsDuringUpkeep
+        // CR 500.1: reads only `state.phase`, apply()-constant global state.
+        | ParsedCondition::CurrentPhaseIs { .. }
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,
         // both apply()-constant like `IsYourTurn`.
         | ParsedCondition::IsOpponentsTurn

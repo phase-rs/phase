@@ -2590,6 +2590,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -2889,6 +2890,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -4262,6 +4264,7 @@ fn walk_ability(
         source_id: _,
         cast_occurrence: _,    // finalized-cast provenance, no read/write effect
         source_incarnation: _, // self-transform epoch latch, no read/write effect
+        announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         delayed_origin: _,     // delayed-trigger identity, no read/write effect
