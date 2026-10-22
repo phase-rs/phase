@@ -10,12 +10,11 @@ use crate::game::functioning_abilities::active_replacements;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
-    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -325,20 +324,6 @@ impl Walk<'_> {
     fn runs(&self, board: &GameState, ability: &ResolvedAbility, before: &Before) -> Runs {
         if let Some(condition) = &ability.condition {
             if self.condition_holds(board, condition, ability, before) != Some(true) {
-                return Runs::No;
-            }
-        }
-        // The chain resolver treats an unless cost of {0} as paid, so a counter
-        // with one counters nothing and the rest of the entry does not run.
-        // Where no player would be asked, it counters; that answer is nothing
-        // here too.
-        if let Some(unless_pay) = &ability.unless_pay {
-            if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(
-                    super::resolved_unless_cost(board, ability, &unless_pay.cost),
-                    AbilityCost::Mana { cost } if cost == ManaCost::zero()
-                )
-            {
                 return Runs::No;
             }
         }

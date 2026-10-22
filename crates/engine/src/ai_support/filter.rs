@@ -357,6 +357,7 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         },
     ) = (&state.waiting_for, action)
     else {
@@ -366,8 +367,16 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // CR 602.2 + CR 602.5: `can_activate_ability_now` is the engine's
     // structural authority for beginning an activation. Avoid re-simulating the
     // same priority activation just to enter target selection and discard the
-    // clone.
-    crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
+    // clone. CR 602.2b + CR 601.2g: judged in the action's own payment mode, so
+    // an automatic activation is accepted only when the automatic payer can
+    // complete it.
+    crate::game::casting::can_activate_ability_now_with_payment_mode(
+        state,
+        *player,
+        *source_id,
+        *ability_index,
+        *payment_mode,
+    )
 }
 
 // CR 117.1a + CR 601.2: a player may cast a spell when they have priority;
@@ -829,6 +838,10 @@ struct LegalityKey {
     /// DeclareBlocker only: the blocked attacker's interned fingerprint id plus
     /// its ring-bearer designation (CR 701.54c/e). `None` for other classes.
     counterpart: Option<(u32, bool)>,
+    /// ActivateAbility only: the payment mode the activation is judged in
+    /// (CR 602.2b + CR 601.2g — a manual payment's life is judged after the
+    /// mana-ability window). `None` for other classes.
+    payment_mode: Option<CastPaymentMode>,
 }
 
 impl LegalityKey {
@@ -847,6 +860,7 @@ impl LegalityKey {
             is_blocked: false,
             attack_target: None,
             counterpart: None,
+            payment_mode: None,
         }
     }
 }
@@ -985,6 +999,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
         | FilterProp::Goaded
+        // CR 722.3a: prepared reads `obj.prepared`, which the candidate
+        // fingerprint does not capture at all (unlike `is_suspected` /
+        // `is_renowned`); memoizing it is unsound — POISON for memoization.
+        | FilterProp::Prepared
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -1138,8 +1156,8 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
         | ParsedCondition::ControlsCommander { .. }
-        // CR 503.1: reads only `state.phase`, apply()-constant global state.
-        | ParsedCondition::IsDuringUpkeep
+        // CR 500.1: reads only `state.phase`, apply()-constant global state.
+        | ParsedCondition::CurrentPhaseIs { .. }
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,
         // both apply()-constant like `IsYourTurn`.
         | ParsedCondition::IsOpponentsTurn
@@ -1436,6 +1454,7 @@ fn legality_equivalence_key(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         } => {
             if poison.has_activation {
                 return None;
@@ -1443,6 +1462,7 @@ fn legality_equivalence_key(
             let fp = interner.intern(state, *source_id)?;
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
+            key.payment_mode = Some(*payment_mode);
             key.activations_this_turn = state
                 .activated_abilities_this_turn
                 .get(&(*source_id, *ability_index))
@@ -2420,10 +2440,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2469,10 +2491,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2603,6 +2627,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2612,6 +2637,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2644,6 +2670,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2653,6 +2680,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -3325,6 +3353,7 @@ mod tests {
             ActivationTargetSelection::Pending,
             None,
             None,
+            CastPaymentMode::Auto,
         );
         assert!(paying.withholds_priority(), "premise: activation pending");
         let speed_options = match &paying.waiting_for {

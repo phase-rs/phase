@@ -7,9 +7,9 @@ use engine::types::ability::{
     CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ChosenTargetSlots, Comparator,
     ContinuousModification, ControllerRef, CountScope, DoubleTarget, Duration, Effect, EffectKind,
     FilterProp, LetterQuery, NameStickerSet, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
-    TypedFilter, ZoneRef,
+    PlayerScope, PossessionAxis, QuantityExpr, QuantityRef, SearchSelectionConstraint,
+    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin,
+    TargetRef, TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -885,6 +885,7 @@ fn activate_chest_twenty(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap()
         .events;
@@ -1231,6 +1232,7 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap()
             .events;
@@ -2692,7 +2694,9 @@ fn declined_search_refuses_unavailable_nested_scalar_thresholds() {
             },
             QuantityExpr::Ref {
                 qty: QuantityRef::HandSize {
-                    player: PlayerScope::ParentObjectTargetController,
+                    player: PlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller,
+                    },
                 },
             },
             QuantityExpr::Ref {
@@ -3098,7 +3102,9 @@ fn declined_search_player_matching_keeps_announced_recipient() {
                                         player: PlayerScope::Target,
                                     },
                                     4 => QuantityRef::HandSize {
-                                        player: PlayerScope::ParentObjectTargetController,
+                                        player: PlayerScope::ParentObjectTarget {
+                                            possession: PossessionAxis::Controller,
+                                        },
                                     },
                                     _ => unreachable!(),
                                 },
@@ -3361,10 +3367,14 @@ fn declined_search_scalar_player_fields_keep_candidate_authority() {
                 relation: PlayerRelation::All,
                 attr: Box::new(QuantityRef::HandSize {
                     player: match parameter {
-                        6 | 7 => PlayerScope::ParentObjectTargetController,
+                        6 | 7 => PlayerScope::ParentObjectTarget {
+                            possession: PossessionAxis::Controller,
+                        },
                         8 | 9 => PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Sum,
-                            exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                            exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                                possession: PossessionAxis::Controller,
+                            })),
                         },
                         _ => PlayerScope::Controller,
                     },
@@ -3716,7 +3726,9 @@ fn declined_search_inherited_player_scalar_uses_each_runtime_entry() {
                         player: PlayerScope::Target,
                     },
                     1 => QuantityRef::HandSize {
-                        player: PlayerScope::ParentObjectTargetController,
+                        player: PlayerScope::ParentObjectTarget {
+                            possession: PossessionAxis::Controller,
+                        },
                     },
                     2 => QuantityRef::TargetControllerCounter {
                         kind: PlayerCounterKind::Poison,

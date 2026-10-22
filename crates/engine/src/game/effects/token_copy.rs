@@ -1,5 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::{DisplaySource, GameObject};
+use crate::game::game_object::{DisplayIdentity, DisplaySource, GameObject};
 use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -7,7 +7,7 @@ use crate::types::ability::{
     ContinuousModification, CopiableValues, Effect, EffectError, EffectKind, ResolvedAbility,
     StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
+use crate::types::card::PrintedLoyalty;
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -291,13 +291,13 @@ pub(crate) fn prepare_copy_creation(
             count: count as u32,
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(source.values),
-                display_source: source.display_source,
-                printed_ref: source.printed_ref,
-                token_image_ref: source.token_image_ref,
                 // Created copy-tokens derive their descriptor from their
                 // own base at injection (copy exceptions included), so the
                 // source's captured body is deliberately not carried here.
-                token_art: None,
+                display: DisplayIdentity {
+                    token_art: None,
+                    ..source.display
+                },
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -336,10 +336,7 @@ pub(crate) enum CopySourceReferent {
 pub(crate) struct CopySource {
     pub(crate) incarnation: ObjectIncarnationRef,
     pub(crate) values: CopiableValues,
-    pub(crate) display_source: DisplaySource,
-    pub(crate) printed_ref: Option<PrintedCardRef>,
-    pub(crate) token_image_ref: Option<TokenImageRef>,
-    pub(crate) token_art: Option<TokenArtDescriptor>,
+    pub(crate) display: DisplayIdentity,
 }
 
 impl CopySource {
@@ -351,10 +348,7 @@ impl CopySource {
         Some(Self {
             incarnation: ObjectIncarnationRef::from_object(source),
             values,
-            display_source: source.display_source,
-            printed_ref: source.printed_ref.clone(),
-            token_image_ref: source.token_image_ref.clone(),
-            token_art: source.token_art.clone(),
+            display: source.display_identity(),
         })
     }
 
@@ -376,14 +370,16 @@ impl CopySource {
         Some(Self {
             incarnation,
             values,
-            display_source: if token_image_ref.is_some() {
-                DisplaySource::Token
-            } else {
-                DisplaySource::Card
+            display: DisplayIdentity {
+                display_source: if token_image_ref.is_some() {
+                    DisplaySource::Token
+                } else {
+                    DisplaySource::Card
+                },
+                printed_ref: None,
+                token_image_ref,
+                token_art: None,
             },
-            printed_ref: None,
-            token_image_ref,
-            token_art: None,
         })
     }
 }
@@ -1170,9 +1166,16 @@ fn drain_copy_token_resolution(
                 .unwrap_or_default(),
         };
 
+        let window_start = events.len();
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
-                if !super::token::apply_create_token_after_replacement(state, event, events) {
+                let completed =
+                    super::token::apply_create_token_after_replacement(state, event, events);
+                // CR 614.1a + CR 608.2c: this batch's created referent includes
+                // any batch a replacement appended to it. The frame is taken, so
+                // the apply assigned the ledger with this batch's own ids.
+                super::token::publish_replacement_appended_tokens(state, &events[window_start..]);
+                if !completed {
                     pending
                         .created_ids
                         .extend(state.last_created_token_ids.clone());
@@ -1371,10 +1374,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     let liminal_immediate = copy_token_uses_liminal_entry(&copy, &enter_with_counters);
     let CopyTokenSpec {
         mut values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -1422,10 +1422,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 
             let copy_spec = Box::new(CopyTokenSpec {
                 values: values.clone(),
-                display_source,
-                printed_ref: printed_ref.clone(),
-                token_image_ref: token_image_ref.clone(),
-                token_art: token_art.clone(),
+                display: display.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -1557,10 +1554,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 
         let copy_spec = Box::new(CopyTokenSpec {
             values: values.clone(),
-            display_source,
-            printed_ref: printed_ref.clone(),
-            token_image_ref: token_image_ref.clone(),
-            token_art: token_art.clone(),
+            display: display.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,
@@ -7707,5 +7701,145 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    }
+
+    // ── Chatterfang's appended Squirrels share the created referent ──────────
+    //
+    // Chatterfang ruling: the additional Squirrels "won't have any abilities the
+    // other tokens were created with", but anything else the creating effect
+    // specifies ("That token gains haste", "Exile that token …") applies to both
+    // the original tokens and the Squirrels.
+
+    const CHATTERFANG: &str = "Forestwalk (This creature can't be blocked as long as defending player controls a Forest.)\nIf one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.\n{B}, Sacrifice X Squirrels: Target creature gets +X/-X until end of turn.";
+    const COGWORK_ASSEMBLER: &str = "{7}: Create a token that's a copy of target artifact. That token gains haste. Exile it at the beginning of the next end step.";
+    const HEAT_SHIMMER: &str = "Create a token that's a copy of target creature, except it has haste and \"At the beginning of the end step, exile this token.\"";
+
+    /// Every battlefield token named `name`.
+    fn battlefield_tokens(state: &GameState, name: &str) -> Vec<ObjectId> {
+        state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| state.objects[id].is_token && state.objects[id].name == name)
+            .collect()
+    }
+
+    /// The one battlefield token named `name`.
+    fn the_battlefield_token(state: &GameState, name: &str) -> ObjectId {
+        let found = battlefield_tokens(state, name);
+        assert_eq!(found.len(), 1, "exactly one {name} token: {found:?}");
+        found[0]
+    }
+
+    /// Advance to the end step with no attackers and let its triggers resolve.
+    fn finish_at_end_step(runner: &mut crate::game::scenario::GameRunner) {
+        use crate::types::phase::Phase;
+
+        runner.advance_to_end_step();
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            runner
+                .declare_attackers(&[])
+                .expect("declaring no attackers is legal");
+            runner.advance_to_end_step();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        runner.advance_until_stack_empty();
+    }
+
+    /// CR 707.2 + CR 614.1a + CR 608.2c: Cogwork Assembler with Chatterfang out,
+    /// on the copy route: one copy and one Squirrel, both hasty and both in the
+    /// created referent (the copy first); at the next end step "Exile it" exiles
+    /// both.
+    #[test]
+    fn chatterfang_squirrel_shares_copy_token_exile_rider() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let assembler = scenario
+            .add_artifact_from_oracle(P0, "Cogwork Assembler", COGWORK_ASSEMBLER)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Chatterfang, Squirrel General", 3, 3, CHATTERFANG);
+        scenario.with_mana_pool(
+            P0,
+            (0..7)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let index = runner.state().objects[&assembler]
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("Cogwork Assembler's activated ability");
+        runner
+            .activate(assembler, index)
+            .target_object(assembler)
+            .resolve();
+        assert!(runner.state().stack.is_empty(), "the activation resolved");
+
+        let state = runner.state();
+        // Reach-guards: the copy exists and Chatterfang's replacement applied.
+        let copy = the_battlefield_token(state, "Cogwork Assembler");
+        let squirrel = the_battlefield_token(state, "Squirrel");
+        assert!(state.objects[&copy].has_keyword(&Keyword::Haste));
+        // CR 702.10a: "That token gains haste" reaches the Squirrel too.
+        assert!(
+            state.objects[&squirrel].has_keyword(&Keyword::Haste),
+            "the Squirrel gains haste"
+        );
+        assert_eq!(state.last_created_token_ids, vec![copy, squirrel]);
+
+        // CR 603.7c: the delayed "Exile it" affects both tokens.
+        finish_at_end_step(&mut runner);
+        let state = runner.state();
+        assert!(!state.battlefield.contains(&copy), "the copy is exiled");
+        assert!(
+            !state.battlefield.contains(&squirrel),
+            "the Squirrel is exiled"
+        );
+    }
+
+    /// Negative sibling (Chatterfang ruling: the Squirrels "won't have any
+    /// abilities the other tokens were created with"): Heat Shimmer's haste and
+    /// end-step exile are copy exceptions (CR 707.9a), so they belong to the copy
+    /// only. The Squirrel is not hasty and survives the end step.
+    #[test]
+    fn heat_shimmer_copy_exceptions_do_not_reach_chatterfang_squirrel() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Chatterfang, Squirrel General", 3, 3, CHATTERFANG);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let shimmer = scenario
+            .add_spell_to_hand_from_oracle(P0, "Heat Shimmer", false, HEAT_SHIMMER)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(shimmer).target_object(bears).resolve();
+
+        let state = runner.state();
+        let copy = the_battlefield_token(state, "Grizzly Bears");
+        let squirrel = the_battlefield_token(state, "Squirrel");
+        assert!(state.objects[&copy].has_keyword(&Keyword::Haste));
+        assert!(
+            !state.objects[&squirrel].has_keyword(&Keyword::Haste),
+            "the Squirrel does not get the copy's haste"
+        );
+
+        finish_at_end_step(&mut runner);
+        let state = runner.state();
+        // Reach-guard: the copy's own end-step trigger exiled it.
+        assert!(!state.battlefield.contains(&copy), "the copy is exiled");
+        assert!(
+            state.battlefield.contains(&squirrel),
+            "the Squirrel survives the end step"
+        );
     }
 }

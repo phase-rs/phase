@@ -846,6 +846,7 @@ fn begin_combat_phase_stop_interrupts_auto_pass_with_usable_priority() {
         GameAction::ActivateAbility {
             source_id: artifact,
             ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("a non-mana activated ability is legal in the stopped BeginCombat window");
@@ -1724,6 +1725,7 @@ fn nonrepresentative_deliberate_action_does_not_resurrect_at_session_teardown() 
         GameAction::ActivateAbility {
             source_id: p1_action,
             ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();

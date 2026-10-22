@@ -3435,6 +3435,7 @@ mod tests {
                 create_object(&mut state, card_id, owner, name.to_string(), Zone::Command);
             let obj = state.objects.get_mut(&commander).unwrap();
             obj.is_commander = true;
+            obj.base_color = colors.clone();
             obj.color = colors;
         }
 
@@ -4567,6 +4568,7 @@ mod tests {
             let before = runner.state().players[0].mana_pool.total();
             runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: crate::types::actions::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })

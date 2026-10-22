@@ -270,6 +270,7 @@ fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a Ability
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => ctx
             .state
             .objects
@@ -378,16 +379,25 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // `wasted_cast_penalty` whenever the AI happens to control no creature.
     // That covers a whole class, not one card: every printed fetchland's
     // search-and-put chain, and reanimation-shaped puts alike.
-    let mut has_beneficial_creature_target = effects.iter().any(|effect| {
-        !matches!(
-            effect,
-            Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-        ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
-            && targets_creatures(effect)
-    });
+    //
+    // CR 608.2c + CR 111.1: a created-token placement (`PutCounter { LastCreated }`
+    // whose nearest preceding publisher in the same chain is a `Token`) is the second member of that category.
+    // Its recipient is the token this same resolution creates, so it does not
+    // need a creature of ours; this check reads the walk without those
+    // placements. Every other check below keeps the full `effects`.
+    let mut has_beneficial_creature_target = ctx
+        .effects_without_created_token_placements()
+        .into_iter()
+        .any(|effect| {
+            !matches!(
+                effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+                && targets_creatures(effect)
+        });
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
@@ -1515,7 +1525,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     WardCost::PayLifeEqualToPower => {
                         (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                     }
-                    WardCost::DiscardCard => 1.5,
+                    WardCost::Discard { count, .. } => *count as f64 * 1.5,
                     WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                     WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                     // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
@@ -1564,7 +1574,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             WardCost::PayLifeEqualToPower => {
                                 (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                             }
-                            WardCost::DiscardCard => 1.5,
+                            WardCost::Discard { count, .. } => *count as f64 * 1.5,
                             WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                             WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                             WardCost::GetPlayerCounters {
@@ -8814,5 +8824,242 @@ mod tests {
             0.0,
             "the battlefield scan must not run in lookahead"
         );
+    }
+
+    // ─── created-token placements (CR 608.2c + CR 111.1) ─────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, last_created_placement, self_etb_trigger,
+        token_effect, x_quantity,
+    };
+    use engine::types::ability::{ConjureCard, ConjureSource};
+
+    fn object_in_hand(
+        state: &mut GameState,
+        name: &str,
+        core_type: CoreType,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(core_type);
+        obj.abilities = Arc::new(abilities);
+        id
+    }
+
+    fn p1p1_on_last_created() -> Effect {
+        last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })
+    }
+
+    fn conjure_walker() -> Effect {
+        Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: "Hangarback Walker".to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination: Zone::Battlefield,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        }
+    }
+
+    /// The counters go on the token the same resolution creates, so a cast
+    /// with no creature of ours is not a wasted beneficial-creature cast:
+    /// Fractal Summoning's spell shape, a creature card whose activated ability
+    /// is the created-token ability (Berta, cast), and Match the Odds's route
+    /// shape. Opponent creatures are present so the board is not empty.
+    #[test]
+    fn created_token_placement_needs_no_creature_of_ours() {
+        let shapes = [
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Creature,
+                imperative_token_then_placement(
+                    AbilityKind::Activated,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::SequentialSibling,
+                    (1, 1),
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::Opponent),
+                            ),
+                        },
+                    },
+                ),
+            ),
+        ];
+        for (core_type, ability) in shapes {
+            let mut state = make_state();
+            add_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+            let id = object_in_hand(&mut state, "Token Maker", core_type, vec![ability]);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0, "{core_type:?}");
+        }
+    }
+
+    /// Hostiles that do not pair keep the no-own-creature penalty: a `Token`
+    /// in one ability and the placement in another, a placement after a
+    /// Conjure, and a placement in the "otherwise" leg of a root `Token`.
+    #[test]
+    fn unpaired_last_created_placements_keep_the_penalty() {
+        let mut otherwise = AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![]));
+        otherwise.condition = Some(AbilityCondition::IsYourTurn);
+        otherwise.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            p1p1_on_last_created(),
+        )));
+        let hostiles = [
+            vec![
+                AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
+                AbilityDefinition::new(AbilityKind::Spell, p1p1_on_last_created()),
+            ],
+            vec![effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![conjure_walker(), p1p1_on_last_created()],
+            )],
+            vec![otherwise],
+        ];
+        for abilities in hostiles {
+            let mut state = make_state();
+            let id = object_in_hand(&mut state, "Hostile", CoreType::Sorcery, abilities);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(
+                score <= -8.0,
+                "expected the wasted-cast penalty, got {score}"
+            );
+        }
+    }
+
+    /// Reach guard: a +1/+1 placement on a creature we control is still a
+    /// beneficial creature-targeting spell with no recipient.
+    #[test]
+    fn placement_on_our_creature_with_none_is_still_penalised() {
+        let mut state = make_state();
+        let id = object_in_hand(
+            &mut state,
+            "Grow",
+            CoreType::Sorcery,
+            vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+            )],
+        );
+        let score = pre_cast_score_for_spell(&state, id);
+        assert!(
+            score <= -8.0,
+            "expected the wasted-cast penalty, got {score}"
+        );
+    }
+
+    fn etb_creature(state: &mut GameState, execute: AbilityDefinition) -> ObjectId {
+        let id = object_in_hand(state, "ETB Creature", CoreType::Creature, Vec::new());
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .trigger_definitions
+            .push(self_etb_trigger(execute));
+        id
+    }
+
+    /// CR 115.10a: an ETB that creates a token and puts counters on it targets
+    /// nothing, so an empty board is no ETB whiff (Manifestation Sage and The
+    /// Bus Runner shapes).
+    #[test]
+    fn created_token_etb_is_not_an_etb_whiff() {
+        let sage = imperative_token_then_placement(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: engine::types::ability::PlayerScope::Controller,
+                },
+            },
+        );
+        let bus_runner = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::SequentialSibling,
+            vec![
+                token_effect(4, 4, vec![]),
+                last_created_placement(
+                    CounterType::Generic("hour".to_string()),
+                    QuantityExpr::Fixed { value: 8 },
+                ),
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
+                },
+            ],
+        );
+        for execute in [sage, bus_runner] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0);
+        }
+    }
+
+    /// Reach guards on the ETB whiff: a targeted +1/+1 ETB with no creature
+    /// whiffs, and a placement after a Conjure keeps today's whiff
+    /// (conservative default).
+    #[test]
+    fn targeted_and_conjure_etbs_keep_the_etb_whiff() {
+        let targeted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        let conjure = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![conjure_walker(), p1p1_on_last_created()],
+        );
+        for execute in [targeted, conjure] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(score <= -8.0, "expected the ETB whiff, got {score}");
+        }
     }
 }

@@ -2759,18 +2759,26 @@ mod departure_result_tests {
                         effect: body,
                     }],
                 },
-                7 | 8 => Effect::FlipCoin {
+                7 | 8 => Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: (edge == 7).then_some(body.clone()),
                     lose_effect: (edge == 8).then_some(body),
                     flipper: TargetFilter::Controller,
                 },
                 9 | 10 => Effect::FlipCoins {
-                    count: QuantityExpr::Fixed { value: 1 },
+                    flips: crate::types::ability::CoinFlipRun::Exactly {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
                     win_effect: (edge == 9).then_some(body.clone()),
                     lose_effect: (edge == 10).then_some(body),
                     flipper: TargetFilter::Controller,
                 },
-                11 => Effect::FlipCoinUntilLose { win_effect: body },
+                11 => Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::UntilLoss,
+                    win_effect: Some(body),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
                 12 => Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![*body],
@@ -2821,14 +2829,14 @@ mod departure_result_tests {
                 ) => body,
                 (Effect::RollDie { results, .. }, 6) => &results[0].effect,
                 (
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
                         win_effect: Some(body),
                         ..
                     },
                     7,
                 ) => body,
                 (
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
                         lose_effect: Some(body),
                         ..
                     },
@@ -2848,7 +2856,14 @@ mod departure_result_tests {
                     },
                     10,
                 ) => body,
-                (Effect::FlipCoinUntilLose { win_effect }, 11) => win_effect,
+                (
+                    Effect::FlipCoins {
+                        flips: crate::types::ability::CoinFlipRun::UntilLoss,
+                        win_effect: Some(win_effect),
+                        ..
+                    },
+                    11,
+                ) => win_effect,
                 (Effect::ChooseOneOf { branches, .. }, 12) => &branches[0],
                 _ => unreachable!(),
             }

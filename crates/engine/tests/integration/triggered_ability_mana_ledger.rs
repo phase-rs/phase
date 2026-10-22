@@ -27,6 +27,7 @@
 //! - `ENTERS_ADD_RED` (synthetic): an ETB trigger whose object can be blinked
 //!   to mint a fresh incarnation.
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::HashSet;
 
 use engine::analysis::resource::loop_states_equal_modulo_resources;
@@ -768,6 +769,7 @@ fn targeted_activated_mana_effect_records_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: prism,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the Prism's ability is activatable");
 

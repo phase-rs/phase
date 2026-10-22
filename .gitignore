@@ -28,6 +28,9 @@ client/src/wasm/*.wasm.d.ts
 .claude/projects/
 .pr-review/
 
+# Generated protocol constants
+/client/src/generated/protocol-versions.ts
+
 # Build output
 client/dist/
 client/bootstrap/dist/

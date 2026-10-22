@@ -560,6 +560,7 @@ fn sacrifice_to_bombardment(runner: &mut GameRunner, bombardment: ObjectId, vict
         .act(GameAction::ActivateAbility {
             source_id: bombardment,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Goblin Bombardment must succeed");
     let mut sacrificed = false;
@@ -2812,6 +2813,7 @@ fn frost_titan_pili_pala_window_after_island_bounced() -> Option<(TitanTaxBoard,
         .act(GameAction::ActivateAbility {
             source_id: pili,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("P1 activates Pili-Pala at the unless-payment prompt");
     let state = board.runner.state();

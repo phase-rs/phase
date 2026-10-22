@@ -684,6 +684,7 @@ fn cda_greater_good_uses_exact_sacrificed_incarnation() {
     cda_full_source(runner.state(), good);
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: good,
             ability_index: 0,
         })
@@ -895,6 +896,7 @@ fn cda_scavenge_uses_last_graveyard_source_incarnation() {
     );
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: lord,
             ability_index: index,
         })
@@ -964,6 +966,7 @@ fn cda_scavenge_uses_last_graveyard_source_incarnation() {
     let after = runner.state().objects[&lord].incarnation;
     assert!(runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: lord,
             ability_index: index
         })
@@ -1550,6 +1553,7 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
             }
             assert!(committed
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: lord,
                     ability_index: index
                 })
@@ -1601,6 +1605,7 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
             assert!(
                 runner
                     .act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: lord,
                         ability_index: index
                     })
@@ -1691,6 +1696,7 @@ fn cda_scavenge_cost_replacement_reload_and_same_id_reentry_preserve_the_old_sou
         );
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: lord,
                 ability_index: index,
             })
@@ -2084,6 +2090,7 @@ fn cda_greater_good_discards_the_whole_smaller_hand_after_a_real_draw() {
     let mut runner = scenario.build();
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: good,
             ability_index: 0,
         })
@@ -2363,6 +2370,7 @@ fn cost_successor_can_start_only_its_own_resolution_relatch() {
     cda_fund(&mut runner, P0, &[ManaType::Green]);
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: lord,
             ability_index: index,
         })
@@ -2474,6 +2482,7 @@ fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
         let g = runner.state().objects[&search].incarnation;
         assert!(runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: search,
                 ability_index: index
             })
@@ -2543,6 +2552,7 @@ fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
             let before = twin.state().objects[&search].incarnation;
             assert!(
                 twin.act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: search,
                     ability_index: index
                 })
@@ -2556,6 +2566,7 @@ fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
         cda_fund(&mut runner, P0, &[ManaType::Green]);
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: search,
                 ability_index: index,
             })
@@ -2772,6 +2783,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
             let original = runner.state().objects[&card].incarnation;
             assert!(runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: card,
                     ability_index: index
                 })
@@ -2798,6 +2810,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 assert!(
                     authorities
                         .act(GameAction::ActivateAbility {
+                            payment_mode: engine::types::actions::CastPaymentMode::Auto,
                             source_id: foreign_card,
                             ability_index: 0
                         })
@@ -2844,6 +2857,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 );
                 own_hand
                     .act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: printed,
                         ability_index: own_index,
                     })
@@ -2879,6 +2893,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 assert!(
                     unequal
                         .act(GameAction::ActivateAbility {
+                            payment_mode: engine::types::actions::CastPaymentMode::Auto,
                             source_id: printed,
                             ability_index: granted_index
                         })
@@ -2910,6 +2925,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 );
                 unequal
                     .act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: printed,
                         ability_index: granted_index,
                     })
@@ -3050,6 +3066,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                 let before = twin.state().objects[&card].incarnation;
                 assert!(
                     twin.act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: card,
                         ability_index: index
                     })
@@ -3063,6 +3080,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
             let turn = runner.state().turn_number;
             let first = runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: card,
                     ability_index: index,
                 })
@@ -3394,6 +3412,7 @@ fn cda_selected_cost_and_automatic_self_cost_preserve_both_slots_across_reload()
         cda_fund(&mut runner, P0, &[ManaType::Green]);
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: source,
                 ability_index: index,
             })
@@ -3529,6 +3548,7 @@ fn cda_carrion_feeder_self_sacrifice_does_not_counter_its_graveyard_successor() 
             .0;
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: feeder,
                 ability_index: index,
             })
@@ -3651,6 +3671,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         // Same route's funded positive below guards unfunded refusal.
         assert!(runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: donor,
                 ability_index: index
             })
@@ -3727,6 +3748,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
             let before = twin.state().objects[&donor].incarnation;
             assert!(
                 twin.act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: donor,
                     ability_index: index
                 })
@@ -3751,6 +3773,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         evaluate_layers(no_targets.state_mut());
         assert!(no_targets
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: donor,
                 ability_index: index
             })
@@ -3759,6 +3782,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         cda_complete(no_targets.state());
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: donor,
                 ability_index: index,
             })
@@ -4050,6 +4074,7 @@ fn cda_all_automatic_source_cost_arms_thread_actual_payment_and_replacement_resu
             }
             runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: id,
                     ability_index: 0,
                 })
@@ -4249,6 +4274,7 @@ fn cda_later_same_id_selected_component_never_resettles_prior_source_origin_acro
     let g = runner.state().objects[&source].incarnation;
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: source,
             ability_index: 0,
         })
@@ -4448,6 +4474,7 @@ fn cda_cost_source_finite_consumers_follow_only_their_own_returned_object() {
             let mut runner = scenario.build();
             runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: source,
                     ability_index: 0,
                 })

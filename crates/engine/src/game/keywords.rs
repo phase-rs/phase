@@ -13,9 +13,9 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, ProtectionTarget,
+    GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
 };
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
@@ -77,19 +77,50 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
+/// about an object's keywords. The door declares it; the authority never
+/// infers liveness from an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldObject {
+    /// The live object of its id, or a view of it that the door rescoped only
+    /// in who controls it (`matches_target_filter_in_owner_zone`'s CR 109.5
+    /// owner substitution). Off the battlefield it answers through the live
+    /// object's off-zone effective keywords, which include off-zone grants.
+    Live,
+    /// A snapshot of an earlier moment (attack, counter, damage and event
+    /// records; entry observations) or a projection of a hypothetical one
+    /// (CR 614.12 entry projections, face-down and token entry objects). It
+    /// answers from its own keywords: the object `FilterProp::WithKeyword` reads.
+    Detached,
+}
+
+/// CR 603.10 + CR 608.2i + CR 400.7: whether the object a caller holds has a
+/// keyword of `kind`. A caller holding a rescoped view of the live object
+/// (same object, one attribute substituted) passes `HeldObject::Live`.
+pub(crate) fn effective_keyword_kind_of(
+    state: &GameState,
+    obj: &GameObject,
+    held: HeldObject,
+    kind: KeywordKind,
+) -> bool {
+    match held {
+        HeldObject::Detached => has_keyword_kind(obj, kind),
+        HeldObject::Live if obj.zone == Zone::Battlefield => has_keyword_kind(obj, kind),
+        HeldObject::Live => {
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, obj.id, kind)
+        }
+    }
+}
+
 pub fn object_has_effective_keyword_kind(
     state: &GameState,
     object_id: ObjectId,
     kind: KeywordKind,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if obj.zone == Zone::Battlefield {
-        return obj.keywords.iter().any(|keyword| keyword.kind() == kind);
-    }
-
-    crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| effective_keyword_kind_of(state, obj, HeldObject::Live, kind))
 }
 
 /// CR 702.61a: True when any spell on the stack has split second. While true,
@@ -655,6 +686,86 @@ pub fn source_matches_protection_target(
             crate::types::ability::ControllerRef::You => source.controller == protected.controller,
             _ => false,
         },
+        // CR 702.16i: a set quality is expanded into concrete Color qualities by
+        // resolve_granted_protection before any match; an unexpanded set (a printed
+        // keyword, never produced by a card today) matches nothing.
+        ProtectionTarget::EachColor(_) => false,
+    }
+}
+
+/// CR 702.16i + CR 903.4 + CR 702.124c: The colors a `ProtectionColorSet` stands
+/// for, relative to `you` (the controller of the granting effect), in WUBRG order.
+pub fn protection_color_set_members(
+    state: &GameState,
+    set: &ProtectionColorSet,
+    you: PlayerId,
+) -> Vec<ManaColor> {
+    match set {
+        // CR 903.4f: with no commander the identity is undefined and the grant
+        // does nothing (no colors).
+        ProtectionColorSet::OutsideCommanderColorIdentity => {
+            crate::game::commander::defined_commander_color_identity(state, you)
+                .map(|identity| {
+                    ManaColor::ALL
+                        .iter()
+                        .copied()
+                        .filter(|color| !identity.contains(color))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
+/// continuous effect from `source_id` whose "you" is `you` into the concrete
+/// qualities it grants. This is the single authority shared by the layer applier
+/// (which bakes the result into `obj.keywords`) and attachment legality (which
+/// reads grant definitions directly), so the two cannot drift.
+///
+/// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
+/// several separate protection abilities, so the result may hold 0..n entries.
+/// Chosen qualities yield 0 (no choice recorded, or a chosen card type with no
+/// protection noun) or 1 entries; every concrete
+/// quality yields exactly itself.
+pub fn resolve_granted_protection(
+    state: &GameState,
+    quality: &ProtectionTarget,
+    source_id: ObjectId,
+    you: PlayerId,
+) -> Vec<ProtectionTarget> {
+    match quality {
+        // CR 702.16 + CR 105.4: the color chosen on the granting source.
+        ProtectionTarget::ChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_color())
+            .map(ProtectionTarget::Color)
+            .into_iter()
+            .collect(),
+        // CR 702.16 + CR 205.2: the card type chosen on the granting source.
+        ProtectionTarget::ChosenCardType => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_card_type())
+            .and_then(|card_type| card_type.protection_quality_str())
+            .map(|quality| ProtectionTarget::CardType(quality.to_string()))
+            .into_iter()
+            .collect(),
+        ProtectionTarget::EachColor(set) => protection_color_set_members(state, set, you)
+            .into_iter()
+            .map(ProtectionTarget::Color)
+            .collect(),
+        // "The chosen player" stays unresolved: it is read off the protected
+        // permanent's own persisted choice, not the granting source.
+        ProtectionTarget::Color(_)
+        | ProtectionTarget::CardType(_)
+        | ProtectionTarget::Quality(_)
+        | ProtectionTarget::Multicolored
+        | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::Everything
+        | ProtectionTarget::Filter(_)
+        | ProtectionTarget::FromPlayer(_) => vec![quality.clone()],
     }
 }
 
@@ -906,6 +1017,8 @@ pub fn activate_ninjutsu(
             cost: effective_cost,
         },
         None,
+        // CR 702.49a: this seam pays only the ninjutsu mana cost; no counter leg can join it.
+        &mut None,
         events,
     )
     .map_err(|e| e.to_string())?
@@ -1279,6 +1392,92 @@ mod tests {
         obj.keywords.push(Keyword::Flying);
         assert!(has_keyword(&obj, &Keyword::Flying));
         assert!(!has_keyword(&obj, &Keyword::Haste));
+    }
+
+    /// CR 603.10 + CR 608.2i + CR 400.7: the declared `HeldObject` decides the
+    /// kind answer. A graveyard card granted flashback by an identity-targeted
+    /// command-zone grant (not materialized into its `keywords`) answers true
+    /// as the live object, and as a rescoped clone of it declared `Live`; the
+    /// same clone declared `Detached` answers from its own keywords. A
+    /// battlefield object answers from its own keywords either way.
+    #[test]
+    fn effective_keyword_kind_of_live_and_detached() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let emblem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: card })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+                    }]),
+            );
+        }
+        let live = &state.objects[&card];
+        assert!(
+            !has_keyword_kind(live, KeywordKind::Flashback),
+            "guard: the grant is not materialized into the card's keywords"
+        );
+        assert!(object_has_effective_keyword_kind(
+            &state,
+            card,
+            KeywordKind::Flashback
+        ));
+        assert!(effective_keyword_kind_of(
+            &state,
+            live,
+            HeldObject::Live,
+            KeywordKind::Flashback
+        ));
+        let mut rescoped = live.clone();
+        rescoped.controller = PlayerId(1);
+        assert!(
+            effective_keyword_kind_of(&state, &rescoped, HeldObject::Live, KeywordKind::Flashback),
+            "a rescoped view of the live object keeps its off-zone grant"
+        );
+        assert!(
+            !effective_keyword_kind_of(
+                &state,
+                &rescoped,
+                HeldObject::Detached,
+                KeywordKind::Flashback
+            ),
+            "a detached object answers from its own keywords"
+        );
+
+        let mut flier = make_obj();
+        flier.keywords.push(Keyword::Flying);
+        for held in [HeldObject::Live, HeldObject::Detached] {
+            assert!(effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Flying
+            ));
+            assert!(!effective_keyword_kind_of(
+                &state,
+                &flier,
+                held,
+                KeywordKind::Haste
+            ));
+        }
     }
 
     #[test]
@@ -1689,6 +1888,115 @@ mod tests {
             &no_choice,
             &creature_source,
         ));
+    }
+
+    /// CR 702.16i: an unexpanded color-set quality matches nothing through
+    /// `source_matches_protection_target`; only `resolve_granted_protection`
+    /// turns it into concrete `Color` qualities.
+    #[test]
+    fn unexpanded_each_color_quality_matches_nothing() {
+        let protected = make_obj();
+        let mut source = make_obj();
+        source.color = vec![ManaColor::Red];
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            &protected,
+            &source,
+        ));
+    }
+
+    /// CR 702.16i + CR 903.4 + CR 903.4f: the color-set members are the colors
+    /// outside the controller's commander identity (WUBRG order), empty when the
+    /// player has no commander, and every color for a colorless commander.
+    #[test]
+    fn protection_color_set_members_outside_commander_identity() {
+        use crate::types::format::FormatConfig;
+
+        let set = ProtectionColorSet::OutsideCommanderColorIdentity;
+        let mut state = GameState::new(FormatConfig::commander(), 2, 7);
+        // CR 903.4f: no commander -> undefined -> no colors.
+        assert!(protection_color_set_members(&state, &set, PlayerId(0)).is_empty());
+
+        let cmd = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd).unwrap();
+            obj.is_commander = true;
+            obj.base_color = vec![ManaColor::Blue, ManaColor::Red];
+        }
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            vec![ManaColor::White, ManaColor::Black, ManaColor::Green]
+        );
+
+        // Colorless commander -> protection from each of the five colors.
+        state.objects.get_mut(&cmd).unwrap().base_color = vec![];
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            ManaColor::ALL.to_vec()
+        );
+        // The other player has no commander.
+        assert!(protection_color_set_members(&state, &set, PlayerId(1)).is_empty());
+    }
+
+    /// CR 702.16 + CR 702.16i: `resolve_granted_protection` expands set and chosen
+    /// qualities and passes concrete qualities through unchanged.
+    #[test]
+    fn resolve_granted_protection_expands_and_passes_through() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(3);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        let you = PlayerId(0);
+
+        // Concrete qualities resolve to exactly themselves.
+        for quality in [
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::CardType("artifacts".to_string()),
+            ProtectionTarget::Multicolored,
+            ProtectionTarget::Everything,
+        ] {
+            assert_eq!(
+                resolve_granted_protection(&state, &quality, source, you),
+                vec![quality.clone()]
+            );
+        }
+
+        // Chosen color with no recorded choice resolves to nothing, then to the choice.
+        assert!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you)
+                .is_empty()
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::White));
+        assert_eq!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you),
+            vec![ProtectionTarget::Color(ManaColor::White)]
+        );
+
+        // A color set with no commander resolves to nothing (CR 903.4f).
+        assert!(resolve_granted_protection(
+            &state,
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            source,
+            you,
+        )
+        .is_empty());
     }
 
     /// CR 702.16a + CR 205.3m + #881: "protection from [creature subtype]" — the

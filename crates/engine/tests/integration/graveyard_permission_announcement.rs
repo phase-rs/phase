@@ -359,6 +359,7 @@ fn leonardos_counter_applies_after_it_is_sacrificed_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: altar,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ashnod's Altar is activatable during payment");
     runner
@@ -520,6 +521,7 @@ fn announced_broodship_is_kept_when_it_leaves_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: ironworks,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ironworks is activatable during payment");
     runner
@@ -1351,6 +1353,7 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
         .act(GameAction::ActivateAbility {
             source_id: ironworks,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ironworks is activatable during payment");
     runner

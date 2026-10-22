@@ -1412,12 +1412,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
                 stamp_retained_printed_slot(&mut branch.effect, slot, kind);
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -1428,9 +1423,6 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
             if let Some(d) = lose_effect {
                 stamp_retained_printed_slot(d, slot, kind);
             }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            stamp_retained_printed_slot(win_effect, slot, kind)
         }
         Effect::ChooseOneOf { branches, .. } => {
             for d in branches {

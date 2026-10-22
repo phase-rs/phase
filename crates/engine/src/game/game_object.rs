@@ -58,6 +58,83 @@ pub enum DisplaySource {
     Token,
 }
 
+/// Image-routing identity of a copy source, bundled so every carrier of it
+/// (`ContinuousModification::CopyValues`, `LatchedCopiableSnapshot`,
+/// `PrecomputedCopyValues`, `CopyTokenSpec`, the merge layer effect) moves the
+/// same four fields together and cannot drop one.
+///
+/// NONE of these fields are CR 707.2 copiable values (status/art are not copied
+/// per CR 707.2) — they are display routing only, deliberately kept off
+/// `CopiableValues`, and mirror the flat `GameObject` storage (`display_source`
+/// discriminates: `Card` => read `printed_ref`; `Token` => read
+/// `token_image_ref`).
+///
+/// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token* stays a
+/// nontoken (token-ness is created by a token-making effect per CR 111.1, and
+/// is not among the CR 707.2 copiable values), but its name is the token's,
+/// which only resolves in the token art database — so the source's
+/// `display_source = Token` and `token_image_ref` must ride along, not just
+/// `printed_ref`.
+///
+/// Serialized with `#[serde(flatten)]` by every carrier; every field defaults,
+/// so payloads that predate any of the keys still deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DisplayIdentity {
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    /// Scryfall oracle-id pointer of the source when it is a printed card.
+    /// `None` when the source is a true token (then `token_image_ref` carries
+    /// the routing).
+    #[serde(default)]
+    pub printed_ref: Option<PrintedCardRef>,
+    /// Exact token-art pointer of the source when it is a true token.
+    /// `None` for printed-card sources.
+    #[serde(default)]
+    pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token-art body of the source, carried so a copy of a token
+    /// without an exact ref still renders from the source's shape rather than
+    /// the recipient's stale descriptor. `None` for printed-card sources and
+    /// pre-descriptor snapshots.
+    #[serde(default)]
+    pub token_art: Option<TokenArtDescriptor>,
+}
+
+impl GameObject {
+    /// Capture this object's live display routing as a [`DisplayIdentity`].
+    pub fn display_identity(&self) -> DisplayIdentity {
+        DisplayIdentity {
+            display_source: self.display_source,
+            printed_ref: self.printed_ref.clone(),
+            token_image_ref: self.token_image_ref.clone(),
+            token_art: self.token_art.clone(),
+        }
+    }
+
+    /// Install a copy source's display routing on the LIVE fields only. Used by
+    /// the Layer-1 `CopyValues` arm (CR 613.1a), where the layer pass resets the
+    /// live fields from their baselines on every recomputation, so the baseline
+    /// (`base_printed_ref`) must stay untouched.
+    pub fn install_display_identity(&mut self, display: &DisplayIdentity) {
+        self.display_source = display.display_source;
+        self.printed_ref = display.printed_ref.clone();
+        self.token_image_ref = display.token_image_ref.clone();
+        self.token_art = display.token_art.clone();
+    }
+
+    /// Install a copy source's display routing as the object's BASE identity
+    /// (the liminal copy-token path, CR 707.2: the token's own base is the
+    /// copied values). Sets `display_source`, `printed_ref`/`base_printed_ref`
+    /// and `token_image_ref`; deliberately leaves `token_art` alone, because a
+    /// created copy-token derives its descriptor from its own base at
+    /// injection (which reflects copy exceptions the source never had).
+    pub fn install_display_identity_as_base(&mut self, display: &DisplayIdentity) {
+        self.display_source = display.display_source;
+        self.printed_ref = display.printed_ref.clone();
+        self.base_printed_ref = display.printed_ref.clone();
+        self.token_image_ref = display.token_image_ref.clone();
+    }
+}
+
 /// CR 702.xxx: Prepared-permanent marker payload (Strixhaven).
 ///
 /// Carried as `GameObject::prepared: Option<PreparedState>`. `Some(_)` means
@@ -1652,6 +1729,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cast_spell_keywords: Vec<Keyword>,
 
+    /// CR 611.3b + CR 702.153b: the permanents whose casualty grant still
+    /// applied to this spell at the `cast_spell_keywords` snapshot. A granted
+    /// casualty payment triggers only while its `grant_source` is listed here.
+    /// Transient like `cast_spell_keywords`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_casualty_grant_sources: Vec<ObjectId>,
+
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
     /// and the resulting exile is recorded as "exiled with" the stored source
@@ -1952,6 +2036,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         spell_announcement: _,
         cast_controller: _,
         cast_spell_keywords: _,
+        cast_casualty_grant_sources: _,
         exile_from_stack_linked_source: _,
         exile_from_stack_rider: _,
         played_from_zone: _,
@@ -1968,6 +2053,35 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
         mana_spent_to_activate: _,
     } = o;
+}
+
+/// CR 606.3: per-object rule state the ordinary object decoder never reads back
+/// (`skip_deserializing` / `serde(skip)`). Unlike the derived read-outs it is
+/// authoritative, so a serde reconstruction of game state carries it as this
+/// one unit. A skipped `GameObject` field that is not derived again belongs here;
+/// `decoder_skipped_object_fields_are_carried_or_derived` fails closed otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UndecodedObjectRules {
+    loyalty_activations_this_turn: u32,
+    extra_loyalty_activations_this_turn: u32,
+}
+
+impl GameObject {
+    pub(crate) fn undecoded_rules(&self) -> UndecodedObjectRules {
+        UndecodedObjectRules {
+            loyalty_activations_this_turn: self.loyalty_activations_this_turn,
+            extra_loyalty_activations_this_turn: self.extra_loyalty_activations_this_turn,
+        }
+    }
+
+    pub(crate) fn restore_undecoded_rules(&mut self, rules: UndecodedObjectRules) {
+        let UndecodedObjectRules {
+            loyalty_activations_this_turn,
+            extra_loyalty_activations_this_turn,
+        } = rules;
+        self.loyalty_activations_this_turn = loyalty_activations_this_turn;
+        self.extra_loyalty_activations_this_turn = extra_loyalty_activations_this_turn;
+    }
 }
 
 /// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
@@ -2897,6 +3011,8 @@ impl GameObject {
                 cast_timing_permission: self.cast_timing_permission,
                 cost_x_paid: self.cost_x_paid,
                 cast_spell_keywords: self.cast_spell_keywords.clone(),
+                // `cast_casualty_grant_sources` is not carried: the casualty
+                // copy trigger reads the live spell on the stack.
                 mana_spent_to_cast: self.mana_spent_to_cast,
                 colors_spent_to_cast: self.colors_spent_to_cast.clone(),
                 mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
@@ -2956,6 +3072,11 @@ impl GameObject {
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
             is_suspected: self.is_suspected,
+            // CR 722.3a + CR 603.4: Snapshot the prepared designation at the
+            // moment of the move, before `move_to_zone` clears it — so a
+            // departed source's intervening-if recheck ("isn't prepared")
+            // reads the exit-time value through the LKI record.
+            was_prepared: self.prepared.is_some(),
         }
     }
 
@@ -3220,6 +3341,7 @@ impl GameObject {
             spell_announcement: None,
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
+            cast_casualty_grant_sources: Vec::new(),
             exile_from_stack_linked_source: None,
             exile_from_stack_rider: None,
             played_from_zone: None,
@@ -3266,6 +3388,10 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
+            // CR 722.3a: Capture the live prepared designation. Taken while the
+            // object is still in its public zone, so `self.prepared` is
+            // authoritative.
+            was_prepared: self.prepared.is_some(),
             // Empty by construction, NOT by choice: classifying an attachment as
             // Aura/Equipment requires looking each attached object up in `GameState`
             // (see `zones::capture_attachment_snapshot`), and this method has only
@@ -3276,6 +3402,84 @@ impl GameObject {
             // empty set here is the same fail-closed answer they got before.
             attachments: Vec::new(),
         }
+    }
+
+    /// CR 603.10 + CR 400.7: write an observed projection's characteristics and battlefield
+    /// status onto this object — the field-for-field inverse of the `TriggerSourceContext`
+    /// `snapshot_for_zone_change` builds. Builds a read-only view for filter evaluation; never
+    /// applied to an object in `GameState`.
+    ///
+    /// Abilities (`trigger_entries`) are not projected; the base object supplies them. The
+    /// projection's state-level relationships with no `GameObject` counterpart
+    /// (`linked_exile_snapshot`, `cards_exiled_this_turn`, `combat_status`, `granting_object`)
+    /// are left to their state-level authorities.
+    pub(crate) fn overlay_source_projection(&mut self, context: &TriggerSourceContext) {
+        let lki = &context.lki;
+        // Identity.
+        self.incarnation = context.identity.reference.incarnation;
+        // allow-raw-zone: writes a detached read-only view for filter evaluation, never an object in `GameState`; no zone change occurs (CR 603.10).
+        self.zone = context.identity.expected_zone;
+        self.card_id = context.card_id;
+        self.printed_ref = context.printed_ref.clone();
+        self.token_image_ref = lki.token_image_ref.clone();
+        // Public characteristics (layer-applied at observation time).
+        self.name = lki.name.clone();
+        self.power = lki.power;
+        self.toughness = lki.toughness;
+        self.layer_base_power = lki.base_power;
+        self.layer_base_toughness = lki.base_toughness;
+        self.controller = lki.controller;
+        self.owner = lki.owner;
+        self.card_types.core_types = lki.card_types.clone();
+        self.card_types.subtypes = lki.subtypes.clone();
+        self.card_types.supertypes = lki.supertypes.clone();
+        self.keywords = lki.keywords.clone();
+        self.color = lki.colors.clone();
+        self.chosen_attributes = lki.chosen_attributes.clone();
+        self.counters = lki.counters.clone();
+        self.tapped = lki.tapped;
+        self.is_suspected = lki.is_suspected;
+        // Relationships.
+        self.attachments = context
+            .attachments
+            .iter()
+            .map(|attachment| attachment.object_id)
+            .collect();
+        self.attached_to = context.attached_to;
+        self.paired_with = context.paired_with;
+        self.pair_controller = context.pair_controller;
+        // Object status and as-cast / as-entered facts.
+        self.is_token = context.is_token;
+        self.face_down = context.face_down;
+        self.mana_cost = context.mana_cost.clone();
+        self.transformed = context.transformed;
+        self.is_renowned = context.is_renowned;
+        self.is_saddled = context.is_saddled;
+        self.echo_due = context.echo_due;
+        self.harnessed = context.harnessed;
+        self.saddled_by = context.saddled_by.clone();
+        self.convoked_creatures = context.convoked_creatures.clone();
+        self.case_state = context.case_state.clone();
+        self.class_level = context.class_level;
+        self.timestamp = context.timestamp;
+        self.entered_battlefield_turn = context.entered_battlefield_turn;
+        self.cast_from_zone = context.cast_from_zone;
+        self.played_from_zone = context.played_from_zone;
+        self.entered_via_ability_source = context.entered_via_ability_source;
+        self.cast_controller = context.cast_controller;
+        self.phase_status = context.phase_status;
+        self.cast_variant_paid = context.cast_variant_paid;
+        self.cast_timing_permission = context.cast_timing_permission;
+        self.cost_x_paid = context.cost_x_paid;
+        self.cast_spell_keywords = context.cast_spell_keywords.clone();
+        self.mana_spent_to_cast = context.mana_spent_to_cast;
+        self.colors_spent_to_cast = context.colors_spent_to_cast.clone();
+        self.mana_spent_to_cast_amount = context.mana_spent_to_cast_amount;
+        self.mana_spent_source_snapshots = context.mana_spent_source_snapshots.clone();
+        self.kickers_paid = context.kickers_paid.clone();
+        self.additional_cost_payment_count = context.additional_cost_payment_count;
+        self.additional_cost_payments = context.additional_cost_payments.clone();
+        self.cast_cost_paid_object = context.cast_cost_paid_object.clone();
     }
 
     /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
@@ -3380,6 +3584,7 @@ impl GameObject {
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on zone change for the same reason.
         self.cast_spell_keywords.clear();
+        self.cast_casualty_grant_sources.clear();
         self.kickers_paid.clear();
         // CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance (who was
         // promised the gift when this permanent was cast). A re-entering object
@@ -3678,6 +3883,7 @@ impl GameObject {
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
+        self.cast_casualty_grant_sources.clear();
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
@@ -5806,6 +6012,132 @@ mod tests {
         entering.prepared_copy_source = Some(ObjectId(77));
         entering.reset_for_battlefield_exit();
         assert_eq!(entering.prepared_copy_source, None);
+    }
+
+    /// U1 — CR 603.10 + CR 400.7: `overlay_source_projection` is the inverse of the
+    /// latch projection for every field an enter observer's filter can read, on both a
+    /// live-entrant base and a `GameObject::new` skeleton.
+    #[test]
+    fn overlay_source_projection_inverts_snapshot() {
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::GameState;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(7);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Observed Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).expect("created");
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Bear".to_string()];
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.layer_base_power = Some(2);
+            obj.layer_base_toughness = Some(2);
+            obj.keywords = vec![Keyword::Flying];
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+            obj.tapped = true;
+            obj.controller = PlayerId(0);
+            obj.incarnation = 3;
+        }
+        let original = state.objects[&id].clone();
+        let ctx = crate::game::triggers::trigger_source_context_for_latch(&state, &original);
+
+        let assert_inverse = |view: &GameObject| {
+            assert_eq!(view.incarnation, original.incarnation);
+            assert_eq!(view.zone, original.zone);
+            assert_eq!(view.card_id, original.card_id);
+            assert_eq!(view.name, original.name);
+            assert_eq!(view.power, original.power);
+            assert_eq!(view.toughness, original.toughness);
+            assert_eq!(view.layer_base_power, original.layer_base_power);
+            assert_eq!(view.layer_base_toughness, original.layer_base_toughness);
+            assert_eq!(view.controller, original.controller);
+            assert_eq!(view.owner, original.owner);
+            assert_eq!(view.card_types.core_types, original.card_types.core_types);
+            assert_eq!(view.card_types.subtypes, original.card_types.subtypes);
+            assert_eq!(view.card_types.supertypes, original.card_types.supertypes);
+            assert_eq!(view.keywords, original.keywords);
+            assert_eq!(view.color, original.effective_colors());
+            assert_eq!(view.counters, original.counters);
+            assert_eq!(view.tapped, original.tapped);
+            assert_eq!(view.is_token, original.is_token);
+            assert_eq!(view.attachments, original.attachments);
+            assert_eq!(view.phase_status, original.phase_status);
+            assert_eq!(view.timestamp, original.timestamp);
+        };
+
+        // Live base: later changes on the object are overwritten by the projection.
+        let mut live = original.clone();
+        live.counters.insert(CounterType::Plus1Plus1, 3);
+        live.power = Some(4);
+        live.keywords.push(Keyword::Haste);
+        live.controller = PlayerId(1);
+        live.tapped = false;
+        live.incarnation = 4;
+        assert_ne!(
+            live.counters, original.counters,
+            "precondition: the live base differs"
+        );
+        live.overlay_source_projection(&ctx);
+        assert_inverse(&live);
+
+        // Skeleton base.
+        let mut skeleton =
+            GameObject::new(id, CardId(0), PlayerId(1), String::new(), Zone::Graveyard);
+        skeleton.overlay_source_projection(&ctx);
+        assert_inverse(&skeleton);
+    }
+
+    /// CR 606.3: every `GameObject` field the object decoder skips is either a
+    /// derived read-out computed again after a reconstruction, or rule state
+    /// carried by `UndecodedObjectRules`. A new skipped field fails here until it
+    /// is classified, so a serde reconstruction cannot drop it silently.
+    #[test]
+    fn decoder_skipped_object_fields_are_carried_or_derived() {
+        const DERIVED: [&str; 8] = [
+            "unimplemented_mechanics",
+            "has_summoning_sickness",
+            "devotion",
+            "has_mana_ability",
+            "mana_ability_index",
+            "available_mana_pips",
+            "blocked_abilities",
+            "commander_tax",
+        ];
+        let source = crate::source_census::code_lines(include_str!("game_object.rs"));
+        let body = source
+            .split_once("pub struct GameObject {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("GameObject definition");
+        let mut skipped = std::collections::BTreeSet::new();
+        let mut attributes = String::new();
+        for line in body.lines().map(str::trim) {
+            let Some((field, _)) = line.strip_prefix("pub ").and_then(|f| f.split_once(':')) else {
+                attributes.push_str(line);
+                continue;
+            };
+            if attributes
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|token| token == "skip" || token == "skip_deserializing")
+            {
+                skipped.insert(field.to_string());
+            }
+            attributes.clear();
+        }
+        let carried = serde_json::to_value(UndecodedObjectRules::default()).unwrap();
+        let expected: std::collections::BTreeSet<String> = DERIVED
+            .iter()
+            .map(|field| field.to_string())
+            .chain(carried.as_object().unwrap().keys().cloned())
+            .collect();
+        assert_eq!(skipped, expected);
     }
 }
 

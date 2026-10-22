@@ -1,3 +1,4 @@
+import { WIRE_PROTOCOL_VERSION } from "../generated/protocol-versions";
 import type {
   AbilityBlockEntry,
   EndContinuousEffectOffer,
@@ -105,7 +106,34 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * first-contact gate rejects a missing or unequal value before it allocates a
  * seat or adopts reconnect state.
  *
- * Bumps to date:
+ * Record incompatible changes: `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * Historical introductions:
+ *  141 — game_setup and state_update carry GameState whose effects carry
+ *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
+ *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
+ *       as one flip, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
+ *  138 — game_setup and state_update carry GameState whose ability conditions
+ *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
+ *       full-game protocol 156, which also adds the optional per-seat
+ *       created_tokens channel (each seat's pinned creation result) on the
+ *       player-scope tail sidecar inside paused resolution frames.
+ *  137 — game_setup and state_update carry GameState whose parked ChangeZone
+ *       frame stores each remaining member with its pre-event entry
+ *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
+ *       from version 6 to 7; a v136 peer cannot parse it. Bumped in lockstep
+ *       with full-game protocol 155.
+ *  136 — game_setup and state_update carry GameState whose
+ *       pending_cost_move_resume may hold PendingCostMoveResume
+ *       CounterCostRemovalPayment (a counter-removal cost paused on a CR 616.1
+ *       replacement choice) and whose mana cost cursor may hold
+ *       counter_removal. A v135 peer cannot parse the new tag, so first
+ *       contact rejects the skew. Bumped in lockstep with full-game protocol
+ *       154; PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
  *  135 — game_setup and state_update carry GameState, whose activated grants
  *       carry an optional kind selector (Nicol Bolas, Dragon-God's loyalty
  *       subset). A v134 peer drops the defaulted field silently and
@@ -719,15 +747,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-// 136: full-game 154 adds the exact cast-time TargetFilter.CastingSpell reference.
-// 137: full-game 155 carries exact creation frames and resolution wire 7.
-// 138: full-game 156 carries revealed membership and exact queued origins (resolution wire 8).
-// 139: full-game 157 requires specified-kind/exact-recipient counter adjustment.
-// 140: full-game 158 carries exact removal/source authority (resolution wire 9).
-// 141: full-game 159 carries source-bound chosen parity.
-// 142: full-game 160 carries addressed departure aggregates and retained owners.
-// 143: full-game 161 carries explicit cost-source selectors and settled origins.
-export const WIRE_PROTOCOL_VERSION = 143 as const;
+export { WIRE_PROTOCOL_VERSION };
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

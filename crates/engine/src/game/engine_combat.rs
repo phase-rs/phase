@@ -1,12 +1,11 @@
 use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
-use crate::types::ability::{CostPaidObjectSnapshot, TargetRef};
+use crate::types::ability::{CostPaidObjectSnapshot, TargetRef, TriggerDefinitionRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatDamageAssignmentMode, CombatTaxContext, CombatTaxPending, DamageSlot, GameState,
-    WaitingFor,
+    PendingAttackExert, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -78,7 +77,8 @@ fn continue_declare_attackers_after_commit(
         state.pending_attack_trigger_events = events[declaration_start..].to_vec();
         return Ok(WaitingFor::ExertChoice {
             player,
-            attacker: *first,
+            attacker: first.attacker,
+            permission: first.permission.clone(),
             remaining: rest.to_vec(),
         });
     }
@@ -92,25 +92,75 @@ fn continue_declare_attackers_after_commit(
     finish_declare_attackers(state, events, attacks.is_empty())
 }
 
-/// CR 701.43d: Attackers carrying an "exert as it attacks" ability (a
-/// `TriggerMode::Exerted` triggered ability) that have not yet been exerted this
-/// turn, in declaration order. These attackers are offered the optional exert
-/// cost per CR 508.1g.
-fn exert_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> Vec<ObjectId> {
+/// CR 508.1g–j + CR 701.43b: Snapshot each eligible ability occurrence before
+/// paying any optional cost. An earlier exert does not prohibit another exert;
+/// only the permission's own pre-payment condition can do that.
+fn exert_candidates(
+    state: &GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+) -> Vec<PendingAttackExert> {
     attacks
         .iter()
-        .map(|(attacker_id, _)| *attacker_id)
-        .filter(|attacker_id| {
-            !state.exerted_this_turn.contains(attacker_id)
-                && state.objects.get(attacker_id).is_some_and(|obj| {
-                    super::functioning_abilities::active_trigger_definitions(state, obj).any(
-                        |active| {
-                            active.definition.mode == crate::types::triggers::TriggerMode::Exerted
-                        },
-                    )
+        .flat_map(|(attacker, _)| {
+            state
+                .objects
+                .get(attacker)
+                .into_iter()
+                .flat_map(move |object| {
+                    super::functioning_abilities::active_trigger_definitions(state, object)
+                        .filter(move |active| {
+                            active.definition.is_attack_exert_permission()
+                                && active.definition.attack_cost_condition.as_ref().is_none_or(
+                                    |condition| {
+                                        super::layers::evaluate_condition(
+                                            state,
+                                            condition,
+                                            object.controller,
+                                            *attacker,
+                                        )
+                                    },
+                                )
+                        })
+                        .map(move |active| PendingAttackExert {
+                            attacker: *attacker,
+                            permission: active.definition_ref,
+                        })
                 })
         })
         .collect()
+}
+
+/// CR 400.7 + CR 508.1g: A queued cost cannot be rebound to a replacement source
+/// or a different functioning occurrence. Its pre-payment gate is already latched.
+pub(super) fn validate_attack_exert_permission(
+    state: &GameState,
+    player: PlayerId,
+    attacker: ObjectId,
+    permission: &TriggerDefinitionRef,
+) -> Result<(), EngineError> {
+    let valid = state.objects.get(&attacker).is_some_and(|object| {
+        object.zone == Zone::Battlefield
+            && object.controller == player
+            && state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .any(|entry| entry.object_id == attacker)
+            })
+            && super::functioning_abilities::active_trigger_definitions(state, object).any(
+                |active| {
+                    active.definition_ref == *permission
+                        && active.definition.is_attack_exert_permission()
+                },
+            )
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidAction(
+            "Attack exert permission is no longer current".into(),
+        ))
+    }
 }
 
 /// CR 702.154b + CR 702.154d: each Enlist instance represents an independent
@@ -198,15 +248,17 @@ fn enlist_eligible_targets(state: &GameState, attacker: ObjectId) -> Vec<ObjectI
     .collect()
 }
 
-/// CR 701.43a + CR 701.43c: Pay the optional exert cost for an attacking
-/// creature — record it as exerted this turn, add the "doesn't untap during your
-/// next untap step" effect (mirroring the `AbilityCost::Exert` cost path), and
-/// emit `CreatureExerted` so the linked "when you do" trigger (CR 701.43d)
-/// fires. No-op if the creature has left the battlefield since attackers were
-/// declared.
+/// CR 701.43a + CR 701.43d: Pay the optional exert cost for an attacking
+/// creature - exert it through the shared `exert::exert_permanent` authority
+/// (exerted status, the "doesn't untap during your next untap step" effect and
+/// the `CreatureExerted` event) on behalf of its controller, then buffer the
+/// event so the linked "when you do" trigger (CR 701.43d) fires with the rest
+/// of the attack triggers. No-op if the creature has left the battlefield
+/// since attackers were declared (CR 701.43c).
 pub(super) fn apply_attack_exert(
     state: &mut GameState,
     attacker: ObjectId,
+    permission: TriggerDefinitionRef,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(obj) = state.objects.get(&attacker) else {
@@ -216,38 +268,20 @@ pub(super) fn apply_attack_exert(
         return;
     }
     let controller = obj.controller;
-    let exerted = crate::game::object_state::resolve_and_apply_object_edit(
+    let exerted = super::exert::exert_permanent(
         state,
         attacker,
-        crate::types::resolved_commands::ResolvedObjectStatus::Exerted,
-        true,
+        controller,
+        crate::types::events::ExertOrigin::AttackCost,
+        Some(permission),
+        events,
     )
     .expect("declared attacker must remain a live exact object");
-    if !exerted {
-        return;
+    if let Some(event) = exerted {
+        // Buffer for deferred trigger matching (CR 508.2); the helper already
+        // surfaced the event to the per-action stream for the frontend.
+        state.pending_attack_trigger_events.push(event);
     }
-    state.add_transient_continuous_effect(
-        attacker,
-        controller,
-        crate::types::ability::Duration::UntilNextStepOf {
-            step: Phase::Untap,
-            player: crate::types::ability::PlayerScope::Controller,
-        },
-        crate::types::ability::TargetFilter::SpecificObject { id: attacker },
-        vec![
-            crate::types::ability::ContinuousModification::AddStaticMode {
-                mode: crate::types::statics::StaticMode::CantUntap,
-            },
-        ],
-        None,
-    );
-    let exerted = GameEvent::CreatureExerted {
-        object_id: attacker,
-    };
-    // Buffer for deferred trigger matching (CR 508.2) and surface to the
-    // per-action event stream for the frontend.
-    state.pending_attack_trigger_events.push(exerted.clone());
-    events.push(exerted);
 }
 
 /// CR 702.154a-c: Pay one Enlist optional attack cost by tapping an eligible

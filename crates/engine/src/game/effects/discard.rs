@@ -184,10 +184,11 @@ fn park_discard_batch(
     effect_kind: EffectKind,
     paused_card: ObjectIncarnationRef,
     discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
-    preceding_events: Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
+    events_before_self: usize,
     completion: crate::types::game_state::PendingDiscardBatchCompletion,
 ) {
-    let paused_events = preceding_events.clone();
+    let preceding_events = events[events_before_self..].to_vec();
     state.pending_discard_batch = Some(Box::new(crate::types::game_state::PendingDiscardBatch {
         player,
         cursor,
@@ -203,8 +204,8 @@ fn park_discard_batch(
     }));
     crate::game::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
         state,
-        &paused_events,
-        0,
+        events,
+        events_before_self,
     );
 }
 
@@ -471,7 +472,8 @@ pub fn resolve(
                                     EffectKind::from(&ability.effect),
                                     pin_paused_occurrence(state, obj_id),
                                     discard_frame,
-                                    events[events_before_self..].to_vec(),
+                                    events,
+                                    events_before_self,
                                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                                 );
                                 return Ok(());
@@ -530,7 +532,8 @@ pub fn resolve(
                         EffectKind::from(&ability.effect),
                         pin_paused_occurrence(state, obj_id),
                         discard_frame,
-                        events[events_before_self..].to_vec(),
+                        events,
+                        events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                     );
                     return Ok(());
@@ -641,7 +644,8 @@ pub fn resolve(
                     EffectKind::from(&ability.effect),
                     paused_card,
                     discard_frame,
-                    events[events_before_self..].to_vec(),
+                    events,
+                    events_before_self,
                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                 );
                 return Ok(());
@@ -681,7 +685,8 @@ pub fn resolve(
                         // CR 400.7: the pause parks the pre-move occurrence.
                         pin_paused_occurrence(state, *obj_id),
                         discard_frame,
-                        events[events_before_self..].to_vec(),
+                        events,
+                        events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                     );
                     return Ok(());

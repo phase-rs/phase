@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-18T00:00:00Z",
+  "updated": "2026-10-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -401,6 +401,238 @@
       ]
     },
     {
+      "name": "Jund Sacrifice",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "G",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Shambling Ghast"
+        },
+        {
+          "count": 4,
+          "name": "Greedy Freebooter"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
+        },
+        {
+          "count": 4,
+          "name": "The Sackville-Bagginses"
+        },
+        {
+          "count": 4,
+          "name": "Biotech Specialist"
+        },
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Witch's Oven"
+        },
+        {
+          "count": 4,
+          "name": "Cauldron Familiar"
+        },
+        {
+          "count": 4,
+          "name": "Mayhem Devil"
+        },
+        {
+          "count": 3,
+          "name": "Lively Dirge"
+        },
+        {
+          "count": 2,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 2,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 2,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 1,
+          "name": "Umbral Collar Zealot"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 2,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 3,
+          "name": "Witherbloom Charm"
+        },
+        {
+          "count": 2,
+          "name": "Ygra, Eater of All"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 3,
+          "name": "Tormod's Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Dark Betrayal"
+        }
+      ]
+    },
+    {
+      "name": "Jund Artifact Sacrifice",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "G",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Biotech Specialist"
+        },
+        {
+          "count": 4,
+          "name": "Springleaf Drum"
+        },
+        {
+          "count": 2,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
+        },
+        {
+          "count": 4,
+          "name": "Oni-Cult Anvil"
+        },
+        {
+          "count": 4,
+          "name": "Experimental Synthesizer"
+        },
+        {
+          "count": 4,
+          "name": "Greedy Freebooter"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 3,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 4,
+          "name": "Shrapnel Blast"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "The Sackville-Bagginses"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Voldaren Epicure"
+        },
+        {
+          "count": 3,
+          "name": "Copperline Gorge"
+        },
+        {
+          "count": 3,
+          "name": "Rottenmouth Viper"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Ob Nixilis, the Adversary"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        }
+      ]
+    },
+    {
       "name": "Dimir Aggro",
       "author": "MTGGoldfish",
       "colors": [
@@ -528,12 +760,10 @@
       ]
     },
     {
-      "name": "Jund Artifact Sacrifice",
+      "name": "Nykthos Ramp",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
-        "G",
-        "B"
+        "G"
       ],
       "tags": [
         "metagame"
@@ -541,105 +771,109 @@
       "main": [
         {
           "count": 4,
-          "name": "Biotech Specialist"
+          "name": "Llanowar Elves"
         },
         {
-          "count": 4,
-          "name": "Springleaf Drum"
-        },
-        {
-          "count": 2,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 4,
-          "name": "Deadly Dispute"
-        },
-        {
-          "count": 4,
-          "name": "Oni-Cult Anvil"
-        },
-        {
-          "count": 4,
-          "name": "Experimental Synthesizer"
-        },
-        {
-          "count": 4,
-          "name": "Greedy Freebooter"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 3,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 4,
-          "name": "Shrapnel Blast"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
+          "count": 9,
+          "name": "Forest"
         },
         {
           "count": 2,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "name": "Lair of the Hydra"
         },
         {
           "count": 4,
-          "name": "The Sackville-Bagginses"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
+          "name": "Nykthos, Shrine to Nyx"
         },
         {
           "count": 4,
-          "name": "Voldaren Epicure"
+          "name": "Sunken Citadel"
+        },
+        {
+          "count": 4,
+          "name": "Cavalier of Thorns"
+        },
+        {
+          "count": 4,
+          "name": "Invasion of Ixalan"
+        },
+        {
+          "count": 4,
+          "name": "Kiora, Behemoth Beckoner"
+        },
+        {
+          "count": 4,
+          "name": "Leyline of the Guildpact"
+        },
+        {
+          "count": 4,
+          "name": "Old-Growth Troll"
         },
         {
           "count": 3,
-          "name": "Copperline Gorge"
+          "name": "Outcaster Trailblazer"
+        },
+        {
+          "count": 2,
+          "name": "Garruk, Curse Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Storm the Festival"
+        },
+        {
+          "count": 2,
+          "name": "Ulvenwald Oddity"
         },
         {
           "count": 3,
-          "name": "Rottenmouth Viper"
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 2,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Vibrance"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Ob Nixilis, the Adversary"
-        },
-        {
-          "count": 3,
-          "name": "Abrupt Decay"
+          "count": 1,
+          "name": "Cityscape Leveler"
         },
         {
           "count": 1,
-          "name": "Torch the Tower"
+          "name": "Elesh Norn, Mother of Machines"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 1,
+          "name": "Emrakul, the Promised End"
+        },
+        {
+          "count": 3,
+          "name": "Hexhaven Invigorator"
+        },
+        {
+          "count": 2,
+          "name": "Setessan Petitioner"
+        },
+        {
+          "count": 2,
+          "name": "The Stone Brain"
+        },
+        {
+          "count": 2,
+          "name": "Scrapshooter"
+        },
+        {
+          "count": 2,
+          "name": "Arasta of the Endless Web"
+        },
+        {
+          "count": 1,
+          "name": "Outcaster Trailblazer"
         }
       ]
     },
@@ -914,147 +1148,11 @@
       ]
     },
     {
-      "name": "Rakdos Sacrifice",
+      "name": "Izzet Aggro",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 3,
-          "name": "Blightstep Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Bloodtithe Harvester"
-        },
-        {
-          "count": 4,
-          "name": "Cauldron Familiar"
-        },
-        {
-          "count": 3,
-          "name": "Claim the Firstborn"
-        },
-        {
-          "count": 4,
-          "name": "Deadly Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Eyetwitch"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Mayhem Devil"
-        },
-        {
-          "count": 1,
-          "name": "Scavenger's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 2,
-          "name": "The Sackville-Bagginses"
-        },
-        {
-          "count": 4,
-          "name": "Witch's Oven"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Go Blank"
-        },
-        {
-          "count": 1,
-          "name": "Ozai's Cruelty"
-        },
-        {
-          "count": 1,
-          "name": "Ruinous Waterbending"
-        },
-        {
-          "count": 3,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Decorum Dissertation"
-        }
-      ]
-    },
-    {
-      "name": "Jund Sacrifice",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "G",
-        "R"
+        "R",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -1062,162 +1160,75 @@
       "main": [
         {
           "count": 4,
-          "name": "Shambling Ghast"
-        },
-        {
-          "count": 4,
-          "name": "Greedy Freebooter"
-        },
-        {
-          "count": 4,
-          "name": "Deadly Dispute"
-        },
-        {
-          "count": 4,
-          "name": "The Sackville-Bagginses"
-        },
-        {
-          "count": 4,
-          "name": "Biotech Specialist"
-        },
-        {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 4,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 4,
-          "name": "Witch's Oven"
-        },
-        {
-          "count": 4,
-          "name": "Cauldron Familiar"
-        },
-        {
-          "count": 4,
-          "name": "Mayhem Devil"
+          "name": "Academic Dispute"
         },
         {
           "count": 3,
-          "name": "Lively Dirge"
-        },
-        {
-          "count": 2,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 2,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 2,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Umbral Collar Zealot"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 3,
-          "name": "Witherbloom Charm"
-        },
-        {
-          "count": 2,
-          "name": "Ygra, Eater of All"
-        },
-        {
-          "count": 1,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 3,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 2,
-          "name": "Dark Betrayal"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Self-Bounce",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
           "name": "Boomerang Basics"
         },
         {
           "count": 4,
-          "name": "Clearwater Pathway"
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 4,
-          "name": "Cryogen Relic"
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
+          "name": "Flow State"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Pompous Battlemage"
         },
         {
           "count": 1,
-          "name": "Otawara, Soaring City"
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Fear of Isolation"
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 3,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 2,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 3,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 2,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
         },
         {
           "count": 4,
-          "name": "Hopeless Nightmare"
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
         },
         {
           "count": 4,
-          "name": "Momentum Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Narset, Parter of Veils"
-        },
-        {
-          "count": 4,
-          "name": "Nowhere to Run"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Shipwreck Marsh"
+          "name": "Steam Vents"
         },
         {
           "count": 4,
@@ -1225,77 +1236,61 @@
         },
         {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Shivan Reef"
         },
         {
-          "count": 4,
-          "name": "This Town Ain't Big Enough"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Underground River"
-        },
-        {
-          "count": 4,
-          "name": "Darkslick Shores"
-        },
-        {
-          "count": 2,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
+          "count": 3,
+          "name": "Burst Lightning"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 3,
-          "name": "Invoke Despair"
+          "count": 1,
+          "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
-          "name": "Yorion, Sky Nomad"
+          "name": "Boomerang Basics"
         },
         {
-          "count": 3,
-          "name": "Unlicensed Hearse"
+          "count": 1,
+          "name": "Firebending Lesson"
         },
         {
-          "count": 4,
-          "name": "Grim Bauble"
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
         },
         {
           "count": 2,
-          "name": "Go Blank"
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
         }
       ]
     }

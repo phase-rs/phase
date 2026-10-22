@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Cost-paid object selectors explicitly distinguish the elected source from selected objects and retain once-settled public/hidden cost-move origins (historical full161/wire143 increment). Older full-game/P2P peers silently drop selector/provenance fields, so both game surfaces must reject incompatible peers."
+}

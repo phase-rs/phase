@@ -8076,6 +8076,7 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
+    s.battlefield_entry_observations.clear();
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -8433,6 +8434,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
     /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
@@ -10035,6 +10037,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10140,6 +10143,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -10250,6 +10254,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -14574,6 +14579,31 @@ mod tests {
         );
     }
 
+    /// U4 — the battlefield-entry observation table is keyed by the `zone_changes_this_turn`
+    /// index space, so the loop projection clears it with the ledger.
+    #[test]
+    fn project_out_resources_clears_battlefield_entry_observations() {
+        let mut state = GameState::new_two_player(7);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.battlefield_entry_observations.is_empty());
+    }
+
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;
     /// whether it reads the growing class is the confirmer's replay to answer (CR 732.2a).
     #[test]
@@ -15475,6 +15505,7 @@ mod tests {
         on_board: [ObjectId; 2],
         in_hand: ObjectId,
         attacker: ObjectId,
+        exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
         use crate::types::game_state::WaitingFor;
         vec![
@@ -15685,6 +15716,7 @@ mod tests {
                     player: PlayerId(0),
                     // CR 701.43d exerts an ATTACKING permanent.
                     attacker: on_board[0],
+                    permission: exert_permission,
                     remaining: Vec::new(),
                 },
                 true,
@@ -15962,7 +15994,39 @@ mod tests {
         // CLASS-DRIFT GATE, run before the cast proof: every candidate's membership must
         // be what the list says it is. A deleted member reds its `true` row here; an
         // added non-member reds its `false` row.
-        let candidates = cast_proof_candidate_windows(on_board, in_hand, attacker);
+        // CR 508.1g: This optional-cost control needs an actual functioning
+        // permission on an attacking source, rather than an arbitrary object ID.
+        state
+            .objects
+            .get_mut(&on_board[0])
+            .unwrap()
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                crate::types::triggers::TriggerMode::Exerted,
+            )
+            .valid_card(TargetFilter::SelfRef)]))
+            .expect("materialize the permission before binding its occurrence");
+        state.combat.as_mut().unwrap().attackers.push(
+            crate::game::combat::AttackerInfo::attacking_player(on_board[0], PlayerId(1)),
+        );
+        let exert_permission = crate::game::functioning_abilities::active_trigger_definitions(
+            &state,
+            &state.objects[&on_board[0]],
+        )
+        .next()
+        .expect("functioning attack permission")
+        .definition_ref;
+        assert_eq!(
+            exert_permission.source,
+            crate::types::identifiers::ObjectIncarnationRef::from_object(
+                &state.objects[&on_board[0]]
+            )
+        );
+        assert!(!matches!(
+            &exert_permission.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized
+        ));
+        let candidates =
+            cast_proof_candidate_windows(on_board, in_hand, attacker, exert_permission);
         for (why, window, expected_member) in &candidates {
             assert_eq!(
                 window.is_forced_cascade_window(),
@@ -15986,6 +16050,13 @@ mod tests {
             if !expected_member {
                 continue;
             }
+            state.phase = match &window {
+                WaitingFor::DeclareAttackers { .. }
+                | WaitingFor::ExertChoice { .. }
+                | WaitingFor::EnlistChoice { .. } => Phase::DeclareAttackers,
+                WaitingFor::DeclareBlockers { .. } => Phase::DeclareBlockers,
+                _ => Phase::PreCombatMain,
+            };
             state.waiting_for = window;
             // PER-WINDOW REACH-GUARD. The zero below is only evidence if the enumerator
             // is live AT THIS WINDOW. A member whose fixture is under-populated (a
@@ -26167,6 +26238,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );

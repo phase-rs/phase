@@ -258,7 +258,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             !done[k]
                 && (lands[k].is_some()
                     || flat.iter().any(|x| {
-                        matches!(x, GameAction::ActivateAbility { source_id, ability_index }
+                        matches!(x, GameAction::ActivateAbility { source_id, ability_index, .. }
                             if *source_id == source && *ability_index == index)
                     }))
         });
@@ -267,6 +267,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             Some(lands[p].clone().unwrap_or(GameAction::ActivateAbility {
                 source_id: b.acts[p].0,
                 ability_index: b.acts[p].1,
+                payment_mode: CastPaymentMode::Auto,
             }))
         } else {
             let fodder_only = |a: &&GameAction| {
@@ -392,6 +393,7 @@ fn drive(row: &Row) -> (bool, String) {
         let action = land_row(c.r.state(), act, &c.hint).unwrap_or(GameAction::ActivateAbility {
             source_id: act.0,
             ability_index: act.1,
+            payment_mode: CastPaymentMode::Auto,
         });
         if step(&mut c.r, action) {
             answer(&mut c, &mut done);
@@ -886,7 +888,11 @@ const UNCHANGED: &[Row] = &[
     ("e/Fíli and Kíli, Joyous", "Fíli and Kíli, Joyous", "{T}: Add {R}{R}. Spend this mana only to cast Dwarf, Equipment, and Saga spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Dwarven Driller", false, "ff/H"),
     ("e/Grinning Ignus", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p'), ("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Bonebreaker Giant", true, "tt/H"),
     ("e/Lavinia, Foil to Conspiracy", "Lavinia, Foil to Conspiracy", "{T}: Add {C}{C}. Activate only during an opponent's turn.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", false, "ff/H"),
-    ("e/Mage-Ring Network", "Mage-Ring Network", "{T}, Remove any number of storage counters from ~: Add {C} for each storage counter removed this way.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "storage", 2)], "Glaring Fleshraker", false, "ff/H"),
+    // CR 605.3b + CR 602.2b + CR 601.2h: removing both storage counters yields {C}{C}
+    // (the yield reads the counters its cost removed), so with Phyrexian Altar's one
+    // mana the reach guard can cast Glaring Fleshraker; the listed reading stays with the
+    // Rasputin row's (amount-choice sources in the payment step, outside this change).
+    ("e/Mage-Ring Network", "Mage-Ring Network", "{T}, Remove any number of storage counters from ~: Add {C} for each storage counter removed this way.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "storage", 2)], "Glaring Fleshraker", true, "ff/H"),
     ("e/Muraganda Raceway#speed4", "Muraganda Raceway", "Max speed — {T}: Add {C}{C}.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Orochi Merge-Keeper", "Orochi Merge-Keeper", "{T}: Add {G}{G}.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "P1P1", 1)], "Axebane Beast", true, "tt/BF"),
     ("e/Quinjet Technician", "Quinjet Technician", "{T}: Add {R}{R}. Spend this mana only to activate power-up abilities.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Barbarian Horde", false, "ff/H"),

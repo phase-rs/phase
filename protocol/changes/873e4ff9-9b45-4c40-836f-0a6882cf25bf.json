@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingCoinFlip gains branch_context (FlipBranchContext): the players chosen earlier in the flipping resolution and a completed-but-empty forwarded result, which a coin-flip branch parked at a Krark's Thumb keep choice inherits when it resumes. The persisted resolution state moves from version 8 to 9. A peer on the previous version would drop the context when re-encoding such a frame, so the resumed branch would lose its chosen opponent; full-game and P2P wire move in lockstep."
+}

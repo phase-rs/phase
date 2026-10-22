@@ -53,6 +53,7 @@ fn activate_recurring_nightmare(observers: &[&str]) -> (GameRunner, ObjectId, Ve
         .act(GameAction::ActivateAbility {
             source_id: nightmare,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("begin Recurring Nightmare activation");
 

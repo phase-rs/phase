@@ -1896,6 +1896,10 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         TriggerCondition::DuringPlayersTurn { player } => legacy_player_filter(player),
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().any(legacy_trigger_condition)
@@ -1993,6 +1997,10 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => legacy_quantity_expr(rhs),
         AbilityCondition::ScopedPlayerMatches { filter } => legacy_player_filter(filter),
         AbilityCondition::DiscardedCardMatchesFilter { filter } => legacy_target_filter(filter),
@@ -2068,6 +2076,10 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             legacy_quantity_expr(lhs) || legacy_quantity_expr(rhs)
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => legacy_quantity_expr(quantity),
         StaticCondition::IsTapped { scope, .. } => legacy_object_scope(scope),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().any(legacy_static_condition)
@@ -2091,6 +2103,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -2585,6 +2598,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -2890,6 +2904,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation, not a legacy
         // event-context or per-source member-bound referent.
@@ -3033,6 +3048,10 @@ fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
 fn legacy_trigger_definition(td: &TriggerDefinition) -> bool {
     td.execute.as_deref().is_some_and(legacy_definition)
         || td.condition.as_ref().is_some_and(legacy_trigger_condition)
+        || td
+            .attack_cost_condition
+            .as_ref()
+            .is_some_and(legacy_static_condition)
         || td.valid_card.as_ref().is_some_and(legacy_target_filter)
         || td.valid_source.as_ref().is_some_and(legacy_target_filter)
 }
@@ -3699,23 +3718,19 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::RollDie { count, results, .. } => {
             legacy_quantity_expr(count) || results.iter().any(|r| legacy_definition(&r.effect))
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            flipper,
-        } => odef(win_effect) || odef(lose_effect) || legacy_target_filter(flipper),
         Effect::FlipCoins {
-            count,
+            flips,
             win_effect,
             lose_effect,
             flipper,
         } => {
-            legacy_quantity_expr(count)
+            flips
+                .count_expr()
+                .is_some_and(legacy_quantity_expr)
                 || odef(win_effect)
                 || odef(lose_effect)
                 || legacy_target_filter(flipper)
         }
-        Effect::FlipCoinUntilLose { win_effect } => legacy_definition(win_effect),
         Effect::RevealFromHand {
             filter, on_decline, ..
         } => legacy_target_filter(filter) || odef(on_decline),
@@ -4279,6 +4294,7 @@ fn walk_ability(
         source_id: _,
         cast_occurrence: _,    // finalized-cast provenance, no read/write effect
         source_incarnation: _, // self-transform epoch latch, no read/write effect
+        announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         delayed_origin: _,     // delayed-trigger identity, no read/write effect
@@ -6025,38 +6041,21 @@ fn rw_effect(
             }
             (p, None)
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            flipper: _,
-        } => {
-            let mut p = RwProfile::empty();
-            if let Some(w) = win_effect {
-                walk_definition(w, chain_root, chain_move_owner, pscope, &mut p);
-            }
-            if let Some(l) = lose_effect {
-                walk_definition(l, chain_root, chain_move_owner, pscope, &mut p);
-            }
-            (p, None)
-        }
         Effect::FlipCoins {
-            count,
+            flips,
             win_effect,
             lose_effect,
             flipper: _,
         } => {
-            let mut p = rw_quantity_expr(count);
+            let mut p = flips
+                .count_expr()
+                .map_or_else(RwProfile::empty, rw_quantity_expr);
             if let Some(w) = win_effect {
                 walk_definition(w, chain_root, chain_move_owner, pscope, &mut p);
             }
             if let Some(l) = lose_effect {
                 walk_definition(l, chain_root, chain_move_owner, pscope, &mut p);
             }
-            (p, None)
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            let mut p = RwProfile::empty();
-            walk_definition(win_effect, chain_root, chain_move_owner, pscope, &mut p);
             (p, None)
         }
 
@@ -6828,6 +6827,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         AbilityCondition::PreviousEffectAmount {
             rhs,
             comparator: _,
@@ -7034,6 +7037,10 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         TriggerCondition::HadCounters { .. } => reads_frozen_of(StateKind::ObjectCounters),
         TriggerCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         TriggerCondition::CounterAddedThisTurn => reads_board_of(StateKind::ObjectCounters),
@@ -7163,9 +7170,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             p.merge(rw_quantity_expr(rhs));
             p
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => rw_quantity_expr(quantity),
         StaticCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         StaticCondition::IsTapped { scope, .. } => read_object_scope(scope, StateKind::TapState),
         StaticCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
+        StaticCondition::SourceExertedThisTurn => RwProfile::conservative(),
         StaticCondition::OpponentPoisonAtLeast { count: _ } => {
             reads_player_of(StateKind::PlayerLife)
         }
@@ -7515,7 +7527,9 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
 
 fn rw_player_scope(x: &PlayerScope) -> RwProfile {
     match x {
-        PlayerScope::ParentObjectTargetController => reads_event_live(),
+        PlayerScope::ParentObjectTarget { .. } => {
+            reads_event_live()
+        }
         PlayerScope::AllPlayers { exclude, .. } => match exclude {
             Some(e) => rw_player_scope(e),
             None => RwProfile::empty(),
@@ -7729,6 +7743,61 @@ mod tests {
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// A unary arithmetic quality reads exactly its quantity — the same profile
+    /// as a `QuantityComparison` of that quantity against a constant (whose
+    /// `Fixed` operand contributes nothing), and never the empty profile.
+    #[test]
+    fn quantity_quality_rw_profile_is_its_quantity_profile() {
+        use crate::types::ability::NumberQuality;
+        let q = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TypedFilter::land().controller(ControllerRef::You).into(),
+            },
+        };
+        let one = QuantityExpr::Fixed { value: 1 };
+
+        let tq = TriggerCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let tc = TriggerCondition::QuantityComparison {
+            lhs: q.clone(),
+            comparator: Comparator::GE,
+            rhs: one.clone(),
+        };
+        assert_eq!(
+            trigger_condition_rw_profile(&tq),
+            trigger_condition_rw_profile(&tc)
+        );
+        assert_ne!(trigger_condition_rw_profile(&tq), RwProfile::empty());
+
+        let sq = StaticCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let sc = StaticCondition::QuantityComparison {
+            lhs: q.clone(),
+            comparator: Comparator::GE,
+            rhs: one.clone(),
+        };
+        assert_eq!(rw_static_condition(&sq), rw_static_condition(&sc));
+        assert_eq!(legacy_static_condition(&sq), legacy_static_condition(&sc));
+        assert_ne!(rw_static_condition(&sq), RwProfile::empty());
+
+        let aq = AbilityCondition::QuantityQuality {
+            quantity: q.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let ac = AbilityCondition::QuantityCheck {
+            lhs: q,
+            comparator: Comparator::GE,
+            rhs: one,
+        };
+        assert_eq!(rw_ability_condition(&aq), rw_ability_condition(&ac));
+        assert_eq!(legacy_ability_condition(&aq), legacy_ability_condition(&ac));
+        assert_ne!(rw_ability_condition(&aq), RwProfile::empty());
+    }
 
     /// U-b. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event
     /// live, like `OpponentOtherThanTriggering`; the controller's attacks read none.
@@ -8539,9 +8608,10 @@ mod tests {
 
     #[test]
     fn base_chaotic_goo_flipcoin_self_counters_clean() {
-        // FlipCoin{win: PutCounter(SelfRef), lose: RemoveCounter(SelfRef)} — no
+        // FlipCoins{win: PutCounter(SelfRef), lose: RemoveCounter(SelfRef)} — no
         // reads ⇒ clean even though the self-writes disable source-independence.
-        let e = Effect::FlipCoin {
+        let e = Effect::FlipCoins {
+            flips: crate::types::ability::CoinFlipRun::single(),
             win_effect: Some(Box::new(def(put_counter(qfix(1), TargetFilter::SelfRef)))),
             lose_effect: Some(Box::new(def(remove_counter(TargetFilter::SelfRef)))),
             flipper: TargetFilter::Controller,
@@ -8549,7 +8619,7 @@ mod tests {
         let p = ability_rw_profile(&ra(e));
         assert!(
             p.writes_self.object_counters,
-            "FlipCoin body descends to self-counter write"
+            "FlipCoins body descends to self-counter write"
         );
         assert!(!profiles_conflict(&p, &se_phase()));
     }
@@ -8564,7 +8634,8 @@ mod tests {
 
     #[test]
     fn base_mana_crypt_flipcoin_player_damage_clean() {
-        let e = Effect::FlipCoin {
+        let e = Effect::FlipCoins {
+            flips: crate::types::ability::CoinFlipRun::single(),
             win_effect: None,
             lose_effect: Some(Box::new(def(Effect::DealDamage {
                 amount: qfix(3),

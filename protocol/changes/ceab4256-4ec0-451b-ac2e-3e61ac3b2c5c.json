@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Merged Jev parser/runtime schemas retain addressed departure aggregates, exact token creation/revealed/counter-removal receipts, and per-invocation instruction-result owners (historical full160/wire142 increment). Resolution wire10 composes these with upstream published ChangeZoneMemberEntry and coin-flip versions7-9; older full/P2P peers would drop private authority or misread result shapes."
+}

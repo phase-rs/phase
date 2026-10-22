@@ -847,6 +847,7 @@ fn drive_one_ping(probe: &mut LoopProbe, pinger: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: pinger,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate pinger");
     assert!(
@@ -1817,6 +1818,7 @@ fn drive_finite_stack_keeps_ring_empty() {
             .act(GameAction::ActivateAbility {
                 source_id: artifact,
                 ability_index: gain_idx,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activate costless gain-life");
     }
@@ -1931,6 +1933,7 @@ fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
                         .iter()
                         .position(|a| !crate::game::mana_abilities::is_mana_ability(a))
                         .expect("the Sieve's ability"),
+                    payment_mode: CastPaymentMode::Auto,
                 }
             }
             WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {

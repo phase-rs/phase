@@ -1784,6 +1784,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_sacrificed_artifact_this_turn.clear();
     state.sacrificed_permanents_this_turn.clear();
     state.zone_changes_this_turn.clear();
+    // CR 603.10: keyed by the ledger index cleared above.
+    state.battlefield_entry_observations.clear();
     state.batched_zone_change_trigger_fired.clear();
     state.battlefield_entries_this_turn.clear();
     // CR 514.2 + CR 400.7: the cleanup step is where "this turn" state ends, which is the authority
@@ -6459,6 +6461,33 @@ card into your hand at the beginning of your next end step.";
         assert!(!state.players[0].has_drawn_this_turn);
         assert_eq!(state.players[0].lands_played_this_turn, 0);
         assert!(state.counter_added_this_turn.is_empty());
+    }
+
+    /// U4 — CR 603.10: the battlefield-entry observation table is keyed by the
+    /// `zone_changes_this_turn` index space, so the turn reset clears it with the ledger.
+    #[test]
+    fn start_next_turn_clears_battlefield_entry_observations() {
+        let mut state = setup();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&object_id],
+        );
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(state.battlefield_entry_observations.is_empty());
     }
 
     /// CR 601.2a + CR 113.6b: Turn cleanup must clear BOTH the per-source

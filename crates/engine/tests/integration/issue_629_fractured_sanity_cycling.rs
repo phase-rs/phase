@@ -86,6 +86,7 @@ fn fractured_sanity_cycling_mills_each_opponent_four() {
         .act(GameAction::ActivateAbility {
             source_id: card,
             ability_index: cycling_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate cycling");
 

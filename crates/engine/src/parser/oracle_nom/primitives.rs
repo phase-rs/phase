@@ -388,6 +388,26 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
     .parse(input)
 }
 
+/// CR 903.4: Parse the possessive phrase "your commander's color identity".
+///
+/// The `alt()` covers the singular possessive and both plural apostrophe
+/// placements ("commanders'" and the apostrophe-less "commanders") that
+/// Oracle text and normalized text use for a partnered commander pair
+/// (CR 702.124c). "commanders'" precedes "commanders" so the longer spelling
+/// is tried first. Operates on already-lowercased text and consumes nothing
+/// beyond the phrase itself.
+pub(crate) fn parse_your_commanders_color_identity(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("your "),
+            alt((tag("commander's"), tag("commanders'"), tag("commanders"))),
+            tag(" color identity"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
 ///
 /// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
@@ -2140,6 +2160,26 @@ mod tests {
     #[test]
     fn test_parse_color_failure() {
         assert!(parse_color("purple").is_err());
+    }
+
+    #[test]
+    fn parse_your_commanders_color_identity_covers_all_three_spellings() {
+        // CR 903.4 + CR 702.124c: singular and both plural possessive spellings.
+        for phrase in [
+            "your commander's color identity",
+            "your commanders' color identity",
+            "your commanders color identity",
+        ] {
+            let (rest, ()) = parse_your_commanders_color_identity(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert_eq!(rest, "", "{phrase} must be fully consumed");
+        }
+        // The combinator consumes only the phrase and leaves the tail intact.
+        let (rest, ()) =
+            parse_your_commanders_color_identity("your commander's color identity.").unwrap();
+        assert_eq!(rest, ".");
+        // Negative: "colors" is not "color identity".
+        assert!(parse_your_commanders_color_identity("your commander's colors").is_err());
     }
 
     #[test]

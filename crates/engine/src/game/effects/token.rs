@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
+use crate::game::game_object::{
+    AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
+};
 use crate::game::quantity::{
     quantity_expr_recipient_read, resolve_quantity_with_targets,
     resolve_quantity_with_targets_and_recipient, RecipientRead,
@@ -1445,13 +1447,7 @@ pub(crate) fn materialize_token_copy_body(
         &copy.additional_modifications,
     );
     values.static_definitions = Arc::new(cda_pruning.definitions);
-    apply_copiable_values_to_liminal_object(
-        object,
-        &values,
-        copy.display_source,
-        copy.printed_ref.clone(),
-        copy.token_image_ref.clone(),
-    );
+    apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
     // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
     // on top of the copied characteristics. Twinflame's haste copies are the
@@ -1508,14 +1504,9 @@ pub(crate) fn reserve_liminal_token_object(
 pub(crate) fn apply_copiable_values_to_liminal_object(
     object: &mut GameObject,
     values: &CopiableValues,
-    display_source: DisplaySource,
-    printed_ref: Option<crate::types::card::PrintedCardRef>,
-    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    display: &DisplayIdentity,
 ) {
-    object.display_source = display_source;
-    object.printed_ref = printed_ref.clone();
-    object.base_printed_ref = printed_ref;
-    object.token_image_ref = token_image_ref;
+    object.install_display_identity_as_base(display);
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
@@ -2427,6 +2418,46 @@ pub(crate) fn record_last_created_copy_batch_token(
     }
 }
 
+/// CR 614.1a + CR 608.2c + CR 400.7: the tokens a replacement appended to one
+/// CreateToken event ("those tokens plus …": Chatterfang, Xorn; Academy
+/// Manufactor's "one of each") inside `window`, the event's span, that `own`
+/// (the ids the event's own batch already published) lacks, in event order.
+/// Membership is the window, as in `created_token_union_from_events`, so only
+/// tokens still on the battlefield count (CR 400.7).
+pub(crate) fn replacement_appended_token_ids(
+    state: &GameState,
+    window: &[GameEvent],
+    own: &[ObjectId],
+) -> Vec<ObjectId> {
+    super::created_token_union_from_events(state, window)
+        .into_iter()
+        .map(|pin| pin.object_id)
+        .filter(|id| !own.contains(id))
+        .collect()
+}
+
+/// CR 614.1a + CR 608.2c + CR 111.1: publish one CreateToken event's whole created
+/// referent — its own batch, then [`replacement_appended_token_ids`] — into
+/// `last_created_token_ids`. A replacement's appended batch is applied inside the
+/// replacement pipeline before the event's own batch, and each apply assigns the
+/// ledger, so without this the event's own batch overwrites it. Chatterfang's
+/// ruling: anything else the creating effect specifies ("that token gains haste",
+/// "exile that token") applies to the original tokens and the appended ones alike.
+/// The own batch stays first, so a singular "it" reader keeps the instruction's own
+/// token. A bulk republish, assigned like the apply's own tail.
+pub(crate) fn publish_replacement_appended_tokens(state: &mut GameState, window: &[GameEvent]) {
+    let appended = replacement_appended_token_ids(state, window, &state.last_created_token_ids);
+    if appended.is_empty() {
+        return;
+    }
+    state.last_created_token_ids = state
+        .last_created_token_ids
+        .iter()
+        .copied()
+        .chain(appended)
+        .collect();
+}
+
 /// CR 400.7 + CR 608.2i + CR 614.12a: realize a postponed token battlefield entry — record it
 /// through `record_zone_change` and emit its entry pair — at the first instant the object IS the
 /// thing that entered. Record and emit are ONE indivisible operation over ONE owned value, so no
@@ -2683,6 +2714,10 @@ fn condition_invariant_for_token(
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_is_invariant(lhs) && quantity_is_invariant(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_is_invariant(quantity),
         _ => false,
     }
 }
@@ -3038,10 +3073,12 @@ pub(crate) fn copy_probe_spec(
     copy_probe_spec_for(
         &CopyTokenSpec {
             values: Box::new(values.clone()),
-            display_source: DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            },
             extra_keywords: Vec::new(),
             additional_modifications: Vec::new(),
             tapped: false,
@@ -4888,10 +4925,12 @@ mod tests {
         object.base_card_types = object.card_types.clone();
         let copy = CopyTokenSpec {
             values: Box::new(intrinsic_copiable_values(&object)),
-            display_source: DisplaySource::Card,
-            printed_ref: None,
-            token_image_ref: None,
-            token_art: None,
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+                token_art: None,
+            },
             extra_keywords: vec![],
             additional_modifications: vec![],
             tapped: false,
@@ -5091,9 +5130,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         state.objects.insert(token_id, token);
 
@@ -6750,6 +6790,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: spawn,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Spawn mana ability should activate");
@@ -9007,9 +9048,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         let timestamp = state.next_timestamp();
         token.reset_for_battlefield_entry(state.turn_number, timestamp);
@@ -9031,10 +9073,10 @@ mod tests {
                 created_ids: Vec::new(),
                 copy_resume: Some(Box::new(CopyTokenSpec {
                     values: Box::new(values.clone()),
-                    display_source: DisplaySource::Token,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: DisplayIdentity {
+                        display_source: DisplaySource::Token,
+                        ..Default::default()
+                    },
                     extra_keywords: Vec::new(),
                     additional_modifications: Vec::new(),
                     tapped: false,

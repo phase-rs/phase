@@ -265,6 +265,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         source_id: _,              // object id
         cast_occurrence: _,        // finalized-cast provenance, no dynamic read
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        announced_source_incarnation: _, // announcement-time source epoch, no dynamic read
         noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
@@ -1732,9 +1733,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::RollDie { .. } => Axes::CONSERVATIVE,
-        Effect::FlipCoin { .. } => Axes::CONSERVATIVE,
         Effect::FlipCoins { .. } => Axes::CONSERVATIVE,
-        Effect::FlipCoinUntilLose { .. } => Axes::CONSERVATIVE,
         Effect::RingTemptsYou => Axes::NONE,
         Effect::VentureIntoDungeon => Axes::NONE,
         Effect::VentureInto { dungeon: _ } => Axes::NONE,
@@ -3313,6 +3312,10 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         AbilityCondition::PreviousEffectAmount {
             rhs,
             comparator: _,
@@ -3886,6 +3889,7 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         // ---- read-bearing: scanned into `acc` below ----
         execute,
         condition,
+        attack_cost_condition,
         // CR 603.2 + CR 603.2h: a fire-count / fire-window gate, which can carry
         // its own spell filter. NOT an event matcher, and no firewall surface
         // reads it (`analysis::resource` reads only `condition` and `execute`), so
@@ -3977,6 +3981,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
     let mut acc = Axes::NONE;
     if let Some(exec) = execute {
         acc = acc.or(ability_definition_axes(exec, mode));
+    }
+    if let Some(condition) = attack_cost_condition {
+        acc = acc.or(scan_static_condition(condition, mode));
     }
     if let Some(cond) = condition {
         acc = acc.or(scan_trigger_condition(cond, mode));
@@ -4305,6 +4312,10 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        TriggerCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         TriggerCondition::HasMaxSpeed => Axes::NONE,
         // CR 725.1: the monarch predicate itself reads no axis; its subject
         // scope is classified per-axis by the shared `PlayerScope` classifier,
@@ -4681,6 +4692,10 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(rhs, mode));
             acc
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => scan_quantity_expr(quantity, mode),
         StaticCondition::HasMaxSpeed => Axes::NONE,
         StaticCondition::SpeedGE { threshold: _ } => Axes::NONE,
         StaticCondition::And { conditions } => {
@@ -4775,6 +4790,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
+        StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
         StaticCondition::SourceHasDealtDamage => Axes {
             event: false,
             sibling: false,
@@ -4939,6 +4955,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         // CR 701.15b/c: goad is a candidate-local designation read; it scans no
         // board/object axis.
@@ -5416,7 +5433,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
         }
         PlayerScope::RecipientController => Axes::NONE,
         PlayerScope::DefendingPlayer => Axes::NONE,
-        PlayerScope::ParentObjectTargetController => Axes {
+        PlayerScope::ParentObjectTarget { .. } => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -7162,9 +7179,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -7576,9 +7591,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }

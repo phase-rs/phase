@@ -2454,7 +2454,7 @@ fn restored(r: &GameRunner, route: usize) -> GameRunner {
             let wire =
                 serde_json::to_value(ResolutionStateWire::from_game_state(r.state().clone()))
                     .unwrap();
-            assert_eq!(wire["resolution_state_version"], 9);
+            assert_eq!(wire["resolution_state_version"], 10);
             serde_json::from_value::<ResolutionStateWire>(wire)
                 .unwrap()
                 .into_game_state()
@@ -2984,6 +2984,7 @@ fn u14_continuous_grammar_reference_preservation_whip() {
         .position(|a| matches!(a.effect.as_ref(), Effect::SetTapState { .. }))
         .unwrap();
     r.act(GameAction::ActivateAbility {
+        payment_mode: engine::types::actions::CastPaymentMode::Auto,
         source_id: next_host,
         ability_index: index,
     })

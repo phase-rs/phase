@@ -2473,6 +2473,7 @@ fn complete_continuous_blade_real_reconfigure_preserves_existing_color_and_types
             .0;
         assert!(runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: blade,
                 ability_index: attach
             })
@@ -2480,6 +2481,7 @@ fn complete_continuous_blade_real_reconfigure_preserves_existing_color_and_types
         complete_publication_fund(&mut runner, P0, 2, &[ManaType::Black, ManaType::Black]);
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: blade,
                 ability_index: attach,
             })
@@ -2648,6 +2650,7 @@ fn complete_continuous_alpine_named_opponent_land_has_real_mana_grant() {
     runner.act(GameAction::PassPriority).unwrap();
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: named,
             ability_index: 0,
         })
@@ -3018,7 +3021,7 @@ fn complete_continuous_paid_native_activations_preserve_companions_and_other_axi
         for player in [P0, P1] { for _ in 0..4 { scenario.add_card_to_library_top(player, "Turn buffer"); } }
         let mut runner = scenario.build();
         let recipient = if name == "Creeperhulk" { ally } else { source };
-        assert!(runner.act(GameAction::ActivateAbility { source_id: source, ability_index: 0 })
+        assert!(runner.act(GameAction::ActivateAbility { payment_mode: engine::types::actions::CastPaymentMode::Auto, source_id: source, ability_index: 0 })
             .is_err(), "unfunded activation {name}");
         complete_publication_fund(&mut runner, P0, generic, &colors);
         if name == "Creeperhulk" { runner.activate(source, 0).target_object(ally).resolve(); }
@@ -3183,6 +3186,7 @@ fn complete_continuous_drop_bear_all_zone_current_and_departure() {
             assert!(
                 runner
                     .act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: grave,
                         ability_index: index
                     })
@@ -3192,6 +3196,7 @@ fn complete_continuous_drop_bear_all_zone_current_and_departure() {
             complete_publication_fund(&mut runner, P0, 3, &[ManaType::Red, ManaType::Green]);
             runner
                 .act(GameAction::ActivateAbility {
+                    payment_mode: engine::types::actions::CastPaymentMode::Auto,
                     source_id: grave,
                     ability_index: index,
                 })
@@ -3382,6 +3387,7 @@ fn complete_continuous_aurelia_colors_latch_and_target_incarnation_is_pinned() {
             for (index, color) in [(0, "White"), (1, "Red")] {
                 runner
                     .act(GameAction::ActivateAbility {
+                        payment_mode: engine::types::actions::CastPaymentMode::Auto,
                         source_id: lenses[index],
                         ability_index: 0,
                     })
@@ -4568,6 +4574,7 @@ fn complete_continuous_rakdos_granted_cost_retains_granting_equipment() {
         .expect("actual parsed granted ability");
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: host,
             ability_index: index,
         })
@@ -4615,6 +4622,7 @@ fn complete_continuous_rakdos_granted_cost_retains_granting_equipment() {
     assert!(
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: host,
                 ability_index: index
             })
@@ -5365,6 +5373,7 @@ fn complete_continuous_entity_x_zero_two_and_lifetime_hostiles() {
         let mut runner = scenario.build();
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: source,
                 ability_index: 0,
             })
@@ -5613,6 +5622,7 @@ fn complete_continuous_rakdos_self_sacrifice_keeps_granter_and_printed_br_body()
         .unwrap();
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: host,
             ability_index: index,
         })
@@ -5646,6 +5656,7 @@ fn complete_continuous_rakdos_self_sacrifice_keeps_granter_and_printed_br_body()
     assert_continuous_complete(runner.state());
     assert!(runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: host,
             ability_index: index
         })
@@ -5653,6 +5664,7 @@ fn complete_continuous_rakdos_self_sacrifice_keeps_granter_and_printed_br_body()
     assert!(
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: knife,
                 ability_index: 0
             })
@@ -5663,6 +5675,7 @@ fn complete_continuous_rakdos_self_sacrifice_keeps_granter_and_printed_br_body()
     assert!(
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: knife,
                 ability_index: 0
             })
@@ -7047,6 +7060,7 @@ fn complete_continuous_rakdos_granter_reentry_invalidates_only_old_activation() 
         .unwrap();
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: host,
             ability_index: index,
         })
@@ -7145,6 +7159,7 @@ fn complete_continuous_rakdos_granter_reentry_invalidates_only_old_activation() 
         .unwrap();
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: host,
             ability_index: new_index,
         })
@@ -7607,6 +7622,7 @@ fn complete_continuous_history_full_food_draft_reflexive_and_restricted_mana() {
     complete_publication_fund(&mut runner, P0, 0, &[ManaType::Blue]);
     runner
         .act(GameAction::ActivateAbility {
+            payment_mode: engine::types::actions::CastPaymentMode::Auto,
             source_id: source,
             ability_index: 0,
         })
@@ -7749,6 +7765,7 @@ fn complete_continuous_rakdos_pending_grant_keeps_equipment_after_detach_or_cont
             .unwrap();
         runner
             .act(GameAction::ActivateAbility {
+                payment_mode: engine::types::actions::CastPaymentMode::Auto,
                 source_id: host,
                 ability_index: index,
             })

@@ -153,6 +153,7 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
             | PendingCostMoveResume::CollectEvidencePayment { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(..),
@@ -173,6 +174,48 @@ fn take_announcing(
         .map(|carrier| carrier.collection)
 }
 
+/// CR 601.2h + CR 602.2b + CR 603.3: whether a live announcement owns
+/// `events[start..]` of the current action buffer — exactly the condition under
+/// which [`stage_announcement_trigger_events`] takes custody. `Some` holds the
+/// first index the announcement owns (`start`, or later when the announcement
+/// began part-way through the span).
+fn announcement_owned_from(state: &GameState, start: usize) -> Option<usize> {
+    let AnnouncementEventScope::From { start: owned_from } = state.announcement_event_scope else {
+        return None;
+    };
+    state.pending_trigger_carrier_owner()?;
+    Some(start.max(owned_from))
+}
+
+/// CR 601.2h + CR 602.2b + CR 603.3 + CR 605.4a: the entry for a collector
+/// that scans `events[start..]` of the current action buffer inline (a
+/// resolution choice, a mana-colour choice, a change-zone iteration). Under a
+/// live announcement those events wait in its carrier until the announcement
+/// is complete, so this stages and claims the owned part and returns the
+/// sub-range the caller still collects itself: empty when the announcement
+/// owns the whole span, the whole span when none is live. The caller then does
+/// no inline scan, no deferred collection and no `triggers_processed_inline`
+/// for what was taken; events a cost root retains are left to that owner.
+///
+/// Triggered mana abilities still resolve immediately (CR 605.4a): those of a
+/// `TapsForMana` or `ManaAbilityProduced` trigger resolve here before custody
+/// is taken. The residual is a `ManaAdded`-mode triggered mana ability, which
+/// the carrier holds until the announcement's drain; classifying the span's
+/// contexts through `triggers::partition_collected_mana_frame_contexts` is the
+/// follow-up route.
+pub(crate) fn take_inline_trigger_span(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) -> std::ops::Range<usize> {
+    let Some(owned_from) = announcement_owned_from(state, start) else {
+        return start..events.len();
+    };
+    triggers::resolve_tap_mana_triggers_inline(state, events, start);
+    stage_announcement_trigger_events(state, events, start);
+    start..owned_from.min(events.len())
+}
+
 /// Stages the not-yet-collected events of `events[event_start..]` into the
 /// live announcement's carrier. A no-op when no announcement is live.
 ///
@@ -184,10 +227,9 @@ pub(crate) fn stage_announcement_trigger_events(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    let AnnouncementEventScope::From { start: owned_from } = state.announcement_event_scope else {
+    let Some(start) = announcement_owned_from(state, event_start) else {
         return;
     };
-    let start = event_start.max(owned_from);
     if start >= events.len() {
         return;
     }
@@ -252,6 +294,22 @@ pub(crate) fn disown_events_through(state: &mut GameState, end: usize) {
     state.announcement_event_scope = state.announcement_event_scope.advanced_to(end);
 }
 
+/// CR 602.2a + CR 602.2b + CR 700.2a: whether an announcement is already live
+/// when an action begins. A live `PendingCastOwner` holds one; so does an
+/// activated ability's mode prompt, because its modes are chosen as part of
+/// activating it (CR 700.2a) and its `PendingCast` is built only once they are
+/// known. A triggered ability's mode prompt is not an announcement.
+fn announcement_live_at_action_entry(state: &GameState) -> bool {
+    !state.live_pending_cast_owners().is_empty()
+        || matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ..
+            }
+        )
+}
+
 /// Action entry: an announcement already live owns the action's buffer from
 /// its start; otherwise none does until an announcement begins
 /// ([`begin_announcement`]). A spell announcement's carrier also leaves its
@@ -263,10 +321,10 @@ pub(crate) fn begin_action(state: &mut GameState) {
         state.in_flight_spell_trigger_carrier.is_none(),
         "a spell trigger carrier outlived its action"
     );
-    state.announcement_event_scope = if state.live_pending_cast_owners().is_empty() {
-        AnnouncementEventScope::Unowned
-    } else {
+    state.announcement_event_scope = if announcement_live_at_action_entry(state) {
         AnnouncementEventScope::From { start: 0 }
+    } else {
+        AnnouncementEventScope::Unowned
     };
     let Some(object_id) = live_spell_announcement(state) else {
         return;
@@ -340,13 +398,59 @@ pub(crate) fn commit_spell_announcement(
     events: &[GameEvent],
 ) {
     let scope = std::mem::take(&mut state.announcement_event_scope);
-    let Some(mut collection) = take_announcing(state, object_id) else {
+    let Some(collection) = take_announcing(state, object_id) else {
         return;
     };
     let start = match scope {
         AnnouncementEventScope::From { start } => start.min(events.len()),
         AnnouncementEventScope::Unowned => events.len(),
     };
+    commit_announcement_span(state, *collection, events, start);
+}
+
+/// CR 602.2b + CR 603.3b: the activation reached the stack. A carrier-less
+/// activation (untargeted, unpaused) only ends the announcement scope: its cost
+/// triggers are collected by the priority pipeline that follows. A carrier
+/// collects the finishing fragment and commits it in one batch, exactly as the
+/// spell commit does (`commit_announcement_span`).
+///
+/// No trigger is lost by reading `unclaimed_events`: every writer of
+/// `consumed_before_priority_trigger_events` pairs its claim with a collection
+/// (the carrier, the deferred queue, a mana frame, a cost owner's own pass), so
+/// the filter removes only re-collections. The commit point is unchanged, so
+/// nothing is reordered.
+pub(crate) fn commit_activation_announcement(
+    state: &mut GameState,
+    collection: Option<Box<PendingActivationTriggerCollection>>,
+    events: &[GameEvent],
+) {
+    let scope = std::mem::take(&mut state.announcement_event_scope);
+    let Some(collection) = collection else {
+        return;
+    };
+    let start = match scope {
+        AnnouncementEventScope::From { start } => start.min(events.len()),
+        AnnouncementEventScope::Unowned => {
+            debug_assert!(
+                false,
+                "a carrier-bearing activation committed with no announcement scope"
+            );
+            0
+        }
+    };
+    commit_announcement_span(state, *collection, events, start);
+}
+
+/// The commit body shared by spells and activations: collect `events[start..]`
+/// not yet claimed (minus what a cost root retains) and the delayed scan into
+/// `collection`, commit it into the deferred queue, and claim the span for
+/// every collector.
+fn commit_announcement_span(
+    state: &mut GameState,
+    mut collection: PendingActivationTriggerCollection,
+    events: &[GameEvent],
+    start: usize,
+) {
     let retained = retained_by_cost_owners(state);
     let new_events: Vec<GameEvent> = unclaimed_events(state, events, start)
         .into_iter()
@@ -383,12 +487,6 @@ pub(crate) fn commit_spell_announcement(
         owned,
         ConsumedTriggerEventScope::AllCollectors,
     );
-}
-
-/// CR 602.2b: the activation reached the stack; the announcement no longer
-/// owns this action's later events.
-pub(crate) fn end_activation_announcement(state: &mut GameState) {
-    state.announcement_event_scope = AnnouncementEventScope::Unowned;
 }
 
 /// CR 800.4a: the announcement's controller left the game. The events it
@@ -460,6 +558,7 @@ fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) ->
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_),

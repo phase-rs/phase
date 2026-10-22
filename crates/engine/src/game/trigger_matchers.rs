@@ -6,7 +6,7 @@ use crate::types::ability::{
     DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
     TargetRef, TriggerDefinition, TypedFilter,
 };
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::{ExertOrigin, GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -984,7 +984,7 @@ fn count_matching_trigger_event_subjects(
     let count_one = |id| u32::from(matches(id));
     match event {
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
-        GameEvent::CreatureExerted { object_id } => count_one(*object_id),
+        GameEvent::CreatureExerted { object_id, .. } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
@@ -1222,6 +1222,9 @@ fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint
 /// CR 603.6 + CR 603.6c: Tests whether one zone-change event satisfies a single
 /// origin/destination/valid_card clause. Shared by both the scalar
 /// `match_changes_zone` path and the disjunctive `zone_change_clauses` path.
+/// CR 603.10 + CR 611.3c: an enters observer's subject filter reads the entrant as it existed
+/// immediately after its entry event, continuous effects in force at that time applied
+/// (`filter::matches_target_filter_on_entry_observation`).
 #[allow(clippy::too_many_arguments)]
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
@@ -1252,14 +1255,20 @@ fn zone_change_clause_matches(
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-        let live_entrant =
-            *to == Zone::Battlefield && state.objects.contains_key(&record.object_id);
         let departed = named_origin_zone(origin, record.from_zone);
-        let matches = match (live_entrant, departed) {
-            // CR 603.6a: an enters trigger reads the permanent as it exists on the battlefield,
-            // so a named battlefield destination leaves the pile unlicensed.
-            (true, Some(from))
-                if !destination_constraint_names(destination, destination_constraint, *to) =>
+        // CR 603.6a + CR 603.10: an enters observer (destination battlefield, and either no named
+        // origin or a named battlefield destination) reads the entrant as it existed immediately
+        // after its entry event. A named-origin clause without a named battlefield destination is
+        // a leaves-a-zone observer (CR 603.10a) and keeps the departure reading.
+        let enters_observer = *to == Zone::Battlefield
+            && (departed.is_none()
+                || destination_constraint_names(destination, destination_constraint, *to));
+        let matches = match (enters_observer, departed) {
+            (true, _) => super::filter::matches_target_filter_on_entry_observation(
+                state, record, departed, filter, &ctx,
+            ),
+            (false, Some(from))
+                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) =>
             {
                 super::filter::matches_target_filter_on_departure(
                     state,
@@ -1269,14 +1278,9 @@ fn zone_change_clause_matches(
                     &ctx,
                 )
             }
-            (true, _) => {
-                super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-            }
-            (false, departed) => {
-                super::filter::matches_target_filter_on_zone_change_record_licensed(
-                    state, record, departed, filter, &ctx,
-                )
-            }
+            (false, _) => super::filter::matches_target_filter_on_zone_change_record_licensed(
+                state, record, departed, filter, &ctx,
+            ),
         };
         if !matches {
             return false;
@@ -1915,18 +1919,41 @@ pub(super) fn match_attacks(
     !matching_attack_events(event, trigger, source_context, state).is_empty()
 }
 
-/// CR 701.43d: The linked "when you do" trigger fires when its source creature
-/// is exerted (the optional "exert as it attacks" cost was paid). The exert
-/// ability is self-referential, so the exerted object must be the trigger
-/// source.
+/// CR 701.43a + CR 701.43d: Matches a permanent being exerted. The linked
+/// "when you do" trigger (CR 701.43d, CR 607.2h) is self-referential - its
+/// `valid_card` is `SelfRef`, so only its own source being exerted matches. A
+/// "whenever you exert a creature" observer carries a creature `valid_card` and
+/// `valid_target: Controller`, matching any creature exerted by the trigger's
+/// controller ("you" is the player who chose to exert, `CreatureExerted.player`).
 pub(super) fn match_exerted(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
-    let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::CreatureExerted { object_id } if *object_id == source_id)
+    let GameEvent::CreatureExerted {
+        object_id,
+        player,
+        origin,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if !valid_card_matches(trigger, state, *object_id, source_context) {
+        return false;
+    }
+    match trigger.valid_target {
+        // CR 701.43d + CR 607.2h: the attack-linked "when you do" trigger names
+        // no exerting player (an observer always does), and refers only to the
+        // exert paid as its own optional attack cost, never to one paid as part
+        // of an activated ability's cost on the same permanent.
+        None => *origin == ExertOrigin::AttackCost,
+        // A "whenever you exert" observer reads the saved actor; a legacy event
+        // that never recorded one matches no actor filter.
+        Some(_) => player
+            .is_some_and(|player| valid_player_matches(trigger, state, player, source_context)),
+    }
 }
 
 /// CR 607.2h + CR 702.154b: Enlist's linked "when you do" trigger fires only
