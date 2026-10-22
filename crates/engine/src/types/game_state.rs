@@ -24118,8 +24118,10 @@ declare_game_state! {
     /// are surfaced by `filter_state_for_viewer` ONLY to `private_look_player`,
     /// so the looking player can see the card while deciding a subsequent
     /// "you may reveal that card" optional, without leaking it to opponents.
-    /// Cleared at depth 0 of `resolve_ability_chain` and at action boundaries
-    /// once no optional-effect decision that depends on the peek is pending.
+    /// Cleared at depth 0 of `resolve_ability_chain` and at every action
+    /// boundary except while the pending prompt is an `OptionalEffectChoice` or
+    /// `RevealChoice`, or a parked ability continuation still holds a
+    /// `DigSource::PriorLook` reader (`engine::private_look_outlives_action_boundary`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_look_ids: Vec<ObjectId>,
     /// CR 701.20e: The player to whom `private_look_ids` is visible (the looker).

@@ -7786,6 +7786,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: journal.clone(),
                 exclude: crate::types::ability::SubtypeExclusion::None,
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong {
                 source: journal.clone(),
