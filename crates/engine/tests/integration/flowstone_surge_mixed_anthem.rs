@@ -169,7 +169,7 @@ fn u22_paid_return(runner: &mut GameRunner, source: ObjectId) {
     assert!(runner.state().objects[&source]
         .static_definitions
         .iter_unchecked()
-        .any(|entry| entry.definition.description.as_deref() == Some(U22_RETURN)));
+        .any(|entry| entry.description.as_deref() == Some(U22_RETURN)));
     assert_eq!(
         runner.state().objects[&source].mana_cost,
         complete_publication_cost("{4}{R}{R}")
@@ -2049,7 +2049,7 @@ fn u6_otaria_public_planeswalk_away_back_and_chaos_preserve_command_membership()
         assert!(runner.state().objects[&command_return]
             .static_definitions
             .iter_unchecked()
-            .all(|entry| entry.definition.active_zones.is_empty()));
+            .all(|entry| entry.active_zones.is_empty()));
         assert!(effective_flashback_cost(runner.state(), own).is_none());
         let (otaria, tazeem) = u22_starting_otaria(&mut runner);
         if second_source {

@@ -2134,7 +2134,7 @@ fn g3_gate_on_a_carried_player_who_left_reads_no_one_at_the_event_and_at_resolut
     let died_power = |comparator, n| AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::ZoneChangeAggregate {
-                source: crate::types::ability::ZoneChangeRecordSource::ThisTurn,
+                source: engine::types::ability::ZoneChangeRecordSource::ThisTurn,
                 from: None,
                 to: None,
                 filter: TargetFilter::Typed(creatures()),

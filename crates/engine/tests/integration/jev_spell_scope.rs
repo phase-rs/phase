@@ -2,7 +2,7 @@
 
 use super::jev_token_followup::{assert_created, board, ORDINARY_CONSTRUCTION};
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::{oracle_nom::primitives::parse_mana_cost, parse_oracle_text};
 use engine::types::ability::{Effect, EffectKind, PerpetualModification, ShieldKind};
 use engine::types::actions::GameAction;
@@ -489,7 +489,14 @@ fn choice_of_fortunes_complete_optional_and_persistent_rule() {
         );
         assert_eq!(runner.state().active_player, P1);
         assert_eq!(runner.state().phase, Phase::Cleanup);
-        assert_eq!(cards, runner.state().players[1].hand);
+        assert_eq!(
+            cards,
+            runner.state().players[1]
+                .hand
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        );
         assert_eq!(count, cards.len() - 7);
         assert!(count > 0);
         assert_eq!(
@@ -596,7 +603,14 @@ fn hosted_no_max_ends_on_source_departure_and_tower_keeps_mana() {
                 )
             };
             assert_eq!(count, hand - 7);
-            assert_eq!(cards, runner.state().players[0].hand);
+            assert_eq!(
+                cards,
+                runner.state().players[0]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            );
             runner
                 .act(GameAction::SelectCards {
                     cards: cards[..count].to_vec(),
@@ -678,7 +692,8 @@ fn discover_formula_grants_unsought_hand_and_future_paid_cast() {
         if runner.state().priority_player != P0 {
             runner.act(GameAction::PassPriority).unwrap();
         }
-        runner.state_mut().players[0].mana_pool = spell_pool(1, &[ManaType::Blue]);
+        runner.state_mut().players[0].mana_pool =
+            engine::types::mana::ManaPool::from_units(spell_pool(1, &[ManaType::Blue]));
         // CR 601.2f + CR 118.7a: unsought {2}{U} now costs exactly {1}{U}.
         let committed = runner.cast(existing).commit();
         assert_eq!(committed.state().objects[&existing].zone, Zone::Stack);

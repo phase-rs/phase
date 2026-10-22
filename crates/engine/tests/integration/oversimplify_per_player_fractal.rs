@@ -564,7 +564,9 @@ fn departure_imported_coin_runner_with_population(
     definition.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::FlipCoins {
-            count: QuantityExpr::Fixed { value: flips },
+            flips: engine::types::ability::CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: flips },
+            },
             win_effect: Some(Box::new(reader.clone())),
             lose_effect: Some(Box::new(reader)),
             flipper: TargetFilter::Controller,
@@ -2040,7 +2042,7 @@ fn departure_die_modifier_and_result_table_restore_before_public_ignore() {
                 P0,
                 "Barbarian Class",
                 Zone::Battlefield,
-                load_db().expect(
+                super::support::shared_card_db().expect(
                     "pinned card data is required for the public class replacement fixture",
                 ),
             );
@@ -2302,7 +2304,8 @@ fn departure_retained_family_runner(
                     P0,
                     "Barbarian Class",
                     Zone::Battlefield,
-                    load_db().expect("pinned class replacement card is required"),
+                    super::support::shared_card_db()
+                        .expect("pinned class replacement card is required"),
                 );
                 let Effect::GainLife { amount, .. } = *departure_gain_definition(7, P0).effect
                 else {
@@ -2580,7 +2583,8 @@ fn departure_retained_family_runner(
                     P0,
                     "Krark's Thumb",
                     Zone::Battlefield,
-                    load_db().expect("pinned real replacement card is required"),
+                    super::support::shared_card_db()
+                        .expect("pinned real replacement card is required"),
                 );
                 let effect = if matches!(family, DepartureRetainedFamily::CoinSingle) {
                     Effect::FlipCoins {
@@ -2961,7 +2965,7 @@ fn departure_retained_public_action(state: &GameState) -> engine::types::actions
             assert_eq!((*min_targets, *max_targets), (1, 1));
             assert_eq!(legal_targets.len(), 2);
             GameAction::SelectTargets {
-                targets: vec![legal_targets[1]],
+                targets: vec![engine::types::ability::TargetRef::Object(legal_targets[1])],
             }
         }
         WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
@@ -3523,9 +3527,6 @@ fn departure_assert_retained_hostile_reads(
 
 #[test]
 fn departure_retained_branch_vote_die_explore_clash_reject_foreign_before_public_mutation() {
-    use engine::game::scenario::GameRunner;
-    use engine::types::ability::ReturnResultId;
-    use engine::types::game_state::{InstructionResult, RevealedInstructionResult, WaitingFor};
     for family in [
         DepartureRetainedFamily::Branch,
         DepartureRetainedFamily::Vote,
@@ -3853,7 +3854,7 @@ fn departure_scoped_search_preparation_selection_and_custom_wire_keep_the_actual
                 runner.state().return_result_frames[&occurrence].process,
                 pending.ability.return_result_process
             );
-            assert!(runner.state().active_library_searches.len() >= 1);
+            assert!(!runner.state().active_library_searches.is_empty());
             assert!(
                 runner.state().players.iter().all(|p| p.hand.is_empty()),
                 "announced choices do not deliver an earlier player's card"
@@ -3875,7 +3876,14 @@ fn departure_scoped_search_preparation_selection_and_custom_wire_keep_the_actual
         }
         for (player, card) in selected {
             assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
-            assert_eq!(runner.state().players[player.0 as usize].hand, vec![card]);
+            assert_eq!(
+                runner.state().players[player.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![card]
+            );
         }
         assert!(runner.state().pending_scoped_library_search.is_none());
         assert!(runner.state().active_library_searches.is_empty());
@@ -4242,8 +4250,7 @@ fn oversimplify_result_publishes_once_after_complete_replacement_pauses_and_igno
 fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remaining_members() {
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, ReturnResultId,
-        TargetFilter, TargetRef, TypedFilter,
+        Effect, QuantityExpr, QuantityRef, ReturnResultId, TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::{InstructionResult, WaitingFor};
@@ -4678,7 +4685,12 @@ fn departure_assert_entry_member_hostile(
         assert_eq!(serde_json::to_value(reached.state()).unwrap(), before, "invalid member work cannot attach an Aura, deliver another member, or alter counters/events/selection");
     }
     for viewer in [None, Some(PlayerId(0)), Some(PlayerId(1))] {
-        let projected = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        let projected = match viewer {
+            Some(player) => {
+                engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+            }
+            None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+        };
         assert!(projected.return_result_frames.is_empty());
         assert!(projected.resolution_stack.is_empty());
         assert!(!serde_json::to_string(&projected)
@@ -4943,8 +4955,13 @@ fn departure_latched_discard_and_sacrifice_keep_the_narrow_tail_owner_until_the_
         let pending = runner
             .state()
             .resolution_stack
-            .ability_continuations()
-            .next()
+            .iter()
+            .find_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) => {
+                    Some(&frame.pending)
+                }
+                _ => None,
+            })
             .unwrap();
         let occurrence = pending.return_result_occurrence.unwrap();
         assert_eq!(
@@ -5275,7 +5292,10 @@ fn departure_optional_multi_target_public_filter_and_selected_body_keep_their_ac
         let before = serde_json::to_value(runner.state()).unwrap();
         assert!(runner
             .act(GameAction::SelectTargets {
-                targets: vec![subjects[1], subjects[1]]
+                targets: vec![
+                    engine::types::ability::TargetRef::Object(subjects[1]),
+                    engine::types::ability::TargetRef::Object(subjects[1])
+                ]
             })
             .is_err());
         assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
@@ -5284,7 +5304,7 @@ fn departure_optional_multi_target_public_filter_and_selected_body_keep_their_ac
             .expect("the actual optional-resolution target owner survives reload");
         runner
             .act(GameAction::SelectTargets {
-                targets: vec![subjects[1]],
+                targets: vec![engine::types::ability::TargetRef::Object(subjects[1])],
             })
             .unwrap();
         assert!(!runner.state().objects[&subjects[0]].tapped);
@@ -5546,8 +5566,12 @@ fn departure_category_counter_public_members_use_saved_process_without_an_outer_
                 runner
                     .state()
                     .resolution_stack
-                    .ability_continuations()
-                    .next()
+                    .iter()
+                    .find_map(|frame| match frame {
+                        engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) =>
+                            Some(&frame.pending),
+                        _ => None,
+                    })
                     .is_none(),
                 "the final category itself owns the future unresolved counter read"
             );
@@ -8027,8 +8051,12 @@ fn departure_token_host_public_resume_reads_the_actual_bound_counter_after_nonde
         assert!(runner
             .state()
             .resolution_stack
-            .ability_continuations()
-            .next()
+            .iter()
+            .find_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) =>
+                    Some(&frame.pending),
+                _ => None,
+            })
             .is_none());
         for fault in 0..6 {
             let mut hostile = runner.state().clone();
@@ -9170,16 +9198,20 @@ fn departure_redirected_member_records_its_actual_arrival_without_joining_the_pr
         |state, victims| {
             let redirect = state
                 .objects
-                .values_mut()
+                .values()
                 .find(|object| object.name == "Supplemental departure redirect")
-                .unwrap();
+                .unwrap()
+                .id;
+            let redirect = state.objects.get_mut(&redirect).unwrap();
             redirect.replacement_definitions[0].valid_card =
                 Some(TargetFilter::SpecificObject { id: victims[0] });
             let pause = state
                 .objects
-                .values_mut()
+                .values()
                 .find(|object| object.name == "Supplemental departure pause")
-                .unwrap();
+                .unwrap()
+                .id;
+            let pause = state.objects.get_mut(&pause).unwrap();
             pause.replacement_definitions[0].valid_card =
                 Some(TargetFilter::SpecificObject { id: victims[1] });
         },
@@ -9573,7 +9605,7 @@ fn departure_saved_inner_local_pause_cannot_import_the_outer_result_even_when_bo
 #[test]
 fn oversimplify_two_paid_same_name_sources_exclude_prior_departures_and_retired_first_process() {
     use engine::game::scenario::{GameScenario, P0, P1};
-    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     let mut scenario = GameScenario::new();
@@ -9755,7 +9787,7 @@ fn departure_repeated_local_three_owns_each_inner_thumb_pause_and_rejects_saved_
                 P0,
                 "Krark's Thumb",
                 Zone::Battlefield,
-                load_db().expect("pinned complete Thumb is required"),
+                super::support::shared_card_db().expect("pinned complete Thumb is required"),
             );
             let mut local = departure_selected_local_body(false, false);
             let producer = local.sub_ability.as_deref_mut().unwrap();
@@ -10247,8 +10279,11 @@ fn departure_five_hidden_predicates_are_the_only_read_and_category_retains_publi
                                 runner
                                     .state()
                                     .resolution_stack
-                                    .ability_continuations()
-                                    .next()
+                                    .iter()
+                                    .find_map(|frame| match frame {
+                                        engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+                                        _ => None,
+                                    })
                                     .is_none(),
                                 "category has no outer executable tail"
                             );
@@ -10711,7 +10746,13 @@ fn departure_next_matches_filter_survives_actual_replacement_delivery_and_reload
         let continuation = runner
             .state()
             .resolution_stack
-            .ability_continuations()
+            .iter()
+            .filter_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) => {
+                    Some(&frame.pending)
+                }
+                _ => None,
+            })
             .find(|pending| {
                 matches!(
                     pending.chain.effect,
@@ -11851,7 +11892,7 @@ fn departure_five_contextual_source_only_thresholds_refuse_before_the_complete_r
                     let mut scenario = GameScenario::new();
                     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
                     let retained = scenario
-                        .add_artifact(P0, "Supplemental player predicate witness")
+                        .add_artifact_from_oracle(P0, "Supplemental player predicate witness", "")
                         .id();
                     let victims = if empty {
                         vec![]
@@ -12077,7 +12118,7 @@ fn departure_bound_player_attribute_filters_and_player_counts_still_read_the_act
             let (runner, spell, subjects) =
                 departure_public_program_runner(false, empty, 2, |scenario| {
                     let retained = scenario
-                        .add_artifact(P0, "Supplemental bound player threshold")
+                        .add_artifact_from_oracle(P0, "Supplemental bound player threshold", "")
                         .with_mana_cost(ManaCost::generic(1))
                         .id();
                     let Effect::GainLife { amount, .. } = *departure_gain_definition(7, P0).effect
@@ -12153,7 +12194,7 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
                 ]
             };
             let runtime_source = scenario
-                .add_artifact(P0, "Supplemental independent runtime source")
+                .add_artifact_from_oracle(P0, "Supplemental independent runtime source", "")
                 .id();
             let body = if imported {
                 departure_gain_definition(7, P0)
@@ -12315,7 +12356,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
             let (mut runner, spell, subjects) =
                 departure_public_program_runner(false, false, 2, |scenario| {
                     let recipient = scenario
-                        .add_artifact(P0, "Supplemental continuous recipient")
+                        .add_artifact_from_oracle(P0, "Supplemental continuous recipient", "")
                         .id();
                     let definition = departure_retained_epic_definition(mode);
                     let modification = match arm {
@@ -12479,7 +12520,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
                 (
                     AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
                     vec![scenario
-                        .add_artifact(P0, "Supplemental retained public object")
+                        .add_artifact_from_oracle(P0, "Supplemental retained public object", "")
                         .id()],
                 )
             });
@@ -12843,7 +12884,7 @@ fn departure_stateless_spell_history_thresholds_refuse_before_production_and_kee
                     });
                     trigger.valid_card = Some(TargetFilter::Typed(current));
                     scenario
-                        .add_artifact(P0, "Supplemental history trigger")
+                        .add_artifact_from_oracle(P0, "Supplemental history trigger", "")
                         .with_trigger_definition(trigger);
                 }
                 scenario.with_mana_pool(
@@ -12922,7 +12963,7 @@ fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_
             scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
         ];
         let recipient = scenario
-            .add_artifact(P0, "Supplemental perpetual recipient")
+            .add_artifact_from_oracle(P0, "Supplemental perpetual recipient", "")
             .id();
         let mut body = if imported {
             departure_gain_definition(7, P0)
@@ -13182,7 +13223,7 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
     let mut scenario = GameScenario::new();
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let public_source = scenario
-        .add_artifact(P0, "Supplemental public record source")
+        .add_artifact_from_oracle(P0, "Supplemental public record source", "")
         .with_keyword(keyword.clone())
         .id();
     let spell = scenario
@@ -13566,7 +13607,7 @@ fn departure_opaque_payloads(
             if ensure {
                 replacement.ensure_token_specs = Some(vec![spec]);
             } else {
-                replacement.additional_token_spec = Some(spec);
+                replacement.additional_token_spec = Some(Box::new(spec));
             }
             effects.push(Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
@@ -13637,7 +13678,9 @@ fn departure_opaque_installed_payloads_refuse_before_any_producer_and_preserve_i
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
     for mode in 0..5 {
         let mut fixture = GameScenario::new();
-        let face_source = fixture.add_artifact(P0, "Supplemental face source").id();
+        let face_source = fixture
+            .add_artifact_from_oracle(P0, "Supplemental face source", "")
+            .id();
         let fixture = fixture.build();
         let face = engine::game::printed_cards::snapshot_object_face(
             &fixture.state().objects[&face_source],
@@ -13747,7 +13790,7 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                 if ensure {
                     replacement.ensure_token_specs = Some(vec![spec]);
                 } else {
-                    replacement.additional_token_spec = Some(spec);
+                    replacement.additional_token_spec = Some(Box::new(spec));
                 }
                 let token = scenario
                     .add_spell_to_hand(P0, "Supplemental real token event", false)
@@ -13917,7 +13960,9 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
     use engine::types::keywords::Keyword;
     use std::sync::Arc;
     let mut fixture = engine::game::scenario::GameScenario::new();
-    let face_source = fixture.add_artifact(P0, "Supplemental prepare source").id();
+    let face_source = fixture
+        .add_artifact_from_oracle(P0, "Supplemental prepare source", "")
+        .id();
     let fixture = fixture.build();
     let mut face =
         engine::game::printed_cards::snapshot_object_face(&fixture.state().objects[&face_source]);
@@ -13927,7 +13972,7 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
     let (mut runner, spell, subjects) =
         departure_public_program_runner(false, false, 2, |scenario| {
             let recipient = scenario
-                .add_artifact(P0, "Supplemental layered recipient")
+                .add_artifact_from_oracle(P0, "Supplemental layered recipient", "")
                 .id();
             // Typed face setup; real resolution installs both leaves before layers apply the copy.
             let mut values = departure_retained_epic_values(0);
@@ -14075,7 +14120,7 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
                         ))
                         .id();
                     let host = scenario
-                        .add_artifact(P0, "Supplemental ReturnTo stamper")
+                        .add_artifact_from_oracle(P0, "Supplemental ReturnTo stamper", "")
                         .with_trigger_definition(
                             TriggerDefinition::new(TriggerMode::SpellCast)
                                 .valid_card(TargetFilter::SpecificObject { id: marker })
@@ -14265,7 +14310,7 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
         .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
         .id();
     let watcher = scenario
-        .add_artifact(P0, "Supplemental pending cast watcher")
+        .add_artifact_from_oracle(P0, "Supplemental pending cast watcher", "")
         .with_trigger_definition(
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SpecificObject { id: spell })
@@ -14273,7 +14318,7 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
         )
         .id();
     scenario
-        .add_artifact(P1, "Supplemental counter on cast")
+        .add_artifact_from_oracle(P1, "Supplemental counter on cast", "")
         .with_trigger_definition(
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SpecificObject { id: spell })
@@ -14381,7 +14426,7 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
     let mut scenario = GameScenario::new();
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let maker = scenario
-        .add_artifact(P0, "Supplemental copy maker")
+        .add_artifact_from_oracle(P0, "Supplemental copy maker", "")
         .with_ability(Effect::CopyTokenOf {
             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
             owner: TargetFilter::Controller,

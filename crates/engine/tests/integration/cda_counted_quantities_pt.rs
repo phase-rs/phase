@@ -2535,7 +2535,7 @@ fn cda_source_epoch_preserves_full_paid_suspend_cost_successor() {
                     let card_id = twin.state().objects[&decoy].card_id;
                     twin.state_mut()
                         .stack
-                        .push(engine::types::game_state::StackEntry {
+                        .push_back(engine::types::game_state::StackEntry {
                             id: decoy,
                             source_id: decoy,
                             controller: P0,
@@ -3048,7 +3048,7 @@ fn cda_source_epoch_preserves_full_printed_and_granted_plot() {
                         let card_id = twin.state().objects[&land_a].card_id;
                         twin.state_mut()
                             .stack
-                            .push(engine::types::game_state::StackEntry {
+                            .push_back(engine::types::game_state::StackEntry {
                                 id: land_a,
                                 source_id: land_a,
                                 controller: P0,
@@ -3368,9 +3368,10 @@ fn cda_selected_cost_and_automatic_self_cost_preserve_both_slots_across_reload()
             .add_creature_to_graveyard(P0, "Nondefault selected", 9, 9)
             .with_mana_cost(ManaCost::generic(9))
             .id();
+        let mut runner = scenario.build();
         if paused {
-            scenario
-                .state
+            runner
+                .state_mut()
                 .objects
                 .get_mut(&source)
                 .unwrap()
@@ -3390,17 +3391,17 @@ fn cda_selected_cost_and_automatic_self_cost_preserve_both_slots_across_reload()
                             ))),
                         }),
                 );
-            let replacements = scenario.state.objects[&source]
+            let replacements = runner.state().objects[&source]
                 .replacement_definitions
-                .clone();
-            scenario
-                .state
+                .as_slice()
+                .to_vec();
+            runner
+                .state_mut()
                 .objects
                 .get_mut(&source)
                 .unwrap()
                 .base_replacement_definitions = std::sync::Arc::new(replacements);
         }
-        let mut runner = scenario.build();
         engine::game::layers::flush_layers(runner.state_mut());
         cda_pt(runner.state(), source, 4);
         let original = runner.state().objects[&source].incarnation;
@@ -3657,7 +3658,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         cda_full_source(runner.state(), donor);
         let donor_trigger = runner.state().objects[&donor]
             .trigger_definitions
-            .iter_all()
+            .iter_unchecked()
             .next()
             .expect("full first printed ability")
             .definition
@@ -3731,7 +3732,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
                     let card_id = twin.state().objects[&decoy].card_id;
                     twin.state_mut()
                         .stack
-                        .push(engine::types::game_state::StackEntry {
+                        .push_back(engine::types::game_state::StackEntry {
                             id: decoy,
                             source_id: decoy,
                             controller: P0,
@@ -3902,7 +3903,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         assert!(runner.state().objects[&decoy].counters.is_empty());
         assert!(runner.state().objects[&decoy]
             .trigger_definitions
-            .iter_all()
+            .iter_unchecked()
             .next()
             .is_none());
         assert!(
@@ -3911,7 +3912,7 @@ fn cda_full_symbiote_find_new_host_preserves_cost_moved_card_donor() {
         );
         let gained: Vec<_> = runner.state().objects[&recipient]
             .trigger_definitions
-            .iter_all()
+            .iter_unchecked()
             .map(|entry| entry.definition.clone())
             .collect();
         assert_eq!(gained, if stale { vec![] } else { vec![donor_trigger] });

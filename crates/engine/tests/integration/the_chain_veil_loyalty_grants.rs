@@ -172,6 +172,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         reads_chosen_group: None,
         declares_return_result: None,
         reads_return_result: None,
+        return_result_process: None,
         kind: AbilityKind::Activated,
         sub_ability: None,
         else_ability: None,
