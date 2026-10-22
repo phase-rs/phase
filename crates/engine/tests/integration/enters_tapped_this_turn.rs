@@ -449,12 +449,29 @@ fn u5_full_sources_paid_entries_and_actual_own_untap() {
             };
             let ordinary =
                 scenario.add_real_card(player, "Llanowar Elves", Zone::Battlefield, u5_database());
+            let foreign_player = if player == P0 { P1 } else { P0 };
             let foreign = scenario.add_real_card(
-                if player == P0 { P1 } else { P0 },
+                foreign_player,
                 "Grizzly Bears",
                 Zone::Battlefield,
                 u5_database(),
             );
+            let foreign_entrant =
+                scenario.add_real_card(foreign_player, "Grizzly Bears", Zone::Hand, u5_database());
+            let foreign_mana_sources = [
+                scenario.add_real_card(
+                    foreign_player,
+                    "Llanowar Elves",
+                    Zone::Battlefield,
+                    u5_database(),
+                ),
+                scenario.add_real_card(
+                    foreign_player,
+                    "Llanowar Elves",
+                    Zone::Battlefield,
+                    u5_database(),
+                ),
+            ];
             u5_fund(&mut scenario, player, &mana);
             let mut runner = scenario.build();
             // Initial player/phase setup precedes every public action.
@@ -486,6 +503,53 @@ fn u5_full_sources_paid_entries_and_actual_own_untap() {
             runner.advance_to_upkeep();
             assert_ne!(runner.state().active_player, player);
             assert!(runner.state().objects[&source].tapped);
+            // CR 302.1: the foreign creature is cast in its controller's own
+            // main phase, after the tested source has entered and is functioning.
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_eq!(runner.state().active_player, foreign_player);
+            assert_eq!(runner.state().phase, Phase::PreCombatMain);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { player: actor } if actor == foreign_player)
+            );
+            u5_complete(&runner);
+            for mana_source in foreign_mana_sources {
+                runner.activate(mana_source, 0).resolve();
+            }
+            let foreign_hand_epoch = runner.state().objects[&foreign_entrant].incarnation;
+            let foreign_cast = runner.cast(foreign_entrant).commit();
+            assert_eq!(
+                foreign_cast.state().objects[&foreign_entrant].zone,
+                Zone::Stack
+            );
+            assert_eq!(foreign_cast.state().stack.len(), 1);
+            assert_eq!(foreign_cast.state().stack[0].source_id, foreign_entrant);
+            assert!(foreign_cast.state().players[foreign_player.0 as usize]
+                .mana_pool
+                .is_empty());
+            foreign_cast.resolve();
+            assert_eq!(
+                runner.state().objects[&foreign_entrant].zone,
+                Zone::Battlefield
+            );
+            assert!(runner.state().objects[&foreign_entrant].incarnation > foreign_hand_epoch);
+            assert_eq!(
+                runner.state().objects[&foreign_entrant].owner,
+                foreign_player
+            );
+            assert_eq!(
+                runner.state().objects[&foreign_entrant].controller,
+                foreign_player
+            );
+            // CR 614.12: each self-entry replacement affects only its source;
+            // the unrelated entrant stays untapped beside that tapped source.
+            assert!(
+                !runner.state().objects[&foreign_entrant].tapped,
+                "{name}: foreign paid entry"
+            );
+            assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&source].incarnation, entered_epoch);
+            assert!(runner.state().objects[&source].tapped);
+            u5_complete(&runner);
             runner.advance_to_combat();
             runner.declare_attackers(&[]).unwrap();
             runner.advance_to_end_step();
