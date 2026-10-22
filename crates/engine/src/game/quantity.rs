@@ -2099,6 +2099,16 @@ fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
     }
 }
 
+/// The explicit object scope, if any, from the exhaustive reference classifier.
+pub(crate) fn quantity_ref_object_scope(qty: &QuantityRef) -> Option<ObjectScope> {
+    match quantity_ref_object_scope_read(qty) {
+        ObjectScopeRead::ObjectInformation(scope) | ObjectScopeRead::CounterCount(scope) => {
+            Some(scope)
+        }
+        ObjectScopeRead::Unscoped => None,
+    }
+}
+
 /// CR 608.2h + CR 608.2k + CR 608.2c: True when the QuantityExpr reads an object
 /// characteristic through a scope whose referent only exists during the resolving
 /// ability's resolution — the triggering/cost/instruction-order object

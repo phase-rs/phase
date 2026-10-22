@@ -1,13 +1,14 @@
 use crate::game::quantity::{
-    quantity_ref_recipient_read, resolve_quantity_with_targets, RecipientRead,
+    quantity_ref_object_scope, quantity_ref_recipient_read, resolve_quantity_with_targets,
+    RecipientRead,
 };
 use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
     AbilityDefinition, CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Duration,
-    Effect, EffectError, EffectKind, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
-    TargetRef,
+    Effect, EffectError, EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+    SourceExclusion, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -518,11 +519,13 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         },
         QuantityRef::PlayerCount { filter } => match filter {
             // The threshold preserves ctx.entering, unlike object filter thresholds.
-            // The threshold is deferred as a whole: its `ScopedPlayer` leaves rebind
-            // per candidate player, so a leaf-level rewrite is not safe here. A
-            // resolution-only leaf (an event-scoped read) inside a threshold that
-            // also holds an entering-object read is therefore unsupported; no
-            // corpus rider has that shape.
+            // Keep the census live when its threshold needs the entrant. The
+            // freezer still snapshots non-Recipient ObjectScope leaves within
+            // that threshold; they are independent of its candidate binding.
+            // All other threshold leaves stay live conservatively, including
+            // ScopedPlayer reads and filters with ScopedPlayer controllers.
+            // Resolution-only reads without an ObjectScope remain unsupported
+            // inside a deferred threshold.
             PlayerFilter::PlayerAttribute { value, .. } => {
                 value.any_ref(&mut entry_counter_reference_is_deferred)
             }
@@ -647,34 +650,47 @@ fn freeze_entry_counter_expression(
     expr: &mut QuantityExpr,
     state: &GameState,
     ability: &ResolvedAbility,
+    freeze_reference: fn(&QuantityRef) -> bool,
 ) {
     match expr {
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::Ref { qty } => {
-            if !entry_counter_reference_is_deferred(qty) {
+            if freeze_reference(qty) {
                 *expr = QuantityExpr::Fixed {
                     value: resolve_quantity_with_targets(state, expr, ability),
                 };
+            } else if let QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute { value, .. },
+            } = qty
+            {
+                // CR 608.2h + CR 614.1c: preserve entry/candidate bindings while
+                // fixing ability-bound object reads before trigger context clears.
+                freeze_entry_counter_expression(value, state, ability, |reference| {
+                    quantity_ref_object_scope(reference)
+                        .is_some_and(|scope| scope != ObjectScope::Recipient)
+                });
             }
         }
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => {
-            freeze_entry_counter_expression(inner, state, ability);
+            freeze_entry_counter_expression(inner, state, ability, freeze_reference);
         }
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for expr in exprs {
-                freeze_entry_counter_expression(expr, state, ability);
+                freeze_entry_counter_expression(expr, state, ability, freeze_reference);
             }
         }
-        QuantityExpr::UpTo { max } => freeze_entry_counter_expression(max, state, ability),
+        QuantityExpr::UpTo { max } => {
+            freeze_entry_counter_expression(max, state, ability, freeze_reference);
+        }
         QuantityExpr::Power { exponent, .. } => {
-            freeze_entry_counter_expression(exponent, state, ability);
+            freeze_entry_counter_expression(exponent, state, ability, freeze_reference);
         }
         QuantityExpr::Difference { left, right } => {
-            freeze_entry_counter_expression(left, state, ability);
-            freeze_entry_counter_expression(right, state, ability);
+            freeze_entry_counter_expression(left, state, ability, freeze_reference);
+            freeze_entry_counter_expression(right, state, ability, freeze_reference);
         }
     }
 }
@@ -701,7 +717,9 @@ fn freeze_entry_counter_quantities(
             break;
         }
         if let Effect::PutCounter { count, .. } = execute.effect.as_mut() {
-            freeze_entry_counter_expression(count, state, ability);
+            freeze_entry_counter_expression(count, state, ability, |qty| {
+                !entry_counter_reference_is_deferred(qty)
+            });
         }
         current = execute.sub_ability.as_deref_mut();
     }

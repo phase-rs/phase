@@ -3,7 +3,7 @@
 //! CR 611.2d + CR 608.2h: resolution-owned quantities are determined once.
 //! CR 614.1c: entering-object quantities remain entry replacement work.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric, ChoiceType,
     Comparator, ControllerRef, Effect, EffectScope, ObjectScope, PlayerFilter, PlayerRelation,
@@ -254,6 +254,83 @@ fn nested_player_threshold_keeps_entering_object_mana_value_live() {
     // at install would use source MV1 + 12 = 13 and count neither player, so the
     // positive count of 2 also proves the player census itself was evaluated.
     finish(&mut runner, spell, 2);
+}
+
+#[test]
+fn nested_player_threshold_freezes_event_mana_value_before_context_clears() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::LE,
+                value: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Sum {
+                        exprs: vec![
+                            quantity(QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Recipient,
+                            }),
+                            quantity(QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::EventSource,
+                            }),
+                        ],
+                    }),
+                    offset: 4,
+                }),
+            },
+        })),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    // install asserts the trigger context is cleared before the entrant resolves.
+    install(&mut runner, spell);
+    // CR 608.2h + CR 614.1c: entrant MV8 + snapshotted event MV8 + 4 = 20.
+    // Both players at 20 life qualify; a late event read gives 12 and counts none.
+    finish(&mut runner, spell, 2);
+}
+
+#[test]
+fn nested_player_threshold_rebinds_scoped_hand_size_per_candidate() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::LE,
+                value: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Sum {
+                        exprs: vec![
+                            quantity(QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Recipient,
+                            }),
+                            quantity(QuantityRef::HandSize {
+                                player: PlayerScope::ScopedPlayer,
+                            }),
+                        ],
+                    }),
+                    offset: 11,
+                }),
+            },
+        })),
+    );
+    scenario.add_creature_to_hand(P1, "Candidate hand card", 1, 1);
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 608.2h + CR 614.1c: after casting, P0 has no cards and P1 has one.
+    // Their candidate-relative thresholds are MV8 + 0 + 11 = 19 and
+    // MV8 + 1 + 11 = 20. Only P1 qualifies; freezing HandSize would count none.
+    finish(&mut runner, spell, 1);
 }
 
 #[test]
