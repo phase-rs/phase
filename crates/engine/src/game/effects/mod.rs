@@ -14266,19 +14266,36 @@ pub(crate) struct UpfrontOptionalGate {
 }
 
 /// CR 118.12 + CR 608.2d: enumerate the payable immediate branches of an
-/// optional root `PayCost(OneOf)` without renumbering them. The chooser is only
-/// an adapter; affordability and execution remain owned by `game::costs`.
+/// optional root `PayCost` without renumbering them. A singleton fixed typed
+/// sacrifice borrows index zero; genuine alternatives keep their ordered slice.
+/// The chooser is an adapter; affordability and execution remain owned by
+/// `game::costs`.
 pub(crate) fn resolution_optional_payment_options(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<(PlayerId, Vec<ResolutionOptionalPaymentOption>)> {
     let Effect::PayCost {
-        cost: AbilityCost::OneOf { costs },
+        cost,
         scale: None,
         payer,
     } = &ability.effect
     else {
         return None;
+    };
+    let costs = match cost {
+        AbilityCost::OneOf { costs } => costs.as_slice(),
+        AbilityCost::Sacrifice(sacrifice)
+            if matches!(&sacrifice.target, TargetFilter::Typed(typed)
+                if typed.type_filters.iter().any(|kind| !matches!(kind,
+                    crate::types::ability::TypeFilter::Any | crate::types::ability::TypeFilter::Card)))
+                && sacrifice
+                    .requirement
+                    .fixed_count()
+                    .is_some_and(|count| count > 0 && count != u32::MAX) =>
+        {
+            std::slice::from_ref(cost)
+        }
+        _ => return None,
     };
     let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer)?;
     let scope = crate::game::costs::PaymentScope::Resolution {

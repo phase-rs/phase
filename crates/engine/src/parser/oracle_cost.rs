@@ -872,24 +872,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
         // of activating or casting, so preserve it as a variable cost marker.
-        let (use_count, filter_text) = if let Some(((), rest_after_x)) =
-            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
-        {
-            (u32::MAX, rest_after_x.trim().to_string())
-        } else if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
-            if count > 1 {
-                // Parsed a count > 1 — use it and strip the count from the filter text
-                (count, rest_after_count.trim().to_string())
-            } else {
-                // Count was 1 — treat as single sacrifice with article stripping
-                let stripped = strip_article(rest, &rest_lower);
-                (1, stripped.to_string())
-            }
-        } else {
-            // No number found — strip article
-            let stripped = strip_article(rest, &rest_lower);
-            (1, stripped.to_string())
-        };
+        let (use_count, _, filter_text) = parse_sacrifice_count_population(rest);
         // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
         // conjunct leads with a determiner — "Sacrifice another creature or an
         // artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
@@ -1867,14 +1850,17 @@ fn strip_article<'a>(text: &'a str, lower: &str) -> &'a str {
 /// recovered without the prefix (article stripping, numeric count paths, etc.).
 fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> TargetFilter {
     let lower = phrase.trim().to_lowercase();
-    let has_another_prefix = nom_on_lower(&lower, &lower, |i| {
-        value((), alt((tag("another "), tag("other ")))).parse(i)
-    })
-    .is_some();
-    if !has_another_prefix {
+    if nom_on_lower(&lower, &lower, parse_sacrifice_population_exclusion).is_none() {
         return filter;
     }
     distribute_shared_properties(filter, &[FilterProp::Another])
+}
+
+fn parse_sacrifice_population_exclusion(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, Option<u32>> {
+    // Both exclude the source; only the singular determiner proves count one.
+    alt((value(Some(1), tag("another ")), value(None, tag("other ")))).parse(input)
 }
 
 /// CR 601.2h + CR 602.2b: Build the object filter for a sacrifice cost from its
@@ -1909,6 +1895,76 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
 /// safe default: `AbilityCost::Unimplemented` is not inert on every cost
 /// channel, and the corpus proves it.
 fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
+    let (filter, tail) = parse_sacrifice_cost_population(filter_text)?;
+    (!sacrifice_filter_lost_a_restriction(&filter, &tail)).then_some(filter)
+}
+
+/// Keep the legacy count/article interpretation and the printed count together.
+/// The strict resolution entry can reject zero without changing old callers.
+fn parse_sacrifice_count_population(rest: &str) -> (u32, Option<(u32, String)>, String) {
+    let lower = rest.to_lowercase();
+    if let Some(((), tail)) = nom_on_lower(rest, &lower, |i| value((), tag("x ")).parse(i)) {
+        return (
+            u32::MAX,
+            Some((u32::MAX, tail.trim().to_owned())),
+            tail.trim().to_owned(),
+        );
+    }
+    let printed = parse_number(&lower);
+    if let Some((count, tail)) = printed {
+        if count > 1 {
+            return (
+                count,
+                Some((count, tail.trim().to_owned())),
+                tail.trim().to_owned(),
+            );
+        }
+    }
+    let population = strip_article(rest, &lower).to_owned();
+    let explicit = printed
+        .map(|(count, tail)| (count, tail.trim().to_owned()))
+        .or_else(|| {
+            nom_on_lower(rest, &lower, parse_sacrifice_population_exclusion)
+                .and_then(|(count, _)| count)
+                .map(|count| (count, population.clone()))
+        });
+    (1, explicit, population)
+}
+
+/// CR 118.3 + CR 118.12: a singleton resolution cost owns its whole source.
+/// Legacy activation/additional-cost exemptions remain in their wrapper above.
+pub(crate) fn parse_complete_fixed_typed_sacrifice(text: &str) -> Option<Result<AbilityCost, ()>> {
+    let lower = text.to_lowercase();
+    let (_, rest) = nom_on_lower(text, &lower, |i| value((), tag("sacrifice ")).parse(i))?;
+    let prove = || {
+        let (_, printed, _) = parse_sacrifice_count_population(rest.trim());
+        let (count, population) = printed?;
+        if count == 0 || count == u32::MAX {
+            return None;
+        }
+        let (target, tail) = parse_sacrifice_cost_population(&population)?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        let TargetFilter::Typed(typed) = &target else {
+            return None;
+        };
+        if !typed.type_filters.iter().any(|kind| {
+            !matches!(
+                kind,
+                crate::types::ability::TypeFilter::Any | crate::types::ability::TypeFilter::Card
+            )
+        }) {
+            return None;
+        }
+        Some(AbilityCost::Sacrifice(SacrificeCost::count(target, count)))
+    };
+    Some(prove().ok_or(()))
+}
+
+/// One authority for the population, union and attachment rider, retaining any
+/// unowned source for the caller's distinct completion contract.
+fn parse_sacrifice_cost_population(filter_text: &str) -> Option<(TargetFilter, String)> {
     let phrase = format!("target {filter_text}");
     let (base, rest) = parse_target(&phrase);
     // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
@@ -1933,14 +1989,17 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
     // `Or` only when it fires — every decline path returns `(base, rest)`
     // untouched — so this predicate separates the two exactly.
     if base_was_typed && matches!(folded, TargetFilter::Or { .. }) {
-        return folded_rest.trim().is_empty().then_some(folded);
+        return folded_rest
+            .trim()
+            .is_empty()
+            .then(|| (folded, String::new()));
     }
 
     // The fold DECLINED, so the base filter stands and `rest` is whatever the
     // shared grammar left. Consume the riders this cost channel understands, then
     // decline only if what remains is a genuine lost restriction.
     let (filter, tail) = fold_attached_to_source_rider(unfolded, rest);
-    (!sacrifice_filter_lost_a_restriction(&filter, tail)).then_some(filter)
+    Some((filter, tail.to_owned()))
 }
 
 /// Did the sacrifice-cost noun phrase leave behind text that is a LOST FILTER
@@ -2426,6 +2485,85 @@ mod tests {
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
+
+    #[test]
+    fn complete_resolution_sacrifice_requires_a_positive_owned_typed_population() {
+        for (source, count) in [
+            ("Sacrifice an Island", 1),
+            ("Sacrifice one Island", 1),
+            ("Sacrifice 1 Island", 1),
+            ("Sacrifice two Islands", 2),
+            ("Sacrifice three artifact tokens", 3),
+            ("Sacrifice another creature", 1),
+            ("Sacrifice one other creature", 1),
+            ("Sacrifice two blue creatures you control", 2),
+            ("Sacrifice an Aura attached to ~", 1),
+        ] {
+            let cost = parse_complete_fixed_typed_sacrifice(source)
+                .unwrap()
+                .unwrap();
+            let AbilityCost::Sacrifice(cost) = cost else {
+                panic!("{source}")
+            };
+            assert_eq!(cost.requirement.fixed_count(), Some(count));
+            assert!(
+                matches!(cost.target, TargetFilter::Typed(ref typed) if !typed.type_filters.is_empty())
+            );
+        }
+        for source in [
+            "Sacrifice zero Islands",
+            "Sacrifice 0 Islands",
+            "Sacrifice X Islands",
+            "Sacrifice any number of Islands",
+            "Sacrifice 4294967295 Islands",
+            "Sacrifice one or more artifacts",
+            "Sacrifice up to three permanents",
+            "Sacrifice half the lands you control, rounded up",
+            "Sacrifice all permanents",
+            "Sacrifice Islands",
+            "Sacrifice other creatures",
+            "Sacrifice ~",
+            "Sacrifice this creature",
+            "Sacrifice a card",
+            "Sacrifice a player",
+            "Sacrifice another",
+            "Sacrifice an unknown noun",
+            "Sacrifice ",
+            "Sacrifice two Islands if you control a creature",
+            "Sacrifice two Islands unless you control a creature",
+            "Sacrifice two Islands, draw a card",
+            "Sacrifice two Islands and draw a card",
+            "Sacrifice two Islands. Draw a card",
+            "Sacrifice two Islands otherwise draw a card",
+            "Sacrifice three artifact tokens with different names",
+            "Sacrifice two Islands with an unknown restriction",
+            "Sacrifice another creature or an artifact or a land",
+        ] {
+            assert!(
+                matches!(parse_complete_fixed_typed_sacrifice(source), Some(Err(()))),
+                "{source}"
+            );
+        }
+        // Legacy new-clause/default-filter exemptions and the article-led union
+        // retain their distinct old contract despite the strict root entry.
+        for source in [
+            "sacrifice a creature, discard a card",
+            "sacrifice all permanents you control and discard your hand",
+            "sacrifice one or more artifacts",
+        ] {
+            assert!(
+                matches!(parse_single_cost(source), AbilityCost::Sacrifice(_)),
+                "{source}"
+            );
+        }
+        assert!(matches!(
+            parse_oracle_cost("Sacrifice another creature or an artifact"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Or { .. },
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn half_life_activation_cost_keeps_rounding_in_its_component() {

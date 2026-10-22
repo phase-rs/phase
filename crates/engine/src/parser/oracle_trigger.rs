@@ -1832,31 +1832,19 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // body shape the override sentence is printed on; every other body keeps the
     // sentence in its text (strict failure).
     let mut illegal_targets_disposition = IllegalTargetsDisposition::default();
+    let optional_payment = split_reflexive_optional_payment(&effect_for_parse);
     let body = if !effect_for_parse.is_empty() {
-        if let Some((cost, connector, reflexive_effect_text)) =
-            split_reflexive_optional_payment(&effect_for_parse)
-        {
+        if let Some(Ok((cost, connector, reflexive_effect_text))) = &optional_payment {
             optional = false;
-            // CR 603.12: a reflexive "When you do" body is created by the
-            // resolving ability and has its OWN event authority — the reflexive
-            // trigger event, not the outer trigger's zone change. This site
-            // passes the outer `effect_ctx` by `&mut` and never clones it, so
-            // the reset-on-`Clone` contract cannot protect it; the reset has to
-            // be explicit. Restored afterwards so the outer context is unchanged
-            // for any later reader.
-            //
-            // SCOPE, stated honestly: this is the SPLIT representation, where the
-            // reflexive body is parsed as its own chain. The in-chain "When you
-            // do, …" CLAUSE form (an `EffectOutcome` guard on a sibling chunk of
-            // the same chain) is NOT this site and deliberately keeps the
-            // trigger's authority — that clause resolves inside the same
-            // triggered ability, so `state.current_trigger_event` is still the
-            // outer event when its gate is evaluated. Resetting here is the
-            // conservative side of that line: a split body that would have been
-            // answerable stays an honest gap rather than a guessed binding.
-            let mut reflexive_ctx = effect_ctx.clone_for_independent_body();
+            // CR 118.12 + CR 603.12: If continues this resolving body; When
+            // creates an independent reflexive body with its own event authority.
+            let mut reflexive_ctx = if *connector == AbilityCondition::WhenYouDo {
+                effect_ctx.clone_for_independent_body()
+            } else {
+                effect_ctx.clone()
+            };
             let mut effect_chain = parse_effect_chain_ir(
-                &reflexive_effect_text,
+                reflexive_effect_text,
                 AbilityKind::Spell,
                 &mut reflexive_ctx,
             );
@@ -1867,19 +1855,21 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             // `reflexive_ability.condition = connector`). Rent Is Due.
             crate::parser::oracle_effect::bind_otherwise_to_reflexive_chain_root(
                 &mut effect_chain,
-                &connector,
+                connector,
             );
             Some(TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                 event_producer: None,
                 parent: ReflexiveParent::MayPay {
-                    cost,
+                    cost: cost.clone(),
                     payment_chain: None,
                 },
-                connector,
+                connector: connector.clone(),
                 effect_chain,
                 modal: None,
             })))
-        } else if is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse) {
+        } else if optional_payment.is_some()
+            || is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse)
+        {
             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                 &effect_for_parse,
                 AbilityKind::Spell,
@@ -4825,12 +4815,12 @@ fn infer_pronoun_unless_payer(
 /// The cost is parsed through the same `AbilityCost` authority used for
 /// activation/additional costs, then filtered through the subset payable by the
 /// straight-line resolution `PayCost` prompt. Returns `None` unless the cost is
-/// fully recognized and payable during resolution; unsupported or branch-choice
-/// costs should remain honest parser gaps rather than becoming a broad no-op
-/// `PayCost`.
+/// fully recognized. A recognized singleton sacrifice with an affirmative
+/// connector commits either a complete cost or an exact-source refusal, so an
+/// invalid cost cannot fall through to ordinary partial sacrifice semantics.
 fn split_reflexive_optional_payment(
     effect_text: &str,
-) -> Option<(AbilityCost, AbilityCondition, String)> {
+) -> Option<Result<(AbilityCost, AbilityCondition, String), &str>> {
     let lower = effect_text.to_lowercase();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("you may ")
         .parse(lower.as_str())
@@ -4843,21 +4833,197 @@ fn split_reflexive_optional_payment(
     let cost_start = effect_text.len() - after_prefix.len();
     let cost_len = cost_lower.len();
     let body_start = effect_text.len() - body_lower.len();
-    if take_until::<_, _, OracleError<'_>>(" if ")
+    let conditional = take_until::<_, _, OracleError<'_>>(" if ")
         .parse(cost_lower)
-        .is_ok()
-    {
-        return None;
-    }
+        .is_ok();
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
     let cost = super::oracle_cost::parse_oracle_cost(cost_text);
-    if matches!(cost, AbilityCost::Unimplemented { .. })
-        || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)
-    {
-        return None;
+    // Select the old genuine alternatives/composites/tap family first, including
+    // sacrifice-first alternatives. Singleton interception is ROOT-only.
+    if !conditional && reflexive_optional_cost_payable_by_resolution_prompt(&cost) {
+        return Some(Ok((cost, connector, body_text.to_string())));
     }
-    Some((cost, connector, body_text.to_string()))
+    Some(
+        super::oracle_cost::parse_complete_fixed_typed_sacrifice(cost_text)?
+            .and_then(|cost| if conditional { Err(()) } else { Ok(cost) })
+            .map(|cost| (cost, connector, body_text.to_owned()))
+            .map_err(|()| effect_text),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn optional_sacrifice_root_owns_its_source_without_broadening_recursive_costs() {
+    for connector in ["If you do", "When you do"] {
+        let source = format!("you may sacrifice two Islands. {connector}, untap ~.");
+        let (cost, condition, body) = split_reflexive_optional_payment(&source).unwrap().unwrap();
+        assert!(matches!(cost, AbilityCost::Sacrifice(ref sacrifice)
+            if sacrifice.requirement.fixed_count() == Some(2)
+                && matches!(&sacrifice.target, TargetFilter::Typed(typed)
+                    if typed.type_filters == vec![TypeFilter::Subtype("Island".into())])));
+        assert_eq!(
+            condition,
+            if connector == "If you do" {
+                AbilityCondition::effect_performed()
+            } else {
+                AbilityCondition::WhenYouDo
+            }
+        );
+        assert_eq!(body, "untap ~.");
+        let printed = format!("At the beginning of your upkeep, {source}");
+        let trigger = parse_trigger_line(&printed, "Grammar Control");
+        let root = trigger.execute.as_deref().unwrap();
+        assert!(!trigger.optional);
+        assert!(root.optional);
+        assert!(
+            matches!(*root.effect, Effect::PayCost { ref cost, scale: None, payer: TargetFilter::Controller } if matches!(cost, AbilityCost::Sacrifice(_)))
+        );
+        assert!(root.target_prompt.is_none() && root.multi_target.is_none());
+        assert_eq!(
+            root.sub_ability.as_ref().unwrap().condition,
+            Some(condition)
+        );
+    }
+    for cost in [
+        "sacrifice zero Islands",
+        "sacrifice X Islands",
+        "sacrifice any number of Islands",
+        "sacrifice one or more Islands",
+        "sacrifice all permanents",
+        "sacrifice Islands",
+        "sacrifice other creatures",
+        "sacrifice an unknown noun",
+        "sacrifice another",
+        "sacrifice ~",
+        "sacrifice this creature",
+        "sacrifice a card",
+        "sacrifice a player",
+        "sacrifice two Islands if you control a creature",
+        "sacrifice two Islands unless you control a creature",
+        "sacrifice two Islands, draw a card",
+        "sacrifice two Islands and draw a card",
+        "sacrifice two Islands otherwise draw a card",
+        "sacrifice two Islands with different names",
+    ] {
+        let body = format!("you may {cost}. If you do, untap ~.");
+        assert_eq!(
+            split_reflexive_optional_payment(&body)
+                .unwrap()
+                .unwrap_err(),
+            body
+        );
+        let trigger = parse_trigger_line(
+            &format!("At the beginning of your upkeep, {body}"),
+            "Grammar Control",
+        );
+        let Effect::Unimplemented { name, description } =
+            &*trigger.execute.as_ref().unwrap().effect
+        else {
+            panic!("recognized invalid root must remain a whole-body gap");
+        };
+        assert_eq!(name, "reflexive optional payment");
+        assert_eq!(description.as_deref(), Some(body.as_str()));
+    }
+    for source in [
+        "you may pay {1}. If you do, draw a card.",
+        "you may discard a card. If you do, draw a card.",
+        "you may sacrifice a creature.",
+        "you may sacrifice a creature. If you don't, draw a card.",
+    ] {
+        assert!(
+            split_reflexive_optional_payment(source).is_none(),
+            "{source}"
+        );
+    }
+    for cost in [
+        "pay {1} or sacrifice a creature",
+        "sacrifice a creature or pay {1}",
+    ] {
+        let source = format!("you may {cost}. If you do, draw a card.");
+        assert!(
+            matches!(split_reflexive_optional_payment(&source).unwrap().unwrap().0,
+            AbilityCost::OneOf { ref costs } if costs.len() == 2)
+        );
+    }
+    let singleton =
+        super::oracle_cost::parse_complete_fixed_typed_sacrifice("sacrifice two Islands")
+            .unwrap()
+            .unwrap();
+    assert!(!reflexive_optional_cost_payable_by_resolution_prompt(
+        &singleton
+    ));
+    assert!(!crate::game::costs::supported_at_resolution(&singleton));
+    assert!(!reflexive_optional_cost_payable_by_resolution_prompt(
+        &super::oracle_cost::parse_oracle_cost(
+            "tap an untapped creature you control, sacrifice two Islands"
+        )
+    ));
+    for cost in [
+        "tap two untapped creatures you control",
+        "tap an untapped creature you control, tap an untapped artifact you control",
+    ] {
+        let body = format!("you may {cost}. If you do, draw a card.");
+        let (cost, _, _) = split_reflexive_optional_payment(&body).unwrap().unwrap();
+        assert!(reflexive_optional_cost_payable_by_resolution_prompt(&cost));
+        assert!(cost_contains_tap_creatures(&cost));
+    }
+    let nested = "you may tap two untapped creatures you control, sacrifice an Island. If you do, draw a card.";
+    assert!(
+        split_reflexive_optional_payment(nested).is_none(),
+        "a recursive sacrifice must not inherit the singleton adapter"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn optional_payment_if_keeps_outer_zone_authority_when_stays_independent() {
+    // Constructed grammar control: the second instruction's past-counter
+    // predicate belongs to the enclosing dies event only in the same body.
+    for when in [false, true] {
+        let connector = if when { "When" } else { "If" };
+        let source = format!("Whenever a creature dies, you may sacrifice an Island. {connector} you do, draw a card. You gain 3 life if it had a +1/+1 counter on it.");
+        let trigger = parse_trigger_line(&source, "Constructed Zone Grammar");
+        let root = trigger.execute.as_deref().unwrap();
+        assert!(matches!(
+            *root.effect,
+            Effect::PayCost {
+                cost: AbilityCost::Sacrifice(_),
+                ..
+            }
+        ));
+        let body = root.sub_ability.as_deref().unwrap();
+        assert!(matches!(*body.effect, Effect::Draw { .. }));
+        assert_eq!(
+            body.condition,
+            Some(if when {
+                AbilityCondition::WhenYouDo
+            } else {
+                AbilityCondition::effect_performed()
+            })
+        );
+        let tail = body.sub_ability.as_deref().unwrap();
+        if when {
+            assert!(!matches!(
+                tail.condition,
+                Some(AbilityCondition::ZoneChangeObjectMatchesFilter { .. })
+            ));
+            assert!(
+                matches!(*tail.effect, Effect::Unimplemented { .. }),
+                "unbound independent event predicate stays honest"
+            );
+        } else {
+            assert!(matches!(
+                tail.condition,
+                Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Graveyard,
+                    ..
+                })
+            ));
+            assert!(matches!(*tail.effect, Effect::GainLife { .. }));
+        }
+    }
 }
 
 #[cfg(test)]

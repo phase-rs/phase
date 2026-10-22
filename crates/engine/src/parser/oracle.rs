@@ -1059,6 +1059,55 @@ pub(crate) fn parse_graveyard_keyword_continuation(
     }
 }
 
+/// CR 614.12 + CR 502.3: prove both complete self instructions before either
+/// document item can be published. Existing strict clause parsers own semantics.
+fn parse_self_entry_tapped_cant_untap(line: &str) -> Option<(ReplacementIr, StaticIr)> {
+    let lower = line.to_lowercase();
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("~ enters "),
+        opt(tag("the battlefield ")),
+        tag("tapped and "),
+        alt((tag("doesn't"), tag("doesn’t"))),
+        tag(" untap during your untap step"),
+        multispace0,
+        opt(tag(".")),
+        multispace0,
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let mut replacement = parse_replacement_line_ir("~ enters tapped.", "~")?;
+    let mut restriction = parse_static_line("~ doesn't untap during your untap step.")?;
+    let execute = replacement.definition.execute.as_deref()?;
+    if replacement.definition.event != ReplacementEvent::Moved
+        || replacement.definition.destination_zone != Some(Zone::Battlefield)
+        || replacement.definition.valid_card != Some(TargetFilter::SelfRef)
+        || replacement.definition.condition.is_some()
+        || replacement.definition.mode != crate::types::ability::ReplacementMode::Mandatory
+        || !matches!(
+            *execute.effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            }
+        )
+        || execute.sub_ability.is_some()
+        || execute.else_ability.is_some()
+        || execute.condition.is_some()
+        || execute.optional
+        || restriction.mode != StaticMode::CantUntap
+        || restriction.affected != Some(TargetFilter::SelfRef)
+        || restriction.condition.is_some()
+        || !restriction.modifications.is_empty()
+    {
+        return None;
+    }
+    replacement.source_text = line.to_owned();
+    replacement.definition.description = Some(line.to_owned());
+    restriction.description = Some(line.to_owned());
+    Some((replacement, StaticIr::from_definition(line, restriction)))
+}
+
 fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<StaticDefinition> {
     let lower = line.to_lowercase();
     let (prefix, continuation) = split_once_on_lower(line, &lower, ". ")?;
@@ -7302,36 +7351,32 @@ fn parse_normalized_oracle_ir(
         // Priority 6d: Compound "[~] enters tapped and doesn't untap during your
         // untap step." carries TWO independent rules in one sentence — an
         // ETB-tapped replacement (CR 614.1c) and a CantUntap static (CR 502.3).
-        // The "doesn't untap" substring makes Priority 7's `is_static_pattern`
-        // fire and consume the line, dropping the ETB-tapped half. Decompose so
-        // both parsers run.
+        // Prove both complete clauses before either is emitted. Recognition
+        // alone cannot license publication of a successful half.
         // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
         if is_enters_tapped_cant_untap_compound(&lower) {
-            let mut consumed = false;
-            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+            let original_line = original_oracle_text
+                .lines()
+                .nth(item_line)
+                .unwrap_or(raw_line);
+            if let Some((mut replacement_ir, mut restriction_ir)) =
+                parse_self_entry_tapped_cant_untap(&static_line)
+            {
+                replacement_ir.source_text = original_line.to_owned();
+                replacement_ir.definition.description = Some(original_line.to_owned());
+                restriction_ir.source_text = original_line.to_owned();
+                restriction_ir.definition.description = Some(original_line.to_owned());
                 emitter.emit_at(
                     item_line,
                     OracleNodeIr::Replacement(replacement_ir),
                     OuterRoute::Replacement,
                 );
-                consumed = true;
+                emitter.static_ir_at(item_line, restriction_ir);
+            } else {
+                emitter.unsupported_at(item_line, original_line.to_owned());
             }
-            let defs = parse_static_line_with_graveyard_keyword_continuation(
-                &static_line,
-                Some(raw_line),
-                Some(card_name),
-            );
-            if !defs.is_empty() {
-                for __item in defs {
-                    emitter
-                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
-                }
-                consumed = true;
-            }
-            if consumed {
-                i += 1;
-                continue;
-            }
+            i += 1;
+            continue;
         }
 
         if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {

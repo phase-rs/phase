@@ -1,5 +1,459 @@
 use super::*;
 
+const U21_GRIMGRIN: &str = "Grimgrin enters tapped and doesn't untap during your untap step.\nSacrifice another creature: Untap Grimgrin and put a +1/+1 counter on it.\nWhenever Grimgrin attacks, destroy target creature defending player controls, then put a +1/+1 counter on Grimgrin.";
+const U21_LEVIATHAN: &str = "Trample\nThis creature enters tapped and doesn't untap during your untap step.\nAt the beginning of your upkeep, you may sacrifice two Islands. If you do, untap this creature.\nThis creature can't attack unless you sacrifice two Islands. (This cost is paid as attackers are declared.)";
+const U21_TRAXOS: &str = "Trample\nTraxos enters tapped and doesn't untap during your untap step.\nWhenever you cast a historic spell, untap Traxos. (Artifacts, legendaries, and Sagas are historic.)";
+
+// SHAPE: complete pinned sources, normal native construction and both loaders.
+#[test]
+fn u5_full_documents_publish_both_halves_at_the_original_source() {
+    for (name, text, types, subtypes, entry_line, power, mana) in [
+        (
+            "Grimgrin, Corpse-Born",
+            U21_GRIMGRIN,
+            vec!["Creature".into()],
+            vec!["Zombie".into(), "Warrior".into()],
+            0usize,
+            5,
+            "{3}{U}{B}",
+        ),
+        (
+            "Leviathan",
+            U21_LEVIATHAN,
+            vec!["Creature".into()],
+            vec!["Leviathan".into()],
+            1,
+            10,
+            "{5}{U}{U}{U}{U}",
+        ),
+        (
+            "Traxos, Scourge of Kroog",
+            U21_TRAXOS,
+            vec!["Artifact".into(), "Creature".into()],
+            vec!["Dragon".into(), "Construct".into()],
+            1,
+            7,
+            "{4}",
+        ),
+    ] {
+        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, text);
+        let normalized = normalize_card_name_refs(text, name);
+        let normalized_line = normalized.lines().nth(entry_line).unwrap();
+        let original_line = text.lines().nth(entry_line).unwrap();
+        let units = doc
+            .items
+            .iter()
+            .filter(|item| item.source.span.first_line == entry_line)
+            .collect::<Vec<_>>();
+        assert_eq!(units.len(), 2, "{name}");
+        assert_ne!(units[0].id, units[1].id);
+        for (ordinal, item) in units.iter().enumerate() {
+            let span = &item.source.span;
+            assert!(span.is_exact());
+            assert_eq!(span.first_line, entry_line);
+            assert_eq!(span.last_line, entry_line);
+            assert_eq!(span.ordinal_within_span, ordinal as u32);
+            assert_eq!(item.source.fragment(), Some(normalized_line));
+            assert_eq!(&normalized[span.start_byte..span.end_byte], normalized_line);
+        }
+        let OracleNodeIr::Replacement(replacement) = &units[0].node else {
+            panic!("replacement first")
+        };
+        let OracleNodeIr::Static(restriction) = &units[1].node else {
+            panic!("restriction second")
+        };
+        assert_eq!(replacement.source_text, original_line);
+        assert_eq!(restriction.source_text, original_line);
+        assert_eq!(
+            replacement.definition.description.as_deref(),
+            Some(original_line)
+        );
+        assert_eq!(
+            restriction.definition.description.as_deref(),
+            Some(original_line)
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.replacements.len(), 1);
+        let replacement = &parsed.replacements[0];
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            replacement.mode,
+            crate::types::ability::ReplacementMode::Mandatory
+        );
+        let execute = replacement.execute.as_deref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap
+            }
+        ));
+        assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+        let restrictions = parsed
+            .statics
+            .iter()
+            .filter(|definition| definition.mode == StaticMode::CantUntap)
+            .collect::<Vec<_>>();
+        assert_eq!(restrictions.len(), 1);
+        assert_eq!(restrictions[0].affected, Some(TargetFilter::SelfRef));
+        assert!(restrictions[0].condition.is_none() && restrictions[0].modifications.is_empty());
+        assert_eq!(restrictions[0].description.as_deref(), Some(original_line));
+        assert_eq!(parsed.triggers.len(), 1, "full independent trigger: {name}");
+        if name == "Grimgrin, Corpse-Born" {
+            assert_eq!(parsed.abilities.len(), 1);
+            let activation = &parsed.abilities[0];
+            assert!(
+                matches!(&activation.cost, Some(AbilityCost::Sacrifice(cost)) if cost.requirement.fixed_count() == Some(1) && matches!(&cost.target, TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Creature] && tf.properties.contains(&FilterProp::Another)))
+            );
+            assert!(matches!(
+                *activation.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                *activation.sub_ability.as_ref().unwrap().effect,
+                Effect::PutCounter { .. }
+            ));
+            let attack = parsed.triggers[0].execute.as_deref().unwrap();
+            assert!(
+                matches!(*attack.effect, Effect::Destroy { ref target, .. } if matches!(target, TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Creature] && tf.controller == Some(ControllerRef::DefendingPlayer)))
+            );
+            assert!(matches!(
+                *attack.sub_ability.as_ref().unwrap().effect,
+                Effect::PutCounter { .. }
+            ));
+        } else {
+            assert!(parsed.extracted_keywords.contains(&Keyword::Trample));
+            if name == "Leviathan" {
+                let trigger = &parsed.triggers[0];
+                assert_eq!(trigger.phase, Some(crate::types::phase::Phase::Upkeep));
+                assert!(!trigger.optional);
+                let root = trigger.execute.as_deref().unwrap();
+                assert!(root.optional);
+                assert!(
+                    matches!(*root.effect, Effect::PayCost { cost: AbilityCost::Sacrifice(ref cost), scale: None, payer: TargetFilter::Controller } if cost.requirement.fixed_count() == Some(2) && matches!(&cost.target, TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Subtype("Island".into())]))
+                );
+                assert!(
+                    root.target_prompt.is_none()
+                        && root.multi_target.is_none()
+                        && root.target_constraints.is_empty()
+                );
+                let untap = root.sub_ability.as_deref().unwrap();
+                assert_eq!(untap.condition, Some(AbilityCondition::effect_performed()));
+                assert!(matches!(
+                    *untap.effect,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        state: TapStateChange::Untap,
+                        ..
+                    }
+                ));
+                // The separate printed attack cost must remain represented or
+                // retain the exact unsupported unit; this test grants no combat platform.
+                let attack_line = normalized.lines().last().unwrap();
+                assert!(doc
+                    .items
+                    .iter()
+                    .any(|item| item.source.fragment() == Some(attack_line)));
+                let independent =
+                    parse_oracle_text(text.lines().last().unwrap(), name, &[], &types, &subtypes);
+                assert!(independent.abilities.is_empty());
+                assert_eq!(independent.statics.len(), 1);
+                let attack_restriction = &independent.statics[0];
+                assert_eq!(attack_restriction.mode, StaticMode::CantAttack);
+                assert_eq!(attack_restriction.affected, Some(TargetFilter::SelfRef));
+                assert!(
+                    matches!(&attack_restriction.condition,
+                    Some(StaticCondition::Not { condition })
+                    if matches!(&**condition, StaticCondition::Unrecognized { text }
+                        if text == "unless you sacrifice two Islands")),
+                    "the independent combat payment remains an exact honest gap"
+                );
+                for ability in independent.abilities {
+                    assert!(parsed.abilities.contains(&ability));
+                }
+                for definition in independent.statics {
+                    assert!(parsed.statics.contains(&definition));
+                }
+            } else {
+                let trigger = &parsed.triggers[0];
+                assert_eq!(trigger.mode, crate::types::triggers::TriggerMode::SpellCast);
+                assert!(
+                    matches!(&trigger.valid_card, Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Historic)),
+                    "historic union remains typed"
+                );
+                assert!(matches!(
+                    *trigger.execute.as_ref().unwrap().effect,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        state: TapStateChange::Untap,
+                        ..
+                    }
+                ));
+            }
+        }
+        let face = complete_publication_native_face(name, text, &types, &subtypes);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.mana_cost, parse_mana_symbols(mana).unwrap().0);
+        assert_eq!(
+            face.power,
+            Some(crate::types::ability::PtValue::Fixed(power))
+        );
+        assert_eq!(
+            face.toughness,
+            Some(crate::types::ability::PtValue::Fixed(power))
+        );
+        assert_eq!(face.replacements, parsed.replacements);
+        assert_eq!(face.static_abilities, parsed.statics);
+        assert_eq!(face.abilities, parsed.abilities);
+        assert_eq!(face.triggers, parsed.triggers);
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&face));
+        }
+        let round_trip: crate::types::card::CardFace =
+            serde_json::from_str(&serde_json::to_string(&face).unwrap()).unwrap();
+        assert_eq!(round_trip, face);
+    }
+}
+
+#[test]
+fn u5_atomic_compound_refusals_keep_exact_source_and_independent_sibling() {
+    for bad in [
+        "Another creature enters tapped and doesn't untap during your untap step.",
+        "~ enters tapped unless you control an Island and doesn't untap during your untap step.",
+        "~ enters tapped with a charge counter and doesn't untap during your untap step.",
+        "~ enters tapped and doesn't untap during your next untap step.",
+        "~ enters tapped and doesn't untap during your untap step this turn.",
+        "~ enters tapped and doesn't untap during your untap step unexplained.",
+        "~ enters tapped and doesn't untap during your untap step and draw a card.",
+    ] {
+        let source = format!("{bad}\nFlying");
+        let mut doc = parse_oracle_ir(
+            &source,
+            "Grammar Control",
+            &["Flying".into()],
+            &["Creature".into()],
+            &[],
+        );
+        let units = doc
+            .items
+            .iter()
+            .filter(|item| item.source.span.first_line == 0)
+            .collect::<Vec<_>>();
+        assert_eq!(units.len(), 1, "{bad}");
+        assert!(
+            matches!(&units[0].node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == bad)
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed.replacements.is_empty());
+        assert!(!parsed
+            .statics
+            .iter()
+            .any(|definition| definition.mode == StaticMode::CantUntap));
+        assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+        assert!(parsed.abilities.iter().any(|ability| matches!(&*ability.effect, Effect::Unimplemented { description, .. } if description.as_deref() == Some(bad))));
+        let atomic: crate::database::mtgjson::AtomicCard =
+            serde_json::from_value(serde_json::json!({
+                "name": "Constructed Compound Publication", "text": source,
+                "colors": [], "colorIdentity": [], "identifiers": {},
+                "layout": "normal", "manaCost": "{4}", "manaValue": 4.0,
+                "types": ["Artifact", "Creature"], "subtypes": ["Construct"],
+                "power": "3", "toughness": "3", "keywords": ["Flying"]
+            }))
+            .unwrap();
+        let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+        assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+            &face
+        ));
+        assert!(face.replacements.is_empty());
+        assert!(!face
+            .static_abilities
+            .iter()
+            .any(|definition| definition.mode == StaticMode::CantUntap));
+        let whole =
+            serde_json::to_string(&serde_json::json!({"constructed compound publication": face}))
+                .unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(
+                database.get_face_by_name("Constructed Compound Publication"),
+                Some(&face)
+            );
+        }
+    }
+    for (source, replacements, restrictions) in [
+        ("~ enters tapped.", 1, 0),
+        ("~ doesn't untap during your untap step.", 0, 1),
+        (
+            "~ enters the battlefield tapped and doesn’t untap during your untap step.",
+            1,
+            1,
+        ),
+    ] {
+        let parsed = parse_oracle_text(source, "Grammar Control", &[], &["Creature".into()], &[]);
+        assert_eq!(parsed.replacements.len(), replacements);
+        assert_eq!(
+            parsed
+                .statics
+                .iter()
+                .filter(|definition| definition.mode == StaticMode::CantUntap)
+                .count(),
+            restrictions
+        );
+    }
+}
+
+// SHAPE: invalid committed payment roots retain a complete public/native gap.
+#[test]
+fn u5_invalid_singleton_payment_publication_keeps_the_whole_original_body() {
+    for cost in [
+        "sacrifice zero Islands",
+        "sacrifice X Islands",
+        "sacrifice 4294967295 Islands",
+        "sacrifice any number of Islands",
+        "sacrifice one or more Islands",
+        "sacrifice all permanents",
+        "sacrifice Islands",
+        "sacrifice other creatures",
+        "sacrifice an unknown noun",
+        "sacrifice another",
+        "sacrifice ~",
+        "sacrifice this creature",
+        "sacrifice a card",
+        "sacrifice a player",
+        "sacrifice two Islands if you control a creature",
+        "sacrifice two Islands unless you control a creature",
+        "sacrifice two Islands, draw a card",
+        "sacrifice two Islands and draw a card",
+        "sacrifice two Islands otherwise draw a card",
+        "sacrifice two Islands with different names",
+    ] {
+        for connector in ["If", "When"] {
+            let body = format!("you may {cost}. {connector} you do, untap ~.");
+            let source = format!("Flying\nAt the beginning of your upkeep, {body}");
+            let mut doc = parse_oracle_ir(
+                &source,
+                "Constructed Invalid Payment",
+                &[],
+                &["Creature".into()],
+                &[],
+            );
+            assert_eq!(doc.source_text, source);
+            let parsed = lower_oracle_ir(&mut doc);
+            assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+            assert_eq!(parsed.triggers.len(), 1);
+            let root = parsed.triggers[0].execute.as_deref().unwrap();
+            let Effect::Unimplemented { name, description } = &*root.effect else {
+                panic!("invalid payment must not widen into PayCost or ordinary Sacrifice: {cost}")
+            };
+            assert_eq!(name, "reflexive optional payment");
+            // Self references are normalized by the established trigger parser.
+            let normalized = normalize_card_name_refs(&source, "Constructed Invalid Payment");
+            let normalized_body = normalized
+                .lines()
+                .nth(1)
+                .unwrap()
+                .strip_prefix("At the beginning of your upkeep, ")
+                .unwrap();
+            assert_eq!(description.as_deref(), Some(normalized_body));
+            assert!(root.sub_ability.is_none());
+            let atomic: crate::database::mtgjson::AtomicCard =
+                serde_json::from_value(serde_json::json!({
+                    "name": "Constructed Invalid Payment", "text": source, "layout": "normal",
+                    "colors": [], "colorIdentity": [], "identifiers": {},
+                    "manaCost": "{2}", "manaValue": 2.0, "types": ["Creature"], "subtypes": [],
+                    "power": "2", "toughness": "2", "keywords": ["Flying"]
+                }))
+                .unwrap();
+            let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+            assert_eq!(face.triggers, parsed.triggers);
+            assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+                &face
+            ));
+            let whole =
+                serde_json::to_string(&serde_json::json!({"constructed invalid payment": face}))
+                    .unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &whole).unwrap();
+            for database in [
+                crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+                crate::database::CardDatabase::from_export(file.path()).unwrap(),
+            ] {
+                assert_eq!(
+                    database.get_face_by_name("Constructed Invalid Payment"),
+                    Some(&face)
+                );
+            }
+        }
+    }
+}
+
+// Printed When sibling: preserve the entire source and existing damage/body
+// disposition. This does not claim new Ziatora damage/LKI semantics.
+#[test]
+fn u5_printed_ziatora_keeps_its_full_reflexive_source_and_independent_keyword() {
+    const SOURCE: &str = "Flying\nAt the beginning of your end step, you may sacrifice another creature. When you do, Ziatora deals damage equal to that creature's power to any target and you create three Treasure tokens.";
+    let atomic: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
+        "colorIdentity": ["B", "G", "R"], "colors": ["B", "G", "R"],
+        "identifiers": {"scryfallOracleId": "d46c3fb6-f1c7-4a96-ae42-5bce17fc7c1d"},
+        "keywords": ["Flying", "Treasure"], "layout": "normal", "manaCost": "{3}{B}{R}{G}",
+        "manaValue": 6.0, "name": "Ziatora, the Incinerator", "power": "6", "toughness": "6",
+        "rulings": [{"date": "2022-04-29", "text": "Use the creature's power as it last existed on the battlefield to determine how much damage Ziatora deals."}],
+        "subtypes": ["Demon", "Dragon"], "supertypes": ["Legendary"], "type": "Legendary Creature — Demon Dragon",
+        "types": ["Creature"], "text": SOURCE
+    })).unwrap();
+    let mut doc = parse_oracle_ir(SOURCE, &atomic.name, &[], &atomic.types, &atomic.subtypes);
+    assert_eq!(doc.source_text, SOURCE);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+    assert_eq!(parsed.triggers.len(), 1);
+    let root = parsed.triggers[0].execute.as_deref().unwrap();
+    assert!(root.optional);
+    assert!(
+        matches!(&*root.effect, Effect::PayCost { cost: AbilityCost::Sacrifice(cost), payer: TargetFilter::Controller, scale: None }
+        if cost.requirement.fixed_count() == Some(1) && matches!(&cost.target, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature] && typed.properties.contains(&FilterProp::Another)))
+    );
+    assert_eq!(
+        root.sub_ability.as_ref().unwrap().condition,
+        Some(AbilityCondition::WhenYouDo)
+    );
+    let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+    assert_eq!(face.oracle_text.as_deref(), Some(SOURCE));
+    assert_eq!(face.triggers, parsed.triggers);
+    assert_eq!(face.abilities, parsed.abilities);
+    assert_eq!(face.static_abilities, parsed.statics);
+    let whole =
+        serde_json::to_string(&serde_json::json!({"ziatora, the incinerator": face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(
+            database.get_face_by_name("Ziatora, the Incinerator"),
+            Some(&face)
+        );
+    }
+}
+
 const U14_STANDARD: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.";
 const U14_ASHLING: &str = "As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.";
 
@@ -38102,6 +38556,15 @@ fn complete_publication_native_face(
     subtypes: &[String],
 ) -> crate::types::card::CardFace {
     let metadata = match name {
+        "Grimgrin, Corpse-Born" => {
+            r##"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"a2aa2c8f-7058-4020-9881-663b104ea051"},"layout":"normal","manaCost":"{3}{U}{B}","manaValue":5.0,"name":"Grimgrin, Corpse-Born","power":"5","toughness":"5","rulings":[{"date":"2011-09-22","text":"If the defending player controls no creatures when Grimgrin attacks, the last ability will be removed from the stack and have no effect."},{"date":"2011-09-22","text":"If the targeted creature is an illegal target by the time Grimgrin's last ability resolves, the entire ability doesn't resolve and none of its effects will occur. You won't put a +1/+1 counter on Grimgrin."},{"date":"2013-07-01","text":"If Grimgrin's last ability resolves, but the targeted creature isn't destroyed (perhaps because it regenerated or has indestructible), you'll still put a +1/+1 on Grimgrin."}],"subtypes":["Zombie","Warrior"],"supertypes":["Legendary"],"type":"Legendary Creature — Zombie Warrior","types":["Creature"]}"##
+        }
+        "Leviathan" => {
+            r##"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"d8c49932-9b4f-4cb0-a7e9-4b7eb12203ee"},"keywords":["Trample"],"layout":"normal","manaCost":"{5}{U}{U}{U}{U}","manaValue":9.0,"name":"Leviathan","power":"10","toughness":"10","rulings":[{"date":"2004-10-04","text":"You don't have to pay the untap cost if it is untapped outside the upkeep phase or is untapped by an effect."}],"subtypes":["Leviathan"],"supertypes":[],"type":"Creature — Leviathan","types":["Creature"]}"##
+        }
+        "Traxos, Scourge of Kroog" => {
+            r##"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"c1c78144-b335-4d22-a668-9173ab6a0d04"},"keywords":["Trample"],"layout":"normal","manaCost":"{4}","manaValue":4.0,"name":"Traxos, Scourge of Kroog","power":"7","toughness":"7","rulings":[{"date":"2018-04-27","text":"A card, spell, or permanent is historic if it has the legendary supertype, the artifact card type, or the Saga subtype. Having two of those qualities doesn't make an object more historic than another or provide an additional bonus—an object either is historic or it isn't."},{"date":"2018-04-27","text":"An ability that triggers \"whenever you cast a historic spell\" doesn't trigger if a historic card is put onto the battlefield without being cast."},{"date":"2018-04-27","text":"Lands are never cast, so abilities that trigger \"whenever you cast a historic spell\" won't trigger if you play a legendary land. They also won't trigger if a card on the battlefield transforms into a legendary land, as the Ixalan and Rivals of Ixalan double-faced cards do."},{"date":"2018-04-27","text":"Some abilities trigger \"whenever you cast a historic spell.\" Such an ability resolves before the spell that caused it to trigger. It resolves even if that spell is countered."}],"subtypes":["Dragon","Construct"],"supertypes":["Legendary"],"type":"Legendary Artifact Creature — Dragon Construct","types":["Artifact","Creature"]}"##
+        }
         "Almost Perfect" => {
             r##"{"colorIdentity":["G","W"],"colors":["G","W"],"identifiers":{"scryfallOracleId":"617eae63-b5f8-4014-8269-7c66f4388ac7"},"keywords":["Enchant"],"layout":"normal","manaCost":"{4}{G}{W}","manaValue":6.0,"name":"Almost Perfect","rulings":[{"date":"2024-03-08","text":"Almost Perfect overwrites all previous effects that set the creature’s base power and toughness to specific values. Any power- or toughness-setting effects that start to apply after the ability resolves will overwrite this effect."},{"date":"2024-03-08","text":"Effects that modify a creature’s power and/or toughness, such as the effect of the ability granted by Idolized, will apply to the creature no matter when they started to take effect. The same is true for any counters that change its power and/or toughness and effects that switch its power and toughness."}],"subtypes":["Aura"],"supertypes":[],"type":"Enchantment — Aura","types":["Enchantment"]}"##
         }
