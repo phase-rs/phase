@@ -127,6 +127,7 @@ mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod braids_arisen_nightmare_decline;
 mod brainspoil;
+mod bramble_elemental_aura_attach;
 mod brass_knuckles_equipment_threshold;
 mod breathless_knight_graveyard_origin;
 mod breeches_blastmaker_coin_flip_copy;

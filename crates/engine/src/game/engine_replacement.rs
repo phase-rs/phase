@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect,
+    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect, EffectKind,
     PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
@@ -3747,10 +3747,30 @@ pub(crate) fn apply_pending_spell_resolution(
                     if state.battlefield.contains(target_id) =>
                 {
                     effects::attach::attach_to(state, ctx.object_id, *target_id);
+                    // CR 608.3c / CR 603.2e: an Aura spell resolving and becoming
+                    // attached after a paused replacement choice is an effect
+                    // resolution — emit `EffectResolved { kind: Attach }` so
+                    // "whenever an Aura becomes attached" triggers (e.g. Bramble
+                    // Elemental) fire on this resume path too, not only on the
+                    // unpaused spell-resolution attach in `stack.rs`.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        source_id: ctx.object_id,
+                        subject: state
+                            .capture_event_object_snapshot(ctx.object_id)
+                            .map(Box::new),
+                    });
                 }
                 crate::types::ability::TargetRef::Object(_) => {}
                 crate::types::ability::TargetRef::Player(player_id) => {
                     effects::attach::attach_to_player(state, ctx.object_id, *player_id);
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        source_id: ctx.object_id,
+                        subject: state
+                            .capture_event_object_snapshot(ctx.object_id)
+                            .map(Box::new),
+                    });
                 }
             }
         }
