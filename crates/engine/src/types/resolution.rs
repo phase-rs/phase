@@ -243,6 +243,33 @@ pub struct PendingCoinFlip {
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
 /// at an "ignore the lowest roll" choice (Barbarian Class, Pixie Guide, Wyll).
 ///
+/// CR 608.2c: the declared slot-context capture of a suspending ability,
+/// taken through the single capture authority
+/// (`targeting::capture_parked_slot_context`) while the ability is still in
+/// scope. Carried as `Option` on the parked die-roll frames: `None` means no
+/// capture ran (pre-M2 frames keep the legacy root path), while `Some` — even
+/// with empty lists — is an authoritative capture the resume path must honor
+/// instead of the legacy lists. The presence bit is structural: a `bool`
+/// alongside separately writable lists cannot express "recorded empty".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedDeclarationPayload {
+    /// CR 608.2c: the declared (target, pin) entries counted from the slot
+    /// base. Resume indexes these — never the legacy chain-root list — so
+    /// modal bases, downstream offsets, and repeated IDs resolve exactly
+    /// like the live authority.
+    #[serde(default)]
+    pub targets: Vec<TargetRef>,
+    /// CR 400.7: the announced pin of each declared entry, aligned with
+    /// `targets`. Positional — repeated IDs keep distinct pins.
+    #[serde(default)]
+    pub target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
+    /// the root-numbered illegality stamp at `ahead + index` like the live
+    /// authority.
+    #[serde(default)]
+    pub ahead: usize,
+}
+
 /// The dice have all been rolled (`results` holds their NATURAL values) but no
 /// `GameEvent::DieRolled` has been emitted yet: CR 706.6 says an ignored roll
 /// "is considered to have never happened", so emission is deferred to
@@ -352,31 +379,14 @@ pub struct PendingDieRoll {
     /// in-flight states serialized before this field existed.
     #[serde(default)]
     pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
-    /// CR 608.2c: the declared (target, pin) entries counted from the slot
-    /// base, captured via `targeting::capture_parked_slot_context`. Resume
-    /// indexes these — never the legacy chain-root list — so modal bases,
-    /// downstream offsets, and repeated IDs resolve exactly like the live
-    /// authority. Empty both on pre-M2 frames (which keep the legacy root
-    /// path) and on authoritative empty captures — `declared_targets_recorded`
-    /// tells the two apart.
-    #[serde(default)]
-    pub declared_targets: Vec<TargetRef>,
-    /// CR 400.7: the announced pin of each declared entry, aligned with
-    /// `declared_targets`. Positional — repeated IDs keep distinct pins.
-    #[serde(default)]
-    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
-    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
-    /// the root-numbered illegality stamp at `ahead + index` like the live
-    /// authority. Zero on pre-M2 frames (raw root indexing).
-    #[serde(default)]
-    pub declared_ahead: usize,
-    /// CR 608.2c: whether `declared_targets` was authoritatively captured
-    /// (possibly empty) rather than absent. A recorded empty list stays
-    /// empty on resume — only a genuinely absent capture falls back to the
-    /// legacy root/local lists. `#[serde(default)]` for in-flight states
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`). `None` on pre-M2 frames — which keep
+    /// the legacy root path — and on frames built without a capture;
+    /// `Some`, even with empty lists, is authoritative on resume. Skipped on
+    /// the wire when absent; `#[serde(default)]` for in-flight states
     /// serialized before this field existed.
-    #[serde(default)]
-    pub declared_targets_recorded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
     /// CR 400.7: the suspending node's own positional pins, aligned with
     /// `targets`, for the local fallback and occurrence-aware parked reads.
     #[serde(default)]
@@ -467,30 +477,13 @@ pub struct PendingDieRollInstruction {
     /// serialized before this field existed.
     #[serde(default)]
     pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
-    /// CR 608.2c: the declared entries counted from the slot base (see
-    /// `PendingDieRoll::declared_targets`), carried across the CR 616.1
-    /// choice so they survive into the `PendingDieRoll` this instruction
-    /// produces. `#[serde(default)]` for in-flight states serialized before
-    /// this field existed.
-    #[serde(default)]
-    pub declared_targets: Vec<TargetRef>,
-    /// CR 400.7: announced pins aligned with `declared_targets`, carried
-    /// across the CR 616.1 choice. `#[serde(default)]` for in-flight states
-    /// serialized before this field existed.
-    #[serde(default)]
-    pub declared_target_pins: Vec<Option<ObjectIncarnationRef>>,
-    /// CR 608.2b: the slot base's offset in root numbering, carried across
-    /// the CR 616.1 choice. `#[serde(default)]` for in-flight states
-    /// serialized before this field existed.
-    #[serde(default)]
-    pub declared_ahead: usize,
-    /// CR 608.2c: whether `declared_targets` was authoritatively captured
-    /// (possibly empty) rather than absent, carried across the CR 616.1
-    /// choice so it survives into the `PendingDieRoll` this instruction
-    /// produces. `#[serde(default)]` for in-flight states serialized before
-    /// this field existed.
-    #[serde(default)]
-    pub declared_targets_recorded: bool,
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`), carried across the CR 616.1 choice so
+    /// it survives into the `PendingDieRoll` this instruction produces.
+    /// Skipped on the wire when absent; `#[serde(default)]` for in-flight
+    /// states serialized before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
     /// CR 400.7: the suspending node's positional pins aligned with
     /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
     /// for in-flight states serialized before this field existed.

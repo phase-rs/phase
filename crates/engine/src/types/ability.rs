@@ -3164,7 +3164,6 @@ impl ZoneRef {
     /// compile here rather than silently reading as "some other zone" at a call
     /// site that pattern-matched only the four it knew about.
     pub fn zone(&self) -> crate::types::zones::Zone {
-        use crate::types::zones::Zone;
         match self {
             ZoneRef::Graveyard => Zone::Graveyard,
             ZoneRef::Exile => Zone::Exile,
@@ -7931,6 +7930,7 @@ impl FilterProp {
             | FilterProp::Suspected
             | FilterProp::Renowned
             | FilterProp::Goaded
+            | FilterProp::Prepared
             | FilterProp::ToughnessGTPower
             | FilterProp::PowerExceedsBase
             | FilterProp::Modified
@@ -8398,7 +8398,6 @@ impl ThisWayCause {
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
     pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
-        use crate::types::zones::Zone;
         match self {
             // CR 701.21a / CR 701.8a: sacrifice and destroy act on permanents.
             ThisWayCause::Sacrificed | ThisWayCause::Destroyed => Some(Zone::Battlefield),
@@ -9712,6 +9711,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::Suspected
         | FilterProp::Renowned
         | FilterProp::Goaded
+        | FilterProp::Prepared
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }

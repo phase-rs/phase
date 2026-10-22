@@ -24,7 +24,9 @@ use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
     ControllerTense, PlayerAnaphor,
 };
-use crate::parser::oracle_ir::context::{bind_controller_phrase, PlayerAntecedents};
+use crate::parser::oracle_ir::context::{
+    bind_controller_phrase, BareCardAggregateBinding, PlayerAntecedents,
+};
 use crate::parser::oracle_target::{
     parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
     parse_target_with_syntax, parse_type_phrase_folding, TargetSyntax,
@@ -2093,7 +2095,6 @@ pub(crate) fn parse_contextual_bare_card_aggregate_ref(
     input: &str,
     binding: crate::parser::oracle_ir::context::BareCardAggregateBinding,
 ) -> OracleResult<'_, QuantityRef> {
-    use crate::parser::oracle_ir::context::BareCardAggregateBinding;
     let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
     let (rest, _) = parse_bare_card_set_anaphor(rest)?;
     // CR 608.2c + CR 115.1: a target-set binding emits the new population

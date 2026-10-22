@@ -9,6 +9,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
+use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
@@ -1620,6 +1621,20 @@ pub(crate) fn capture_parked_slot_context(
         // have read without the pause — capture the live verdict itself,
         // not the inputs to re-derive it from a mode-relative list.
         declared_player: super::filter::declared_target_player(state, Some(ability)),
+    }
+}
+
+/// CR 608.2c: the declared triple of a slot capture, as the parked frames
+/// carry it. Only the declared list needs the payload's presence bit — the
+/// local pins, keyed incarnations, and player verdict travel as independent
+/// frame fields with their own empty-meaningful semantics.
+impl From<&ParkedSlotCapture> for CapturedDeclarationPayload {
+    fn from(captured: &ParkedSlotCapture) -> Self {
+        CapturedDeclarationPayload {
+            targets: captured.declared_targets.clone(),
+            target_pins: captured.declared_pins.clone(),
+            ahead: captured.declared_ahead,
+        }
     }
 }
 

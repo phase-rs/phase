@@ -33842,10 +33842,11 @@ impl GameState {
     /// See `normalize_for_loop`. Per object, rank-based over the retained
     /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys,
     /// the incarnations trigger events name (`ZoneChanged` entries and stamped
-    /// `PermanentTapped` taps), and the incarnations tracked-set member
+    /// `PermanentTapped` taps), and the incarnations the resolved set's member
     /// origins name — so two positions minted at different times compare
-    /// equal while which incarnation each reference names, and whether a
-    /// snapshot sits behind it, is preserved.
+    /// equal while which incarnation each live reference names, and whether a
+    /// snapshot sits behind it, is preserved. Non-resolved origins name
+    /// append-only history and remap by union rank below the window.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -34025,15 +34026,33 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
             }
         });
-        // CR 608.2h: origin-named incarnations join the identity pool, so a
-        // reference to a missing departure takes its own rank instead of
-        // aliasing a retained snapshot's rank below.
-        for members in self.tracked_set_member_origins.values() {
-            for (member, origin) in members.iter() {
-                present
-                    .entry(*member)
-                    .or_default()
-                    .push(origin.departure_incarnation);
+        // CR 608.2c + CR 608.2h: only the RESOLVED set's origins join the
+        // identity pool (mirrors `retain_carrier_referenced_lki`:
+        // `chain_tracked_set_id`, else the latest non-empty set — inlined
+        // because types cannot depend on game). Reads through normalized
+        // origins go through the resolved set alone, so only its stamps need
+        // exact ranks: a missing departure there takes its own rank instead
+        // of aliasing a retained snapshot's rank, which would change what the
+        // normalized state reads. Every other set is append-only history
+        // whose superseded stamps converge structurally below the window via
+        // the union-rank path — pooling them would let a missing older-set
+        // stamp consume a dense rank and shift the surviving snapshot's rank,
+        // artefactually refusing cover across blink periods.
+        let resolved_set = self.chain_tracked_set_id.or_else(|| {
+            self.tracked_object_sets
+                .iter()
+                .filter(|(_, members)| !members.is_empty())
+                .max_by_key(|(id, _)| id.0)
+                .map(|(id, _)| *id)
+        });
+        if let Some(set) = resolved_set {
+            if let Some(members) = self.tracked_set_member_origins.get(&set) {
+                for (member, origin) in members.iter() {
+                    present
+                        .entry(*member)
+                        .or_default()
+                        .push(origin.departure_incarnation);
+                }
             }
         }
         for incarnations in present.values_mut() {
@@ -34072,13 +34091,26 @@ impl GameState {
                 *incarnation = canonical(object_id, *incarnation);
             }
         });
-        // CR 608.2c: remap origin-named incarnations with the same exact
-        // ranks, so two positions minted at different times keep reading the
-        // same snapshots through structurally identical origins. Origins
-        // joined the pool above, so a stale record-less stamp remaps to its
-        // own rank — total, like history keys and carriers — instead of
-        // aliasing a retained snapshot's rank and changing what the
-        // normalized state reads.
+        // CR 608.2c: remap origin-named incarnations. A pooled incarnation
+        // (history, carrier, or resolved-set origin) takes its exact rank, so
+        // two positions minted at different times keep reading the same
+        // snapshots through structurally identical origins. A non-resolved
+        // origin names append-only history and remaps by union rank — the rank
+        // it WOULD have — so a superseded older-set stamp remaps exactly like
+        // the live stamp naming the same departure on the other side and the
+        // origins field converges below the window. Total on both paths: the
+        // `binary_search` hit is the exact rank, the miss its insertion point.
+        let remap_origin = |member: ObjectId, incarnation: u64| {
+            present
+                .get(&member)
+                .map(
+                    |incarnations| match incarnations.binary_search(&incarnation) {
+                        Ok(rank) => rank as u64 + 1,
+                        Err(would_be) => would_be as u64 + 1,
+                    },
+                )
+                .unwrap_or(1)
+        };
         self.tracked_set_member_origins = std::mem::take(&mut self.tracked_set_member_origins)
             .into_iter()
             .map(|(set_id, members)| {
@@ -34086,7 +34118,7 @@ impl GameState {
                     .into_iter()
                     .map(|(member, mut origin)| {
                         origin.departure_incarnation =
-                            canonical(member, origin.departure_incarnation);
+                            remap_origin(member, origin.departure_incarnation);
                         (member, origin)
                     })
                     .collect();
