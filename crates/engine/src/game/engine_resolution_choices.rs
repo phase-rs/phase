@@ -7021,7 +7021,6 @@ fn handle_resolution_choice_in_occurrence(
                             .map(|object| object.zone)
                             .unwrap_or(zone);
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
-                            return_result_process,
                             source_id,
                             controller: player,
                             origin: Some(origin),
@@ -7519,7 +7518,6 @@ fn handle_resolution_choice_in_occurrence(
                         )
                     })?;
                     let ctx = effects::change_zone::ChangeZoneIterationCtx {
-                        return_result_process: None,
                         source_id,
                         controller: player,
                         origin: Some(zone),

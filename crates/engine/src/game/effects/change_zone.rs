@@ -1320,7 +1320,6 @@ pub fn resolve(
     }
 
     let ctx = ChangeZoneIterationCtx {
-        return_result_process: ability.return_result_process,
         source_id: ability.source_id,
         controller: ability.controller,
         origin,
@@ -1839,13 +1838,13 @@ pub(crate) fn pending_zone_entry_evaluation_ability(
 
 /// Per-iteration context for the multi-target `ChangeZone` loop. Captured once
 /// per `resolve` call (and once per `EffectZoneChoice` resolution) so that the
-/// loop body and the post-pause drain share one parameter bundle. Mirrors
-/// the captured fields on [`crate::types::game_state::PendingChangeZoneIteration`]
-/// minus `remaining`, `effect_kind` and the logical-group fields. Per-member
-/// entry modifications travel on each [`ChangeZoneMemberEntry`] instead.
+/// loop body and the post-pause drain share one parameter bundle. Shares the
+/// move parameters captured on [`crate::types::game_state::PendingChangeZoneIteration`];
+/// result-process authority and other resume bookkeeping stay on that pending
+/// state. Per-member entry modifications travel on each [`ChangeZoneMemberEntry`]
+/// instead.
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
-    pub return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub origin: Option<Zone>,

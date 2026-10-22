@@ -3288,7 +3288,6 @@ fn drain_pending_change_zone_iteration_in_occurrence(
         for (i, member) in remaining.iter().enumerate() {
             let obj_id = &member.object_id;
             let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
-                return_result_process,
                 source_id,
                 controller,
                 origin,

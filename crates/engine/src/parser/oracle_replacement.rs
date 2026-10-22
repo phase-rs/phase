@@ -5376,21 +5376,6 @@ fn compose_enters_with_keyword_grant(
     .sub_ability(inner)
 }
 
-/// CR 614.1d: a gate word the unconditional "enters tapped" fallback cannot
-/// carry. `as long as` also matches "for as long as" at its word boundary.
-fn enters_tapped_conditional_marker(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag("unless"),
-            tag("if you control"),
-            tag("if x"),
-            tag("as long as"),
-        )),
-    )
-    .parse(input)
-}
-
 fn has_enters_tapped_with_counter(text: &str) -> bool {
     has_enters_tapped_phrase(text)
         && preceded(
