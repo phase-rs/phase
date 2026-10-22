@@ -1,13 +1,14 @@
-//! Synthetic typed riders isolate the install/entry boundary without depending
-//! on Torgal's parser. Every trigger is produced by an actual creature cast.
+//! Typed and parsed riders isolate the install/entry boundary. Every trigger
+//! is produced by an actual creature cast.
 //! CR 611.2d + CR 608.2h: resolution-owned quantities are determined once.
 //! CR 614.1c: entering-object quantities remain entry replacement work.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric, ChoiceType,
-    ControllerRef, Effect, EffectScope, ObjectScope, QuantityExpr, QuantityRef, TapStateChange,
-    TargetFilter, TargetSelectionMode, TypedFilter,
+    Comparator, ControllerRef, Effect, EffectScope, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, TapStateChange, TargetFilter, TargetSelectionMode,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -146,6 +147,111 @@ fn remove_after_install(runner: &mut GameRunner, response: ObjectId, victim: Obj
     runner.resolve_top();
     assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
     assert_eq!(runner.state().stack.len(), 1);
+}
+
+fn other_dog_scenario() -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+    const RIDER: &str = "Whenever you cast a Human creature spell, that creature enters with an additional +1/+1 counter on it for each other Dog you control.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Other Dog rider source", 2, 2, RIDER)
+        .with_subtypes(vec!["Dog"])
+        .id();
+    let dog = scenario
+        .add_creature(P0, "Counted other Dog", 2, 2)
+        .with_subtypes(vec!["Dog"])
+        .id();
+    let response = removal(&mut scenario, dog);
+    let spell = scenario
+        .add_creature_to_hand(P0, "Human entrant", 1, 1)
+        .with_subtypes(vec!["Human"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    (scenario, spell, dog, response)
+}
+
+#[test]
+fn other_dog_population_excludes_source_without_response() {
+    let (scenario, spell, _, _) = other_dog_scenario();
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    finish(&mut runner, spell, 1);
+}
+
+#[test]
+fn other_dog_removed_before_trigger_resolution_is_not_counted() {
+    let (scenario, spell, dog, response) = other_dog_scenario();
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.cast(response).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&dog].zone, Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    finish(&mut runner, spell, 0);
+}
+
+#[test]
+fn other_dog_removed_after_trigger_resolution_remains_counted() {
+    let (scenario, spell, dog, response) = other_dog_scenario();
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    remove_after_install(&mut runner, response, dog);
+    // CR 611.2d + CR 608.2h: "other" is source-relative, not an entry-time read.
+    finish(&mut runner, spell, 1);
+}
+
+#[test]
+fn recipient_controller_hand_size_is_frozen_without_an_entering_binding() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::HandSize {
+            player: PlayerScope::RecipientController,
+        })),
+    );
+    let dog = scenario.add_creature(P0, "Response victim", 2, 2).id();
+    let response = removal(&mut scenario, dog);
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    remove_after_install(&mut runner, response, dog);
+    // CR 611.2d + CR 608.2h: the response was still in hand at install.
+    // RecipientController does not use the entering-object fallback.
+    finish(&mut runner, spell, 1);
+}
+
+#[test]
+fn nested_player_threshold_keeps_entering_object_mana_value_live() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    source(
+        &mut scenario,
+        counter(quantity(QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(quantity(QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient,
+                    })),
+                    offset: 16,
+                }),
+            },
+        })),
+    );
+    let spell = entrant(&mut scenario);
+    let mut runner = scenario.build();
+    install(&mut runner, spell);
+    // CR 614.1c: the preserved threshold is entrant MV8 + 16, not source MV1 + 16.
+    // Neither player's 20 life reaches 24; freezing at install would count both.
+    finish(&mut runner, spell, 0);
 }
 
 #[test]

@@ -1777,7 +1777,7 @@ pub(crate) fn quantity_expr_recipient_read(expr: &QuantityExpr) -> RecipientRead
 }
 
 /// Classify every reference explicitly so a new variant requires a decision.
-fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
+pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
     match qty {
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
