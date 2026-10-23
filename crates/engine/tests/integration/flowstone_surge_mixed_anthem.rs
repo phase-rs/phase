@@ -9251,7 +9251,34 @@ fn duration_repair_licid_empty_legal_hosts_and_new_incarnation_use_public_action
     );
     let mut runner = scenario.build();
     duration_repair_install_face(&mut runner, source, &face);
-    runner.equip(greaves, source).unwrap();
+    runner
+        .act(GameAction::Equip {
+            equipment_id: greaves,
+            target_id: source,
+        })
+        .unwrap();
+    let WaitingFor::EquipTarget {
+        player,
+        equipment_id,
+        valid_targets,
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual Greaves equip target selection");
+    };
+    assert_eq!((*player, *equipment_id), (P0, greaves));
+    let mut actual_targets = valid_targets.clone();
+    actual_targets.sort();
+    let mut expected_targets = vec![source, host];
+    expected_targets.sort();
+    assert_eq!(actual_targets, expected_targets);
+    runner
+        .act(GameAction::Equip {
+            equipment_id: greaves,
+            target_id: source,
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.advance_until_stack_empty();
     assert!(runner.state().objects[&source]
         .keywords
         .contains(&Keyword::Shroud));
