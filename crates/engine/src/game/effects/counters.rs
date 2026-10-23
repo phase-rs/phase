@@ -683,10 +683,14 @@ pub(crate) fn resume_copy_target_entry_completions(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), crate::game::engine::EngineError> {
-    // Only a remainder left behind by a consumed tail is drained here. A frame
-    // this function did not consume belongs to the ordinary drains, which also
-    // defer to a due counter-cost root; draining it first would reorder the
-    // boundary for every card, not just copy entries.
+    // Nothing is drained until this function has consumed a tail. Once it has,
+    // `drain_pending_counter_additions` runs over whatever counter frame is on
+    // top: the remainder the tail left behind, or an exposed parent counter
+    // frame. The latter is benign because the due-root check above runs first
+    // and the ordinary drains would take the same frame anyway. A frame this
+    // function never reached belongs to the ordinary drains, which also defer to
+    // a due counter-cost root; draining it first would reorder the boundary for
+    // every card, not just copy entries.
     let mut consumed_tail = false;
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         if state.counter_cost_root_is_due() {
@@ -729,8 +733,19 @@ pub(crate) fn resume_copy_target_entry_completions(
         consumed_tail = true;
         // Emit the completion event only AFTER its post-actions. A non-noop
         // remainder is drained on the next iteration; no empty frame survives.
-        if !completion.is_noop() {
+        if completion.is_noop() {
+            continue;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             stash_pending_counter_additions(state, Vec::new(), completion);
+        } else {
+            // CR 608.2c + CR 616.1: the tail's deferred-event replay can raise a
+            // parent continuation's prompt and still return `Completed`. A plain
+            // push would bury a direct-choice owner under this remainder, so
+            // park it the way the paused branch does and stop; the remainder
+            // runs once the prompt is consumed.
+            merge_pending_counter_completion_after_nested_pause(state, completion);
+            return Ok(());
         }
     }
     Ok(())

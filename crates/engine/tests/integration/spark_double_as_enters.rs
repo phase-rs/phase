@@ -779,7 +779,7 @@ fn spark_double_printed_x_loyalty_noncast_boundary_adds_only_exception() {
     const NISSA: &str = "[+2]: Scry 2.\n[0]: Look at the top card of your library. If it's a land card or a creature card with mana value less than or equal to the number of loyalty counters on Nissa, you may put that card onto the battlefield.\n[−6]: Untap up to two target lands you control. They become 5/5 Elemental creatures with flying and haste until end of turn. They're still lands.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Spark Double can copy a planeswalker directly; Luxior is unnecessary.
+    // Spark Double copies a planeswalker directly.
     let donor = scenario
         .add_planeswalker_from_oracle(P0, "Nissa, Steward of Elements", "Nissa", 2, NISSA)
         .id();
