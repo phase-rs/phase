@@ -565,10 +565,10 @@ pub(super) fn handle_assign_combat_damage(
     blockers: &[DamageSlot],
     assignment_modes: &[CombatDamageAssignmentMode],
     trample: Option<TrampleKind>,
-    defending_player: PlayerId,
-    attack_target: &AttackTarget,
-    pw_loyalty: Option<u32>,
-    pw_controller: Option<PlayerId>,
+    _defending_player: PlayerId,
+    _attack_target: &AttackTarget,
+    _pw_loyalty: Option<u32>,
+    _pw_controller: Option<PlayerId>,
     mode: CombatDamageAssignmentMode,
     assignments: &[(ObjectId, u32)],
     trample_damage: u32,
@@ -626,6 +626,28 @@ pub(super) fn handle_assign_combat_damage(
         return Ok(WaitingFor::Priority { player });
     }
 
+    let attacker_info = state
+        .combat
+        .as_ref()
+        .and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == attacker_id)
+        })
+        .ok_or_else(|| EngineError::InvalidAction("Attacker no longer in combat".to_string()))?;
+    let attack_target = attacker_info.attack_target;
+    let excess_target =
+        attacker_info.resolve_damage_target(state, trample == Some(TrampleKind::OverPlaneswalkers));
+    let (pw_loyalty, pw_controller) =
+        super::combat_damage::compute_pw_loyalty_threshold(state, attacker_info);
+    // CR 506.4c + CR 510.1b: ordinary trample cannot assign excess when the
+    // permanent relation has ended. Reject before any pending assignment writes.
+    if (trample_damage > 0 || controller_damage > 0) && excess_target.is_none() {
+        return Err(EngineError::InvalidAction(
+            "No current recipient for combat damage excess".to_string(),
+        ));
+    }
     let assigned_total: u32 = assignments.iter().map(|(_, amount)| *amount).sum::<u32>()
         + trample_damage
         + controller_damage;
@@ -719,23 +741,6 @@ pub(super) fn handle_assign_combat_damage(
         }
 
         if trample_damage > 0 {
-            let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
-            let excess_target = match attack_target {
-                AttackTarget::Player(player_id) => Some(DamageTarget::Player(*player_id)),
-                AttackTarget::Planeswalker(pw_id) => match state.objects.get(pw_id) {
-                    Some(obj) if obj.zone == Zone::Battlefield => {
-                        Some(DamageTarget::Object(*pw_id))
-                    }
-                    _ if is_over_pw => Some(DamageTarget::Player(defending_player)),
-                    _ => None,
-                },
-                AttackTarget::Battle(battle_id) => match state.objects.get(battle_id) {
-                    Some(obj) if obj.zone == Zone::Battlefield => {
-                        Some(DamageTarget::Object(*battle_id))
-                    }
-                    _ => None,
-                },
-            };
             if let Some(target) = excess_target {
                 combat.pending_damage.push((
                     attacker_id,
@@ -1253,6 +1258,11 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
         let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 6);
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),

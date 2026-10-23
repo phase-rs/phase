@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, CoinFlipRun, CombatDamageScope,
-    ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
+    CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
     ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
@@ -24,10 +24,10 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
-    ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
-    ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -1128,6 +1128,13 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     // CR 614.12a: likewise preserve the authenticated pre-entry as-enters
     // prompt of the parked entry (and only that `NamedChoice`).
     if pending_entry_named_choice_is_live(state) {
+        return state.waiting_for.clone();
+    }
+    // CR 614.12a: likewise preserve the authenticated pre-entry life-payment
+    // prompt of the parked entry (Phyrexian Processor class). Without this
+    // the zone pipeline's post-`NeedsChoice` render would clobber the
+    // `PayAmountChoice` with a degenerate one-candidate ordering prompt.
+    if pending_entry_payment_is_live(state) {
         return state.waiting_for.clone();
     }
     // CR 616.1 / CR 614: each option carries its source object so the frontend
@@ -2494,6 +2501,14 @@ fn redirect_damage_event(
 
     match redirect_amount {
         PreventionAmount::All => {
+            let redirected = new_recipient.is_some();
+            let event = ProposedEvent::Damage {
+                source_id,
+                target: new_recipient.unwrap_or(target),
+                amount: damage_amount,
+                is_combat,
+                applied,
+            };
             // CR 614.5: The one-shot opportunity is spent on this event whether
             // or not the redirection succeeds — consume the shield in both the
             // success and the "does nothing" (illegal recipient per CR 614.9)
@@ -2503,19 +2518,23 @@ fn redirect_damage_event(
             // re-fire for every damage event within their lifetime.
             if consume_after_redirect {
                 consume_prevention_shield(state, rid, None);
+                // CR 510.2 + CR 700.1 + CR 614.9: A successful redirection
+                // covers this source's whole simultaneous combat instance.
+                // Zero-damage events returned above; illegal recipients do nothing.
+                if redirected {
+                    record_combat_one_shot_application(
+                        state,
+                        AppliedReplacementKey::for_event(&event, rid),
+                        source_id,
+                    );
+                }
             }
 
             // CR 614.9: A legal recipient takes the damage instead; an illegal
             // one (left the battlefield, no longer a battle/creature/
             // planeswalker, or a player who left the game) makes the redirection
             // do nothing, so the damage stays on the original recipient.
-            ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount: damage_amount,
-                is_combat,
-                applied,
-            })
+            ApplyResult::Modified(event)
         }
         PreventionAmount::AllBut(_) => {
             // CR 615.1a vs CR 614.9: `AllBut` is exclusively a *prevention*
@@ -2738,12 +2757,16 @@ fn damage_done_applier(
                     }
                 }
             };
-            // CR 614.5: A one-shot effect-created amount replacement (Desperate
-            // Gambit) gets a single opportunity, then is consumed. Continuous
-            // statics (Furnace of Rath) keep `ShieldKind::None` and are never
-            // consumed here — they re-apply to every damage event.
-            if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
+            // CR 614.5: Consume a one-shot damage replacement after applying it.
+            // The batch ledger retains only successful amount changes.
+            if matches!(
+                shield_kind_for_rid(state, rid),
+                Some(ShieldKind::DamageReplacementOneShot)
+            ) {
                 consume_prevention_shield(state, rid, None);
+                if amount > 0 && new_amount != amount {
+                    record_combat_one_shot_application(state, applied_key, source_id);
+                }
             }
             // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
             // prevention provenance of the shared `Minus` subtraction — CR 702.64
@@ -3066,16 +3089,12 @@ fn damage_done_applier(
         }
     }
 
-    // CR 615.3 + CR 615.1a: One-shot prevention shield ("the next time [target
-    // creature] would deal damage this turn, prevent that damage" — Awe Strike).
-    // Single opportunity bounded by the "the next time" qualifier (CR 615.3);
-    // the `Prevention { All }`-style body absorbs any magnitude of the single
-    // matching damage event. The one-shot consumption itself is handled by the
-    // generic `consume_on_apply` contract (applier `Prevented`/`Modified` arms)
-    // rather than here. Per-event path throughout — even inside a combat-damage
-    // batch the shield matches at most one event (it is consumed on apply), so
-    // the per-event `DamagePrevented` + `last_effect_count` stamp fires the
-    // rider once with the exact prevented amount.
+    // CR 615.8 + CR 510.2: One-shot prevention covers the chosen source's
+    // entire next instance, including every simultaneous combat recipient.
+    // The generic `consume_on_apply` arms consume immediately; the batch ledger
+    // keeps only this source's remaining portions eligible. CR 615.5: Aggregate
+    // the runtime rider's amount, while template/source-reflecting riders retain
+    // their existing per-event continuation path.
     //
     // CR 120.8: A 0-damage event is not damage at all — it has no event to
     // replace. The shield must not "prevent" it (no DamagePrevented, no
@@ -3112,16 +3131,73 @@ fn damage_done_applier(
                 target: target.clone(),
                 amount: dmg,
             });
-            // CR 615.5: stamp the prevented amount for the rider's
-            // `EventContextAmount` ("You gain life equal to the damage
-            // prevented this way").
-            state.last_effect_count = Some(dmg as i32);
+            let accumulated_in_batch = if !reflects_per_event {
+                if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                    *tally.entry(applied_key).or_insert(0) += dmg as i32;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            // CR 615.13 + CR 615.5: Keep real source/recipient provenance above;
+            // only the runtime rider's amount is aggregated, without emitting a
+            // second, sentinel-source prevention event at the rider boundary.
+            if !accumulated_in_batch || shield_has_per_event_execute_followup(state, rid) {
+                state.last_effect_count = Some(dmg as i32);
+            }
             return ApplyResult::Prevented;
         }
     }
 
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
+}
+
+/// CR 510.2 + CR 700.1 + CR 615.8: A consumed one-shot may still cover another
+/// portion of the same damage source's current simultaneous combat instance.
+fn consumed_replacement_applies_in_combat_batch(
+    state: &GameState,
+    event: &ProposedEvent,
+    rid: ReplacementId,
+) -> bool {
+    match event {
+        ProposedEvent::Damage {
+            source_id,
+            is_combat: true,
+            ..
+        } => state
+            .combat_one_shot_applications
+            .as_ref()
+            .is_some_and(|applications| {
+                applications.contains(&(AppliedReplacementKey::for_event(event, rid), *source_id))
+            }),
+        _ => false,
+    }
+}
+
+/// CR 609.7b + CR 700.1: Record only successful one-shot damage applications;
+/// CR 615.7: finite Next(N) depletion never records.
+fn record_combat_one_shot_application(
+    state: &mut GameState,
+    key: AppliedReplacementKey,
+    damage_source: ObjectId,
+) {
+    if matches!(
+        shield_kind_for_rid(state, key.as_replacement_id()),
+        Some(ShieldKind::Prevention {
+            amount: PreventionAmount::Next(_)
+        })
+    ) {
+        return;
+    }
+    if let Some(applications) = state.combat_one_shot_applications.as_mut() {
+        let application = (key, damage_source);
+        if !applications.contains(&application) {
+            applications.push(application);
+        }
+    }
 }
 
 /// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
@@ -5066,6 +5142,9 @@ fn create_entry_copy_spec_for_replacement(
         sacrifice_at: duration.clone(),
         source_id: replacement_source,
         controller,
+        // Forwards BecomeCopy mods, but no BecomeCopy+halving card exists, so the
+        // None fallback (today's token-id read) preserves behavior on this route.
+        donor: None,
     })
 }
 
@@ -7499,8 +7578,9 @@ fn object_replacement_candidate_applies(
         }
     }
 
-    // CR 701.19: skip consumed one-shot replacements such as used regeneration.
-    if repl_def.is_consumed {
+    // CR 614.5 + CR 615.8: Only the same source's current combat instance may
+    // reuse a consumed one-shot; all other consumed replacements stay spent.
+    if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) {
         return false;
     }
     // CR 708.3 + CR 708.2a: An object put onto the battlefield FACE DOWN is turned
@@ -8717,14 +8797,15 @@ pub fn find_applicable_replacements(
     // reachable only by non-damage entries on non-damage events.
     {
         for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
-            if repl_def.is_consumed {
-                continue;
-            }
-
             let rid = ReplacementId {
                 source: ObjectId(0),
                 index,
             };
+            if repl_def.is_consumed
+                && !consumed_replacement_applies_in_combat_batch(state, event, rid)
+            {
+                continue;
+            }
 
             if event.already_applied(&rid) {
                 continue;
@@ -9239,13 +9320,12 @@ enum ReplacementBranch {
 /// Extract ETB counter data from a replacement ability's effect.
 /// Handles `PutCounter` and `AddCounter` effects, returning (counter_type, count) pairs.
 ///
-/// `event` scopes the quantity resolution: for a `ZoneChange` to the battlefield
-/// the entering object is threaded through `QuantityContext::entering`, so
-/// self-scoped spell refs (`ManaSpentToCast` with self/trigger scopes
-/// lookups) resolve against the spell that is ETB'ing rather than the static
-/// replacement source. CR 614.1c treats these as replacement effects; CR 601.2h
-/// guarantees `colors_spent_to_cast` is still populated at this point (the clear
-/// happens later in `process_triggers`).
+/// Floating riders' resolution-owned quantities are already fixed at install
+/// (CR 611.2d: continuous-effect variables are determined on resolution).
+/// For quantities left dynamic, `event` supplies `QuantityContext::entering`:
+/// recipient-scoped object reads and self-scoped `ManaSpentToCast` then use the
+/// entering spell rather than the installing source (CR 614.1c: enters-with
+/// effects modify entry). Trigger/event scopes are not entering-object scopes.
 ///
 /// `scoped_player` is the entrant's as-enters choice (e.g. "choose an opponent")
 /// carried on `event.enter_with_choices` as `ChosenAttribute::Player`. Binding it
@@ -9314,11 +9394,12 @@ fn extract_etb_counters_from_effect(
             count,
             ..
         } => {
-            // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
-            // object for ETB replacements. `CostXPaid` reads the spell's paid X
-            // (stashed by `finalize_cast`); self-scoped spent-mana refs read the spell's
-            // per-color mana tally; other dynamic refs resolve against current
-            // state.
+            // CR 614.1c: resolve the remaining dynamic entering-object reads
+            // while modifying entry. Floating resolution-owned counts have
+            // already been fixed at install (CR 611.2d). Self-scoped spent-mana
+            // refs use the entering spell's payment tally. CostXPaid remains a
+            // known limitation: its resolver reads source/trigger context,
+            // not ctx.entering.
             let entering = match event {
                 ProposedEvent::ZoneChange {
                     object_id,
@@ -9401,7 +9482,7 @@ pub(super) struct EnterReplacementModifiers {
 impl EventModifiers {
     /// True if this single effect (ignoring sub_ability chain) is purely a
     /// ProposedEvent modifier with no additional resolution work.
-    fn is_event_modifier_effect(effect: &Effect) -> bool {
+    pub(super) fn is_event_modifier_effect(effect: &Effect) -> bool {
         match effect {
             // CR 701.26a/b: a SelfRef single tap/untap is purely an enters-tapped
             // event modifier (either polarity).
@@ -9617,6 +9698,80 @@ pub(super) fn current_self_enter_replacement_choice(
         })
         .find(|ability| matches!(&*ability.effect, Effect::Choose { persist: true, .. }))
         .cloned()
+}
+
+/// CR 614.12a + CR 707.2 + CR 614.1c: surface a copied as-enters life payment (Clone
+/// entering as Minion of the Wastes) after the copy resolves. The payment
+/// sibling of `current_self_enter_replacement_choice`: the interactive copy
+/// choice resolves post-move, so the acquired payment never passes through
+/// the entry pipeline — park it on a synthetic battlefield-to-battlefield
+/// proposal and raise its prompt. The answer latches straight onto the live
+/// object (there is no delivery to resume — see the completion tail's
+/// copy-surface short-circuit); a determined 0 latches inline with no prompt
+/// (the F5 analogue). Answer-once: an object that already carries a latched
+/// Number never re-surfaces. `None` (no payment, off-battlefield, already
+/// latched, or determined-0) lets the copy finish continue untouched, so
+/// ordinary Clones observe zero behavior change.
+pub(crate) fn surface_copied_entry_payment(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let live = state.objects.get(&source_id)?;
+    if live.zone != Zone::Battlefield {
+        return None;
+    }
+    if live
+        .chosen_attributes
+        .iter()
+        .any(|attr| matches!(attr, ChosenAttribute::Number(_)))
+    {
+        return None;
+    }
+    let payer = live.controller;
+    let mut proposed =
+        ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+    if let ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = &mut proposed
+    {
+        // The copy's live controller pays (CR 118.1) — the entering object's
+        // controller, not necessarily its owner (Threaten-style copies).
+        *controller_override = Some(payer);
+    }
+    let registry = replacement_registry();
+    let rid = find_applicable_replacements(state, &proposed, registry)
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .find(|rid| {
+            replacement_definition_for_id(state, *rid).is_some_and(as_enters_payment_shape)
+        })?;
+    let (max, player) = as_enters_pay_terms(state, &proposed, rid)?;
+    if max == 0 {
+        // Determined 0 (CR 609.3): latch inline, no prompt.
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.chosen_attributes.push(ChosenAttribute::Number(0));
+            // CR 613.1: re-run layers so CDA readers see the latch.
+            crate::game::layers::mark_layers_full(state);
+        }
+        return None;
+    }
+    let choice = AsEntersPayChoice { player, max };
+    let _ = park_as_enters_pay_choice(state, proposed, 0, rid, choice, events);
+    Some(state.waiting_for.clone())
+}
+
+/// CR 614.12a + CR 707.2: whether the parked entry payment is a copy-surface
+/// park (synthetic battlefield-to-battlefield proposal — the object already
+/// entered). A genuine pre-entry proposal always arrives from a
+/// non-battlefield zone, so the from/to signature is unambiguous.
+pub(crate) fn parked_entry_payment_is_copy_surface(pending: &PendingReplacement) -> bool {
+    matches!(
+        &pending.proposed,
+        ProposedEvent::ZoneChange { from, to, .. }
+            if *from == Zone::Battlefield && *to == Zone::Battlefield
+    )
 }
 
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
@@ -9843,9 +9998,9 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
-                // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
-                // resolving spell (e.g. Inkshield) captures a `runtime_execute`
-                // rider at resolution time and fires it once post-batch against the
+                // CR 510.2 + CR 615.5: All-damage and one-shot prevention shields
+                // created by resolving spells capture a `runtime_execute` rider
+                // and fire it once post-batch against the
                 // aggregate prevented amount. Suppress the per-event stash here for
                 // such shields so `fire_combat_prevention_riders` owns the single
                 // continuation.
@@ -9867,16 +10022,8 @@ fn apply_single_replacement(
                 // condition `PostReplacementDamageSourceMatchesFilter` (and/or a
                 // `PostReplacementDamageSource` reflection target) is the per-source
                 // marker; Inkshield/New Way Forward carry neither and keep batching.
-                //
-                // CR 615.3 + CR 615.5 (Awe Strike): the one-shot `PreventionOneShot`
-                // shield stays on the per-event path even inside a combat-damage
-                // batch — it is single-opportunity (consumed on first apply), so the
-                // batch contains at most one matching event from the one captured
-                // source, and the per-event stash + inline drain in
-                // `replace_combat_damage_batch` fires its template rider exactly
-                // once. The batch aggregation path would require the post-batch
-                // rider firing in `combat_damage.rs`, which this shield deliberately
-                // does not use.
+                // CR 615.8 + CR 615.5: One-shot runtime riders (Awe Strike) also
+                // use the total across the chosen source's simultaneous portions.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
                     && !repl_def
@@ -9887,7 +10034,7 @@ fn apply_single_replacement(
                         repl_def.shield_kind,
                         ShieldKind::Prevention {
                             amount: PreventionAmount::All
-                        }
+                        } | ShieldKind::PreventionOneShot
                     );
                 let post_effect = match (branch, &repl_def.mode) {
                     // CR 614.6 + CR 611.2b: SearchFound binds its exact
@@ -10183,9 +10330,12 @@ fn apply_single_replacement(
                 // CR 614.12a: an as-enters choice was made before the permanent
                 // enters (`as_enters_named_choice` parks every apply site first);
                 // its answer rides the event's `enter_with_choices`, so there is
-                // no post-entry choice left to run.
+                // no post-entry choice left to run. An as-enters life payment
+                // (`park_as_enters_pay_choice`) is answered the same way — paid
+                // and latched pre-zone-change — so its execute is suppressed too.
                 let post_effect = post_effect.filter(|_| {
-                    !(as_enters_choice_type(repl_def).is_some()
+                    !(((as_enters_choice_type(repl_def).is_some()
+                        || as_enters_payment_shape(repl_def))
                         && matches!(
                             &proposed,
                             ProposedEvent::ZoneChange {
@@ -10194,6 +10344,19 @@ fn apply_single_replacement(
                                 ..
                             } if *object_id == rid.source
                         ))
+                        // CR 614.12a + CR 707.2: only the PAYMENT half extends
+                        // to TokenEntry — its answer rides the entry-payment
+                        // continuation. The choice half stays ZoneChange-only:
+                        // choice detection never parks a TokenEntry, so a
+                        // token-entry choice has no pre-entry answer and must
+                        // keep its generic post-replacement prompt;
+                        // suppressing it would drop the choice entirely.
+                        || (as_enters_payment_shape(repl_def)
+                            && matches!(
+                                &proposed,
+                                ProposedEvent::TokenEntry { entry_ref, .. }
+                                if *entry_ref == rid.source
+                            )))
                 });
                 let post_effect = post_effect.filter(|_| {
                     !(matches!(
@@ -10250,6 +10413,22 @@ fn apply_single_replacement(
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
+    // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
+    // or prevented. Capture scalar provenance only; do not clone damage events.
+    let combat_one_shot_application =
+        state
+            .combat_one_shot_applications
+            .as_ref()
+            .and_then(|_| match &proposed {
+                ProposedEvent::Damage {
+                    source_id, amount, ..
+                } if *amount > 0 => Some((
+                    AppliedReplacementKey::for_event(&proposed, rid),
+                    *source_id,
+                    *amount,
+                )),
+                _ => None,
+            });
     // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
     // *successfully applies*. The single exception is a `PreventionOneShot`
     // damage shield whose applier returns the event UNMODIFIED — the
@@ -10426,6 +10605,24 @@ fn apply_single_replacement(
                     || (pre_applier_event.is_none() && consume_on_apply)
                 {
                     mark_replacement_consumed(state, rid);
+                    if let Some((key, damage_source, damage_amount)) = combat_one_shot_application {
+                        let changed = match &new_event {
+                            ProposedEvent::Damage {
+                                source_id,
+                                target,
+                                amount,
+                                ..
+                            } => {
+                                *source_id != damage_source
+                                    || *amount != damage_amount
+                                    || Some(target) != proposed_event_target.as_ref()
+                            }
+                            _ => true,
+                        };
+                        if changed {
+                            record_combat_one_shot_application(state, key, damage_source);
+                        }
+                    }
                 }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement
                 // effect when it has work beyond the event modifiers (e.g., a Choose
@@ -10488,6 +10685,9 @@ fn apply_single_replacement(
             ApplyResult::Prevented => {
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
+                    if let Some((key, damage_source, _)) = combat_one_shot_application {
+                        record_combat_one_shot_application(state, key, damage_source);
+                    }
                 }
                 // CR 615.5: A prevention effect's additional effect (e.g.
                 // Phyrexian Hydra's "Put a -1/-1 counter on ~ for each 1 damage
@@ -10995,6 +11195,21 @@ fn candidate_materiality(
     // candidates, so this arm decides that two such overrides are offered as a choice.
     if repl_def.enters_under.is_some() {
         return CandidateMateriality::Unconditional;
+    }
+    // CR 616.1 + CR 614.12a: an as-enters life payment writes NO event field —
+    // the answer rides `enter_with_choices` exactly like an as-enters `Choose`
+    // (see the `Choose` arm below), so it is ordering-immaterial against
+    // same-carrier/different-field co-candidates (EnterTapped, counters) and
+    // auto-resolves without a degenerate ordering prompt. A co-candidate whose
+    // APPLICABILITY the payment can flip (a life-reading condition — the
+    // payment changes life the moment it applies, CR 616.1f re-scan) is a
+    // set-level question answered by `as_enters_choice_changes_applicability`,
+    // which the shared authorities consult before this per-candidate walk
+    // (mirroring the `Choose` arm's arrangement). Controller overrides and
+    // copy/redirects force materiality via their own `Unconditional` arms
+    // above and below.
+    if as_enters_payment_shape(repl_def) {
+        return CandidateMateriality::Disjoint;
     }
     // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
     // so it writes the `Damage` field and is order-material against any other
@@ -11609,6 +11824,289 @@ pub(crate) fn pending_entry_named_choice_is_live(state: &GameState) -> bool {
         && as_enters_choice_for_entry(state, &pending.proposed, *rid).is_some()
 }
 
+/// CR 614.1c + CR 614.12a: the shape whose life payment is made before the
+/// permanent enters: a mandatory `Moved` self-replacement whose execute is a
+/// single any-amount `PayLife` cost (no follow-up chain, no condition).
+/// Mirrors `as_enters_choice_type`; the payment answer rides the event's
+/// `enter_with_choices` exactly like a pre-entry choice.
+fn as_enters_payment_shape(def: &ReplacementDefinition) -> bool {
+    if def.event != ReplacementEvent::Moved
+        || !matches!(def.mode, ReplacementMode::Mandatory)
+        || def.condition.is_some()
+        || !matches!(def.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    if execute.sub_ability.is_some() || execute.condition.is_some() {
+        return false;
+    }
+    matches!(
+        &*execute.effect,
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { amount },
+            ..
+        } if crate::game::effects::pay::is_pay_any_amount(amount)
+    )
+}
+
+/// CR 614.12a: `rid` is the entrant's own as-enters life payment for this
+/// battlefield entry (whether or not it has been answered yet).
+fn as_enters_payment_for_entry<'a>(
+    state: &'a GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<&'a ReplacementDefinition> {
+    // CR 614.12a + CR 707.2: a direct token copy (Rite of Replication) enters
+    // via TokenEntry through the same pipeline — its copied payment rides the
+    // same continuation as a ZoneChange entry.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return None,
+    };
+    if rid.source != entrant_id {
+        return None;
+    }
+    let def = replacement_definition_for_id(state, rid)?;
+    as_enters_payment_shape(def).then_some(def)
+}
+
+/// The prompt a pre-entry as-enters life payment raises.
+struct AsEntersPayChoice {
+    /// CR 110.2 + CR 110.2a: the player who will control the permanent as it
+    /// enters — the controller override the entry carries, else its owner —
+    /// mirroring `AsEntersChoice`.
+    player: PlayerId,
+    /// Maximum payable: the shared any-amount helper's team-life/lock clamp,
+    /// further clamped by the entry cap when the definition carries one.
+    max: u32,
+}
+
+/// CR 614.12a: the payment terms for `rid` on this entry — `(max, payer)`
+/// — or `None` when `rid` is not this entry's unanswered as-enters payment.
+/// The cap (`entry_payment_max`, Nameless Race) is evaluated live at raise
+/// time against the payer's board, like every other `resolve_quantity`.
+fn as_enters_pay_terms(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<(u32, PlayerId)> {
+    let def = as_enters_payment_for_entry(state, proposed, rid)?;
+    if proposed.already_applied(&rid) {
+        return None;
+    }
+    // Reached only for the two entry classes `as_enters_payment_for_entry`
+    // admits; a TokenEntry carries no controller override and owner==controller
+    // for tokens, so the entrant's controller pays.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return None,
+    };
+    let entrant = state.entering_or_live_object(entrant_id)?;
+    let payer = match proposed {
+        ProposedEvent::ZoneChange {
+            controller_override,
+            ..
+        } => controller_override.unwrap_or(entrant.owner),
+        ProposedEvent::TokenEntry { .. } => entrant.controller,
+        _ => return None,
+    };
+    let pay_max = crate::game::effects::pay::max_pay_any_life_amount(state, payer);
+    let max = match &def.entry_payment_max {
+        Some(cap) => {
+            let cap_eval =
+                crate::game::quantity::resolve_quantity(state, cap, payer, entrant_id).max(0);
+            pay_max.min(u32::try_from(cap_eval).unwrap_or(0))
+        }
+        None => pay_max,
+    };
+    Some((max, payer))
+}
+
+/// CR 614.12a: the entry-payment prompt for `rid`, or `None` when no prompt is
+/// due (not this entry's payment, already applied, or a determined 0 — the
+/// funnel auto-commits that case inline instead of prompting).
+fn as_enters_pay_choice(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<AsEntersPayChoice> {
+    let (max, player) = as_enters_pay_terms(state, proposed, rid)?;
+    if max == 0 {
+        return None;
+    }
+    Some(AsEntersPayChoice { player, max })
+}
+
+/// CR 614.12a: raise the as-enters life-payment prompt for the parked entry.
+/// The caller has installed `state.pending_replacement` (the exact proposed
+/// event and the single candidate `rid`); the answer resumes it through
+/// `engine_replacement::handle_entry_payment`.
+fn raise_as_enters_pay_choice(
+    state: &mut GameState,
+    object_id: ObjectId,
+    choice: AsEntersPayChoice,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let AsEntersPayChoice { player, max } = choice;
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::PayCost,
+        source_id: object_id,
+        subject: None,
+    });
+    state.waiting_for = WaitingFor::PayAmountChoice {
+        player,
+        resource: PayableResource::Life,
+        min: 0,
+        max,
+        accumulated: 0,
+        source_id: object_id,
+        pending_mana_ability: None,
+    };
+    ReplacementResult::NeedsChoice(player)
+}
+
+/// CR 614.12a: park the entry and raise its life-payment prompt, mirroring
+/// `park_as_enters_named_choice` (the pin is owned by the answer, which pins
+/// before the payment can change the proposal).
+fn park_as_enters_pay_choice(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    depth: u16,
+    rid: ReplacementId,
+    choice: AsEntersPayChoice,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth,
+        is_optional: false,
+        choice_player: None,
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+        delivery_boundary: None,
+    });
+    raise_as_enters_pay_choice(state, rid.source, choice, events)
+}
+
+/// CR 614.12a: whether `state.waiting_for` is the live pre-entry as-enters
+/// payment prompt of the parked entry — a `PayAmountChoice{Life}` with no
+/// mana-ability rider whose source is the entrant of a parked single-candidate
+/// battlefield entry whose candidate is that entrant's unanswered as-enters
+/// payment, put by that entry's payer. Consulted ONLY at the `SubmitPayAmount`
+/// answer site, never at the drain (which keys on the resume marker).
+pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource,
+        source_id,
+        pending_mana_ability: None,
+        ..
+    } = &state.waiting_for
+    else {
+        return false;
+    };
+    if !matches!(resource, PayableResource::Life) {
+        return false;
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let [rid] = pending.candidates.as_slice() else {
+        return false;
+    };
+    // The parked proposal is either entry class; the TokenEntry payer is the
+    // entrant's controller (no override slot, owner==controller for tokens).
+    let (entrant_id, payer) = match &pending.proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            controller_override,
+            ..
+        } => {
+            let Some(entrant) = state.entering_or_live_object(*object_id) else {
+                return false;
+            };
+            (*object_id, controller_override.unwrap_or(entrant.owner))
+        }
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            let Some(entrant) = state.entering_or_live_object(*entry_ref) else {
+                return false;
+            };
+            (*entry_ref, entrant.controller)
+        }
+        _ => return false,
+    };
+    if rid.source != *source_id || entrant_id != *source_id {
+        return false;
+    }
+    if *player != payer {
+        return false;
+    }
+    !pending.is_optional
+        && !pending.proposed.already_applied(rid)
+        && as_enters_payment_for_entry(state, &pending.proposed, *rid).is_some()
+}
+
+/// CR 614.12a: mutable access to the latch slot on a battlefield entry
+/// proposal — `ZoneChange` or `TokenEntry`. Both classes ride the entry-payment
+/// continuation, so the paid amount (and the determined-0 latch) rides the
+/// proposal identically through this one helper.
+pub(crate) fn proposed_entry_choices_mut(
+    proposed: &mut ProposedEvent,
+) -> Option<&mut Option<Box<crate::types::proposed_event::EntryChoices>>> {
+    match proposed {
+        ProposedEvent::ZoneChange {
+            enter_with_choices, ..
+        }
+        | ProposedEvent::TokenEntry {
+            enter_with_choices, ..
+        } => Some(enter_with_choices),
+        _ => None,
+    }
+}
+
+/// CR 614.12a + CR 609.3: tri-state pre-entry payment funnel shared by all
+/// three park sites. `Some(choice)` parks + raises the prompt; determined-0
+/// latches `Number(0)` inline onto the proposal and falls through (`None`);
+/// shape-absent/already-applied falls through untouched (`None`).
+fn check_and_autocommit_entry_payment(
+    state: &mut GameState,
+    proposed: &mut ProposedEvent,
+    rid: ReplacementId,
+) -> Option<AsEntersPayChoice> {
+    if let Some(choice) = as_enters_pay_choice(state, proposed, rid) {
+        return Some(choice);
+    }
+    // Determined 0 (CR 609.3): the payment is impossible-but-zero, so it
+    // applies with nothing paid — latch `Number(0)` inline and let the
+    // ordinary apply path run. No `pay_life_as_cost` call: paying 0 life is
+    // vacuous (CR 119.4b; `life_costs.rs` short-circuits it identically).
+    as_enters_pay_terms(state, proposed, rid).filter(|(max, _)| *max == 0)?;
+    if let Some(slot) = proposed_entry_choices_mut(proposed) {
+        slot.get_or_insert_with(Default::default)
+            .0
+            .push(ChosenAttribute::Number(0));
+    }
+    None
+}
+
 /// CR 614.12 + CR 616.1e: an unanswered pre-entry choice can change what a
 /// competing candidate reads. The choice writes the entrant's characteristics
 /// as it would exist (its own statics that read the choice — the CR 614.12
@@ -11623,25 +12121,54 @@ fn as_enters_choice_changes_applicability(
     candidates: &[ReplacementId],
     proposed: &ProposedEvent,
 ) -> bool {
-    // Only a battlefield entry can carry a pre-entry choice; every other event
-    // class leaves here without touching a candidate.
-    let ProposedEvent::ZoneChange {
-        object_id,
-        to: Zone::Battlefield,
-        ..
-    } = proposed
-    else {
-        return false;
+    // Only a battlefield entry can carry a pre-entry choice or payment; every
+    // other event class leaves here without touching a candidate. The choice
+    // half stays inert on TokenEntry (choice detection is ZoneChange-only);
+    // the payment half below goes live for it.
+    let entrant_id = match proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => *object_id,
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return false,
     };
     if candidates.len() < 2 {
         return false;
     }
     let is_choice =
         |rid: &ReplacementId| as_enters_choice_for_entry(state, proposed, *rid).is_some();
-    if !candidates.iter().any(is_choice) {
+    // CR 614.12a + CR 616.1e/616.1f: a pre-entry life payment changes the
+    // payer's life total the moment it applies, and the pipeline re-scans
+    // applicability after every application — so a competitor whose condition
+    // reads life applies or not depending on the order, and the affected
+    // player must choose it. The payment is the life-half analogue of the
+    // choice half below. Only CONDITIONS qualify: the payment writes no
+    // entrant characteristic pre-delivery (the latch rides the proposal) and
+    // payment-only entrants take no staged projection
+    // (`object_has_pre_entry_choice` is Choose-shaped, and the projection
+    // allowlist excludes the latch-reading CDA), so a `valid_card` filter
+    // cannot flip on a payment the way it can on a choice.
+    let is_payment =
+        |rid: &ReplacementId| as_enters_payment_for_entry(state, proposed, *rid).is_some();
+    let has_choice = candidates.iter().any(is_choice);
+    let has_payment = candidates.iter().any(is_payment);
+    if !has_choice && !has_payment {
         return false;
     }
-    let Some(entrant) = state.entering_or_live_object(*object_id) else {
+    if has_payment
+        && candidates.iter().filter(|rid| !is_payment(rid)).any(|rid| {
+            // Virtual candidates carry no definition to prove independence from.
+            replacement_definition_for_id(state, *rid).is_none_or(|def| def.condition.is_some())
+        })
+    {
+        return true;
+    }
+    if !has_choice {
+        return false;
+    }
+    let Some(entrant) = state.entering_or_live_object(entrant_id) else {
         return false;
     };
     if !crate::game::filter::entry_projection_reads_choices(entrant) {
@@ -12163,6 +12690,13 @@ fn pipeline_loop(
             if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
             }
+            // CR 614.12a: an as-enters life payment is made before the
+            // permanent enters (determined-0 auto-commits inline via the
+            // funnel and falls through to the ordinary apply below).
+            if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid)
+            {
+                return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
+            }
 
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
@@ -12221,6 +12755,13 @@ fn pipeline_loop(
             if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
             }
+            // CR 614.12a: an as-enters life payment is made before the
+            // permanent enters (determined-0 auto-commits inline via the
+            // funnel and falls through to the ordinary apply below).
+            if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid)
+            {
+                return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
+            }
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
                 state,
@@ -12266,14 +12807,16 @@ pub fn replace_event(
 /// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
 /// simultaneous combat-damage batch.
 ///
-/// Each proposed `Damage` event is passed through `replace_event` individually
-/// (the pipeline is inherently per-event), but for the duration of the batch
-/// `state.combat_prevention_tally` is active: the damage-replacement applier's
-/// `Prevention::All` branch routes each prevented amount into a per-shield
-/// aggregate keyed by `ReplacementId` instead of stamping `last_effect_count`
-/// or emitting a per-source `DamagePrevented`. `Prevention::Next(N)` shields
-/// keep the existing per-event sequential path — depletion-style shields are
-/// not aggregated here.
+/// Each proposed `Damage` event runs through the pipeline individually. The
+/// batch-local one-shot ledger keeps a successfully consumed replacement eligible
+/// only for the same damage source's remaining portions (CR 700.1 + CR 615.8).
+/// Definitions stay consumed immediately; a later damage batch starts empty.
+/// `combat_prevention_tally` aggregates continuous all-damage and one-shot runtime
+/// riders. `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
+/// source/recipient `DamagePrevented` events. `Prevention { All }` with
+/// `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+/// path, whose aggregate event is emitted at the rider boundary.
+/// `Prevention::Next(N)` retains sequential depletion, with no ledger membership.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
 /// player choice — out of scope (#314 is Prevention::All)`. When two or more
@@ -12285,7 +12828,7 @@ pub fn replace_event(
 /// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
 /// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
 /// `None` means that source's damage was fully prevented or skipped. The
-/// `HashMap` is the per-`Prevention::All`-shield aggregate prevented amount.
+/// `HashMap` holds each aggregating shield's total prevented amount.
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -12299,6 +12842,13 @@ pub(crate) fn replace_combat_damage_batch(
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
+    let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
+    // AppliedReplacementKey is registry-index based, exactly as combat_prevention_tally's keys are.
+    // Absolute indices stay valid only while the replacement lists are unchanged between portions:
+    // consumption marks entries in place, but a follow-up drain can rebuild or prune lists (layer flush;
+    // layers.rs prune_controller_controls_source_on_leave; turns.rs prunes the pending registry outside
+    // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
+    // such a mutation. Printed cards in this class run no such follow-up between portions.
 
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
@@ -12306,17 +12856,21 @@ pub(crate) fn replace_combat_damage_batch(
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);
         // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
-        // by the applier (the `Prevention::All` batch path suppresses its stash
-        // and fires once post-batch instead). Resolve any such per-event
+        // by the applier (the all-damage and one-shot prevention batch paths
+        // suppress their stash and fire once post-batch instead). Resolve any such per-event
         // continuation inline — for both full prevention (`Prevented`) and
         // partial prevention (`Modified` → `Execute`) — so a depletion-shield
         // rider fires "immediately afterward" and never leaks past the batch.
         if !matches!(result, ReplacementResult::NeedsChoice(_))
             && state.has_post_replacement_drain()
         {
+            // CR 700.1: Follow-up damage is an independent event, even if its
+            // source also participates in the original simultaneous instance.
+            let applications = state.combat_one_shot_applications.take();
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
             );
+            state.combat_one_shot_applications = applications;
         }
         match result {
             ReplacementResult::Execute(survivor) => survivors.push(Some(survivor)),
@@ -12337,6 +12891,7 @@ pub(crate) fn replace_combat_damage_batch(
 
     let tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
+    state.combat_one_shot_applications = restore_applications;
     (survivors, tally)
 }
 
@@ -12878,6 +13433,15 @@ fn continue_replacement_impl(
         pending.is_optional = false;
         state.pending_replacement = Some(pending);
         return raise_as_enters_named_choice(state, rid.source, choice, events);
+    }
+    // CR 614.12a: choosing an as-enters payment's turn to apply makes its
+    // payment now, before the permanent enters (determined-0 auto-commits
+    // into the continuing clone and falls through to the ordinary apply).
+    if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid) {
+        pending.candidates = vec![rid];
+        pending.is_optional = false;
+        state.pending_replacement = Some(pending);
+        return raise_as_enters_pay_choice(state, rid.source, pay_choice, events);
     }
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
@@ -14226,6 +14790,7 @@ mod tests {
                 entry_ref,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -14355,6 +14920,7 @@ mod tests {
                     entry_ref: ObjectId(77),
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::ChangeZone, ReplacementEvent::Moved],

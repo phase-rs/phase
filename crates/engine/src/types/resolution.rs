@@ -1134,6 +1134,37 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 107.3f + CR 608.2c: the rider a paused resolution-time payment parked
+    /// and marked with `announcement`, found by walking down from the top one
+    /// adjacent frame at a time. Frames above it (an unmarked chain parked over
+    /// the rider) are passed over untouched.
+    ///
+    /// The stack carries no per-resolution boundary marker, and none is needed:
+    /// a mark exists only from the moment a payment prompt opens until that
+    /// prompt's answer consumes it, only one payment prompt can be open at a time,
+    /// and no other resolution starts while it is open. So at most one frame is
+    /// marked, and the topmost marked frame is the open payment's own rider.
+    pub(crate) fn x_announcement_rider_mut(
+        &mut self,
+        announcement: crate::types::game_state::ContinuationXAnnouncement,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if matches!(
+                self.frames.get(current),
+                Some(ResolutionFrame::AbilityContinuation(frame))
+                    if frame.pending.x_announcement == Some(announcement)
+            ) {
+                return match self.frames.get_mut(current) {
+                    Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+                    _ => None,
+                };
+            }
+            slot = self.frames.below(current);
+        }
+        None
+    }
+
     /// Returns the active continuation only when the exact discard operation
     /// is its immediate parent. This fixed adjacency is the authority that
     /// permits a Recruit result to cross a replacement pause; arbitrary stack

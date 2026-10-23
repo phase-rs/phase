@@ -2661,10 +2661,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: None,
-            }),
+            })),
             proposition_truth: Some(true),
         };
         state.park_ability_continuation(pending_source_bound_continuation(

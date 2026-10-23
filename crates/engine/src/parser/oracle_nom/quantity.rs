@@ -1068,6 +1068,35 @@ fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
 }
 
+/// CR 614.12a + CR 400.7: "the life paid as ~ entered" — the amount paid for
+/// the entering object's own as-enters life payment (Phyrexian Processor
+/// class), latched pre-entry as `ChosenAttribute::Number` on the object.
+/// Reads via the existing `ChosenNumber` channel (game/quantity.rs), like
+/// `parse_chosen_number_ref` beside it. Longer subject alts precede the `it`
+/// alternative, which carries a word-boundary guard (peek-not-alphanumeric,
+/// per `parse_chosen_number_noun`) so "item" cannot false-match.
+fn parse_life_paid_as_entered_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::ChosenNumber,
+        (
+            tag("the life paid as "),
+            alt((
+                tag("this artifact"),
+                tag("this creature"),
+                tag("~"),
+                terminated(
+                    tag("it"),
+                    nom::combinator::not(nom::character::complete::satisfy(|c: char| {
+                        c.is_ascii_alphanumeric()
+                    })),
+                ),
+            )),
+            tag(" entered"),
+        ),
+    )
+    .parse(input)
+}
+
 /// Digital-only Alchemy (no CR entry): "the noted number" — the resolving
 /// player's `Player::noted_number`, written by `Effect::NoteNumber` ("note
 /// its power", "note that excess damage") and read when a granted one-time
@@ -1171,6 +1200,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
+            parse_life_paid_as_entered_ref,
             parse_noted_number_ref,
             parse_paid_energy_this_way_ref,
             parse_intensity_ref,
@@ -3049,6 +3079,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3186,6 +3217,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3933,6 +3965,21 @@ fn parse_zone_ref_plural(input: &str) -> OracleResult<'_, ZoneRef> {
         value(ZoneRef::Library, tag("libraries")),
         value(ZoneRef::Hand, tag("hands")),
     ))
+    .parse(input)
+}
+
+/// CR 614.12a, Nameless-Race-local: "their \<zone-plural\>" — the opponents'
+/// zones, bound positionally to the "your opponents" named in the payment
+/// cap's left half. Deliberately NOT registered in any global alt: the bare
+/// "their" possessive stays TargetPlayer-anaphoric everywhere else (see
+/// `parse_self_possessive`'s "their" arm, which reads the ability source).
+/// Sole caller: the Nameless cap composer in `oracle_replacement.rs`.
+pub(crate) fn parse_their_opponents_zone_ref(
+    input: &str,
+) -> OracleResult<'_, (ZoneRef, CountScope)> {
+    map(preceded(tag("their "), parse_zone_ref_plural), |zone| {
+        (zone, CountScope::Opponents)
+    })
     .parse(input)
 }
 
@@ -12289,6 +12336,74 @@ mod tests {
                 "{unrelated} must not read as a chosen-number extremum"
             );
         }
+    }
+
+    /// CR 614.12a + CR 400.7: the Phyrexian Processor class back-references —
+    /// "the life paid as \<subject\> entered" — read the pre-entry latch via
+    /// `ChosenNumber`. One row per subject shape (artifact, creature, `~`,
+    /// `it`), all fully consumed.
+    #[test]
+    fn life_paid_as_entered_ref_reads_chosen_number() {
+        for text in [
+            "the life paid as this artifact entered",
+            "the life paid as this creature entered",
+            "the life paid as ~ entered",
+            "the life paid as it entered",
+        ] {
+            let (rest, qty) = parse_life_paid_as_entered_ref(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(qty, QuantityRef::ChosenNumber, "{text}");
+        }
+        // Reachable from the context-free grammar (the token where-X and CDA
+        // consumers both delegate here).
+        let (rest, qty) = parse_quantity_ref("the life paid as this artifact entered").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(qty, QuantityRef::ChosenNumber);
+    }
+
+    /// HOSTILE: the `it` alternative's word-boundary guard blocks "item", and
+    /// the sibling "the life lost this way" shape (PreviousEffectAmount) is
+    /// not stolen by the paid-as-entered leaf.
+    #[test]
+    fn life_paid_as_entered_ref_rejects_near_misses() {
+        assert!(
+            parse_life_paid_as_entered_ref("the life paid as item entered").is_err(),
+            "item must not false-match the it alternative"
+        );
+        assert!(
+            parse_life_paid_as_entered_ref("the life lost this way").is_err(),
+            "the lost-this-way shape is not a paid-as-entered ref"
+        );
+        assert_ne!(
+            crate::parser::oracle_quantity::parse_cda_quantity("the life lost this way"),
+            Some(crate::types::ability::QuantityExpr::Ref {
+                qty: QuantityRef::ChosenNumber,
+            }),
+            "the CDA interpreter must not route lost-this-way to the latch"
+        );
+    }
+
+    /// CR 614.12a, Nameless-Race-local: "their \<zone-plural\>" binds the
+    /// opponents' zones. The arm is deliberately NOT in any global alt: the
+    /// full cap sentence still declines the context-free grammar (the cap
+    /// composer is the sole caller).
+    #[test]
+    fn their_opponents_zone_ref_binds_opponents_zones() {
+        for (text, zone) in [
+            ("their graveyards", ZoneRef::Graveyard),
+            ("their hands", ZoneRef::Hand),
+            ("their libraries", ZoneRef::Library),
+        ] {
+            let (rest, (parsed_zone, scope)) = parse_their_opponents_zone_ref(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(parsed_zone, zone, "{text}");
+            assert_eq!(scope, CountScope::Opponents, "{text}");
+        }
+        assert!(
+            parse_quantity_ref_complete("the total number of white cards in their graveyards")
+                .is_err(),
+            "the their-arm must not leak into the global grammar"
+        );
     }
 
     /// The extremum reference is NOT reachable from the context-free

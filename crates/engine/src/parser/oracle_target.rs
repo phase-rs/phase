@@ -1573,6 +1573,16 @@ pub fn parse_target_with_syntax<'a>(
             }
         }
     }
+    // CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" is a context
+    // reference to what an attacking creature is attacking. It must be tried before the
+    // anaphoric group below, whose bare "the player" arm would absorb its prefix.
+    if let Some((filter, rest)) = nom_on_lower(
+        text,
+        &lower,
+        nom_target::parse_attacked_player_or_planeswalker,
+    ) {
+        return (filter, rest, syntax);
+    }
     // CR 608.2c: Definite anaphoric references to previously-mentioned objects/players.
     // Longest-match-first: "the creature's controller" before "the creature".
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
@@ -9941,6 +9951,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }

@@ -61984,6 +61984,7 @@ fn an_activation_journal_row_round_trips() {
         source_zone: crate::types::zones::Zone::Battlefield,
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
+        activation_cost: crate::types::events::BoundActivationCost::Unknown,
         targets: vec![
             ActivationTargetFact::Player(PlayerId(1)),
             ActivationTargetFact::Object {

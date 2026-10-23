@@ -4102,10 +4102,27 @@ fn finish_layer_evaluation(
     // re-run the pass here, as ring normalization does. The nested pass
     // snapshots the new controllers, so its delta is empty and the recursion is
     // exactly one pass deep.
-    if remove_controller_changed_from_combat(state, &controller_changed, retirement_owner) {
+    // CR 506.4 + CR 506.4c + CR 506.4d + CR 506.4e: the same settled delta ends
+    // being attacked for each permanent whose type change removes it from combat
+    // (a planeswalker that stopped being one, a battle that stopped being one, a
+    // planeswalker-battle per CR 506.4e). Decided against the kinds stored with
+    // each pin at declaration or the last settled pass, so a face change written
+    // outside a pass (transform, face down, face up) is caught too. The relation
+    // is retired, so restoring the type later declares no new attack. Only the
+    // incoming relations end; the attackers stay in combat (CR 506.4c) and the
+    // permanent keeps any blocking role (CR 506.4d).
+    let type_changed = super::combat::type_changed_attacked_permanents(state);
+    let attack_retired =
+        retire_type_changed_attack_relations(state, &type_changed, retirement_owner);
+    let controller_removed =
+        remove_controller_changed_from_combat(state, &controller_changed, retirement_owner);
+    if attack_retired || controller_removed {
         evaluate_layers_with_retirement_owner(state, retirement_owner);
         return;
     }
+    // CR 506.4: this pass settled with no retirement left, so its kinds are the
+    // baseline the next settled pass compares against.
+    super::combat::refresh_attacked_kinds(state);
 
     super::pairing::cleanup_invalid_pairs(state);
     if super::effects::ring::normalize_ring_bearers(state) {
@@ -4170,6 +4187,30 @@ fn finish_layer_evaluation(
     // (Clean / EnteredObjects / Full).
     crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 506.4 + CR 733: retire the incoming attacked relations of each exact
+/// permanent incarnation in `changed`, journaled under a live layer settlement
+/// and replayed verbatim under an attachment command (whose own journal entry
+/// owns the settlement), exactly as [`remove_controller_changed_from_combat`]
+/// owns its removals.
+fn retire_type_changed_attack_relations(
+    state: &mut GameState,
+    changed: &[ObjectIncarnationRef],
+    owner: StateDurationRetirementOwner,
+) -> bool {
+    let mut retired = false;
+    for &pin in changed {
+        retired |= match owner {
+            StateDurationRetirementOwner::LayerSettlement => {
+                super::combat::retire_incoming_attack_relations_journaled(state, pin)
+            }
+            StateDurationRetirementOwner::AttachmentCommand => {
+                !super::combat::retire_incoming_attack_relations(state, pin).is_empty()
+            }
+        };
+    }
+    retired
 }
 
 /// CR 506.4: "A permanent is removed from combat if ... its controller ...
@@ -5139,6 +5180,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner

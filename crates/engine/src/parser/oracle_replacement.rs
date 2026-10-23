@@ -60,7 +60,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    TapStateChange, TargetFilter, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -164,6 +164,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "As ~ enters, pay any amount of life" → Moved replacement whose
+    //     execute is the life payment (Phyrexian Processor class). CR 614.1c +
+    //     CR 614.12a: the payment is made before the permanent enters; the
+    //     engine parks the entry on a pre-entry prompt and latches the paid
+    //     amount. Dispatched beside its as-enters-choose sibling, ahead of
+    //     shock lands. ---
+    if let Some(def) = parse_as_enters_pay(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -670,10 +680,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // function is ever reached for that shape — `parse_whenever_you_cast_enters_with`
     // (below) is reused only as the core ChangeZone/PutCounter builder for that
     // trigger's floating-replacement payload, never as a standalone object-hosted
-    // replacement. Torgal ("your first Human creature spell each turn") and
-    // Boreal Outrider (an intervening "if" before the rider) are not that shape
-    // and are not handled here either: their "that creature" subject is a
-    // `ForeignSubject` below, so they stay honest gaps on the trigger route.
+    // replacement. Boreal Outrider (an intervening "if" before the rider) is
+    // not that shape and is not handled here either: its "that creature"
+    // subject is a `ForeignSubject` below, so it stays an honest gap on the
+    // trigger route.
 
     // --- "[Subject] enters/escapes with N [type] counter(s)" ---
     // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
@@ -2458,6 +2468,133 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 614.1c + CR 614.12a: "As ~ enters, pay any amount of life" → a mandatory
+/// `Moved` self-replacement whose execute is the life payment (Phyrexian
+/// Processor class). The engine parks the entry on a pre-entry
+/// `PayAmountChoice` prompt and latches the paid amount as
+/// `ChosenAttribute::Number` (see `as_enters_payment_shape`).
+///
+/// The frame strip is ANCHORED at the line start (the F7 structural guard): a
+/// `when`-framed line (Vizkopa Confessor's trigger) declines here even if the
+/// coarse classifier ever claims it. The payment residue delegates to the
+/// `CostResource` single authority and must be the any-amount-life shape —
+/// fixed payments ("pay 2 life"), mana, and energy all decline. A trailing
+/// second sentence is the Nameless Race cap ("The amount you pay can't be
+/// more than …"); anything else trailing declines the whole line.
+fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let (residue, _) = preceded(
+        tag::<_, _, OracleError<'_>>("as "),
+        alt((
+            tag("this artifact enters, "),
+            tag("this creature enters, "),
+            tag("~ enters, "),
+        )),
+    )
+    .parse(norm_lower)
+    .ok()?;
+    // Split the payment sentence from a following cap sentence (Nameless
+    // Race). `first_sentence` cuts at the first period; a lone trailing
+    // period leaves no remainder.
+    let payment_text = first_sentence(residue);
+    let trailing = residue[payment_text.len()..].trim_start_matches('.').trim();
+    // The `CostResource` authority takes the post-"pay " residue.
+    let (pay_residue, _) = tag::<_, _, OracleError<'_>>("pay ")
+        .parse(payment_text)
+        .ok()?;
+    let cost = super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
+    let AbilityCost::PayLife { amount } = &cost else {
+        return None;
+    };
+    if !crate::game::effects::pay::is_pay_any_amount(amount) {
+        return None;
+    }
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost,
+            scale: None,
+            payer: TargetFilter::Controller,
+        },
+    );
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(execute)
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Battlefield)
+        .description(original_text.to_string());
+    if !trailing.is_empty() {
+        def.entry_payment_max = Some(parse_entry_payment_cap(trailing)?);
+    }
+    Some(def)
+}
+
+/// CR 614.12a (Nameless Race): "The amount you pay can't be more than \<A\>
+/// plus \<B\>" → the entry payment's maximum as a `QuantityExpr::Sum`
+/// (Abomination-of-Llanowar-shaped composition).
+///
+/// The left half delegates to the CDA quantity interpreter after stripping
+/// the semantically-vacuous "total" ("the total number of X" and "the number
+/// of X" both denote |X|): the legacy controlled-type fall-through heads on
+/// "the number of " without it (P-U4 row 10 vs 11), and that frozen file is
+/// deliberately untouched — the strip is Nameless-local.
+fn parse_entry_payment_cap(trailing: &str) -> Option<QuantityExpr> {
+    // Structural trailing-period cleanup on the pre-split sentence (not
+    // dispatch): the cap sentence arrives with its printed period.
+    let sentence = trailing.trim_end().trim_end_matches('.').trim();
+    let (cap_body, _) = tag::<_, _, OracleError<'_>>("the amount you pay can't be more than ")
+        .parse(sentence)
+        .ok()?;
+    let (_, (left_text, right_text)) = nom_primitives::split_once_on(cap_body, " plus ").ok()?;
+    let (left_text, right_text) = (left_text.trim(), right_text.trim());
+    if left_text.is_empty() || right_text.is_empty() {
+        return None;
+    }
+    let left_input = match tag::<_, _, OracleError<'_>>("the total number of ").parse(left_text) {
+        Ok((rest, _)) => format!("the number of {rest}"),
+        Err(_) => left_text.to_owned(),
+    };
+    let left = super::oracle_quantity::parse_cda_quantity(&left_input)?;
+    let right = parse_nameless_their_zone_count(right_text)?;
+    Some(QuantityExpr::Sum {
+        exprs: vec![left, right],
+    })
+}
+
+/// Nameless-local right-half composer: "the total number of white cards in
+/// their graveyards" → `ZoneCardCount` with the color in the supported
+/// `filter` slot (Cavernous Maw precedent) and the opponents scope.
+///
+/// The "their" binds Nameless-locally to the "your opponents" named in the
+/// cap's left half — a positional anaphora on this one card. The bare "their"
+/// possessive stays TargetPlayer-anaphoric everywhere else, so the their-arm
+/// (`parse_their_opponents_zone_ref`) is registered in NO global alt, and this
+/// composer lives at the cap site rather than in the quantity grammar.
+fn parse_nameless_their_zone_count(input: &str) -> Option<QuantityExpr> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the total number of "),
+        tag("the number of "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (rest, color) = nom_primitives::parse_color(rest).ok()?;
+    let (rest, _) = nom_quantity::parse_card_word(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" in ").parse(rest).ok()?;
+    let (rest, (zone, scope)) = nom_quantity::parse_their_opponents_zone_ref(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let color_filter = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::HasColor { color }]),
+    );
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ZoneCardCount {
+            zone,
+            card_types: vec![TypeFilter::Card],
+            scope,
+            filter: Some(color_filter),
+        },
+    })
 }
 
 /// Parse the object-filter of an as-enters permanent choice. Accepts either the
@@ -6228,14 +6365,33 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
     .parse(norm_lower)
     .ok()?;
 
-    // Drop the article before the spell filter.
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("a "),
-        tag("an "),
-        tag("another "),
+    // CR 603.2: an ordinal qualifies the cast event, not the entry payload.
+    // Isolate a whole token before delegating its meaning to parse_ordinal.
+    let (rest, ordinal_word) = opt(preceded(
+        tag::<_, _, OracleError<'_>>("your "),
+        terminated(take_while1(|c: char| c.is_ascii_alphabetic()), tag(" ")),
     ))
     .parse(rest)
     .ok()?;
+    let (rest, ordinal) = match ordinal_word {
+        Some(word) => {
+            let (n, unconsumed) = parse_ordinal(word)?;
+            if !unconsumed.is_empty() {
+                return None;
+            }
+            (rest, Some(n))
+        }
+        None => {
+            let (rest, _) = alt((
+                tag::<_, _, OracleError<'_>>("a "),
+                tag("an "),
+                tag("another "),
+            ))
+            .parse(rest)
+            .ok()?;
+            (rest, None)
+        }
+    };
 
     // Spell filter — split on ", that " to isolate the filter text from the subject.
     // `split_once_on` returns `Ok(("", (prefix, suffix)))`.
@@ -6247,7 +6403,29 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
                 .then_some(CastEntersWithShape::SelfExilePrelude)
         }
     };
+    let spell_filter_text = if ordinal.is_some() {
+        all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(" spell each turn"),
+            tag(" spell each turn"),
+        ))
+        .parse(spell_filter_text)
+        .ok()?
+        .1
+    } else {
+        spell_filter_text
+    };
     let spell_filter = parse_cast_spell_filter(spell_filter_text)?;
+    let constraint = ordinal.map(|n| {
+        // CR 603.2: tally the same spell class as the generic ordinal trigger.
+        // Caster scoping belongs to the event, not the history's type filter.
+        let mut counted_filter = spell_filter.clone();
+        counted_filter.controller = None;
+        TriggerConstraint::NthSpellThisTurn {
+            n,
+            comparator: Comparator::EQ,
+            filter: Some(TargetFilter::Typed(counted_filter)),
+        }
+    });
 
     // Subject — "creature", "permanent", or "spell" — and the enters frame.
     // CR 614.12: "enters with" and "enters the battlefield with" are the same
@@ -6273,6 +6451,7 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
 
     Some(CastEntersWithShape::Rider {
         spell_filter,
+        constraint,
         tapped,
         payload,
     })
@@ -6284,6 +6463,8 @@ enum CastEntersWithShape<'a> {
     Rider {
         /// The controller-constrained spell filter of the trigger condition.
         spell_filter: TypedFilter,
+        /// CR 603.2: optional ordinal qualification of the cast event.
+        constraint: Option<TriggerConstraint>,
         /// CR 614.1c: the frame was "enters tapped and with " — the entering
         /// permanent is tapped as it enters, ahead of the counters.
         tapped: bool,
@@ -6379,10 +6560,11 @@ fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
 /// CR 614.1c + CR 601.2: Parse "When/Whenever you cast a [spell], that
 /// [subject] enters with [an additional] [count] [type] counter(s) on it[,
 /// where X is [quantity]]" into the `ChangeZone` + `PutCounter` replacement
-/// payload for this shape. Wildgrowth Archaic, Runadi and Communal Brewing
-/// share this shape; Torgal (an ordinal "your first …" head) and Boreal
-/// Outrider (an intervening "if" before the rider) do not, and are not read
-/// here. The self-exile form (Dark Intimations) is recognized by the shape half
+/// payload for this shape. Wildgrowth Archaic, Runadi, Communal Brewing and
+/// ordinal heads such as Torgal share this shape. A fixed count may scale by a
+/// trailing "for each" population; a conjoined counter list may not. Boreal
+/// Outrider's intervening "if" is not read here. The self-exile form (Dark
+/// Intimations) is recognized by the shape half
 /// but never built ([`CastEntersWithShape::SelfExilePrelude`]).
 ///
 /// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
@@ -6402,11 +6584,12 @@ fn is_self_exile_from_graveyard(instruction_text: &str) -> bool {
 fn parse_whenever_you_cast_enters_with(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<(ReplacementDefinition, Option<TriggerConstraint>)> {
     // The self-exile form has no payload this builder may publish; the outcome
     // dispatcher fails it closed through the shape half.
     let CastEntersWithShape::Rider {
         spell_filter: spell_typed,
+        constraint,
         tapped,
         payload: rest,
     } = parse_cast_enters_with_prefix(norm_lower)?
@@ -6454,13 +6637,14 @@ fn parse_whenever_you_cast_enters_with(
         );
         choice.description = Some("your choice of counter".to_string());
         let execute = compose_cast_enters_with_tap(choice, tapped);
-        return Some(
+        return Some((
             ReplacementDefinition::new(ReplacementEvent::ChangeZone)
                 .execute(execute)
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
-        );
+            constraint,
+        ));
     }
 
     // A CONJOINED counter list ("an additional +1/+1 counter and deathtouch
@@ -6502,7 +6686,7 @@ fn parse_whenever_you_cast_enters_with(
         if !counter_list_remainder_is_exhausted(after_list) {
             return None;
         }
-        return Some(
+        return Some((
             ReplacementDefinition::new(ReplacementEvent::ChangeZone)
                 .execute(compose_cast_enters_with_tap(
                     build_enters_counter_ability(entries),
@@ -6511,7 +6695,8 @@ fn parse_whenever_you_cast_enters_with(
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
-        );
+            constraint,
+        ));
     }
 
     // Count prefix: "an additional" | "N additional" | plain "N" | "x additional" | "x".
@@ -6553,9 +6738,9 @@ fn parse_whenever_you_cast_enters_with(
     // "enters tapped" rider (CR 110.5: a resolving trigger cannot tap a
     // permanent that has not entered yet), so routing tapped shapes here is
     // load-bearing.
-    let (rest, counter_type) = parse_enters_counter_type_noun(rest).ok()?;
+    let (after_counter, counter_type) = parse_enters_counter_type_noun(rest).ok()?;
     let (rest, _) = preceded(opt(tag::<_, _, OracleError<'_>>("s")), tag(" on it"))
-        .parse(rest)
+        .parse(after_counter)
         .ok()?;
 
     // Optional trailing "where X is [quantity]" clause. Delegate to
@@ -6574,10 +6759,14 @@ fn parse_whenever_you_cast_enters_with(
             // suffix consumption the conjoined-list route above enforces — a
             // rider this route cannot compose stays an honest gap. (The
             // dynamic-X arm already fails closed via `?`.)
-            if !counter_list_remainder_is_exhausted(rest) {
+            let fixed = QuantityExpr::Fixed { value: n as i32 };
+            if let Some(population) = parse_enters_counter_for_each_suffix(after_counter) {
+                multiply_counter_count_by_for_each(fixed, population)
+            } else if counter_list_remainder_is_exhausted(rest) {
+                fixed
+            } else {
                 return None;
             }
-            QuantityExpr::Fixed { value: n as i32 }
         }
         None => parse_enters_with_where_x_suffix(rest)?,
     };
@@ -6593,13 +6782,14 @@ fn parse_whenever_you_cast_enters_with(
 
     // CR 614.12: External ETB counter placement — use ChangeZone so tokens
     // entering the battlefield also receive counters (Metallic Mimic + creature tokens).
-    Some(
+    Some((
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(compose_cast_enters_with_tap(put_counter, tapped))
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
-    )
+        constraint,
+    ))
 }
 
 /// CR 614.1c: compose the "enters tapped" rider ahead of the entering-with
@@ -6714,7 +6904,7 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
 
-    let mut replacement = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
+    let (mut replacement, constraint) = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
     let spell_filter = replacement.valid_card.clone()?;
     // CR 614.1c: one qualifying entry, then gone — this floating install must
     // never persist to affect a second, later cast of the same shape.
@@ -6742,14 +6932,14 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
         },
     );
 
-    Some(
-        TriggerDefinition::new(TriggerMode::SpellCast)
-            .valid_card(spell_filter)
-            .valid_target(TargetFilter::Controller)
-            .trigger_zones(vec![Zone::Battlefield])
-            .execute(install)
-            .description(text.to_string()),
-    )
+    let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_card(spell_filter)
+        .valid_target(TargetFilter::Controller)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(install)
+        .description(text.to_string());
+    trigger.constraint = constraint;
+    Some(trigger)
 }
 
 /// Extract kicker-conditional prefix from "if ~ was kicked [with its {cost} kicker], it enters with..."
@@ -20082,6 +20272,139 @@ mod tests {
         ));
     }
 
+    /// CR 614.1c + CR 614.12a: the Phyrexian Processor class line lowers to a
+    /// mandatory `Moved` self-replacement whose execute is the any-amount life
+    /// payment (no cap).
+    #[test]
+    fn as_enters_pay_any_life_builds_payment_replacement() {
+        for (line, name) in [
+            (
+                "As Phyrexian Processor enters, pay any amount of life.",
+                "Phyrexian Processor",
+            ),
+            (
+                "As Minion of the Wastes enters, pay any amount of life.",
+                "Minion of the Wastes",
+            ),
+        ] {
+            let def = parse_replacement_line(line, name)
+                .unwrap_or_else(|| panic!("{name} entry line must produce a replacement"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.destination_zone, Some(Zone::Battlefield), "{name}");
+            assert!(matches!(def.mode, ReplacementMode::Mandatory), "{name}");
+            assert!(def.condition.is_none(), "{name}");
+            assert!(def.entry_payment_max.is_none(), "{name}: uncapped");
+            let execute = def.execute.as_ref().unwrap();
+            assert!(execute.sub_ability.is_none(), "{name}");
+            assert!(
+                matches!(
+                    *execute.effect,
+                    Effect::PayCost {
+                        cost: AbilityCost::PayLife {
+                            amount: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { .. },
+                            },
+                        },
+                        ..
+                    }
+                ),
+                "{name}: execute is the any-amount life payment"
+            );
+        }
+    }
+
+    /// CR 614.12a (Nameless Race): the two-sentence line lowers to the payment
+    /// replacement PLUS the exact cap — `Sum(ObjectCount(white nontoken
+    /// opponents' permanents), ZoneCardCount(white cards, opponents'
+    /// graveyards, white filter))`.
+    #[test]
+    fn as_enters_pay_nameless_cap_shape_is_exact() {
+        let def = parse_replacement_line(
+            "As Nameless Race enters, pay any amount of life. The amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
+            "Nameless Race",
+        )
+        .expect("Nameless entry line must produce a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let Some(QuantityExpr::Sum { exprs }) = &def.entry_payment_max else {
+            panic!("cap must be a Sum, got {:?}", def.entry_payment_max);
+        };
+        assert_eq!(exprs.len(), 2, "two cap halves");
+        assert!(
+            matches!(
+                    &exprs[0],
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(filter),
+                        },
+                    } if filter.type_filters == vec![TypeFilter::Permanent]
+                        && filter.controller == Some(ControllerRef::Opponent)
+                        && filter.properties.contains(&FilterProp::HasColor {
+                            color: ManaColor::White,
+                        })
+                        && filter.properties.contains(&FilterProp::NonToken)
+            ),
+            "left half is the white nontoken opponents'-permanents count, got {:?}",
+            exprs[0]
+        );
+        assert!(
+            matches!(
+                &exprs[1],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types,
+                        scope: CountScope::Opponents,
+                        filter: Some(TargetFilter::Typed(color_filter)),
+                    },
+                } if *card_types == vec![TypeFilter::Card]
+                    && color_filter.properties.contains(&FilterProp::HasColor {
+                        color: ManaColor::White,
+                    })
+            ),
+            "right half is the white-cards-in-opponents'-graveyards count, got {:?}",
+            exprs[1]
+        );
+    }
+
+    /// F7 NEGATIVE: Vizkopa Confessor's `when`-framed line declines the
+    /// anchored builder even though it carries the pay phrase (its trigger
+    /// parser owns it).
+    #[test]
+    fn as_enters_pay_declines_when_framed_trigger_line() {
+        assert!(
+            parse_as_enters_pay(
+                "when this creature enters, pay any amount of life. target opponent reveals that many cards from their hand. you choose one of them and exile it.",
+                "When this creature enters, pay any amount of life. Target opponent reveals that many cards from their hand. You choose one of them and exile it.",
+            )
+            .is_none(),
+            "the anchored frame must decline when-framed lines"
+        );
+    }
+
+    /// NEGATIVE: fixed life payments, mana/energy residues, and cap-headed
+    /// lines without a payment sentence all decline (the builder requires the
+    /// any-amount-life shape plus, when present, a well-formed cap).
+    #[test]
+    fn as_enters_pay_declines_non_any_amount_shapes() {
+        for norm_lower in [
+            "as ~ enters, pay 2 life.",
+            "as ~ enters, pay {2}{b}.",
+            "as ~ enters, pay any amount of {e}.",
+            // Cap sentence without the payment sentence.
+            "as ~ enters. the amount you pay can't be more than the total number of white cards in their graveyards.",
+            // Cap head with an unparseable body.
+            "as ~ enters, pay any amount of life. the amount you pay can't be more than a lot.",
+        ] {
+            assert!(
+                parse_as_enters_pay(norm_lower, norm_lower).is_none(),
+                "{norm_lower}"
+            );
+        }
+    }
+
     #[test]
     fn as_enters_choose_a_number_sentence_ending_period() {
         // #722: "As Squall enters, choose a number." ends the sentence, so the
@@ -29016,6 +29339,228 @@ mod tests {
             panic!("expected PutCounter");
         };
         assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+    }
+
+    const TORGAL_ORACLE: &str = "Whenever you cast your first Human creature spell each turn, that creature enters with an additional +1/+1 counter on it for each Dog and/or Wolf you control.\n{T}: Add one mana of any color.";
+
+    /// SHAPE: CR 603.2 + CR 614.12: event qualification and the entry rider
+    /// are separate; the Dog/Wolf union is one controller-scoped census.
+    #[test]
+    fn torgal_full_oracle_installs_first_human_population_rider() {
+        let parsed = parse_oracle_text(
+            TORGAL_ORACLE,
+            "Torgal, A Fine Hound",
+            &[],
+            &["Creature".into()],
+            &["Wolf".into()],
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            trigger.constraint,
+            Some(crate::types::ability::TriggerConstraint::NthSpellThisTurn {
+                n: 1,
+                comparator: Comparator::EQ,
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature().subtype("Human".into())
+                )),
+            })
+        );
+        let replacement = cast_enters_install(trigger.execute.as_deref().expect("cast effect"));
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        assert!(replacement.consume_on_apply);
+        let effect = &replacement.execute.as_deref().expect("entry effect").effect;
+        let Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            target: TargetFilter::SelfRef,
+        } = effect.as_ref()
+        else {
+            panic!("expected population-scaled entry counters, got {effect:?}");
+        };
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Dog and/or Wolf must be a union, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for (leg, subtype) in filters.iter().zip(["Dog", "Wolf"]) {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected typed population leg, got {leg:?}");
+            };
+            assert_eq!(typed.controller, Some(ControllerRef::You));
+            assert!(typed
+                .type_filters
+                .contains(&TypeFilter::Subtype(subtype.into())));
+        }
+        assert!(parsed.replacements.is_empty());
+        assert_eq!(parsed.abilities.len(), 1, "mana ability retained");
+        assert!(matches!(*parsed.abilities[0].effect, Effect::Mana { .. }));
+    }
+
+    /// SHAPE: CR 603.2: count only the stated class of spells each turn.
+    #[test]
+    fn torgal_class_ordinal_heads_with_fixed_payload() {
+        for trigger_word in ["When", "Whenever"] {
+            for (ordinal, n) in [("first", 1), ("second", 2), ("third", 3)] {
+                for (phrase, expected) in [
+                    ("creature", TypedFilter::creature()),
+                    (
+                        "Human creature",
+                        TypedFilter::creature().subtype("Human".into()),
+                    ),
+                    (
+                        "artifact creature",
+                        TypedFilter {
+                            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+                            ..TypedFilter::default()
+                        },
+                    ),
+                    (
+                        "Elf creature",
+                        TypedFilter::creature().subtype("Elf".into()),
+                    ),
+                ] {
+                    let line = format!("{trigger_word} you cast your {ordinal} {phrase} spell each turn, that creature enters with two additional +1/+1 counters on it.");
+                    let trigger = parse_whenever_you_cast_enters_with_trigger(&line, "Fixture")
+                        .unwrap_or_else(|| panic!("supported head: {line}"));
+                    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+                    let Some(crate::types::ability::TriggerConstraint::NthSpellThisTurn {
+                        n: actual,
+                        comparator: Comparator::EQ,
+                        filter: Some(TargetFilter::Typed(filter)),
+                    }) = trigger.constraint.as_ref()
+                    else {
+                        panic!("expected ordinal constraint: {trigger:?}");
+                    };
+                    assert_eq!(*actual, n);
+                    assert_eq!(filter.controller, None);
+                    for ty in &expected.type_filters {
+                        assert!(
+                            filter.type_filters.contains(ty),
+                            "{filter:?}: missing {ty:?}"
+                        );
+                    }
+                    let replacement = cast_enters_install(trigger.execute.as_deref().unwrap());
+                    assert!(matches!(
+                        replacement.execute.as_deref().unwrap().effect.as_ref(),
+                        Effect::PutCounter {
+                            count: QuantityExpr::Fixed { value: 2 },
+                            ..
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
+    /// SHAPE: CR 614.12: per-population scaling composes with a fixed count,
+    /// independently of whether the trigger head carries an ordinal.
+    #[test]
+    fn torgal_class_population_suffix_with_article_head() {
+        for (article, phrase) in [
+            ("a", "Human creature"),
+            ("an", "Elf creature"),
+            ("another", "artifact creature"),
+        ] {
+            for (amount, noun, factor) in [
+                ("an additional", "counter", 1),
+                ("two additional", "counters", 2),
+            ] {
+                let line = format!("Whenever you cast {article} {phrase} spell, that creature enters with {amount} +1/+1 {noun} on it for each Dog and/or Wolf you control.");
+                let trigger = parse_whenever_you_cast_enters_with_trigger(&line, "Fixture")
+                    .unwrap_or_else(|| panic!("supported suffix: {line}"));
+                assert_eq!(trigger.constraint, None);
+                let replacement = cast_enters_install(trigger.execute.as_deref().unwrap());
+                let Effect::PutCounter { count, .. } =
+                    replacement.execute.as_deref().unwrap().effect.as_ref()
+                else {
+                    panic!("counter payload expected");
+                };
+                let quantity = if factor == 1 {
+                    count
+                } else {
+                    let QuantityExpr::Multiply {
+                        factor: actual,
+                        inner,
+                    } = count
+                    else {
+                        panic!("expected fixed multiplier: {count:?}");
+                    };
+                    assert_eq!(*actual, factor);
+                    inner.as_ref()
+                };
+                assert!(matches!(
+                    quantity,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ));
+            }
+        }
+    }
+
+    /// SHAPE: CR 603.1: an owned but unsupported sentence cannot publish a
+    /// partial rider. Each rejected tail has a supported-prefix reach guard.
+    #[test]
+    fn torgal_class_unsupported_tails_fail_closed() {
+        for head in ["a", "your first"] {
+            let timing = if head == "a" { "" } else { " each turn" };
+            for (payload, tail) in [
+                ("an additional +1/+1 counter on it", " and it gains haste"),
+                (
+                    "an additional +1/+1 counter on it for each Dog and/or Wolf you control",
+                    " and it gains haste",
+                ),
+                (
+                    "an additional +1/+1 counter and a lifelink counter on it",
+                    " for each Dog you control",
+                ),
+                (
+                    "your choice of a lifelink counter or a deathtouch counter on it",
+                    " for each Dog you control",
+                ),
+            ] {
+                let supported = format!("Whenever you cast {head} Human creature spell{timing}, that creature enters with {payload}.");
+                assert!(
+                    matches!(
+                        parse_whenever_you_cast_enters_with_outcome(&supported, "Fixture"),
+                        CastEntersWithOutcome::Parsed(_)
+                    ),
+                    "{supported}"
+                );
+                let unsupported = format!("Whenever you cast {head} Human creature spell{timing}, that creature enters with {payload}{tail}.");
+                assert!(
+                    matches!(
+                        parse_whenever_you_cast_enters_with_outcome(&unsupported, "Fixture"),
+                        CastEntersWithOutcome::ShapeUnsupported
+                    ),
+                    "{unsupported}"
+                );
+                let parsed =
+                    parse_oracle_text(&unsupported, "Fixture", &[], &["Creature".into()], &[]);
+                assert_whole_line_gap(&parsed, &unsupported);
+            }
+        }
+    }
+
+    #[test]
+    fn torgal_class_ordinal_token_requires_whole_word_and_timing() {
+        let supported = "Whenever you cast your first Human creature spell each turn, that creature enters with a +1/+1 counter on it.";
+        assert!(matches!(
+            parse_whenever_you_cast_enters_with_outcome(supported, "Fixture"),
+            CastEntersWithOutcome::Parsed(_)
+        ));
+        for line in [
+            "Whenever you cast your firstly Human creature spell each turn, that creature enters with a +1/+1 counter on it.",
+            "Whenever you cast your first Human creature spell, that creature enters with a +1/+1 counter on it.",
+            "Whenever you cast your first Human creature spell each turn extra, that creature enters with a +1/+1 counter on it.",
+        ] {
+            assert!(matches!(parse_whenever_you_cast_enters_with_outcome(line, "Fixture"), CastEntersWithOutcome::NotThisShape), "{line}");
+        }
     }
 
     /// Dark Intimations, second paragraph (verbatim, MTGJSON AtomicCards).

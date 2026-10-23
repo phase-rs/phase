@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "'The player or planeswalker it's attacking' resolves through a new TargetFilter attacked-player/planeswalker reference; zone-change combat status gains attack fields and CombatState tracks attacked permanents and the kinds (planeswalker, battle, both) each was last settled with. The resolved-rules journal gains a RetireAttacked combat-membership edit (a type-changed planeswalker or battle stops being attacked, CR 506.4), and paused continuations carry an x_announcement mark. Older peers cannot deserialize the new variants/fields and would lose the attack referent."
+}

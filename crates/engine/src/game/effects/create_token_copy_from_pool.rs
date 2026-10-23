@@ -161,6 +161,8 @@ pub fn resolve(
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
+            // Pool-drawn values name no donor object; empty mods are stamp-proof.
+            donor: None,
         }),
     });
 

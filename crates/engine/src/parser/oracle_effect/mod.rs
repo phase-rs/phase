@@ -78,6 +78,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError};
 use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
+use crate::parser::oracle_trigger::{split_spell_or_activation_disjunction, SubjectPerson};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{
@@ -2505,27 +2506,25 @@ fn extract_when_next_spell_filter(payload: &str) -> Option<TargetFilter> {
     })
 }
 
-const WHEN_NEXT_OR_ACTIVATE_ABILITY: &str = " or activate an ability ";
-
 /// CR 603.7: Parse a disjunctive delayed-trigger condition of the form
 /// "cast a <spell-qualifier> or activate an ability <activation-qualifier>".
-/// Each branch lowers into a normal `TriggerDefinition` filter via the shared
-/// spell/activation post-modifier combinators.
+/// The disjunction is located by the detector shared with the printed
+/// cast-or-activate trigger splitter
+/// (`oracle_trigger::split_spell_or_activation_disjunction`); "when you next"
+/// requires the second-person "activate". Each branch lowers into a normal
+/// `TriggerDefinition` filter via the shared spell/activation post-modifier
+/// combinators; a bare "or activate an ability" (empty qualifier) declines.
 fn try_parse_when_next_spell_or_activate_disjunction(
     condition_fragment: &str,
 ) -> Option<(TargetFilter, TargetFilter)> {
-    use nom::bytes::complete::{tag, take_until};
-    use nom::Parser;
-
-    let (rest, spell_part) = take_until::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
-        .parse(condition_fragment.trim())
-        .ok()?;
-    let (activation_part, _) = tag::<_, _, OracleError<'_>>(WHEN_NEXT_OR_ACTIVATE_ABILITY)
-        .parse(rest)
-        .ok()?;
-    let spell_filter = extract_when_next_spell_filter(spell_part.trim())?;
-    let ability_filter =
-        crate::parser::oracle_trigger::parse_post_activation_modifier(activation_part.trim())?;
+    let disjunction = split_spell_or_activation_disjunction(condition_fragment.trim())?;
+    if disjunction.person != SubjectPerson::Second {
+        return None;
+    }
+    let spell_filter = extract_when_next_spell_filter(disjunction.spell)?;
+    let ability_filter = crate::parser::oracle_trigger::parse_post_activation_modifier(
+        disjunction.activation_qualifier.trim(),
+    )?;
     Some((spell_filter, ability_filter))
 }
 
@@ -10981,6 +10980,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -38886,6 +38886,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }

@@ -79,6 +79,23 @@ fn player_context_target(
             },
         );
     }
+    if matches!(target_filter, TargetFilter::AttackedPlayerOrPlaneswalker) {
+        // CR 506.3 + CR 608.2h: "the player or planeswalker it's attacking" is read from
+        // combat at resolution by the single combat authority. No referent (a battle, a
+        // creature that is no longer attacking, a planeswalker that is gone) is dealt
+        // nothing: it must not fall through to the node's targets, nor to a controller
+        // via `bound_player_context_target`'s `resolve_player_for_context_ref` tail.
+        return Some(
+            match crate::game::combat::resolve_attacked_player_or_planeswalker(
+                state,
+                ability.source_id,
+                ability.trigger_source.as_ref(),
+            ) {
+                Some(recipient) => PlayerRecipient::Bound(recipient),
+                None => PlayerRecipient::NoReferent,
+            },
+        );
+    }
     bound_player_context_target(state, ability, target_filter).map(PlayerRecipient::Bound)
 }
 
@@ -8407,6 +8424,86 @@ mod tests {
         assert!(
             !crate::game::effects::optional_effect_is_infeasible(&empty_state, &stack_timed),
             "a stack-timed recipient is announced, not chosen here"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_recipient_tests {
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// CR 506.3 + CR 608.2h: no referent is `NoReferent`, so the recipient list is empty
+    /// even when the node carries propagated targets; with a referent it is exactly that.
+    #[test]
+    fn attacked_referent_recipient_binds_or_deals_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let mut spawn = |card: u64, controller: PlayerId| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                controller,
+                format!("Creature {card}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let attacker = spawn(1, PlayerId(0));
+        let bystander = spawn(2, PlayerId(1));
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(bystander)],
+            attacker,
+            PlayerId(0),
+        );
+        let referent = TargetFilter::AttackedPlayerOrPlaneswalker;
+
+        assert!(matches!(
+            player_context_target(&state, &ability, &referent),
+            Some(PlayerRecipient::NoReferent)
+        ));
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &referent, false),
+            vec![]
+        );
+        // Positive control: a propagating filter on the same node reaches the target.
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &TargetFilter::ParentTarget, false),
+            vec![TargetRef::Object(bystander)]
+        );
+
+        state
+            .combat
+            .get_or_insert_with(Default::default)
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+        assert!(matches!(
+            player_context_target(&state, &ability, &referent),
+            Some(PlayerRecipient::Bound(TargetRef::Player(PlayerId(1))))
+        ));
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &referent, false),
+            vec![TargetRef::Player(PlayerId(1))]
         );
     }
 }

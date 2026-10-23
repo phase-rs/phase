@@ -9,7 +9,7 @@ use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::{ActivatedAbilityKind, GameEvent, ManaTapState};
+use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
@@ -1447,7 +1447,13 @@ pub(crate) fn mana_choice_prompt(
         // single option auto-picks). Mirrors `AnyTypeProduceableBy`.
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
-            let options = super::mana_sources::opponent_land_color_options(state, owner);
+            // CR 106.1a + CR 105.1: the survey yields `ManaColor`s, so colorless can
+            // never be offered as an "any color" option.
+            let options: Vec<ManaType> =
+                super::mana_sources::opponent_land_color_options(state, owner)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect();
             // CR 106.5: An ability that would produce mana of an undefined type
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
@@ -3523,11 +3529,16 @@ fn finish_mana_ability_cost_payment(
     // it; it is then an ordinary activation, and "that isn't a mana ability"
     // triggers must see it as one.
     let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+    // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
+    // activation began, before any cost; never `mana_ability_definition`'s
+    // post-payment live fallback (a pending without its snapshot is `Unknown`).
+    let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
     let activation_event = super::casting_targets::emit_ability_activated(
         state,
         pending.player,
         pending.source_id,
         activation_kind,
+        activation_cost,
         None,
         ability_def.activation_zone.unwrap_or(Zone::Battlefield),
         events,
@@ -11626,6 +11637,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

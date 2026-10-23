@@ -1559,13 +1559,16 @@ pub(crate) fn move_to_zone_with_entry_flags(
             .unwrap_or_default(),
     );
     zone_change_record.combat_status = if let Some(target) = liminal_attack_target {
+        // CR 508.4a: a stale destination yields no defending player and then no
+        // attack target either, so the latch is never half-populated.
+        let defending_player =
+            super::combat::entry_attack_target_defender(state, snapshot_object.controller, target);
         ZoneChangeCombatStatus {
-            attacking: true,
-            defending_player: super::combat::entry_attack_target_defender(
-                state,
-                snapshot_object.controller,
-                target,
-            ),
+            attacking: defending_player.is_some(),
+            defending_player,
+            attack_target: defending_player.map(|_| target),
+            attack_target_identity: defending_player
+                .and_then(|_| super::combat::bind_attack_target(state, target)),
             ..ZoneChangeCombatStatus::default()
         }
     } else {
@@ -2437,6 +2440,7 @@ pub(crate) fn capture_combat_status(
         .attackers
         .iter()
         .find(|attacker| attacker.object_id == object_id);
+    let active_target = attacker.and_then(|info| super::combat::active_attack_target(state, info));
 
     ZoneChangeCombatStatus {
         attacking: attacker.is_some(),
@@ -2448,6 +2452,10 @@ pub(crate) fn capture_combat_status(
         attacking_alone: crate::game::combat::attacking_alone(state, object_id),
         blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
+        // CR 506.4c + CR 608.2h: capture the active relation before removal,
+        // including its explicit absence, independently of the original defender.
+        attack_target: active_target.map(|(target, _)| target),
+        attack_target_identity: active_target.and_then(|(_, pin)| pin),
     }
 }
 
@@ -6869,5 +6877,116 @@ mod hand_entry_rebind_tests {
             wire["ZoneChange"].get("rebound_from").is_some(),
             "reach: a rebound command carries the key"
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_combat_status_tests {
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+
+    /// CR 506.3 + CR 508.5: the capture holds the declared attack target
+    /// beside the collapsed defending player, for every kind of target.
+    /// Siblings (a non-attacker, a blocker, no combat) hold none.
+    #[test]
+    fn capture_combat_status_holds_the_declared_attack_target() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut attacker = |n: u64| {
+            create_object(
+                &mut state,
+                CardId(n),
+                P0,
+                format!("A{n}"),
+                Zone::Battlefield,
+            )
+        };
+        let (a_player, a_walker, a_battle) = (attacker(1), attacker(2), attacker(3));
+        let bystander = attacker(4);
+        let blocker = attacker(5);
+        let walker = create_object(
+            &mut state,
+            CardId(900),
+            P2,
+            "Walker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&walker)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Planeswalker];
+        let battle = create_object(
+            &mut state,
+            CardId(901),
+            P0,
+            "Battle".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Battle];
+
+        let mut combat = CombatState::default();
+        combat
+            .attackers
+            .push(AttackerInfo::new(a_player, AttackTarget::Player(P1), P1));
+        // The planeswalker's controller (P2) is the collapsed defender.
+        combat.attackers.push(AttackerInfo::new(
+            a_walker,
+            AttackTarget::Planeswalker(walker),
+            P2,
+        ));
+        // The battle's protector (P1) is the collapsed defender.
+        combat.attackers.push(AttackerInfo::new(
+            a_battle,
+            AttackTarget::Battle(battle),
+            P1,
+        ));
+        combat.blocker_to_attacker.insert(blocker, vec![a_player]);
+        combat.attacked_permanents.insert(
+            a_walker,
+            super::super::combat::bind_attack_target(&state, AttackTarget::Planeswalker(walker))
+                .unwrap(),
+        );
+        combat.attacked_permanents.insert(
+            a_battle,
+            super::super::combat::bind_attack_target(&state, AttackTarget::Battle(battle)).unwrap(),
+        );
+        state.combat = Some(combat);
+
+        for (id, target, defender) in [
+            (a_player, AttackTarget::Player(P1), P1),
+            (a_walker, AttackTarget::Planeswalker(walker), P2),
+            (a_battle, AttackTarget::Battle(battle), P1),
+        ] {
+            let status = capture_combat_status(&state, id);
+            assert!(status.attacking, "reach guard: {target:?}");
+            assert_eq!(status.defending_player, Some(defender), "{target:?}");
+            assert_eq!(status.attack_target, Some(target), "{target:?}");
+            assert_eq!(
+                status.attack_target_identity,
+                super::super::combat::bind_attack_target(&state, target)
+            );
+        }
+
+        let blocking = capture_combat_status(&state, blocker);
+        assert!(blocking.blocking, "reach guard: the blocker is in combat");
+        assert_eq!(blocking.attack_target, None);
+        let outside = capture_combat_status(&state, bystander);
+        assert!(!outside.attacking && !outside.blocking);
+        assert_eq!(outside.attack_target, None);
+
+        state.combat = None;
+        let no_combat = capture_combat_status(&state, a_player);
+        assert!(!no_combat.attacking, "reach guard: combat is gone");
+        assert_eq!(no_combat.attack_target, None);
     }
 }

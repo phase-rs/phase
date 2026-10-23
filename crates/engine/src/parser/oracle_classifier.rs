@@ -1019,6 +1019,12 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
+    // CR 614.1c + CR 614.12a: "As ~ enters, pay any amount of life" entry
+    // payments (Phyrexian Processor class) route to `parse_replacement_line`;
+    // the builder carries the anchored-`as ` frame guard (F7).
+    if is_as_enters_pay_pattern(lower) {
+        return true;
+    }
     // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
     // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
     if is_as_becomes_attached_choose_pattern(lower) {
@@ -1259,6 +1265,28 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 614.1c + CR 614.12a: coarse gate for the "As ~ enters, pay any amount of
+/// life" entry-payment class (Phyrexian Processor, Minion of the Wastes,
+/// Nameless Race). Mirrors `is_as_enters_choose_pattern`'s probe shape; the
+/// builder (`parse_as_enters_pay`) carries the anchored-`as ` frame guard, so
+/// a `when`-framed line (Vizkopa Confessor) declines there even if this coarse
+/// gate ever claims one.
+fn is_as_enters_pay_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_enters = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("enters").parse(i)
+    })
+    .is_some();
+    let has_pay_any_life = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("pay any amount of life").parse(i)
+    })
+    .is_some();
+    has_as && has_enters && has_pay_any_life
 }
 
 /// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
@@ -1992,5 +2020,56 @@ mod as_enters_choose_qualifier_classification_tests {
             Some("choose a basic land type. ~ has landwalk of the chosen type.".to_string())
         );
         assert_eq!(super::excise_selection_qualifier("choose a color."), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.1c + CR 614.12a: the "As ~ enters, pay any amount of life"
+// entry-payment class (Phyrexian Processor, Minion of the Wastes, Nameless
+// Race) routes to `parse_replacement_line`. The classifier probes the
+// lowercased (not self-ref-normalized) line, so the fixtures below keep their
+// printed "this artifact/creature" subjects.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod as_enters_pay_classification_tests {
+    use super::is_as_enters_pay_pattern;
+
+    /// The three printed class lines classify — one per subject shape plus the
+    /// two-sentence Nameless line (the classifier sees the whole line; the
+    /// builder splits its sentences).
+    #[test]
+    fn class_lines_classify() {
+        for line in [
+            "as this artifact enters, pay any amount of life.",
+            "as this creature enters, pay any amount of life.",
+            "as this creature enters, pay any amount of life. the amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
+        ] {
+            assert!(is_as_enters_pay_pattern(line), "{line}");
+        }
+    }
+
+    /// F7 NEGATIVE: Vizkopa Confessor's `when`-framed trigger line carries the
+    /// same pay phrase but must NOT classify (and the builder's anchored-`as `
+    /// frame declines it structurally even if this gate ever claims one).
+    #[test]
+    fn vizkopa_trigger_line_does_not_classify() {
+        assert!(!is_as_enters_pay_pattern(
+            "when this creature enters, pay any amount of life. target opponent reveals that many cards from their hand. you choose one of them and exile it."
+        ));
+    }
+
+    /// NEGATIVE: neighboring as-enters payment shapes stay out — shock-land
+    /// optionals, fixed life payments, and rider-only lines ("if you do")
+    /// without the pay phrase.
+    #[test]
+    fn neighboring_payment_shapes_do_not_classify() {
+        for line in [
+            "as ~ enters, you may pay 2 life. if you don't, ~ enters tapped.",
+            "as ~ enters, pay 2 life.",
+            "if you paid life as ~ entered, draw that many cards.",
+            "at the beginning of your end step, you may pay any amount of life. if you do, draw that many cards.",
+        ] {
+            assert!(!is_as_enters_pay_pattern(line), "{line}");
+        }
     }
 }

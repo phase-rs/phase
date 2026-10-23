@@ -2256,56 +2256,14 @@ pub fn fallback_action(
             }
         }
 
-        // Assign combat damage: greedy lethal-to-each, mirroring the engine's
-        // ai_support::candidates AssignCombatDamage arm so the fallback stays
-        // rules-legal for trample (CR 702.19b) and trample-over-PW (CR 702.19c).
-        WaitingFor::AssignCombatDamage {
-            total_damage,
-            blockers,
-            trample,
-            pw_loyalty,
-            attack_target,
-            ..
-        } => {
-            let mut remaining = *total_damage;
-            let mut assignments = Vec::new();
-            // CR 702.19b: Assign lethal to each blocker in order.
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
-            // CR 510.1c: Non-trample — the leftover must land on a blocker (no player
-            // spillover), so dump it on the last blocker to keep the total == power.
-            if trample.is_none() && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
-                }
-            }
-            // CR 702.19c: Trample-over-PW attacking a PW splits excess into
-            // loyalty-worth to the PW and the remainder to the PW's controller.
-            let (trample_damage, controller_damage) = if *trample
-                == Some(engine::game::combat::TrampleKind::OverPlaneswalkers)
-                && matches!(
-                    attack_target,
-                    engine::game::combat::AttackTarget::Planeswalker(_)
-                ) {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                let to_ctrl = remaining.saturating_sub(to_pw);
-                (to_pw, to_ctrl)
-            } else {
-                // CR 702.19b: Standard trample — all excess to the attack target.
-                (if trample.is_some() { remaining } else { 0 }, 0)
-            };
-            Some(GameAction::AssignCombatDamage {
+        // The engine-issued assignment already accounts for the current recipient
+        // and exact combat membership, including a retired permanent destination.
+        WaitingFor::AssignCombatDamage { .. } => issued(|action| {
+            matches!(action, GameAction::AssignCombatDamage {
                 mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
-                assignments,
-                trample_damage,
-                controller_damage,
+                ..
             })
-        }
+        }),
 
         // CR 510.1d + CR 702.22k: a banded blocker's damage is divided by the
         // ACTIVE player among the attackers it blocks. There is no lethal rule
@@ -13348,10 +13306,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context: context.clone(),
                 committed_choice: Some(ChosenAttribute::Number(7)),
-            }),
+            })),
             proposition_truth: Some(true),
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -13367,10 +13325,10 @@ mod tests {
         else {
             unreachable!("fixture remains an opponent guess");
         };
-        *owner = Some(OpponentGuessOwner {
+        *owner = Some(Box::new(OpponentGuessOwner {
             context,
             committed_choice: Some(ChosenAttribute::Number(1)),
-        });
+        }));
         *proposition_truth = Some(false);
         let mut second_rng = SmallRng::seed_from_u64(71);
         let second = choose_action(&state, PlayerId(0), &config, &mut second_rng)
@@ -14155,6 +14113,27 @@ mod tests {
         let mut state = make_state();
         let attacker = add_creature(&mut state, PlayerId(0), total_damage as i32, 1);
         let blocker = add_creature(&mut state, PlayerId(1), 1, lethal_minimum as i32);
+        if let Some(kind) = trample {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .keywords
+                .push(match kind {
+                    engine::game::combat::TrampleKind::Standard => Keyword::Trample,
+                    engine::game::combat::TrampleKind::OverPlaneswalkers => {
+                        Keyword::TrampleOverPlaneswalkers
+                    }
+                });
+        }
+        let mut member = engine::game::combat::AttackerInfo::attacking_player(attacker, P1);
+        member.blocked = true;
+        state.combat = Some(engine::game::combat::CombatState {
+            attackers: vec![member],
+            blocker_assignments: [(attacker, vec![blocker])].into_iter().collect(),
+            blocker_to_attacker: [(blocker, vec![attacker])].into_iter().collect(),
+            ..Default::default()
+        });
         state.waiting_for = WaitingFor::AssignCombatDamage {
             player: PlayerId(0),
             attacker_id: attacker,
@@ -14170,7 +14149,33 @@ mod tests {
             pw_loyalty: None,
             pw_controller: None,
         };
-        fallback_action_default(&state).expect("AssignCombatDamage fallback must produce an action")
+        let contract = test_contract(&state);
+        assert!(contract.candidates.iter().any(|candidate| matches!(
+            candidate.action,
+            GameAction::AssignCombatDamage {
+                mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                ..
+            }
+        )));
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let action = fallback_action(&state, &config, &contract)
+            .expect("AssignCombatDamage fallback must produce an action");
+        assert!(contract.contains_action(&state, &action));
+        let mut no_normal = contract.clone();
+        no_normal.candidates.retain(|candidate| {
+            !matches!(
+                candidate.action,
+                GameAction::AssignCombatDamage {
+                    mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                    ..
+                }
+            )
+        });
+        assert!(
+            fallback_action(&state, &config, &no_normal).is_none(),
+            "no issued Normal action means no fallback assignment"
+        );
+        action
     }
 
     /// CR 702.19b: single-blocker trample attacker — the AI fallback keeps lethal
@@ -14217,6 +14222,275 @@ mod tests {
                 assert_eq!(controller_damage, 0);
             }
             other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 702.19b + CR 506.4c: fallback follows the issued ordinary-trample
+    /// assignment after the exact permanent recipient leaves combat.
+    #[test]
+    fn fallback_printed_rancor_swordjack_uses_live_and_retired_recipient_contracts() {
+        use engine::game::combat::{AttackTarget, DamageTarget};
+        use engine::game::game_object::AttachTarget;
+        use engine::types::game_state::CombatDamageAssignmentMode as Mode;
+
+        const SWORDJACK: &str = "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.\nEncore {5}{R} ({5}{R}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)";
+        const RANCOR: &str = "Enchant creature\nEnchanted creature gets +2/+0 and has trample.\nWhen this Aura is put into a graveyard from the battlefield, return it to its owner's hand.";
+        const WORD: &str = "Split second (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)\nUntap target permanent and gain control of it until end of turn. It gains haste until end of turn.";
+        const FLICKER: &str = "Exile target nontoken permanent, then return it to the battlefield under its owner's control.";
+        const LEYLINE: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou may cast spells as though they had flash.";
+        let p2 = PlayerId(2);
+
+        for retirement in 0..3 {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            for _ in 0..20 {
+                for player in [P0, P1, p2] {
+                    scenario.add_card_to_library_top(player, "Plains");
+                }
+            }
+            let attacker = scenario
+                .add_creature_from_oracle(P0, "Fathom Fleet Swordjack", 4, 3, SWORDJACK)
+                .id();
+            for index in 0..3 {
+                scenario.add_artifact_from_oracle(P0, &format!("Artifact {index}"), "");
+            }
+            let blocker = scenario.add_creature(P1, "Blocking creature", 1, 4).id();
+            let walker = scenario
+                .add_creature(p2, "Defending Walker", 1, 1)
+                .as_planeswalker_with_loyalty("Test", 10)
+                .id();
+            let aura = scenario
+                .add_spell_to_hand(P0, "Rancor", false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .from_oracle_text_with_keywords(&["Enchant"], RANCOR)
+                .id();
+            scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE);
+            let word = scenario
+                .add_spell_to_hand_from_oracle(P0, "Word of Seizing", true, WORD)
+                .from_oracle_text_with_keywords(&["Split second"], WORD)
+                .id();
+            let flicker = scenario
+                .add_spell_to_hand_from_oracle(P0, "Flicker", false, FLICKER)
+                .id();
+            let mut runner = scenario.build();
+            let object = runner.state_mut().objects.get_mut(&walker).unwrap();
+            object.base_controller = Some(P1);
+            object.controller = P1;
+            let outcome = runner.cast(aura).target_object(attacker).resolve();
+            outcome.assert_zone(&[aura], Zone::Battlefield);
+            assert_eq!(
+                outcome.state().objects[&aura].attached_to,
+                Some(AttachTarget::Object(attacker))
+            );
+            assert!(outcome.state().objects[&attacker]
+                .attachments
+                .contains(&aura));
+            assert_eq!(runner.state().objects[&attacker].power, Some(6));
+            assert!(runner.state().objects[&attacker].has_keyword(&Keyword::Trample));
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(attacker, AttackTarget::Planeswalker(walker))])
+                .unwrap();
+            let pin = runner.state().combat.as_ref().unwrap().attacked_permanents[&attacker];
+            assert_eq!(pin.object_id, walker);
+            assert_eq!(runner.state().stack.len(), 1);
+            assert!(matches!(&runner.state().stack.back().unwrap().kind,
+                StackEntryKind::TriggeredAbility { ability, .. } if ability.targets.is_empty()));
+            assert!(
+                !serde_json::to_string(&runner.state().stack.back().unwrap().kind)
+                    .unwrap()
+                    .contains("Unimplemented")
+            );
+            let mut trigger_events = Vec::new();
+            for _ in 0..24 {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                trigger_events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert!(runner.state().stack.is_empty());
+            assert!(trigger_events.iter().any(|event| matches!(event,
+                engine::types::events::GameEvent::EffectResolved { source_id, kind: EffectKind::DealDamage, .. }
+                    if *source_id == attacker)));
+            assert!(trigger_events.iter().any(|event| matches!(event,
+                engine::types::events::GameEvent::DamageDealt { source_id, target: TargetRef::Object(id), amount: 3, .. }
+                    if *source_id == attacker && *id == walker)));
+            assert_eq!(
+                runner.state().objects[&walker].counters[&CounterType::Loyalty],
+                7
+            );
+
+            for _ in 0..32 {
+                if runner.state().combat.as_ref().unwrap().attackers[0].blocked
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                match runner.state().waiting_for.clone() {
+                    WaitingFor::DeclareBlockers { player, .. } => {
+                        let blocks = [(blocker, attacker)];
+                        runner
+                            .declare_blockers(if player == P1 { &blocks } else { &[] })
+                            .unwrap();
+                    }
+                    WaitingFor::Priority { .. } => {
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    other => panic!("before legal blocking: {other:?}"),
+                }
+            }
+            assert!(runner.state().combat.as_ref().unwrap().attackers[0].blocked);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            if retirement != 0 {
+                for _ in 0..3 {
+                    if matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { player: P0 }
+                    ) {
+                        break;
+                    }
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player: P0 }
+                ));
+                let outcome = runner
+                    .cast(if retirement == 1 { word } else { flicker })
+                    .target_object(walker)
+                    .resolve();
+                outcome.assert_zone(&[walker], Zone::Battlefield);
+                assert_eq!(runner.state().objects[&walker].owner, p2);
+                assert_eq!(
+                    runner.state().objects[&walker].incarnation != pin.incarnation,
+                    retirement == 2
+                );
+                assert_eq!(
+                    runner.state().objects[&walker].controller,
+                    if retirement == 1 { P0 } else { p2 }
+                );
+                assert!(!runner
+                    .state()
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .attacked_permanents
+                    .contains_key(&attacker));
+            } else {
+                assert_eq!(
+                    runner.state().combat.as_ref().unwrap().attacked_permanents[&attacker],
+                    pin
+                );
+            }
+            for _ in 0..24 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::AssignCombatDamage { .. }
+                ) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(runner.state().waiting_for,
+                WaitingFor::AssignCombatDamage { attacker_id, total_damage: 6, .. } if attacker_id == attacker));
+            assert_eq!(
+                runner.state().combat.as_ref().unwrap().attackers[0]
+                    .resolve_damage_target(runner.state(), false),
+                (retirement == 0).then_some(DamageTarget::Object(walker))
+            );
+            let contract = AiDecisionContract::issue(runner.state(), P0);
+            assert!(contract.candidates.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::AssignCombatDamage {
+                    mode: Mode::Normal,
+                    ..
+                }
+            )));
+            let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+            let action = fallback_action(runner.state(), &config, &contract)
+                .expect("the real combat prompt has an issued Normal fallback");
+            assert_eq!(
+                action,
+                GameAction::AssignCombatDamage {
+                    mode: Mode::Normal,
+                    assignments: vec![(blocker, if retirement == 0 { 4 } else { 6 })],
+                    trample_damage: if retirement == 0 { 2 } else { 0 },
+                    controller_damage: 0,
+                }
+            );
+            assert!(contract.contains_action(runner.state(), &action));
+            let mut no_normal = contract.clone();
+            no_normal.candidates.retain(|candidate| {
+                !matches!(
+                    candidate.action,
+                    GameAction::AssignCombatDamage {
+                        mode: Mode::Normal,
+                        ..
+                    }
+                )
+            });
+            assert!(fallback_action(runner.state(), &config, &no_normal).is_none());
+            let before_loyalty = runner.state().objects[&walker].counters[&CounterType::Loyalty];
+            let result = runner
+                .act(action)
+                .expect("issued fallback applies through the reducer");
+            let damage = result
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    engine::types::events::GameEvent::DamageDealt {
+                        source_id,
+                        target,
+                        amount,
+                        ..
+                    } if *source_id == attacker => Some((target.clone(), *amount)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                damage,
+                if retirement == 0 {
+                    vec![
+                        (TargetRef::Object(blocker), 4),
+                        (TargetRef::Object(walker), 2),
+                    ]
+                } else {
+                    vec![(TargetRef::Object(blocker), 6)]
+                }
+            );
+            assert_eq!(
+                runner.state().objects[&walker].counters[&CounterType::Loyalty],
+                before_loyalty - if retirement == 0 { 2 } else { 0 }
+            );
+            assert_eq!(
+                runner
+                    .state()
+                    .players
+                    .iter()
+                    .map(|player| player.life)
+                    .collect::<Vec<_>>(),
+                vec![20, 20, 20]
+            );
+            assert!(!matches!(
+                runner.state().waiting_for,
+                WaitingFor::AssignCombatDamage { .. }
+            ));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
         }
     }
 
@@ -16560,10 +16834,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: Some(ChosenAttribute::Number(7)),
-            }),
+            })),
             proposition_truth: Some(true),
         };
         rows.push(("OpponentGuess", opponent_guess, PlayerId(0)));

@@ -510,6 +510,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
@@ -1484,6 +1485,7 @@ mod tests {
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: Default::default(),
             }
         ));

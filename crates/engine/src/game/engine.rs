@@ -8481,6 +8481,8 @@ fn seed_representative_fodder(
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: owner,
+            // Source-less fodder mint from a captured profile; empty mods are stamp-proof.
+            donor: None,
         }),
     };
     crate::game::effects::token_copy::drive_copy_token_batches(
@@ -9818,10 +9820,26 @@ fn drain_pending_deferred_life_cost_resume(
                 }
             }
             crate::types::game_state::DeferredLifeCostResume::PayAmount {
-                player, total, ..
-            } => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
-                state, player, total, events,
-            )),
+                player,
+                total,
+                pending_entry,
+                // The depth gate fired upstream (the caller compares
+                // `resolution_stack.len()` against the recorded boundary); the
+                // fork below only routes, so it binds no depth.
+                ..
+            } => match pending_entry {
+                // CR 614.12a: a pre-entry payment's deferral resumes the parked
+                // ENTRY (latch already recorded at answer time), never a
+                // resolution chain — no `last_effect_count` stamp. The fork keys
+                // on the resume marker, never on `waiting_for`: the drain fires
+                // at Priority, long after the inner prompt closed.
+                Some(pending) => {
+                    engine_replacement::complete_entry_payment(state, *pending, events)
+                }
+                None => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
+                    state, player, total, events,
+                )),
+            },
             crate::types::game_state::DeferredLifeCostResume::ManaRoot {
                 player,
                 resume,
@@ -13582,6 +13600,22 @@ fn apply_non_priority_pass_action(
                         &mut events,
                     )?;
                     state.last_effect_count = Some(chosen.len() as i32);
+                    // CR 107.3f + CR 107.3i + CR 118.12: "tap X untapped ..." as an effect
+                    // resolves with X chosen by the player, so the count tapped defines X for the
+                    // riders. The selection mode is the signal, as in casting_costs.rs and
+                    // mana_abilities.rs; min_count == 0 is not (Aggregate also has floor 0).
+                    // Only the rider this payment parked receives it: a payment with no rider
+                    // leaves any enclosing continuation's X untouched.
+                    if matches!(
+                        *mode,
+                        crate::types::ability::TapCreaturesSelectionMode::VariableX
+                    ) {
+                        engine_resolution_choices::stamp_paused_payment_rider_x(
+                            state,
+                            crate::types::game_state::ContinuationXAnnouncement::TappedCount,
+                            u32::try_from(chosen.len()).unwrap_or(u32::MAX),
+                        );
+                    }
                     if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
                         state.waiting_for = WaitingFor::Priority { player: *player };
                     }
@@ -23973,7 +24007,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            54,
+            57,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -23981,10 +24015,11 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (4, 11, 39),
+            (4, 11, 42),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 39 \
-             `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (including the two new optional-subject projection reads), and 42 \
+             `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
+             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(

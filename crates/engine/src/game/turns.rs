@@ -1300,7 +1300,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
     state.lki_copiable_values_by_incarnation.clear();
-    state.departed_stack_spells.clear();
+    state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
     state.linked_exile_lki.clear();
@@ -11495,14 +11495,32 @@ card into your hand at the beginning of your next end step.";
             "precondition: attacker power is stale before the CombatDamage phase arm runs"
         );
 
+        assert_eq!(
+            state.objects[&attacker].counters[&CounterType::Plus1Plus1],
+            8
+        );
+        let pin = crate::game::combat::bind_attack_target(
+            &state,
+            AttackTarget::Planeswalker(planeswalker),
+        )
+        .expect("staged planeswalker is a live combat destination");
         state.combat = Some(CombatState {
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(planeswalker),
                 PlayerId(1),
             )],
+            attacked_permanents: [(attacker, pin)].into_iter().collect(),
             ..Default::default()
         });
+        assert_eq!(
+            state.combat.as_ref().unwrap().attacked_permanents[&attacker],
+            pin
+        );
+        assert_eq!(
+            state.combat.as_ref().unwrap().attackers[0].resolve_damage_target(&state, false),
+            Some(crate::game::combat::DamageTarget::Object(planeswalker))
+        );
 
         let mut events = Vec::new();
         let _ = auto_advance(&mut state, &mut events);
@@ -11511,7 +11529,14 @@ card into your hand at the beginning of your next end step.";
         // including +1/+1 counters from layer 7c. Without the CombatDamage pre-flush
         // in auto_advance, this remains at 9 because stale base power dealt only 1.
         assert_eq!(state.objects[&planeswalker].loyalty, Some(1));
+        assert_eq!(state.objects[&attacker].power, Some(9));
         assert_eq!(state.players[1].life, 20);
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::DamageDealt { source_id, target: crate::types::ability::TargetRef::Object(id), amount: 9, .. }
+                if *source_id == attacker && *id == planeswalker)));
+        assert!(!events.iter().any(|event| matches!(event,
+            GameEvent::DamageDealt { source_id, target: crate::types::ability::TargetRef::Player(_), .. }
+                if *source_id == attacker)));
     }
 
     /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,

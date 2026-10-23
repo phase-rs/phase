@@ -215,6 +215,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -458,6 +459,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -613,6 +615,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
@@ -1004,6 +1007,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -2215,6 +2219,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2591,6 +2596,7 @@ fn filter_grammar_any(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -3128,6 +3134,7 @@ fn filter_contains_input(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -4472,9 +4479,22 @@ fn bind_absent_search_node(filter: &mut TargetFilter) {
     }
 }
 
+/// The constant property a bound predicate folds to: the empty disjunction
+/// (`AnyOf { [] }`) is false, and its negation is true.
+fn filter_prop_truth(value: bool) -> FilterProp {
+    let never = FilterProp::AnyOf { props: vec![] };
+    if value {
+        FilterProp::Not {
+            prop: Box::new(never),
+        }
+    } else {
+        never
+    }
+}
+
 fn bind_absent_search_property(prop: &mut FilterProp) {
     if matches!(prop, FilterProp::InTrackedSet { id } if id.0 == 0) {
-        *prop = FilterProp::AnyOf { props: vec![] };
+        *prop = filter_prop_truth(false);
     }
 }
 
@@ -4482,10 +4502,47 @@ fn bind_absent_search_property_after_children(prop: &mut FilterProp) {
     if matches!(prop, FilterProp::DistinctFrom { reference }
         if absent_search_predicate_truth(reference) == Some(false))
     {
-        *prop = FilterProp::Not {
-            prop: Box::new(FilterProp::AnyOf { props: vec![] }),
-        };
+        *prop = filter_prop_truth(true);
     }
+}
+
+/// CR 602.1a + CR 603.2 + CR 603.10: bind every `HasXInActivationCost` in an
+/// activation trigger's filter to the `AbilityActivated` event's own bound cost
+/// (`BoundActivationCost`, captured before payment) before the filter is
+/// evaluated against the source. CR 113.7a: live and departed-LKI evaluation
+/// both see the one bound fact.
+///
+/// Transactional, like the other binders over this walk: the rewrite runs on a
+/// copy and is published only when the bounded walk reached every property. An
+/// incomplete walk (a `CardTypeSetSource::AnyOf` population nested past
+/// `UNION_DEPTH_BUDGET`) leaves `filter` unchanged and returns `false`, so the
+/// caller fails closed instead of evaluating a filter with an occurrence left
+/// unbound.
+#[must_use]
+pub(crate) fn bind_activation_cost_x(
+    filter: &mut TargetFilter,
+    cost: &crate::types::events::BoundActivationCost,
+) -> bool {
+    let has_x = crate::game::casting_costs::bound_activation_cost_has_x(cost);
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if matches!(prop, FilterProp::HasXInActivationCost) {
+                *prop = filter_prop_truth(has_x);
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
 }
 
 // This summary reads Boolean composition only. It never replaces a descriptor
@@ -4554,6 +4611,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -4785,6 +4843,7 @@ fn rewrite_filter_props(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -8261,7 +8320,8 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::DefendingPlayer => false,
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker => false,
         // CR 608.2k: `TriggeringSource` IS object-valued (unlike its player-axis
         // siblings above — types/ability.rs documents it as "the source object
         // of the triggering event"), but it is still not a population predicate,
@@ -8741,6 +8801,7 @@ fn zone_change_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
@@ -9079,6 +9140,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
@@ -9403,6 +9465,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -9659,6 +9722,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::FaceDown => {
             record.cast_variant == crate::types::game_state::CastingVariant::FaceDown
         }
+        // CR 602.1a: a fact of an activation, not of a spell. An activation
+        // trigger's matcher binds it from its `AbilityActivated` event before
+        // evaluation (`bind_activation_cost_x`), so a spell record never
+        // answers it.
         FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
@@ -10755,12 +10822,11 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
-        // CR 107.3 + CR 601.2f: "{X} in its activation cost" — consult the
-        // pending activation record for the matched source object. Composes with
-        // typed type/controller filters via `TargetFilter::And`/`Or`.
-        FilterProp::HasXInActivationCost => {
-            crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
-        }
+        // CR 602.1a: "{X} in its activation cost" is a fact of an activation,
+        // not a characteristic of an object. It is answered only from the
+        // `AbilityActivated` event the trigger matches (`bind_activation_cost_x`,
+        // bound before evaluation); an unbound read names no activation.
+        FilterProp::HasXInActivationCost => false,
         FilterProp::WasKicked => {
             if let Some(pending) = state.pending_cast.as_ref() {
                 if pending.object_id == object_id {
@@ -11249,19 +11315,43 @@ fn matches_filter_prop(
         FilterProp::PowerExceedsBase => {
             obj.power.unwrap_or(0) > obj.layer_base_power.or(obj.base_power).unwrap_or(0)
         }
-        // Match objects whose name differs from all controlled battlefield objects matching the filter.
+        // CR 201.2c: the object has a different name than a group of objects only
+        // if it has at least one name and has no name in common with any of
+        // them, even if some of them have no name. A nameless object (face-down
+        // permanent, CR 708.2a) never has a different name. Names are read
+        // through the shared `SharedQuality::Name` value set, which is empty for
+        // a nameless object, so a nameless reference never collides.
+        // CR 109.5: the group is the permanents "you" control — the source's
+        // controller. `SourceContext::controller` is always `Some` from the
+        // filter-context constructors (backfilled from the source's LKI, or from a
+        // placeholder snapshot when neither exists — see
+        // `source_context_from_filter`), so `None` is not expected here; handle it
+        // explicitly (no "you", no group, no match) rather than defaulting to
+        // player 0's permanents in this arm.
         FilterProp::DifferentNameFrom { filter } => {
-            let controller = source.controller.unwrap_or(PlayerId(0));
+            let Some(controller) = source.controller else {
+                return false;
+            };
+            let candidate_names =
+                object_shared_quality_values(obj, &SharedQuality::Name, &state.all_creature_types);
+            if candidate_names.is_empty() {
+                return false;
+            }
             let nested_ctx = FilterContext::from_source_with_controller(source.id, controller);
-            let controlled_names: Vec<&str> = state
+            !state
                 .battlefield
                 .iter()
                 .filter_map(|&bid| state.objects.get(&bid))
                 .filter(|bobj| bobj.controller == controller)
                 .filter(|bobj| matches_target_filter(state, bobj.id, filter, &nested_ctx))
-                .map(|bobj| bobj.name.as_str())
-                .collect();
-            !controlled_names.contains(&obj.name.as_str())
+                .any(|bobj| {
+                    object_shares_quality_values(
+                        bobj,
+                        &SharedQuality::Name,
+                        &candidate_names,
+                        &state.all_creature_types,
+                    )
+                })
         }
         // CR 109.1 + CR 120.3: Match objects that are NOT the same object as any
         // object the `reference` filter resolves to. `ParentTarget` resolves to
@@ -12046,6 +12136,10 @@ fn zone_change_record_matches_property(
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
+        // CR 602.1a: a fact of an activation, not of an object. An activation
+        // trigger's matcher binds it from its `AbilityActivated` event before
+        // the departed-source branch (`bind_activation_cost_x`), so this record
+        // path never answers it.
         | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
@@ -12968,6 +13062,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -16282,15 +16377,26 @@ mod tests {
         );
     }
 
-    /// CR 107.3 + CR 601.2f: `FilterProp::HasXInActivationCost` consults the
-    /// pending activation record and composes with typed filters via `And`.
+    /// CR 602.1a + CR 603.2: `FilterProp::HasXInActivationCost` is answered only
+    /// by the activation event's bound cost (`bind_activation_cost_x`), composes
+    /// with typed filters via `And` and inside `AnyOf`, and an unbound read never
+    /// consults `pending_activations` (an AI guard, not a rules input).
     #[test]
-    fn pending_activation_has_x_in_activation_cost_composes_with_type_filter() {
+    fn bound_activation_cost_x_composes_with_type_filter_and_ignores_pending_activations() {
         use crate::types::ability::{
             AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter as Tf,
             TypedFilter,
         };
+        use crate::types::events::BoundActivationCost;
         use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X],
+            },
+        }));
+        let non_x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Tap));
 
         let mut state = GameState::new_two_player(42);
         let source = add_creature(&mut state, PlayerId(0), "X Activator");
@@ -16319,15 +16425,97 @@ mod tests {
                 ),
             ],
         };
+
+        let mut bound_true = filter.clone();
+        assert!(bind_activation_cost_x(&mut bound_true, &x_cost));
         assert!(
-            matches_target_filter(&state, source, &filter, source),
-            "creature source with pending X activation must match composed filter"
+            matches_target_filter(&state, source, &bound_true, source),
+            "a creature source whose activation carried {{X}} matches the composed filter"
         );
-        state.pending_activations.clear();
+        let mut bound_false = filter.clone();
+        assert!(bind_activation_cost_x(&mut bound_false, &non_x_cost));
+        assert!(
+            !matches_target_filter(&state, source, &bound_false, source),
+            "an activation whose cost carried no {{X}} fails the composed filter"
+        );
+
+        let nested =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::HasXInActivationCost],
+            }]));
+        let mut nested_true = nested.clone();
+        assert!(bind_activation_cost_x(&mut nested_true, &x_cost));
+        assert!(
+            matches_target_filter(&state, source, &nested_true, source),
+            "a property nested in AnyOf is bound too"
+        );
+        let mut nested_false = nested;
+        assert!(bind_activation_cost_x(&mut nested_false, &non_x_cost));
+        assert!(!matches_target_filter(
+            &state,
+            source,
+            &nested_false,
+            source
+        ));
+
         assert!(
             !matches_target_filter(&state, source, &filter, source),
-            "without pending activation, HasXInActivationCost must fail"
+            "an unbound HasXInActivationCost names no activation, whatever \
+             pending_activations holds"
         );
+    }
+
+    /// CR 602.1a + CR 603.2: binding an activation's cost into a filter is
+    /// transactional. Within the union budget every occurrence is bound; past
+    /// it nothing is published (not even the visible top-level occurrence the
+    /// walk did reach) and the binder reports the incomplete walk.
+    #[test]
+    fn activation_cost_x_binding_is_transactional_at_population_budget() {
+        use crate::types::ability::{AbilityCost, CardTypeSetSource, UNION_DEPTH_BUDGET};
+        use crate::types::events::BoundActivationCost;
+
+        let not_x = |x: FilterProp| FilterProp::Not { prop: Box::new(x) };
+        let population = |depth: u32, x: FilterProp| {
+            let member = || CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![not_x(x.clone())]),
+                ),
+            };
+            let mut source = member();
+            for _ in 0..depth {
+                source = CardTypeSetSource::any_of(vec![source, member()]).unwrap();
+            }
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                not_x(x.clone()),
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctCardTypes { source },
+                    },
+                },
+            ]))
+        };
+        let non_x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Tap));
+
+        let mut within = population(2, FilterProp::HasXInActivationCost);
+        assert!(bind_activation_cost_x(&mut within, &non_x_cost));
+        assert_eq!(
+            within,
+            population(2, filter_prop_truth(false)),
+            "every occurrence, nested population members included, is bound"
+        );
+
+        let mut rejected = population(UNION_DEPTH_BUDGET, FilterProp::HasXInActivationCost);
+        let before = rejected.clone();
+        assert!(
+            filter_contains_filter_prop(&rejected, &|prop| matches!(
+                prop,
+                FilterProp::HasXInActivationCost
+            )),
+            "visible rewritable occurrence guards rejection reach"
+        );
+        assert!(!bind_activation_cost_x(&mut rejected, &non_x_cost));
+        assert_eq!(rejected, before, "no reachable prefix is published");
     }
 
     #[test]
@@ -19047,6 +19235,129 @@ mod tests {
         assert!(
             matches_target_filter(&state, other_name, &does_not_share, source),
             "a card named unlike any battlefield creature does not share"
+        );
+    }
+
+    /// CR 201.2c: an object has a different name than a group of objects only if
+    /// it has at least one name and shares no name with any of them (a nameless
+    /// reference never collides); an object with no name never has a different
+    /// name than anything, even a group of named objects. CR 109.5: the group is
+    /// the permanents "you" (the source's controller) control.
+    ///
+    /// The candidates are library cards (the Light-Paws search shape), outside the
+    /// battlefield reference pool. P0 controls a named creature and a nameless
+    /// face-down creature (CR 708.2a); P1 controls only "Gray Ogre".
+    /// Fails on revert:
+    /// - R2 (P1, nameless candidate): the pre-fix `!names.contains(&name)` found
+    ///   no `""` in P1's population and matched the nameless candidate.
+    /// - E1 (empty population, nameless candidate): same, vacuously.
+    /// - R7 (`GRIZZLY BEARS` vs "Grizzly Bears"): the pre-fix comparison was an
+    ///   exact string match, so the case-differing name read as different.
+    #[test]
+    fn different_name_from_follows_cr_201_2c() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let face_down = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        // CR 708.2a: a face-down permanent has no name.
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down].name, "");
+        add_creature(&mut state, PlayerId(1), "Gray Ogre");
+
+        let mut library_card = |card_id: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            )
+        };
+        let nameless = library_card(101, "");
+        let bears = library_card(102, "Grizzly Bears");
+        let elves = library_card(103, "Llanowar Elves");
+        let ogre = library_card(104, "Gray Ogre");
+        let bears_upper = library_card(105, "GRIZZLY BEARS");
+
+        let different_name_from = |reference: TypedFilter| {
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::DifferentNameFrom {
+                    filter: Box::new(TargetFilter::Typed(reference)),
+                },
+            ]))
+        };
+        // "a different name than each creature you control".
+        let from_creatures = different_name_from(TypedFilter::creature());
+        // A reference filter nothing on the board matches: empty population.
+        let from_artifacts = different_name_from(TypedFilter::new(TypeFilter::Artifact));
+        let as_p1 = |state: &GameState, id: ObjectId, filter: &TargetFilter| {
+            super::matches_target_filter(
+                state,
+                id,
+                filter,
+                &FilterContext::from_source_with_controller(source, PlayerId(1)),
+            )
+        };
+
+        // R3: a named candidate unlike every creature P0 controls matches — the
+        // nameless face-down creature does not exclude it. Reach guard for R1/R4/R7.
+        assert!(
+            matches_target_filter(&state, elves, &from_creatures, source),
+            "CR 201.2c: a nameless reference has no name in common with anything"
+        );
+        // R1: a nameless candidate has no different name, even when the group
+        // holds a nameless object.
+        assert!(
+            !matches_target_filter(&state, nameless, &from_creatures, source),
+            "CR 201.2c: a nameless object never has a different name"
+        );
+        // R4: a candidate named like a creature in the group does not match.
+        assert!(
+            !matches_target_filter(&state, bears, &from_creatures, source),
+            "a candidate sharing a name with a creature in the group is excluded"
+        );
+        // R7: name comparison is case-insensitive, like `SharesQuality`.
+        assert!(
+            !matches_target_filter(&state, bears_upper, &from_creatures, source),
+            "names differing only in case are the same name"
+        );
+        // R5: the group is controller-scoped; P1's "Gray Ogre" is not in P0's group.
+        assert!(
+            matches_target_filter(&state, ogre, &from_creatures, source),
+            "CR 109.5: an opponent's same-named creature is not in the group"
+        );
+
+        // R2g: reach guard for P1's context — a candidate unlike P1's "Gray Ogre"
+        // matches, so the P1 population is read and not empty-failing.
+        assert!(
+            as_p1(&state, elves, &from_creatures),
+            "P1's group is {{Gray Ogre}}; Llanowar Elves differs"
+        );
+        // R2: P1's group holds no nameless object, yet a nameless candidate still
+        // has no different name.
+        assert!(
+            !as_p1(&state, nameless, &from_creatures),
+            "CR 201.2c: a nameless object never has a different name"
+        );
+        // R5 mirror: under P1 the ogre is in the group, P0's creatures are not.
+        assert!(
+            !as_p1(&state, ogre, &from_creatures),
+            "CR 109.5: P1's own same-named creature is in the group"
+        );
+
+        // E2: with an empty group a named candidate has a different name
+        // (vacuously). Reach guard for E1.
+        assert!(
+            matches_target_filter(&state, elves, &from_artifacts, source),
+            "an empty group shares no name with a named candidate"
+        );
+        // E1: with an empty group a nameless candidate still has no different name.
+        assert!(
+            !matches_target_filter(&state, nameless, &from_artifacts, source),
+            "CR 201.2c: a nameless object never has a different name, even vs. no objects"
         );
     }
 
@@ -23080,6 +23391,8 @@ mod tests {
                 attacking_alone: true,
                 blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
+                attack_target: None,
+                attack_target_identity: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -23091,6 +23404,8 @@ mod tests {
                 attacking_alone: false,
                 blocking_alone: true,
                 defending_player: None,
+                attack_target: None,
+                attack_target_identity: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -23162,6 +23477,8 @@ mod tests {
                 attacking_alone: false,
                 blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
+                attack_target: None,
+                attack_target_identity: None,
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -24552,6 +24869,8 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
+                // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
+                donor: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {
@@ -25980,6 +26299,72 @@ mod dandan_axis_collapse_tests {
             assert!(observes(&own), "reach: P0's own pile creature matches");
             assert!(!observes(&theirs), "P1's pile creature is not P0's");
         }
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_filter_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    /// CR 506.3: a resolution-time reference is never a population member: it matches
+    /// no object and no player (a disjunction matches only through its other branch).
+    #[test]
+    fn attacked_referent_matches_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let context = FilterContext::from_source(&state, creature);
+        let referent = TargetFilter::AttackedPlayerOrPlaneswalker;
+        assert!(!matches_target_filter(
+            &state, creature, &referent, &context
+        ));
+        let either = TargetFilter::Or {
+            filters: vec![
+                referent.clone(),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+            ],
+        };
+        assert!(
+            matches_target_filter(&state, creature, &either, &context),
+            "reach guard: the other branch still matches"
+        );
+        assert!(!player_matches_target_filter(
+            &referent,
+            PlayerId(0),
+            Some(PlayerId(0))
+        ));
+        assert!(!player_matches_target_filter(
+            &referent,
+            PlayerId(1),
+            Some(PlayerId(0))
+        ));
+        assert!(!affected_filter_uses_object_population(&referent));
+        assert!(!affected_filter_requires_attachment_relation(&referent));
+        assert!(filter_contains(&referent, &|f| matches!(
+            f,
+            TargetFilter::AttackedPlayerOrPlaneswalker
+        )));
     }
 }
 

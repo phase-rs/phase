@@ -5846,8 +5846,8 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
 /// resolving ability's `trigger_source`, because that authority's binding rule is
 /// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
-/// no `trigger_source` the binding is `DefenderBinding::None`, which skips the
-/// attack-entry tiers entirely and leaves only `resolve_defending_player`. That
+/// no `trigger_source` no attack event is bound (`with_bound_attack_event` passes
+/// `None`), which skips the attack-entry tiers entirely and leaves only `resolve_defending_player`. That
 /// tail resolves a non-attacking source through `extract_source_from_event`,
 /// whose `AttackersDeclared` arm is gated on `attacker_ids.len() == 1`, so ANY
 /// declaration with two or more attackers yields `None`,

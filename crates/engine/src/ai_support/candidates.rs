@@ -3302,6 +3302,7 @@ pub fn candidate_actions_broad_with_probe(
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
         WaitingFor::AssignCombatDamage {
             player,
+            attacker_id,
             total_damage,
             blockers,
             assignment_modes,
@@ -3317,8 +3318,25 @@ pub fn candidate_actions_broad_with_probe(
                 assignments.push((slot.blocker_id, assign));
                 remaining = remaining.saturating_sub(assign);
             }
-            // Non-trample: dump remainder to last blocker so total == power.
-            if trample.is_none() && remaining > 0 {
+            let has_recipient = state
+                .combat
+                .as_ref()
+                .and_then(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .find(|info| info.object_id == *attacker_id)
+                })
+                .and_then(|info| {
+                    info.resolve_damage_target(
+                        state,
+                        *trample == Some(crate::game::combat::TrampleKind::OverPlaneswalkers),
+                    )
+                })
+                .is_some();
+            // CR 506.4c + CR 702.19b: without a current excess recipient,
+            // ordinary trample still permits all damage to the blockers.
+            if (trample.is_none() || !has_recipient) && remaining > 0 {
                 if let Some(last) = assignments.last_mut() {
                     last.1 += remaining;
                     remaining = 0;

@@ -318,6 +318,23 @@ pub struct BlockHistoryPair {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
     pub attackers: Vec<AttackerInfo>,
+    /// CR 400.7 + CR 506.4c: active exact permanent destinations, keyed by attacker.
+    /// The member's selected destination remains recorded after this edge ends.
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
+    pub attacked_permanents: HashMap<ObjectId, ObjectIncarnationRef>,
+    /// CR 506.4 + CR 506.4e: each pinned attacked permanent's kinds as of its
+    /// declaration or the last settled layer pass, keyed like `attacked_permanents`
+    /// (and maintained with it). A type change written outside a pass (a transform,
+    /// turning face down or face up) is compared against these at the next settled
+    /// pass, so it retires the relation exactly once.
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
+    pub attacked_permanent_kinds: HashMap<ObjectId, AttackedPermanentKinds>,
     /// attacker_id -> list of blocker ids
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
@@ -400,6 +417,8 @@ pub struct CombatState {
 impl PartialEq for CombatState {
     fn eq(&self, other: &Self) -> bool {
         self.attackers == other.attackers
+            && self.attacked_permanents == other.attacked_permanents
+            && self.attacked_permanent_kinds == other.attacked_permanent_kinds
             && self.blocker_assignments == other.blocker_assignments
             && self.blocker_to_attacker == other.blocker_to_attacker
             && self.blockers_declared_by == other.blockers_declared_by
@@ -464,26 +483,111 @@ impl AttackerInfo {
         state: &GameState,
         trample_over_pw: bool,
     ) -> Option<DamageTarget> {
-        match &self.attack_target {
-            AttackTarget::Player(pid) => Some(DamageTarget::Player(*pid)),
-            // CR 506.4c: If the planeswalker left the battlefield, creature assigns no damage.
-            // Check zone == Battlefield, not just contains_key — objects persist after zone changes.
-            AttackTarget::Planeswalker(pw_id) => match state.objects.get(pw_id) {
-                Some(obj) if obj.zone == Zone::Battlefield => Some(DamageTarget::Object(*pw_id)),
-                // CR 702.19e: Trample-over-PW falls back to defending player.
-                _ if trample_over_pw => Some(DamageTarget::Player(self.defending_player)),
-                // CR 506.4c: Without trample-over-PW, no damage.
-                _ => None,
-            },
-            // CR 310.6: Damage to a battle removes defense counters — same Object routing.
-            AttackTarget::Battle(battle_id) => match state.objects.get(battle_id) {
-                Some(obj) if obj.zone == Zone::Battlefield => {
-                    Some(DamageTarget::Object(*battle_id))
-                }
-                _ => None,
-            },
+        match active_attack_target(state, self).map(|(target, _)| target) {
+            Some(AttackTarget::Player(player)) => Some(DamageTarget::Player(player)),
+            Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)) => {
+                Some(DamageTarget::Object(id))
+            }
+            // CR 702.19e: this exception uses the original defending player,
+            // even though the creature is no longer attacking anything.
+            None if trample_over_pw
+                && matches!(self.attack_target, AttackTarget::Planeswalker(_)) =>
+            {
+                Some(DamageTarget::Player(self.defending_player))
+            }
+            None => None,
         }
     }
+}
+
+/// CR 400.7 + CR 506.3: bind a newly selected permanent destination once.
+pub fn bind_attack_target(state: &GameState, target: AttackTarget) -> Option<ObjectIncarnationRef> {
+    current_attack_permanent(state, target)
+        .filter(|object| !object.is_phased_out())
+        .map(ObjectIncarnationRef::from_object)
+}
+
+fn current_attack_permanent(state: &GameState, target: AttackTarget) -> Option<&GameObject> {
+    let id = match target {
+        AttackTarget::Player(_) => return None,
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => id,
+    };
+    state.objects.get(&id).filter(|object| {
+        object.zone == Zone::Battlefield
+            && match target {
+                AttackTarget::Planeswalker(_) => object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker),
+                AttackTarget::Battle(_) => object.card_types.core_types.contains(&CoreType::Battle),
+                AttackTarget::Player(_) => false,
+            }
+    })
+}
+
+/// CR 506.4 + CR 506.4e: the exact permanent an EXISTING attacked relation names,
+/// while it is still something that can be attacked: on the battlefield and a
+/// planeswalker or a battle (the live read also requires it phased in). Which characteristic changes end the relation is
+/// decided once, when settled characteristics change
+/// (`layers::finish_layer_evaluation` → [`type_changed_attacked_permanents`]),
+/// and an ended relation drops its pin; so a planeswalker that loses the type and
+/// later regains it is never attacked again, and a planeswalker-battle that stays
+/// attacked as a battle (CR 506.4e) keeps its relation.
+fn related_attack_permanent(state: &GameState, target: AttackTarget) -> Option<&GameObject> {
+    let id = match target {
+        AttackTarget::Player(_) => return None,
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => id,
+    };
+    state.objects.get(&id).filter(|object| {
+        object.zone == Zone::Battlefield
+            && (object
+                .card_types
+                .core_types
+                .contains(&CoreType::Planeswalker)
+                || object.card_types.core_types.contains(&CoreType::Battle))
+    })
+}
+
+/// CR 400.7 + CR 506.4c: read an existing relation without rebinding its identity.
+pub(crate) fn active_attack_target(
+    state: &GameState,
+    info: &AttackerInfo,
+) -> Option<(AttackTarget, Option<ObjectIncarnationRef>)> {
+    match info.attack_target {
+        AttackTarget::Player(player) => {
+            players::is_alive(state, player).then_some((info.attack_target, None))
+        }
+        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => {
+            let pin = *state
+                .combat
+                .as_ref()?
+                .attacked_permanents
+                .get(&info.object_id)?;
+            related_attack_permanent(state, info.attack_target)
+                .filter(|object| !object.is_phased_out())
+                .is_some_and(|object| ObjectIncarnationRef::from_object(object) == pin)
+                .then_some((info.attack_target, Some(pin)))
+        }
+    }
+}
+
+/// Current relation maps must name current members and exact current permanents.
+/// Stored attacked kinds (CR 506.4) belong only to a current pin, and never record
+/// a permanent that is neither a planeswalker nor a battle: such a pin is retired by
+/// the settled pass that would have stored it.
+pub(crate) fn combat_attack_authority_is_coherent(state: &GameState) -> bool {
+    state.combat.as_ref().is_none_or(|combat| {
+        combat.attacked_permanents.iter().all(|(id, pin)| {
+            combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == *id)
+                .and_then(|info| related_attack_permanent(state, info.attack_target))
+                .is_some_and(|object| ObjectIncarnationRef::from_object(object) == *pin)
+        }) && combat.attacked_permanent_kinds.iter().all(|(id, kinds)| {
+            *kinds != AttackedPermanentKinds::Neither && combat.attacked_permanents.contains_key(id)
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,7 +609,7 @@ pub enum DamageTarget {
 /// explicitly because `CombatState`'s hand-written `PartialEq` does NOT compare
 /// that field — a check that leaned on whole-struct equality would be blind to
 /// exactly the bookkeeping this authority prunes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CombatParticipation {
     /// The object's own attacker entry, when it was an attacking creature.
     pub attacking: Option<AttackerInfo>,
@@ -519,6 +623,45 @@ pub struct CombatParticipation {
     pub blocked_by: Vec<ObjectId>,
     /// CR 510.1: combat damage this object had already been assigned to deal.
     pub damage_assignments: Vec<DamageAssignment>,
+    /// Active attackers whose exact permanent edge names this object.
+    #[serde(default)]
+    pub attacked_by: Vec<ObjectId>,
+    /// Missing historical authority, explicitly ended, or an active exact edge.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "outgoing_attack_wire"
+    )]
+    pub outgoing_attack_target_identity: Option<Option<ObjectIncarnationRef>>,
+}
+
+impl Default for CombatParticipation {
+    fn default() -> Self {
+        Self {
+            attacking: None,
+            blocking: None,
+            blocked_by: Vec::new(),
+            damage_assignments: Vec::new(),
+            attacked_by: Vec::new(),
+            outgoing_attack_target_identity: Some(None),
+        }
+    }
+}
+
+mod outgoing_attack_wire {
+    use crate::types::identifiers::ObjectIncarnationRef;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Option<ObjectIncarnationRef>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_ref().unwrap_or(&None).serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<ObjectIncarnationRef>>, D::Error> {
+        Option::<ObjectIncarnationRef>::deserialize(deserializer).map(Some)
+    }
 }
 
 impl CombatParticipation {
@@ -527,7 +670,19 @@ impl CombatParticipation {
         let Some(combat) = state.combat.as_ref() else {
             return Self::default();
         };
+        let identity = state
+            .objects
+            .get(&oid)
+            .map(ObjectIncarnationRef::from_object);
+        let mut attacked_by: Vec<_> = combat
+            .attacked_permanents
+            .iter()
+            .filter_map(|(attacker, pin)| (Some(*pin) == identity).then_some(*attacker))
+            .collect();
+        attacked_by.sort_unstable();
         Self {
+            attacked_by,
+            outgoing_attack_target_identity: Some(combat.attacked_permanents.get(&oid).copied()),
             attacking: combat
                 .attackers
                 .iter()
@@ -556,6 +711,31 @@ impl CombatParticipation {
             && self.blocking.is_none()
             && self.blocked_by.is_empty()
             && self.damage_assignments.is_empty()
+            && self.attacked_by.is_empty()
+            && self.outgoing_attack_target_identity.flatten().is_none()
+    }
+
+    /// Validate recorded graph shape, without requiring historical pins to be current.
+    pub(crate) fn is_coherent(&self, object_id: ObjectId) -> bool {
+        self.attacking
+            .as_ref()
+            .is_none_or(|info| info.object_id == object_id)
+            && self.attacked_by.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .outgoing_attack_target_identity
+                .flatten()
+                .is_none_or(|pin| {
+                    pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+                        && self
+                            .attacking
+                            .as_ref()
+                            .is_some_and(|info| match info.attack_target {
+                                AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+                                    id == pin.object_id
+                                }
+                                AttackTarget::Player(_) => false,
+                            })
+                })
     }
 }
 
@@ -622,6 +802,13 @@ pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> 
     let attackers_before = combat.attackers.len();
     combat.attackers.retain(|a| a.object_id != oid);
     let mut changed = combat.attackers.len() != attackers_before;
+    changed |= combat.attacked_permanents.remove(&oid).is_some();
+    let edges_before = combat.attacked_permanents.len();
+    combat
+        .attacked_permanents
+        .retain(|_, pin| pin.object_id != oid);
+    changed |= combat.attacked_permanents.len() != edges_before;
+    drop_unpinned_attacked_kinds(combat);
     // Drop attacker-keyed forward assignments (oid was an attacker with blockers
     // assigned to it).
     changed |= combat.blocker_assignments.remove(&oid).is_some();
@@ -644,6 +831,195 @@ pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> 
     // CR 510.1: remove any pending damage assignments for this object.
     changed |= combat.damage_assignments.remove(&oid).is_some();
     changed
+}
+
+/// CR 506.4 + CR 506.4e: which attackable permanent kinds an attacked permanent has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackedPermanentKinds {
+    Planeswalker,
+    Battle,
+    /// CR 506.4e: both a planeswalker and a battle.
+    PlaneswalkerBattle,
+    /// Neither: no longer something that can be attacked.
+    Neither,
+}
+
+impl AttackedPermanentKinds {
+    fn of(object: &GameObject) -> Self {
+        let types = &object.card_types.core_types;
+        match (
+            types.contains(&CoreType::Planeswalker),
+            types.contains(&CoreType::Battle),
+        ) {
+            (true, false) => Self::Planeswalker,
+            (false, true) => Self::Battle,
+            (true, true) => Self::PlaneswalkerBattle,
+            (false, false) => Self::Neither,
+        }
+    }
+
+    /// CR 506.4 + CR 506.4e: whether a change from `self` to `after` removes the
+    /// attacked permanent from combat, so it stops being attacked.
+    ///
+    /// * A planeswalker that stops being a planeswalker, or a battle that stops
+    ///   being a battle, is removed (CR 506.4).
+    /// * A permanent that was both is removed only when it stops being both. If it
+    ///   stops being a battle but is still a planeswalker, it is removed only if it
+    ///   is not controlled by its protector; if it stops being a planeswalker but is
+    ///   still a battle, it is not removed (CR 506.4e).
+    fn change_ends_attack(self, after: Self, controlled_by_protector: bool) -> bool {
+        match self {
+            Self::PlaneswalkerBattle => match after {
+                Self::Neither => true,
+                Self::Planeswalker => !controlled_by_protector,
+                Self::Battle | Self::PlaneswalkerBattle => false,
+            },
+            Self::Planeswalker => !matches!(after, Self::Planeswalker | Self::PlaneswalkerBattle),
+            Self::Battle => !matches!(after, Self::Battle | Self::PlaneswalkerBattle),
+            // Never attackable, so never attacked; nothing to end.
+            Self::Neither => false,
+        }
+    }
+}
+
+/// CR 506.4e + CR 310.9g: whether `object` is controlled by its protector. Reads the
+/// persisted chosen protector, which survives the permanent no longer being a battle
+/// (`GameObject::protector` answers only for a current battle).
+fn controlled_by_protector(object: &GameObject) -> bool {
+    object.chosen_player() == Some(object.controller)
+}
+
+/// The exact live permanent `pin` names, if it is still that incarnation.
+fn pinned_object(state: &GameState, pin: ObjectIncarnationRef) -> Option<&GameObject> {
+    state
+        .objects
+        .get(&pin.object_id)
+        .filter(|object| ObjectIncarnationRef::from_object(object) == pin)
+}
+
+/// CR 506.4: record `attacker`'s attacked permanent's current kinds next to its pin,
+/// as the baseline a later settled type change is compared against. Called where a
+/// pin is written (declaration, entering attacking, a replayed attack, meld).
+pub(crate) fn record_attacked_kinds(state: &mut GameState, attacker: ObjectId) {
+    let kinds = state
+        .combat
+        .as_ref()
+        .and_then(|combat| combat.attacked_permanents.get(&attacker))
+        .and_then(|pin| pinned_object(state, *pin))
+        .map(AttackedPermanentKinds::of);
+    if let Some(combat) = state.combat.as_mut() {
+        match kinds {
+            Some(kinds) => {
+                combat.attacked_permanent_kinds.insert(attacker, kinds);
+            }
+            None => {
+                combat.attacked_permanent_kinds.remove(&attacker);
+            }
+        }
+    }
+}
+
+/// Keep `attacked_permanent_kinds` keyed exactly like `attacked_permanents`.
+fn drop_unpinned_attacked_kinds(combat: &mut CombatState) {
+    let pinned = &combat.attacked_permanents;
+    combat
+        .attacked_permanent_kinds
+        .retain(|attacker, _| pinned.contains_key(attacker));
+}
+
+/// CR 506.4: after a settled pass (and its retirements), every remaining pin's
+/// stored kinds become the settled kinds of this pass.
+pub(crate) fn refresh_attacked_kinds(state: &mut GameState) {
+    let Some(combat) = state.combat.as_ref() else {
+        return;
+    };
+    let refreshed: HashMap<ObjectId, AttackedPermanentKinds> = combat
+        .attacked_permanents
+        .iter()
+        .filter_map(|(attacker, pin)| {
+            pinned_object(state, *pin).map(|object| (*attacker, AttackedPermanentKinds::of(object)))
+        })
+        .collect();
+    if let Some(combat) = state.combat.as_mut() {
+        combat.attacked_permanent_kinds = refreshed;
+    }
+}
+
+/// CR 506.4 + CR 506.4e: the exact attacked permanents whose settled kinds differ
+/// from the kinds stored at their declaration or the last settled pass in a way that
+/// ends their being attacked. Comparing against the stored kinds, not a snapshot at
+/// the start of this pass, catches a type change written outside a pass (a transform,
+/// turning face down or face up). A pin with no stored kinds (a state saved before
+/// they were recorded) ends only once its permanent is neither a planeswalker nor a
+/// battle, which ends it whatever its declared kinds were. A pin whose permanent left
+/// or changed incarnation is not decided here (its departure owns it).
+pub(crate) fn type_changed_attacked_permanents(state: &GameState) -> Vec<ObjectIncarnationRef> {
+    let Some(combat) = state.combat.as_ref() else {
+        return Vec::new();
+    };
+    let mut ended: Vec<ObjectIncarnationRef> = Vec::new();
+    for (attacker, pin) in &combat.attacked_permanents {
+        let Some(object) = pinned_object(state, *pin) else {
+            continue;
+        };
+        let current = AttackedPermanentKinds::of(object);
+        let ends = match combat.attacked_permanent_kinds.get(attacker) {
+            Some(stored) => stored.change_ends_attack(current, controlled_by_protector(object)),
+            None => current == AttackedPermanentKinds::Neither,
+        };
+        if ends && !ended.contains(pin) {
+            ended.push(*pin);
+        }
+    }
+    // Deterministic order for the journal.
+    ended.sort_by_key(|pin| (pin.object_id, pin.incarnation));
+    ended
+}
+
+/// CR 506.4 + CR 506.4c + CR 506.4d: the exact permanent `attacked` stops being
+/// attacked. Only the incoming attacked relations naming that exact incarnation are
+/// retired: each attacker stays an attacking creature, attacking nothing
+/// (CR 506.4c), and the permanent's own roles (a blocking creature that is also a
+/// planeswalker, CR 506.4d) are untouched. Returns the attackers whose relation
+/// ended, in declaration order.
+pub(crate) fn retire_incoming_attack_relations(
+    state: &mut GameState,
+    attacked: ObjectIncarnationRef,
+) -> Vec<ObjectId> {
+    let Some(combat) = state.combat.as_mut() else {
+        return Vec::new();
+    };
+    let retired: Vec<ObjectId> = combat
+        .attackers
+        .iter()
+        .map(|info| info.object_id)
+        .filter(|attacker| combat.attacked_permanents.get(attacker) == Some(&attacked))
+        .collect();
+    combat.attacked_permanents.retain(|_, pin| *pin != attacked);
+    drop_unpinned_attacked_kinds(combat);
+    retired
+}
+
+/// CR 506.4 + CR 733: [`retire_incoming_attack_relations`] as a journaled live
+/// settlement, so a replay retires the same edges. Returns whether any edge ended.
+pub(crate) fn retire_incoming_attack_relations_journaled(
+    state: &mut GameState,
+    attacked: ObjectIncarnationRef,
+) -> bool {
+    let retired = retire_incoming_attack_relations(state, attacked);
+    if retired.is_empty() {
+        return false;
+    }
+    record_combat_membership_edit(
+        state,
+        attacked,
+        ResolvedCombatMembershipEdit::RetireAttacked {
+            expected_attacked_by: retired,
+        },
+    );
+    // CR 613.1f: an ended relation can change a combat-role grant or gate.
+    state.layers_dirty.mark_full();
+    true
 }
 
 /// CR 733: Journals one settled combat-membership edit through its owning family.
@@ -737,8 +1113,13 @@ fn push_attacker_and_journal(
         .objects
         .get(&object_id)
         .map(ObjectIncarnationRef::from_object);
+    let attack_target_identity = bind_attack_target(state, attack_target);
 
     if let Some(combat) = state.combat.as_mut() {
+        combat.attacked_permanents.remove(&object_id);
+        if let Some(pin) = attack_target_identity {
+            combat.attacked_permanents.insert(object_id, pin);
+        }
         combat.attackers.push(AttackerInfo::new(
             object_id,
             attack_target,
@@ -748,6 +1129,8 @@ fn push_attacker_and_journal(
         // attacking is an attacking creature; re-evaluate Layer 6
         // FilterProp::Attacking { defender: None } grants immediately.
         state.layers_dirty.mark_full();
+        // CR 506.4: the new pin's kinds are the baseline for later type changes.
+        record_attacked_kinds(state, object_id);
 
         // CR 733 + CR 508.4: the defending player and attack target are a CHOICE
         // the rules assign to the controller; record the settled pair so replay
@@ -759,6 +1142,7 @@ fn push_attacker_and_journal(
                 ResolvedCombatMembershipEdit::Attack {
                     resulting_defending_player: defending_player,
                     resulting_attack_target: attack_target,
+                    resulting_attack_target_identity: attack_target_identity,
                 },
             );
         }
@@ -1056,7 +1440,39 @@ pub fn apply_resolved_combat_membership(
         ResolvedCombatMembershipEdit::Attack {
             resulting_defending_player,
             resulting_attack_target,
+            resulting_attack_target_identity,
         } => {
+            match resulting_attack_target {
+                AttackTarget::Player(_) if resulting_attack_target_identity.is_none() => {}
+                AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+                    let expected = resulting_attack_target_identity.unwrap_or_else(|| {
+                        ObjectIncarnationRef::of(*id, crate::types::identifiers::LEGACY_INCARNATION)
+                    });
+                    let found =
+                        bind_attack_target(state, *resulting_attack_target).unwrap_or_else(|| {
+                            ObjectIncarnationRef::of(
+                                *id,
+                                crate::types::identifiers::LEGACY_INCARNATION,
+                            )
+                        });
+                    if expected.object_id != *id
+                        || expected.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+                        || expected != found
+                    {
+                        return Err(ResolvedCombatMembershipReplayInvariantError::StaleObject {
+                            expected,
+                            found,
+                        });
+                    }
+                }
+                AttackTarget::Player(_) => {
+                    return Err(ResolvedCombatMembershipReplayInvariantError::StaleObject {
+                        expected: resulting_attack_target_identity
+                            .expect("guarded permanent identity"),
+                        found,
+                    });
+                }
+            }
             let combat = state
                 .combat
                 .as_mut()
@@ -1072,6 +1488,10 @@ pub fn apply_resolved_combat_membership(
                 *resulting_attack_target,
                 *resulting_defending_player,
             ));
+            if let Some(pin) = resulting_attack_target_identity {
+                combat.attacked_permanents.insert(object_id, *pin);
+            }
+            record_attacked_kinds(state, object_id);
         }
         ResolvedCombatMembershipEdit::Block {
             resulting_attacker,
@@ -1154,7 +1574,27 @@ pub fn apply_resolved_combat_membership(
             expected_participation,
         } => {
             let found = CombatParticipation::capture(state, object_id);
-            if found != *expected_participation {
+            let mut expected = expected_participation.clone();
+            let legacy_permanent = expected.outgoing_attack_target_identity.is_none()
+                && expected.attacking.as_ref().is_some_and(|info| {
+                    matches!(
+                        info.attack_target,
+                        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)
+                    )
+                });
+            // Only a role that could never have had a permanent outgoing edge
+            // can safely normalize old missing evidence to known-none.
+            if expected.outgoing_attack_target_identity.is_none()
+                && !legacy_permanent
+                && found.outgoing_attack_target_identity == Some(None)
+            {
+                expected.outgoing_attack_target_identity = Some(None);
+            }
+            if legacy_permanent
+                || !expected.is_coherent(object_id)
+                || !combat_attack_authority_is_coherent(state)
+                || found != expected
+            {
                 return Err(
                     ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch {
                         object: object_id,
@@ -1173,6 +1613,37 @@ pub fn apply_resolved_combat_membership(
                 state.layers_dirty.mark_full();
             }
             return Ok(());
+        }
+        ResolvedCombatMembershipEdit::RetireAttacked {
+            expected_attacked_by,
+        } => {
+            // CR 506.4: verify the same attackers still attack this exact
+            // permanent, then retire only those incoming edges.
+            let found: Vec<ObjectId> = state
+                .combat
+                .as_ref()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?
+                .attackers
+                .iter()
+                .map(|info| info.object_id)
+                .filter(|attacker| {
+                    state
+                        .combat
+                        .as_ref()
+                        .and_then(|combat| combat.attacked_permanents.get(attacker))
+                        .is_some_and(|pin| *pin == command.object)
+                })
+                .collect();
+            if found.is_empty() || found != *expected_attacked_by {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::RetiredAttackMismatch {
+                        object: object_id,
+                        expected: expected_attacked_by.clone(),
+                        found,
+                    },
+                );
+            }
+            retire_incoming_attack_relations(state, command.object);
         }
     }
 
@@ -6469,12 +6940,17 @@ pub(super) fn commit_attack_declaration(
         })
         .collect();
     apply_attack_band_ids(&mut attackers, bands);
+    let attacked_permanents = attacks
+        .iter()
+        .filter_map(|(id, target)| bind_attack_target(state, *target).map(|pin| (*id, pin)))
+        .collect();
     let attacking_incarnations_this_combat = attacker_ids
         .iter()
         .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
         .collect();
     let combat = state.combat.get_or_insert_with(CombatState::default);
     combat.attackers = attackers;
+    combat.attacked_permanents = attacked_permanents;
     state.players_attacked_this_step = combat
         .attackers
         .iter()
@@ -6543,6 +7019,8 @@ pub(super) fn commit_attack_declaration(
     // declaration-time characteristics are fixed. Flush attack-dependent
     // continuous effects first, then retain the exact values through later
     // movement and state-based actions.
+    // CR 506.4: each declared pin's kinds are the baseline for later type changes.
+    refresh_attacked_kinds(state);
     crate::game::layers::flush_layers(state);
     let attacker_declarations: Vec<_> = attacker_ids
         .iter()
@@ -8044,20 +8522,40 @@ pub fn resolve_defending_player(state: &GameState, source_id: ObjectId) -> Optio
     })
 }
 
-/// Which attack event, if any, a "defending player" reference is BOUND to.
+/// Run `f` with the attack event, if any, that an attack anaphor is BOUND to.
 ///
-/// Constructed ONLY by [`defending_player_cr508_5`] — no caller builds one.
-/// That is deliberate: when each door selected its own binding, the quantity
-/// door and the filter door disagreed in exactly the state this authority
-/// exists to make coherent (one anaphor, two players).
-enum DefenderBinding<'a> {
-    /// The bound attack event's per-attacker entries and its declared global
-    /// defending player (CR 508.1b).
-    TriggerEvent {
-        entries: &'a [(ObjectId, AttackTarget)],
-        global: PlayerId,
-    },
-    None,
+/// The ONE binding rule for every attack anaphor ("defending player" and "the
+/// player or planeswalker it's attacking"), evaluated here and nowhere else:
+/// an attack event binds a reference **if and only if** the reference is being
+/// evaluated inside the scope of a triggered ability, i.e.
+/// `trigger_source.is_some()`. CR 608.2k: an untargeted object previously
+/// referred to by the trigger condition remains bound to that reference. A
+/// layer/static read, an activated ability, or any filter evaluated outside a
+/// triggered ability's scope is bound to NOTHING, otherwise an unrelated
+/// in-flight `AttackersDeclared` would leak its attacker into a continuous
+/// effect's filter.
+///
+/// When bound, the event is the explicit DETECTION event (the
+/// `DETECTION_TRIGGER_EVENT` TLS, set by `resolve_quantity_for_trigger_check`
+/// whenever an explicit `event` is supplied) if one is present, else
+/// `state.current_trigger_event`: the latter may still hold a stale event from
+/// an unrelated in-flight resolution in the same step (issue #1323). A bound
+/// event that is not an `AttackersDeclared` binds nothing (it does not fall
+/// through to the other candidate).
+///
+/// The detection event is an owned clone, so the event is lent to a closure
+/// rather than returned. Keeping the selection in one function is what stops
+/// two doors disagreeing about which attack an anaphor is bound to.
+fn with_bound_attack_event<R>(
+    state: &GameState,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    f: impl FnOnce(Option<&GameEvent>) -> R,
+) -> R {
+    let detection = trigger_source.and_then(|_| crate::game::quantity::detection_trigger_event());
+    let event = trigger_source
+        .and_then(|_| detection.as_ref().or(state.current_trigger_event.as_ref()))
+        .filter(|event| attack_entries(event).is_some());
+    f(event)
 }
 
 /// Destructure an `AttackersDeclared` into its per-attacker entries and its
@@ -8118,12 +8616,12 @@ fn sole_attacker_defender(
 /// calls THIS FUNCTION WITH THESE THREE ARGUMENTS AND NOTHING ELSE, so one
 /// anaphor can never bind two different players.
 ///
-/// # The one binding rule (stated once, applied here only)
+/// # The one binding rule (implemented in `with_bound_attack_event`)
 ///
 /// An attack event binds a "defending player" reference **if and only if** the
 /// reference is being evaluated inside the scope of a triggered ability — i.e.
-/// `trigger_source.is_some()`. CR 603.4: a triggered ability is bound to the
-/// event that fired it, and that event is authoritative for its anaphors. A
+/// `trigger_source.is_some()`. CR 608.2k: an untargeted object previously
+/// referred to by the trigger condition remains bound to that reference. A
 /// layer/static read, an activated ability, or any filter evaluated outside a
 /// triggered ability's scope is bound to NOTHING and must answer from the
 /// asker's own combat facts only — otherwise an unrelated in-flight
@@ -8209,28 +8707,229 @@ pub(crate) fn defending_player_cr508_5(
     asker_id: ObjectId,
     trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
 ) -> Option<PlayerId> {
-    // The ONE binding rule, evaluated in the ONE place it may be evaluated.
-    let detection = crate::game::quantity::detection_trigger_event();
-    let binding = trigger_source
-        .and_then(|_| detection.as_ref().or(state.current_trigger_event.as_ref()))
-        .and_then(attack_entries)
-        .map_or(DefenderBinding::None, |(entries, global)| {
-            DefenderBinding::TriggerEvent { entries, global }
-        });
-
     let latch = trigger_source.and_then(|source| source.combat_status.defending_player);
     let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
 
-    match binding {
-        DefenderBinding::TriggerEvent { entries, global } => {
-            entry_defender(state, entries, global, entry_id)
+    // The ONE binding rule, evaluated in the ONE place it may be evaluated.
+    with_bound_attack_event(state, trigger_source, |event| {
+        match event.and_then(attack_entries) {
+            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
                 .or_else(|| sole_attacker_defender(state, entries, global))
                 .or(latch)
-                .or(Some(global))
+                .or(Some(global)),
+            None => latch,
         }
-        DefenderBinding::None => latch,
-    }
+    })
     .or_else(|| resolve_defending_player(state, asker_id))
+}
+
+/// The attacking creature an attack anaphor refers to, for the asker `entry_id`
+/// (CR 508.5 and its second clause, applied to "the player or planeswalker it's
+/// attacking"): the asker if the bound event's entries name it, else the SOLE
+/// attacker the event names (an observer trigger: Hellrider, Cavalcade of
+/// Calamity, a Mage Slayer), else the asker. A raw multi-attacker batch that
+/// omits the asker, an event that is not an attack declaration, and no event at
+/// all all answer with the asker.
+fn referent_attacker(event: Option<&GameEvent>, entry_id: ObjectId) -> ObjectId {
+    match event.and_then(attack_entries) {
+        Some((entries, _)) => {
+            if entries.iter().any(|(attacker, _)| *attacker == entry_id) {
+                entry_id
+            } else if let [(sole, _)] = entries {
+                *sole
+            } else {
+                entry_id
+            }
+        }
+        None => entry_id,
+    }
+}
+
+/// CR 506.3: the attack target recorded when the observer's attacker `referent` left
+/// the battlefield (CR 608.2h last-known information). The departure row of the DECLARED incarnation is selected, so a
+/// creature that was blinked since (CR 400.7: a new object) still answers for the
+/// object that was attacking. A legacy declaration that recorded no incarnation falls
+/// back to the object's terminal battlefield departure.
+fn departed_attack_row<'a>(
+    state: &'a GameState,
+    referent: ObjectId,
+    asker: Option<&crate::types::game_state::TriggerSourceContext>,
+    is_asker: bool,
+    event: Option<&GameEvent>,
+) -> Option<&'a crate::types::game_state::ZoneChangeRecord> {
+    let declared_incarnation = match event {
+        Some(GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        }) => declaration_records
+            .iter()
+            .find(|record| record.object_id == referent)
+            .and_then(|record| record.incarnation),
+        _ => None,
+    };
+    let exact_identity = if is_asker {
+        Some(asker?.identity.reference)
+    } else {
+        declared_incarnation.map(|incarnation| ObjectIncarnationRef::of(referent, incarnation))
+    };
+    match exact_identity {
+        Some(identity) => state.zone_changes_this_turn.iter().rev().find(|row| {
+            row.object_id == referent
+                && row.from_zone == Some(Zone::Battlefield)
+                && row.trigger_source_context.as_ref().is_some_and(|context| {
+                    context.identity.reference == identity
+                        && context.identity.expected_zone == Zone::Battlefield
+                })
+        }),
+        None => crate::types::game_state::terminal_battlefield_departure_row(state, referent),
+    }
+}
+
+/// CR 608.2k + CR 400.7: select the bound attacker and determine whether that
+/// exact object is still live. Explicit-event users share the resolution policy.
+pub(crate) fn selected_attacked_referent(
+    state: &GameState,
+    asker_id: ObjectId,
+    source: Option<&crate::types::game_state::TriggerSourceContext>,
+    event: Option<&GameEvent>,
+) -> (ObjectId, bool, bool) {
+    let event = source
+        .and(event)
+        .filter(|event| attack_entries(event).is_some());
+    let entry_id = source.map_or(asker_id, |source| source.identity.reference.object_id);
+    let referent = referent_attacker(event, entry_id);
+    let is_asker = referent == entry_id;
+    let live = if is_asker {
+        match source {
+            Some(source) => matches!(source.source_read(state),
+                crate::types::game_state::TriggerSourceRead::ExactLive(object)
+                    if object.zone == Zone::Battlefield),
+            None => state
+                .objects
+                .get(&referent)
+                .is_some_and(|object| object.zone == Zone::Battlefield),
+        }
+    } else {
+        state.objects.get(&referent).is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && event.is_none_or(|event| {
+                    crate::game::targeting::event_source_is_live_incarnation(event, object)
+                })
+        })
+    };
+    (referent, is_asker, live)
+}
+
+/// Selected immutable departure evidence needed by an unresolved consumer.
+/// A present row with no target is authoritative; placement is never a fallback.
+pub(crate) fn attacked_referent_departure_row<'a>(
+    state: &'a GameState,
+    asker_id: ObjectId,
+    source: Option<&crate::types::game_state::TriggerSourceContext>,
+    event: Option<&GameEvent>,
+) -> Option<&'a crate::types::game_state::ZoneChangeRecord> {
+    let event = source
+        .and(event)
+        .filter(|event| attack_entries(event).is_some());
+    let (referent, is_asker, live) = selected_attacked_referent(state, asker_id, source, event);
+    if live {
+        None
+    } else {
+        departed_attack_row(state, referent, source, is_asker, event)
+    }
+}
+
+/// CR 506.3: the attack target of the attacking creature `referent`, or none.
+///
+/// * (a) Still the live creature (`live`) and attacking (an `AttackerInfo` that
+///   `is_attacker_in_play` accepts): its LIVE attack target, which honors a
+///   reselection.
+/// * (b) Live but not in combat: none. CR 506.4: a creature removed from combat is
+///   no longer an attacking creature (CR 506.4c: it is not attacking any player,
+///   planeswalker or battle).
+/// * (c) No longer the live creature: last-known information only (CR 608.2h,
+///   CR 113.7a). Self and observer read the newest proven exact departure row,
+///   including its authoritative no-recipient status.
+fn attack_target_referent(
+    state: &GameState,
+    referent: ObjectId,
+    asker: Option<&crate::types::game_state::TriggerSourceContext>,
+    is_asker: bool,
+    live: bool,
+    event: Option<&GameEvent>,
+) -> Option<(AttackTarget, Option<ObjectIncarnationRef>)> {
+    if live {
+        return state.combat.as_ref().and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|info| info.object_id == referent)
+                .filter(|info| is_attacker_in_play(state, info.object_id))
+                .and_then(|info| active_attack_target(state, info))
+        });
+    }
+    let status = departed_attack_row(state, referent, asker, is_asker, event)?.combat_status;
+    status
+        .attack_target
+        .map(|target| (target, status.attack_target_identity))
+}
+
+/// CR 506.3 + CR 115.10a: THE authority for "the player or planeswalker it's
+/// attacking" (and "... that creature is attacking"), the sole door for the
+/// DealDamage recipient binding and `targeting::resolved_targets`.
+///
+/// Kind-preserving, unlike [`defending_player_cr508_5`]'s CR 508.5 collapse: an
+/// attacked player is `TargetRef::Player`; an attacked planeswalker is that
+/// permanent (`TargetRef::Object`) while it is still a phased-in planeswalker on the
+/// battlefield (CR 506.4c, CR 510.1b: otherwise nothing is attacked); an attacked
+/// battle is NOT a referent of this phrase (it says "player or planeswalker"), and
+/// yields none. An absent referent never falls back to the asker's controller.
+///
+/// # Which creature (the referent attacker)
+///
+/// Chosen by [`referent_attacker`] over the event bound by
+/// [`with_bound_attack_event`]. The asker is `trigger_source`'s identity reference
+/// when present, else `asker_id`.
+///
+/// # Live versus last-known
+///
+/// The referent attacker is "live" when it is still the very object that was
+/// asking or attacking: for the asker, `trigger_source.source_read` is the exact
+/// live incarnation on the battlefield (a same-id return is never a substitute); for
+/// an observer's attacker, the object on the battlefield is the incarnation the
+/// attack declaration stamped. See [`attack_target_referent`] for the live and
+/// last-known branches.
+pub(crate) fn resolve_attacked_player_or_planeswalker(
+    state: &GameState,
+    asker_id: ObjectId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+) -> Option<TargetRef> {
+    let (target, pin) = with_bound_attack_event(state, trigger_source, |event| {
+        let (referent, is_asker, live) =
+            selected_attacked_referent(state, asker_id, trigger_source, event);
+        attack_target_referent(state, referent, trigger_source, is_asker, live, event)
+    })?;
+    match target {
+        // CR 102.1 + CR 800.4: a departed player is no longer a recipient.
+        AttackTarget::Player(player) => {
+            players::is_alive(state, player).then_some(TargetRef::Player(player))
+        }
+        AttackTarget::Planeswalker(id) => state
+            .objects
+            .get(&id)
+            .filter(|object| {
+                pin.is_some_and(|pin| pin == ObjectIncarnationRef::from_object(object))
+                    && object.zone == Zone::Battlefield
+                    && !object.is_phased_out()
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Planeswalker)
+            })
+            .map(|_| TargetRef::Object(id)),
+        // CR 506.3: "player or planeswalker" does not name a battle.
+        AttackTarget::Battle(_) => None,
+    }
 }
 
 /// Return the next defending player who still needs to declare blockers.
@@ -8825,6 +9524,703 @@ mod tests {
             defending_player_cr508_5(&state, source, Some(&ctx)),
             Some(PlayerId(1)),
             "the asker's own CR 608.2h combat snapshot answers a batch it is not in"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 506.3 attacked player-or-planeswalker authority
+    // ---------------------------------------------------------------------
+
+    fn make_creature(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    fn spawn_creature(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+        let id = spawn(state, card, name);
+        make_creature(state, id);
+        id
+    }
+
+    fn spawn_planeswalker(state: &mut GameState, card: u64, controller: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            controller,
+            "Karn".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Planeswalker];
+        id
+    }
+
+    fn declare_targets(state: &mut GameState, attacks: &[(ObjectId, AttackTarget)]) {
+        let attacked_permanents = attacks
+            .iter()
+            .filter_map(|(id, target)| bind_attack_target(state, *target).map(|pin| (*id, pin)))
+            .collect();
+        state.combat = Some(CombatState {
+            attacked_permanents,
+            attackers: attacks
+                .iter()
+                .map(|(id, target)| {
+                    let defender = match target {
+                        AttackTarget::Player(player) => *player,
+                        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => PlayerId(1),
+                    };
+                    AttackerInfo::new(*id, *target, defender)
+                })
+                .collect(),
+            ..CombatState::default()
+        });
+        // CR 506.4: the declaration's kinds are the baseline, as at a real declaration.
+        refresh_attacked_kinds(state);
+    }
+
+    /// An attack event naming exactly `attacker`, stamped with its incarnation.
+    fn declared_event(state: &GameState, attacker: ObjectId, target: AttackTarget) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, target)],
+            declaration_records: vec![
+                state.objects[&attacker].snapshot_for_attack_declaration(attacker)
+            ],
+        }
+    }
+
+    /// CR 506.3 + CR 508.5: a LIVE attack target outranks the latch, honoring a
+    /// reselection after the trigger was placed.
+    #[test]
+    fn attacked_referent_live_attack_target_outranks_the_latch() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let ctx = latch_context(&state, source);
+        assert_eq!(
+            ctx.combat_status.attack_target,
+            Some(AttackTarget::Player(PlayerId(1)))
+        );
+        // Reach guard: unreselected, the live target is the player.
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(1)))
+        );
+        state.combat.as_mut().unwrap().attackers[0].attack_target =
+            AttackTarget::Planeswalker(karn);
+        let pin = bind_attack_target(&state, AttackTarget::Planeswalker(karn)).unwrap();
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attacked_permanents
+            .insert(source, pin);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Object(karn)),
+            "the live target (the planeswalker itself, not its controller) beats the latch"
+        );
+    }
+
+    /// CR 506.4: alive but out of combat is attacking nothing, for the asker and for
+    /// an observer's attacker; the same fixtures answer when the creature is in combat.
+    #[test]
+    fn attacked_referent_creature_out_of_combat_has_no_referent() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Player(PlayerId(1))),
+                (other, AttackTarget::Player(PlayerId(2))),
+            ],
+        );
+        let ctx = latch_context(&state, source);
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "positive control: the observer's attacker is in combat"
+        );
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .retain(|info| info.object_id != other);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "the observer's attacker is alive and attacking nothing"
+        );
+
+        // The asker, with the event not naming anyone else.
+        state.current_trigger_event = None;
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(1))),
+            "positive control: the asker is still attacking"
+        );
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .retain(|info| info.object_id != source);
+        assert!(ctx.combat_status.attack_target.is_some());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "the asker is alive, off combat: the latch must not answer"
+        );
+    }
+
+    /// CR 608.2h + CR 113.7a: a departed asker answers from its exact departure.
+    #[test]
+    fn attacked_referent_departed_asker_uses_the_departure() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        let ctx = latch_context(&state, source);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Object(karn))
+        );
+
+        // A latch captured outside combat holds nothing.
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let ctx = latch_context(&state, source);
+        assert_eq!(ctx.combat_status.attack_target, None);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None
+        );
+    }
+
+    /// CR 608.2h + CR 400.7: a departed observer's attacker answers from the departure
+    /// row of the DECLARED incarnation, also after a blink; a legacy declaration (no
+    /// incarnation) falls back to the terminal departure; no row means no answer.
+    #[test]
+    fn attacked_referent_departed_observer_uses_the_declared_incarnations_row() {
+        let (mut state, source) = anchor_state();
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(&mut state, &[(other, AttackTarget::Player(PlayerId(2)))]);
+        let ctx = latch_context(&state, source);
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        let legacy = {
+            let GameEvent::AttackersDeclared {
+                attacker_ids,
+                defending_player,
+                attacks,
+                ..
+            } = event.clone()
+            else {
+                unreachable!()
+            };
+            GameEvent::AttackersDeclared {
+                attacker_ids,
+                defending_player,
+                attacks,
+                declaration_records: Vec::new(),
+            }
+        };
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut events);
+
+        state.current_trigger_event = Some(event.clone());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "exact-incarnation departure row"
+        );
+        state.current_trigger_event = Some(legacy.clone());
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "legacy declaration: the terminal departure row"
+        );
+
+        // Blink: back onto the battlefield as a new object.
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            Some(TargetRef::Player(PlayerId(2))),
+            "a blinked attacker still answers through its declared incarnation's row"
+        );
+        state.current_trigger_event = Some(legacy);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None,
+            "a legacy declaration cannot tell the incarnations apart: the terminal row refuses"
+        );
+    }
+
+    /// CR 608.2h: the asker's latch belongs to the asker only. An observer's attacker
+    /// that was not in combat when it left holds no target, whatever the asker latched.
+    #[test]
+    fn attacked_referent_asker_latch_is_ignored_for_another_attacker() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other attacker");
+        declare_targets(&mut state, &[(source, AttackTarget::Player(PlayerId(1)))]);
+        let ctx = latch_context(&state, source);
+        assert_eq!(
+            ctx.combat_status.attack_target,
+            Some(AttackTarget::Player(PlayerId(1)))
+        );
+        let event = declared_event(&state, other, AttackTarget::Player(PlayerId(2)));
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut Vec::new());
+        state.current_trigger_event = Some(event);
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, Some(&ctx)),
+            None
+        );
+    }
+
+    /// CR 506.3 + CR 506.4c + CR 510.1b: a planeswalker that left, stopped being one or
+    /// phased out is no referent (never its controller); a battle is no referent; a
+    /// player is a player.
+    #[test]
+    fn attacked_referent_is_kind_preserving_and_validated() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        let ctx = latch_context(&state, source);
+        let resolve =
+            |state: &GameState| resolve_attacked_player_or_planeswalker(state, source, Some(&ctx));
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)));
+
+        state.objects.get_mut(&karn).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve(&state), None, "phased out");
+        state.objects.get_mut(&karn).unwrap().phase_status = PhaseStatus::PhasedIn;
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)));
+
+        // CR 506.4: a settled type loss removes the planeswalker from combat, so it
+        // stops being attacked; regaining the type later declares no new attack.
+        let set_base_type = |state: &mut GameState, core: CoreType| {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.base_card_types = object.card_types.clone();
+            object.base_card_types.core_types = vec![core];
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(state);
+        };
+        set_base_type(&mut state, CoreType::Planeswalker);
+        assert_eq!(resolve(&state), Some(TargetRef::Object(karn)), "unchanged");
+        set_base_type(&mut state, CoreType::Artifact);
+        assert_eq!(resolve(&state), None, "no longer a planeswalker");
+        set_base_type(&mut state, CoreType::Planeswalker);
+        assert_eq!(
+            resolve(&state),
+            None,
+            "the relation stays retired after the type returns"
+        );
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            combat.attackers.iter().any(|info| info.object_id == source),
+            "CR 506.4c: the attacker stays in combat, attacking nothing"
+        );
+        assert!(!combat.attacked_permanents.contains_key(&source));
+
+        crate::game::zones::move_to_zone(&mut state, karn, Zone::Graveyard, &mut Vec::new());
+        assert_eq!(resolve(&state), None, "gone");
+
+        let siege = spawn(&mut state, 10, "Siege");
+        state.objects.get_mut(&siege).unwrap().card_types.core_types = vec![CoreType::Battle];
+        state.combat.as_mut().unwrap().attackers[0].attack_target = AttackTarget::Battle(siege);
+        assert_eq!(
+            resolve(&state),
+            None,
+            "a battle is not a player or planeswalker"
+        );
+    }
+
+    /// CR 506.4 + CR 506.4e: every before/after kind pair, with and without control by
+    /// the protector. Only CR 506.4e's two exceptions keep a changed permanent attacked.
+    #[test]
+    fn attacked_kind_change_follows_cr_506_4_and_506_4e() {
+        let walker = AttackedPermanentKinds::Planeswalker;
+        let battle = AttackedPermanentKinds::Battle;
+        let both = AttackedPermanentKinds::PlaneswalkerBattle;
+        let neither = AttackedPermanentKinds::Neither;
+        for protector_controls in [false, true] {
+            // CR 506.4: losing the attacked type ends the attack, whatever it gained.
+            assert!(walker.change_ends_attack(neither, protector_controls));
+            assert!(walker.change_ends_attack(battle, protector_controls));
+            assert!(!walker.change_ends_attack(walker, protector_controls));
+            assert!(!walker.change_ends_attack(both, protector_controls));
+            assert!(battle.change_ends_attack(neither, protector_controls));
+            assert!(battle.change_ends_attack(walker, protector_controls));
+            assert!(!battle.change_ends_attack(battle, protector_controls));
+            // CR 506.4e: both -> neither ends it; both -> still a battle keeps it.
+            assert!(both.change_ends_attack(neither, protector_controls));
+            assert!(!both.change_ends_attack(battle, protector_controls));
+            assert!(!both.change_ends_attack(both, protector_controls));
+        }
+        // CR 506.4e: both -> still a planeswalker ends it only when the protector
+        // does not control it.
+        assert!(both.change_ends_attack(walker, false));
+        assert!(!both.change_ends_attack(walker, true));
+    }
+
+    /// CR 506.4e + CR 310.9g: a planeswalker-battle that stops being a battle stays
+    /// attacked only while its protector controls it. The protector is the persisted
+    /// chosen player, which survives the permanent no longer being a battle.
+    #[test]
+    fn planeswalker_battle_losing_battle_stays_attacked_only_under_its_protector() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other");
+        let planeswalker_battle = |state: &mut GameState, card: u64, protector: PlayerId| {
+            let id = spawn_planeswalker(state, card, PlayerId(1));
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![CoreType::Planeswalker, CoreType::Battle];
+            object.base_card_types = object.card_types.clone();
+            object
+                .chosen_attributes
+                .push(ChosenAttribute::Player(protector));
+            id
+        };
+        let guarded = planeswalker_battle(&mut state, 9, PlayerId(1));
+        let unguarded = planeswalker_battle(&mut state, 10, PlayerId(2));
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Planeswalker(guarded)),
+                (other, AttackTarget::Planeswalker(unguarded)),
+            ],
+        );
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanent_kinds
+                .get(&source),
+            Some(&AttackedPermanentKinds::PlaneswalkerBattle)
+        );
+        assert!(type_changed_attacked_permanents(&state).is_empty());
+
+        for id in [guarded, unguarded] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![CoreType::Planeswalker];
+            object.base_card_types = object.card_types.clone();
+        }
+        assert_eq!(
+            type_changed_attacked_permanents(&state),
+            vec![ObjectIncarnationRef::from_object(
+                &state.objects[&unguarded]
+            )],
+            "only the planeswalker its protector does not control is removed"
+        );
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(combat.attacked_permanents.contains_key(&source));
+        assert!(!combat.attacked_permanents.contains_key(&other));
+        assert_eq!(
+            combat.attacked_permanent_kinds.get(&source),
+            Some(&AttackedPermanentKinds::Planeswalker),
+            "the settled pass refreshes the stored kinds"
+        );
+        assert!(!combat.attacked_permanent_kinds.contains_key(&other));
+        assert!(combat_attack_authority_is_coherent(&state));
+    }
+
+    /// CR 506.4: a type change written straight onto the permanent outside a layer
+    /// pass (turning face down rewrites the characteristics, CR 708.2a) still ends
+    /// the attack at the next settled pass, because the pass compares against the
+    /// kinds stored with the pin, not the kinds it finds at its own start. Writing the
+    /// planeswalker type back afterwards declares no new attack.
+    #[test]
+    fn type_change_written_outside_a_pass_retires_at_the_next_pass() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.base_card_types = object.card_types.clone();
+        }
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .contains_key(&source));
+
+        {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+            object.base_card_types = object.card_types.clone();
+        }
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(!state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .contains_key(&source));
+
+        {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.card_types.core_types = vec![CoreType::Planeswalker];
+            object.base_card_types = object.card_types.clone();
+        }
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(!combat.attacked_permanents.contains_key(&source));
+        assert!(combat.attacked_permanent_kinds.is_empty());
+        assert!(combat.attackers.iter().any(|info| info.object_id == source));
+    }
+
+    /// CR 506.4 + CR 733: live retirement ends only the relations naming the exact
+    /// incarnation, as its replay requires, so a stale pin to another incarnation
+    /// of the same object id is left for its own authority and the journaled
+    /// retirement replays to the same relations.
+    #[test]
+    fn type_loss_retirement_matches_the_exact_pin() {
+        use crate::types::resolved_commands::ResolvedRulesCommand;
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let other = spawn_creature(&mut state, 2, "Other");
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Planeswalker(karn)),
+                (other, AttackTarget::Planeswalker(karn)),
+            ],
+        );
+        let live = ObjectIncarnationRef::from_object(&state.objects[&karn]);
+        let stale = ObjectIncarnationRef {
+            incarnation: live.incarnation.wrapping_add(1),
+            ..live
+        };
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attacked_permanents
+            .insert(other, stale);
+        let before = state.clone();
+
+        assert!(retire_incoming_attack_relations_journaled(&mut state, live));
+        let combat = state.combat.as_ref().unwrap();
+        assert!(!combat.attacked_permanents.contains_key(&source));
+        assert_eq!(combat.attacked_permanents.get(&other), Some(&stale));
+        let command = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::CombatMembership(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the retirement is journaled");
+        assert_eq!(
+            command.edit,
+            ResolvedCombatMembershipEdit::RetireAttacked {
+                expected_attacked_by: vec![source],
+            }
+        );
+        let mut replay = before;
+        apply_resolved_combat_membership(&mut replay, &command).expect("replays");
+        assert_eq!(
+            replay.combat.as_ref().unwrap().attacked_permanents,
+            state.combat.as_ref().unwrap().attacked_permanents
+        );
+    }
+
+    /// CR 506.4d: a planeswalker creature that is blocking and being attacked keeps
+    /// blocking when it stops being a planeswalker; only its being attacked ends.
+    #[test]
+    fn type_loss_retires_only_the_incoming_relation() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.card_types.core_types = vec![CoreType::Planeswalker, CoreType::Creature];
+            object.base_card_types = object.card_types.clone();
+        }
+        let combat = state.combat.as_mut().unwrap();
+        combat.blocker_to_attacker.insert(karn, vec![source]);
+        combat.blocker_assignments.insert(source, vec![karn]);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .contains_key(&source));
+
+        state
+            .objects
+            .get_mut(&karn)
+            .unwrap()
+            .base_card_types
+            .core_types = vec![CoreType::Creature];
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let combat = state.combat.as_ref().unwrap();
+        assert!(
+            !combat.attacked_permanents.contains_key(&source),
+            "no longer attacked"
+        );
+        assert_eq!(
+            combat.blocker_to_attacker.get(&karn),
+            Some(&vec![source]),
+            "still a blocking creature"
+        );
+        assert!(
+            combat.attackers.iter().any(|info| info.object_id == source),
+            "the attacker stays in combat (CR 506.4c)"
+        );
+    }
+
+    /// CR 506.4 + CR 733: a live type-loss retirement journals `RetireAttacked`, which
+    /// replays onto the pre-retirement state, ends the same edge, and refuses to apply
+    /// a second time.
+    #[test]
+    fn type_loss_retirement_journals_and_replays_exactly() {
+        use crate::types::resolved_commands::{
+            ResolvedCombatMembershipReplayInvariantError, ResolvedRulesCommand,
+        };
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let karn = spawn_planeswalker(&mut state, 9, PlayerId(1));
+        declare_targets(&mut state, &[(source, AttackTarget::Planeswalker(karn))]);
+        {
+            let object = state.objects.get_mut(&karn).unwrap();
+            object.base_card_types = object.card_types.clone();
+        }
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let before = state.clone();
+
+        state
+            .objects
+            .get_mut(&karn)
+            .unwrap()
+            .base_card_types
+            .core_types = vec![CoreType::Land];
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let command = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::CombatMembership(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the retirement is journaled");
+        assert_eq!(
+            command.edit,
+            ResolvedCombatMembershipEdit::RetireAttacked {
+                expected_attacked_by: vec![source],
+            }
+        );
+
+        let mut replay = before;
+        apply_resolved_combat_membership(&mut replay, &command).expect("replays");
+        let combat = replay.combat.as_ref().unwrap();
+        assert!(!combat.attacked_permanents.contains_key(&source));
+        assert!(combat.attackers.iter().any(|info| info.object_id == source));
+        assert!(matches!(
+            apply_resolved_combat_membership(&mut replay, &command),
+            Err(ResolvedCombatMembershipReplayInvariantError::RetiredAttackMismatch { .. })
+        ));
+    }
+
+    /// CR 508.5 second clause, applied to the attacked referent: which attacker.
+    #[test]
+    fn attacked_referent_attacker_selection() {
+        let (mut state, source) = anchor_state();
+        make_creature(&mut state, source);
+        let a = spawn_creature(&mut state, 2, "A");
+        let b = spawn_creature(&mut state, 3, "B");
+        declare_targets(
+            &mut state,
+            &[
+                (source, AttackTarget::Player(PlayerId(1))),
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(0))),
+            ],
+        );
+        let ctx = latch_context(&state, source);
+        let resolve =
+            |state: &GameState| resolve_attacked_player_or_planeswalker(state, source, Some(&ctx));
+
+        // The asker is among the event's entries: the asker.
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![source, a],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (source, AttackTarget::Player(PlayerId(1))),
+                (a, AttackTarget::Player(PlayerId(2))),
+            ],
+            declaration_records: Vec::new(),
+        });
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // The sole attacker the event names, though the asker is attacking someone else.
+        state.current_trigger_event =
+            Some(declared_event(&state, a, AttackTarget::Player(PlayerId(2))));
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(2))));
+
+        // A raw multi-attacker batch that omits the asker: the asker.
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![a, b],
+            defending_player: PlayerId(2),
+            attacks: vec![
+                (a, AttackTarget::Player(PlayerId(2))),
+                (b, AttackTarget::Player(PlayerId(0))),
+            ],
+            declaration_records: Vec::new(),
+        });
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // No event, and an event that is not an attack declaration: the asker.
+        state.current_trigger_event = None;
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+        state.current_trigger_event = Some(GameEvent::GameStarted);
+        assert_eq!(resolve(&state), Some(TargetRef::Player(PlayerId(1))));
+
+        // No trigger source: the event binds nothing, so the asker (the object itself).
+        state.current_trigger_event =
+            Some(declared_event(&state, a, AttackTarget::Player(PlayerId(2))));
+        assert_eq!(
+            resolve_attacked_player_or_planeswalker(&state, source, None),
+            Some(TargetRef::Player(PlayerId(1)))
         );
     }
 
@@ -22702,6 +24098,303 @@ mod tests {
                 expected_participation,
             },
             cause: state.current_or_begin_rules_execution_node(),
+        }
+    }
+
+    fn assert_atomic_participation_rejection(
+        state: &mut GameState,
+        command: &ResolvedCombatMembershipCommand,
+    ) {
+        let combat = state.combat.clone().unwrap();
+        let journal = serde_json::to_value(&state.resolved_rules_journal).unwrap();
+        let dirty = format!("{:?}", state.layers_dirty);
+        assert!(matches!(
+            apply_resolved_combat_membership(state, command),
+            Err(ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch { .. })
+        ));
+        let after = state.combat.as_ref().unwrap();
+        assert_eq!(after.attackers, combat.attackers);
+        assert_eq!(after.attacked_permanents, combat.attacked_permanents);
+        assert_eq!(after.blocker_assignments, combat.blocker_assignments);
+        assert_eq!(after.blocker_to_attacker, combat.blocker_to_attacker);
+        assert_eq!(after.damage_assignments, combat.damage_assignments);
+        assert_eq!(after.pending_damage, combat.pending_damage);
+        assert_eq!(after.damage_step_index, combat.damage_step_index);
+        assert_eq!(after.first_strike_done, combat.first_strike_done);
+        assert_eq!(
+            after.first_strike_participants,
+            combat.first_strike_participants
+        );
+        assert_eq!(after.regular_damage_done, combat.regular_damage_done);
+        assert_eq!(
+            serde_json::to_value(&state.resolved_rules_journal).unwrap(),
+            journal
+        );
+        assert_eq!(format!("{:?}", state.layers_dirty), dirty);
+    }
+
+    /// Complete graph receipts distinguish active, ended and unknown outgoing edges.
+    #[test]
+    fn permanent_removal_receipts_are_exact_and_atomic() {
+        let mut active = setup();
+        let attacker = create_creature(&mut active, PlayerId(0), "Attacker", 2, 2);
+        let other = create_creature(&mut active, PlayerId(0), "Other", 2, 2);
+        let blocker = create_creature(&mut active, PlayerId(1), "Blocker", 1, 4);
+        let walker = spawn_planeswalker(&mut active, 999, PlayerId(1));
+        declare_targets(
+            &mut active,
+            &[
+                (attacker, AttackTarget::Planeswalker(walker)),
+                (other, AttackTarget::Planeswalker(walker)),
+            ],
+        );
+        let pin = active.combat.as_ref().unwrap().attacked_permanents[&attacker];
+        let combat = active.combat.as_mut().unwrap();
+        combat.attackers[0].blocked = true;
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        combat.damage_assignments.insert(
+            attacker,
+            vec![DamageAssignment {
+                target: DamageTarget::Object(blocker),
+                amount: 2,
+            }],
+        );
+        combat.pending_damage.push((
+            other,
+            DamageAssignment {
+                target: DamageTarget::Object(walker),
+                amount: 1,
+            },
+        ));
+        combat.damage_step_index = Some(1);
+        let command = removal_command(&mut active, attacker);
+        let active_receipt = CombatParticipation::capture(&active, attacker);
+        assert_eq!(
+            active_receipt.outgoing_attack_target_identity,
+            Some(Some(pin))
+        );
+        let incoming = CombatParticipation::capture(&active, walker);
+        let mut expected_incoming = vec![attacker, other];
+        expected_incoming.sort_unstable();
+        assert_eq!(incoming.attacked_by, expected_incoming);
+        assert!(!incoming.is_empty(), "recipient-only role is meaningful");
+        let mut replay = active.clone();
+        apply_resolved_combat_membership(&mut replay, &command).unwrap();
+        let mut live = active.clone();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut live, attacker);
+        assert_eq!(replay.combat, live.combat);
+        assert_eq!(
+            replay.combat.as_ref().unwrap().attacked_permanents,
+            live.combat.as_ref().unwrap().attacked_permanents
+        );
+        assert_eq!(
+            replay.combat.as_ref().unwrap().damage_assignments,
+            live.combat.as_ref().unwrap().damage_assignments
+        );
+        assert_eq!(
+            replay.combat.as_ref().unwrap().pending_damage,
+            live.combat.as_ref().unwrap().pending_damage
+        );
+        assert_eq!(
+            replay.combat.as_ref().unwrap().damage_step_index,
+            live.combat.as_ref().unwrap().damage_step_index
+        );
+        assert_atomic_participation_rejection(&mut replay, &command);
+
+        let mut ended = active.clone();
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut ended, walker);
+        assert_eq!(
+            ended.combat.as_ref().unwrap().attackers,
+            active.combat.as_ref().unwrap().attackers
+        );
+        assert!(ended
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .is_empty());
+        let ended_command = removal_command(&mut ended, attacker);
+        assert_eq!(
+            CombatParticipation::capture(&ended, attacker).outgoing_attack_target_identity,
+            Some(None)
+        );
+        assert_atomic_participation_rejection(&mut ended.clone(), &command);
+        assert_atomic_participation_rejection(&mut active.clone(), &ended_command);
+        apply_resolved_combat_membership(&mut ended.clone(), &ended_command).unwrap();
+
+        let mut different_pin = active.clone();
+        different_pin.objects.get_mut(&walker).unwrap().incarnation += 1;
+        let changed_pin = ObjectIncarnationRef::from_object(&different_pin.objects[&walker]);
+        different_pin
+            .combat
+            .as_mut()
+            .unwrap()
+            .attacked_permanents
+            .values_mut()
+            .for_each(|pin| *pin = changed_pin);
+        let different_command = removal_command(&mut different_pin, attacker);
+        assert_atomic_participation_rejection(&mut different_pin, &command);
+        assert_atomic_participation_rejection(&mut active.clone(), &different_command);
+        let inbound_command = removal_command(&mut active, walker);
+        let mut stale_inbound = active.clone();
+        stale_inbound
+            .combat
+            .as_mut()
+            .unwrap()
+            .attacked_permanents
+            .insert(other, changed_pin);
+        assert_atomic_participation_rejection(&mut stale_inbound, &inbound_command);
+        let mut fewer_incoming = active.clone();
+        fewer_incoming
+            .combat
+            .as_mut()
+            .unwrap()
+            .attacked_permanents
+            .remove(&other);
+        assert_atomic_participation_rejection(&mut fewer_incoming, &inbound_command);
+        let mut inbound_replay = active.clone();
+        apply_resolved_combat_membership(&mut inbound_replay, &inbound_command).unwrap();
+        assert_eq!(
+            inbound_replay.combat.as_ref().unwrap().attackers,
+            active.combat.as_ref().unwrap().attackers
+        );
+        assert!(inbound_replay
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .is_empty());
+        assert_atomic_participation_rejection(&mut inbound_replay, &inbound_command);
+
+        for receipt in [
+            active_receipt.clone(),
+            CombatParticipation::capture(&ended, attacker),
+            incoming,
+        ] {
+            let json = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(
+                serde_json::from_value::<CombatParticipation>(json).unwrap(),
+                receipt
+            );
+        }
+        let mut old_json = serde_json::to_value(active_receipt).unwrap();
+        old_json
+            .as_object_mut()
+            .unwrap()
+            .remove("outgoing_attack_target_identity");
+        let unknown: CombatParticipation = serde_json::from_value(old_json).unwrap();
+        assert_eq!(unknown.outgoing_attack_target_identity, None);
+        assert!(serde_json::to_value(&unknown)
+            .unwrap()
+            .get("outgoing_attack_target_identity")
+            .is_none());
+        let mut legacy_command = command.clone();
+        legacy_command.edit = ResolvedCombatMembershipEdit::Remove {
+            expected_participation: unknown,
+        };
+        assert_atomic_participation_rejection(&mut active.clone(), &legacy_command);
+        assert_atomic_participation_rejection(&mut ended.clone(), &legacy_command);
+        let mut journal = active.resolved_rules_journal.clone();
+        journal.record_combat_membership(legacy_command).unwrap();
+        let json = serde_json::to_string(&journal).unwrap();
+        serde_json::from_str::<crate::types::resolved_commands::ResolvedRulesJournal>(&json)
+            .expect("unused unknown historical evidence stays retainable");
+        assert_eq!(
+            CombatParticipation::default().outgoing_attack_target_identity,
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn malformed_outgoing_receipt_authority_is_not_serialized_history() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+        let walker = spawn_planeswalker(&mut state, 999, PlayerId(1));
+        declare_targets(
+            &mut state,
+            &[(attacker, AttackTarget::Planeswalker(walker))],
+        );
+        let receipt = CombatParticipation::capture(&state, attacker);
+        for malformed in 0..5 {
+            let mut bad = receipt.clone();
+            match malformed {
+                0 => bad.attacking.as_mut().unwrap().object_id = walker,
+                1 => {
+                    bad.attacking.as_mut().unwrap().attack_target =
+                        AttackTarget::Player(PlayerId(1))
+                }
+                2 => {
+                    bad.outgoing_attack_target_identity = Some(Some(
+                        ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+                    ))
+                }
+                3 => bad.attacked_by = vec![attacker, attacker],
+                4 => bad.attacking = None,
+                _ => unreachable!(),
+            }
+            let mut command = removal_command(&mut state, attacker);
+            command.edit = ResolvedCombatMembershipEdit::Remove {
+                expected_participation: bad,
+            };
+            assert_atomic_participation_rejection(&mut state.clone(), &command);
+            let mut journal = state.resolved_rules_journal.clone();
+            journal.record_combat_membership(command).unwrap();
+            assert!(
+                serde_json::from_value::<crate::types::resolved_commands::ResolvedRulesJournal>(
+                    serde_json::to_value(journal).unwrap()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn safely_known_legacy_player_and_orphan_receipts_replay_without_inventing_edges() {
+        for orphan in [false, true] {
+            let mut state = setup();
+            let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+            let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 1, 4);
+            blocking_combat(&mut state, &[attacker], &[(blocker, vec![attacker])]);
+            let object = if orphan {
+                prune_object_from_combat(&mut state, attacker);
+                blocker
+            } else {
+                attacker
+            };
+            let mut command = removal_command(&mut state, object);
+            let ResolvedCombatMembershipEdit::Remove {
+                expected_participation,
+            } = &mut command.edit
+            else {
+                unreachable!()
+            };
+            expected_participation.outgoing_attack_target_identity = None;
+            let mut replay = state.clone();
+            apply_resolved_combat_membership(&mut replay, &command)
+                .expect("legacy role proves no outgoing permanent edge was possible");
+            assert!(CombatParticipation::capture(&replay, object).is_empty());
+            let extra = create_creature(&mut state, PlayerId(0), "Extra attacker", 1, 1);
+            state
+                .objects
+                .get_mut(&object)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Planeswalker);
+            let pin = bind_attack_target(&state, AttackTarget::Planeswalker(object)).unwrap();
+            let combat = state.combat.as_mut().unwrap();
+            combat.attackers.push(AttackerInfo::new(
+                extra,
+                AttackTarget::Planeswalker(object),
+                PlayerId(1),
+            ));
+            combat.attacked_permanents.insert(extra, pin);
+            assert_eq!(
+                CombatParticipation::capture(&state, object).attacked_by,
+                vec![extra]
+            );
+            assert_atomic_participation_rejection(&mut state, &command);
         }
     }
 

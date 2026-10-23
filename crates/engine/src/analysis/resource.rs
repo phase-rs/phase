@@ -5551,6 +5551,7 @@ fn floating_replacement_can_name_object(
         source_controller: _,
         origin: _,
         counter_replacement_subject: _,
+        entry_payment_max,
     } = def;
     execute.is_some()
         || runtime_execute.is_some()
@@ -5563,6 +5564,8 @@ fn floating_replacement_can_name_object(
         || additional_token_spec.is_some()
         || ensure_token_specs.is_some()
         || granting_object.is_some()
+        // CR 614.12a: a capped entry payment reads the cap live (Nameless Race).
+        || entry_payment_max.is_some()
         // A host both frames hold is read live, as an object the comparison compares.
         || source_object
             .is_some_and(|host| frames.iter().any(|frame| !frame.objects.contains_key(&host)))
@@ -6153,7 +6156,7 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// The growth-invariant non-object remainder of the two projected frames, through
 /// `impl PartialEq for GameState`: strip the grown ids from both object maps and clear the
 /// battlefield ordering + stack, with its per-entry tables and the `lki_by_incarnation` and
-/// departed-spell records only they carry
+/// departed stack records (spells and activated abilities) only they carry
 /// (the grown ids live there, and those axes are covered by `board_covers` / the stack gate), so
 /// what is left for `PartialEq` to answer is
 /// `objects.len()` plus the non-object axes it compares.
@@ -6198,15 +6201,16 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     b.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE for loop-cover equality (fn takes &GameState, mutates a local clone) - not a gameplay zone event
 
     // The stack leaves the remainder with its per-entry tables, and the `lki_by_incarnation` and
-    // departed-spell records only they carry go with them; last-known copiable values stay.
+    // departed stack records (spells and activated abilities) only they carry go with them;
+    // last-known copiable values stay.
     // CR 405.5 + CR 608.2h: an entry beneath the recurrence resolves only after it and reads its
     // LKI then.
     crate::game::stack::clear_stack_with_entry_tables(&mut a);
     crate::game::stack::clear_stack_with_entry_tables(&mut b);
     a.retain_carrier_referenced_lki();
     b.retain_carrier_referenced_lki();
-    a.retain_trigger_referenced_departed_spells();
-    b.retain_trigger_referenced_departed_spells();
+    a.retain_trigger_referenced_departed_stack_records();
+    b.retain_trigger_referenced_departed_stack_records();
     a.canonicalize_loop_identities();
     b.canonicalize_loop_identities();
     // AFTER the battlefield/stack clears, which makes those two arms no-ops by construction —
@@ -26350,6 +26354,74 @@ mod tests {
         };
         let (pa, pb) = (frame(2), frame(4));
         assert_ne!(pa.departed_stack_spells, pb.departed_stack_spells);
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+    }
+
+    /// CR 104.4b + CR 602.2a + CR 608.2h: a departed activated ability only a stack entry's
+    /// activation trigger names leaves `eq_except_growable`'s remainder with the stack.
+    #[test]
+    fn eq_except_growable_drops_a_departed_activation_record_only_a_stack_entry_names() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::events::{
+            ActivatedAbilityKind, ActivationTriggerState, BoundActivationCost, GameEvent,
+        };
+        use crate::types::game_state::StackEntryKind;
+        let activation_source = ObjectId(30);
+        let trigger_source = ObjectId(31);
+        let activation = ObjectId(41);
+        let frame = |x: u32| {
+            let mut s = GameState::new_two_player(7);
+            s.stack.push_back(StackEntry {
+                id: ObjectId(40),
+                source_id: trigger_source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: trigger_source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        trigger_source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::AbilityActivated {
+                        player_id: PlayerId(0),
+                        source_id: activation_source,
+                        kind: ActivatedAbilityKind::Normal,
+                        departed_source_lki: None,
+                        trigger_state: ActivationTriggerState::Pending,
+                        stack_entry: Some(activation),
+                        activation_cost: BoundActivationCost::Unknown,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            let mut ability =
+                ResolvedAbility::new(Effect::NoOp, vec![], activation_source, PlayerId(0));
+            ability.chosen_x = Some(x);
+            s.departed_activated_abilities.insert(
+                activation,
+                StackEntry {
+                    id: activation,
+                    source_id: activation_source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::ActivatedAbility {
+                        source_id: activation_source,
+                        ability: Box::new(ability),
+                    },
+                },
+            );
+            s.normalize_for_loop()
+        };
+        let (pa, pb) = (frame(2), frame(4));
+        assert_ne!(
+            pa.departed_activated_abilities, pb.departed_activated_abilities,
+            "reach-guard: the named record survives normalization and differs"
+        );
         assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
     }
 

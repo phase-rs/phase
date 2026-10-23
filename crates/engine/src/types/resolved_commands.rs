@@ -13,7 +13,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ContinuousModification, TriggerDefinitionRef};
+use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -528,6 +528,8 @@ pub enum ResolvedCombatMembershipEdit {
     Attack {
         resulting_defending_player: PlayerId,
         resulting_attack_target: AttackTarget,
+        #[serde(default)]
+        resulting_attack_target_identity: Option<ObjectIncarnationRef>,
     },
     /// CR 509.1g + CR 506.3e: the object became a blocking creature for the
     /// recorded attacker, which becomes blocked per CR 509.1h.
@@ -550,6 +552,13 @@ pub enum ResolvedCombatMembershipEdit {
     Remove {
         expected_participation: CombatParticipation,
     },
+    /// CR 506.4 + CR 506.4c + CR 506.4d + CR 506.4e: the object, a planeswalker or
+    /// battle whose characteristics changed, stopped being attacked. Only its
+    /// incoming attacked relations end: the listed attackers (in declaration
+    /// order) stay attacking creatures, attacking nothing, and the object keeps
+    /// any role of its own. The applier requires the same attackers still attack
+    /// this exact object before retiring their edges.
+    RetireAttacked { expected_attacked_by: Vec<ObjectId> },
 }
 
 /// Typed failure while applying one already-resolved combat-membership edit.
@@ -588,6 +597,14 @@ pub enum ResolvedCombatMembershipReplayInvariantError {
         object: ObjectId,
         expected: Box<CombatParticipation>,
         found: Box<CombatParticipation>,
+    },
+    #[error(
+        "combat-membership attacked-relation retirement mismatch for {object:?}: expected attackers {expected:?}, found {found:?}"
+    )]
+    RetiredAttackMismatch {
+        object: ObjectId,
+        expected: Vec<ObjectId>,
+        found: Vec<ObjectId>,
     },
 }
 
@@ -818,6 +835,15 @@ pub struct ResolvedTokenCreationCommand {
     /// CR 614.1: the post-replacement tapped state the token actually entered
     /// with, not the spec's pre-replacement request.
     pub resulting_tapped: bool,
+    /// CR 614.12a + CR 400.7: the entrant's as-enters answers (entry-payment
+    /// latches, self `choose` latches) as they rode the entry event. The
+    /// applier installs them onto the materialized object before its
+    /// entry-record snapshot, mirroring the live fold; without them a replayed
+    /// copy of a payment creature has no latch and its CDA reads 0. `default`
+    /// keeps pre-change journals parsing; `skip_serializing_if` keeps the
+    /// empty case byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_choices: Vec<ChosenAttribute>,
     /// The `next_object_id` high-water after this token's id was drawn, so a
     /// replay resuming from a shorter prefix cannot hand the same id out twice.
     pub resulting_next_object_id: u64,
@@ -3380,6 +3406,30 @@ impl ResolvedRulesJournal {
                     ));
                 }
                 match &command.edit {
+                    ResolvedCombatMembershipEdit::Attack {
+                        resulting_attack_target,
+                        resulting_attack_target_identity: Some(pin),
+                        ..
+                    } if pin.incarnation == LEGACY_INCARNATION
+                        || match resulting_attack_target {
+                            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+                                *id != pin.object_id
+                            }
+                            AttackTarget::Player(_) => true,
+                        } =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership attack has incoherent permanent identity"
+                                .to_string(),
+                        ));
+                    }
+                    ResolvedCombatMembershipEdit::Remove {
+                        expected_participation,
+                    } if !expected_participation.is_coherent(command.object.object_id) => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership removal has incoherent attack authority".to_string(),
+                        ));
+                    }
                     // CR 509.1a: a creature is chosen to block an attacking
                     // creature, which is never itself.
                     ResolvedCombatMembershipEdit::Block {
@@ -3398,10 +3448,19 @@ impl ResolvedRulesJournal {
                             "combat-membership removal prunes no combat role".to_string(),
                         ));
                     }
+                    // CR 506.4: a retirement that ends no relation never happened.
+                    ResolvedCombatMembershipEdit::RetireAttacked {
+                        expected_attacked_by,
+                    } if expected_attacked_by.is_empty() => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership retirement ends no attacked relation".to_string(),
+                        ));
+                    }
                     ResolvedCombatMembershipEdit::Attack { .. }
                     | ResolvedCombatMembershipEdit::Block { .. }
                     | ResolvedCombatMembershipEdit::MarkBlocked
-                    | ResolvedCombatMembershipEdit::Remove { .. } => {}
+                    | ResolvedCombatMembershipEdit::Remove { .. }
+                    | ResolvedCombatMembershipEdit::RetireAttacked { .. } => {}
                 }
             }
             ResolvedRulesCommand::ControllerOverride(command) => {
@@ -4350,6 +4409,7 @@ mod tests {
             source_zone: crate::types::zones::Zone::Battlefield,
             ability_tag: None,
             is_loyalty_ability: false,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
             targets: vec![crate::types::game_state::ActivationTargetFact::Player(
                 PlayerId(1),
             )],

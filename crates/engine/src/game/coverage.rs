@@ -777,6 +777,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::AttackedPlayerOrPlaneswalker => {
+            "the player or planeswalker it's attacking".into()
+        }
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
@@ -4301,6 +4304,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 ));
             }
         }
+        Effect::ModifyAnnouncedX { modification } => {
+            d.push(("modifies X".into(), format!("{modification:?}")));
+        }
         Effect::Double {
             target_kind,
             target,
@@ -5584,6 +5590,11 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     }
     if let Some(cref) = &repl.enters_under {
         d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    // CR 614.12a: project the entry-payment cap (Nameless Race) so a fix that
+    // only changes it cannot produce a byte-identical signature.
+    if let Some(max) = &repl.entry_payment_max {
+        d.push(("entry payment max".into(), format!("{max:?}")));
     }
     if let Some(expiry) = &repl.expiry {
         d.push(("expiry".into(), format!("{expiry:?}")));
@@ -24735,6 +24746,19 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             items.is_empty(),
             "modeled tree must emit no unsupported item"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn attacked_referent_is_named_in_coverage_text() {
+        assert_eq!(
+            fmt_target(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            "the player or planeswalker it's attacking"
         );
     }
 }
