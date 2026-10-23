@@ -10308,6 +10308,41 @@ pub(crate) fn parse_relative_card_continuation_head(input: &str) -> OracleResult
     .parse(input)
 }
 
+/// Locate a predicate boundary using the relative list's own legs and separators.
+/// An unfinished next leg still belongs to the list; a later outer predicate
+/// without a list separator does not. This query changes no accepted filter.
+pub(crate) fn relative_card_predicate_owns_boundary(input: &str, boundary: usize) -> bool {
+    let Some((mut cursor, _, negated)) = parse_relative_clause_intro(input) else {
+        return false;
+    };
+    if negated {
+        return false;
+    }
+    loop {
+        let position = input.len() - cursor.len();
+        if position == boundary {
+            return parse_relative_card_continuation_head(cursor).is_ok();
+        }
+        if position > boundary {
+            return false;
+        }
+        let Ok((after_leg, _)) = parse_relative_card_leg(cursor) else {
+            return false;
+        };
+        if after_leg.len() >= cursor.len() {
+            return false;
+        }
+        // A nested property predicate can occur within a complete leg.
+        if boundary < input.len() - after_leg.len() {
+            return true;
+        }
+        let Ok((after_separator, _)) = parse_relative_core_type_separator(after_leg) else {
+            return false;
+        };
+        cursor = after_separator;
+    }
+}
+
 /// CR 109.2a + CR 715.2a: relative card predicates may mix card types with
 /// Adventure properties, while the caller retains shared head/zone restrictions.
 pub(crate) fn parse_relative_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {

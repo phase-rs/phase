@@ -56,18 +56,191 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
     .parse(input)
 }
 
+/// `Some(Ok)` delegates a framed production; `Some(Err)` refuses its whole
+/// source. Conditional recursion strictly shortens the source and is outside
+/// the unframed callback used by the structural activation query.
+fn consult_grant_root_frame(text: &str) -> Option<Result<(), &str>> {
+    let lower = text.to_lowercase();
+    if super::oracle_classifier::has_trigger_prefix(&lower)
+        || super::oracle_modal::strip_ability_word_with_name(text).is_some()
+    {
+        return Some(Ok(()));
+    }
+    if tag::<_, _, OracleError<'_>>("as long as ")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        let owns_body = super::shared::try_split_inverted_as_long_as(&TextPair::new(text, &lower))
+            .is_some_and(|split| {
+                try_parse_graveyard_keyword_grant_source(&split.effect_text).is_some()
+            });
+        return Some(if owns_body { Err(text) } else { Ok(()) });
+    }
+    super::oracle::find_root_activated_colon(text, |prefix| {
+        select_grant_head_unframed(prefix)
+            .filter(|(subject, payload)| nominates_off_zone_grant(subject, payload))
+    })
+    .map(|_| Ok(()))
+}
+
+/// The same purely lexical nomination protects a provisional label prefix and
+/// admits a selected source to the existing complete population/cost proof.
+fn nominates_off_zone_grant(subject: &str, payload: &str) -> bool {
+    let lower = subject.to_lowercase();
+    let has_card_noun = nom_primitives::scan_at_word_boundaries(&lower, |input| {
+        terminated(
+            alt((tag("cards"), tag("card"))),
+            nom::combinator::peek(alt((space1, eof))),
+        )
+        .parse(input)
+    })
+    .is_some();
+    (has_card_noun || parse_graveyard_granted_keyword_kind(&payload.to_lowercase()).is_ok())
+        && nom_primitives::scan_at_word_boundaries(&lower, |input| {
+            alt((tag("in "), tag("from "), tag("on "))).parse(input)
+        })
+        .is_some()
+}
+
+fn grant_boundary_has_foreign_owner(
+    body: &str,
+    subject: &str,
+    boundary: usize,
+    verb_len: usize,
+) -> bool {
+    let (nominal, remainder) = parse_type_phrase_folding(subject);
+    let complete_nominal = remainder.trim().is_empty() && !matches!(nominal, TargetFilter::Any);
+    // A fully parsed name is noun content, including relative-looking words.
+    if complete_nominal
+        && crate::game::filter::filter_contains_filter_prop(&nominal, &|property| {
+            matches!(property, FilterProp::Named { .. })
+        })
+    {
+        return false;
+    }
+    let lower = body.to_lowercase();
+    let embedded = nom_primitives::scan_at_word_boundaries(&lower, |suffix| {
+        let start = lower.len() - suffix.len();
+        if start < boundary {
+            if super::oracle_target::relative_card_predicate_owns_boundary(suffix, boundary - start)
+            {
+                return Ok((suffix, ()));
+            }
+            if let Ok((rest, _)) = nom_quantity::parse_quantity_ref(suffix) {
+                let end = lower.len() - rest.len();
+                if start < boundary && boundary + verb_len < end {
+                    return Ok((rest, ()));
+                }
+            }
+        }
+        Err(super::oracle_nom::error::oracle_err(suffix))
+    })
+    .is_some();
+    if embedded {
+        return true;
+    }
+    if complete_nominal {
+        return false;
+    }
+    let subject_lower = subject.to_lowercase();
+    if nom_primitives::scan_at_word_boundaries(&subject_lower, |input| {
+        all_consuming((tag("that"), opt(preceded(space1, tag("each"))), space0)).parse(input)
+    })
+    .is_some()
+    {
+        return true;
+    }
+    // A canonical verb is foreign only with a complete INITIAL subject. Failed
+    // parsing of an unsupported relative does not erase its later outer grant.
+    nom_primitives::scan_at_word_boundaries(&lower[..boundary], |suffix| {
+        let (rest, ()) = super::oracle_effect::subject::parse_predicate_verb_head(suffix)?;
+        let start = boundary - suffix.len();
+        let (filter, remainder) = super::oracle_target::parse_target(body[..start].trim());
+        let concrete = match &filter {
+            TargetFilter::Any => false,
+            TargetFilter::Typed(filter) => {
+                !filter.type_filters.is_empty()
+                    || !filter.properties.is_empty()
+                    || filter.controller.is_some()
+            }
+            _ => true,
+        };
+        if start > 0 && concrete && remainder.trim().is_empty() {
+            Ok((rest, ()))
+        } else {
+            Err(super::oracle_nom::error::oracle_err(suffix))
+        }
+    })
+    .is_some()
+}
+
+/// Unframed grammar selection only: no source admission, root consultation,
+/// cost/effect/static probe or ordinary-keyword semantic decline occurs here.
+fn select_grant_head_unframed(body: &str) -> Option<(String, String)> {
+    let body = body.trim();
+    let lower = body.to_lowercase();
+    let accept = |subject: &str, predicate: &str, payload: &str, verb_len| {
+        let boundary = body.len() - predicate.len();
+        if grant_boundary_has_foreign_owner(body, subject, boundary, verb_len) {
+            return None;
+        }
+        let (_, subject) = nom_on_lower(subject, &subject.to_lowercase(), |input| {
+            opt(value((), tag("each "))).parse(input)
+        })?;
+        Some((subject.trim().to_owned(), payload.trim().to_owned()))
+    };
+    super::shared::parse_continuous_subject_predicate(
+        &TextPair::new(body, &lower),
+        |subject, predicate| {
+            let (verb_len, payload) =
+                nom_on_lower(predicate, &predicate.to_lowercase(), |input| {
+                    alt((value(3, tag("has ")), value(4, tag("have ")))).parse(input)
+                })?;
+            accept(subject, predicate, payload, verb_len)
+        },
+    )
+    .or_else(|| {
+        let (subject, verb, _) = nom_primitives::scan_preceded(body, |input| {
+            terminated(alt((tag_no_case("has"), tag_no_case("have"))), eof).parse(input)
+        })?;
+        (!subject.trim().is_empty())
+            .then(|| accept(subject.trim(), verb, "", verb.len()))
+            .flatten()
+    })
+}
+
 fn parse_graveyard_keyword_grant_head(text: &str) -> Option<(String, String)> {
     let stripped = strip_reminder_text(text);
-    let lower = stripped.to_lowercase();
-    let (_, rest) = nom_on_lower(&stripped, &lower, |input| {
-        opt(value((), tag("each "))).parse(input)
+    let (_, body) = nom_on_lower(&stripped, &stripped.to_lowercase(), |input| {
+        opt(super::parse_leading_turn_scope).parse(input)
     })?;
-    let rest_lower = rest.to_lowercase();
-    let (subject, keyword_text) =
-        super::oracle_nom::bridge::split_once_on_lower(rest, &rest_lower, " has ").or_else(
-            || super::oracle_nom::bridge::split_once_on_lower(rest, &rest_lower, " have "),
-        )?;
-    Some((subject.trim().to_owned(), keyword_text.trim().to_owned()))
+    if consult_grant_root_frame(body).is_some() {
+        return None;
+    }
+    select_grant_head_unframed(body)
+}
+
+fn complete_ordinary_keyword(payload: &str) -> Option<Keyword> {
+    let payload = payload.trim();
+    let phrase = if let Ok((_, sentence)) =
+        all_consuming(terminated(nom_primitives::parse_period_sentence, space0)).parse(payload)
+    {
+        // The sentence combinator proves exactly one structural terminator.
+        sentence.get(..sentence.len().checked_sub(1)?)?
+    } else {
+        all_consuming(terminated(
+            take_while1::<_, _, OracleError<'_>>(|c| c != '.'),
+            space0,
+        ))
+        .parse(payload)
+        .ok()?
+        .1
+    };
+    if phrase.trim().is_empty() {
+        return None;
+    }
+    super::oracle_keyword::parse_router_keyword_fragment(&phrase.trim().to_lowercase())
+        .filter(|keyword| !matches!(keyword, Keyword::Unknown(_)))
 }
 
 pub(crate) fn try_parse_graveyard_keyword_grant_clause(
@@ -147,39 +320,25 @@ pub(crate) fn try_parse_graveyard_keyword_grant_source(
         opt(super::parse_leading_turn_scope).parse(input)
     })?;
     let body_lower = body.to_lowercase();
+    if let Some(frame) = consult_grant_root_frame(body) {
+        return frame.err().map(|_| Err(line));
+    }
     let (grant, continuation) =
         super::oracle_nom::bridge::split_once_on_lower(body, &body_lower, ". ")
             .map_or((body, None), |(grant, cost)| (grant, Some(cost)));
     let (subject, keyword_text) = parse_graveyard_keyword_grant_head(grant)?;
-    let subject_lower = subject.to_lowercase();
     let keyword_lower = keyword_text.to_lowercase();
     if parse_graveyard_granted_keyword_kind(&keyword_lower).is_err()
-        && super::oracle_keyword::parse_router_keyword_fragment(&keyword_lower)
-            .is_some_and(|keyword| !matches!(keyword, Keyword::Unknown(_)))
+        && continuation.is_none()
+        && complete_ordinary_keyword(&keyword_text).is_some()
     {
         return None;
     }
-    let has_card_noun = nom_primitives::scan_at_word_boundaries(&subject_lower, |input| {
-        terminated(
-            alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
-            nom::combinator::peek(alt((space1, eof))),
-        )
-        .parse(input)
-    })
-    .is_some();
-    if !has_card_noun && parse_graveyard_granted_keyword_kind(&keyword_lower).is_err() {
+    if !nominates_off_zone_grant(&subject, &keyword_text) {
         return None;
     }
     // Nominate off-zone card-grant syntax independently of noun/kind validity.
     // This also captures empty or unknown payloads without claiming success.
-    nom_primitives::scan_at_word_boundaries(&subject_lower, |input| {
-        alt((
-            tag::<_, _, OracleError<'_>>("in "),
-            tag("from "),
-            tag("on "),
-        ))
-        .parse(input)
-    })?;
     let complete = || {
         let (affected, kind, _) = try_parse_graveyard_keyword_grant_clause(grant)?;
         let keyword = match continuation {

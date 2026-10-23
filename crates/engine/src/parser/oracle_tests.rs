@@ -1,5 +1,1050 @@
 use super::*;
 
+// SHAPE: both complete printed Adventure faces use the ordinary synthesis and
+// linked export loaders. The runtime paid front-face test is in the Jev module.
+#[test]
+fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
+    let cards: Vec<crate::database::mtgjson::AtomicCard> = [
+        r###"{"colorIdentity":["R"],"colors":["R"],"faceName":"Hearth Elemental","identifiers":{"scryfallOracleId":"f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e"},"layout":"adventure","manaCost":"{5}{R}","manaValue":6.0,"name":"Hearth Elemental // Stoke Genius","power":"4","side":"a","subtypes":["Elemental"],"supertypes":[],"text":"This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","toughness":"5","type":"Creature — Elemental","types":["Creature"]}"###,
+        r###"{"colorIdentity":["R"],"colors":["R"],"faceName":"Stoke Genius","identifiers":{"scryfallOracleId":"f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e"},"layout":"adventure","manaCost":"{1}{R}","manaValue":6.0,"name":"Hearth Elemental // Stoke Genius","side":"b","subtypes":["Adventure"],"supertypes":[],"text":"Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)","type":"Sorcery — Adventure","types":["Sorcery"]}"###
+    ].iter().map(|metadata| serde_json::from_str(metadata).unwrap()).collect();
+    let mut faces = Vec::new();
+    let mut exports = serde_json::Map::new();
+    for (index, card) in cards.iter().enumerate() {
+        let text = card.text.as_deref().unwrap();
+        let name = card.face_name.as_deref().unwrap();
+        let input = crate::database::synthesis::prepare_oracle_parser_input(card, true);
+        let mut doc = parse_oracle_ir(
+            &input.oracle_text,
+            &input.card_name,
+            &input.keyword_names,
+            &card.types,
+            &card.subtypes,
+        );
+        assert_eq!(doc.source_text, text);
+        assert_eq!(doc.items.len(), 1);
+        assert_eq!(doc.items[0].source.fragment(), Some(text));
+        let span = doc.items[0].source.span();
+        assert!(span.is_exact());
+        assert_eq!(
+            (
+                span.first_line,
+                span.last_line,
+                span.start_byte,
+                span.end_byte,
+                span.ordinal_within_span
+            ),
+            (0, 0, 0, text.len(), 0)
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed.parse_warnings.is_empty());
+        let face = crate::database::synthesis::build_oracle_face_multi(
+            card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        );
+        assert_eq!(face.name, name);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+        assert_eq!(
+            face.mana_cost,
+            parse_mana_symbols(card.mana_cost.as_deref().unwrap())
+                .unwrap()
+                .0
+        );
+        assert_eq!(face.card_type.subtypes, card.subtypes);
+        assert_eq!(face.abilities, parsed.abilities);
+        assert_eq!(face.static_abilities, parsed.statics);
+        assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+        if index == 0 {
+            assert_eq!(face.power, Some(crate::types::ability::PtValue::Fixed(4)));
+            assert_eq!(
+                face.toughness,
+                Some(crate::types::ability::PtValue::Fixed(5))
+            );
+            assert_eq!(face.card_type.core_types, vec![CoreType::Creature]);
+            assert!(face.abilities.is_empty());
+            assert_eq!(face.static_abilities.len(), 1);
+            let cost = &face.static_abilities[0];
+            assert_eq!(cost.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(
+                cost.active_zones,
+                crate::types::zones::self_spell_cost_mod_active_zones()
+            );
+            assert_eq!(cost.description.as_deref(), Some(text));
+            let expected = QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+                scope: crate::types::ability::CountScope::Controller,
+                card_types: vec![],
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                            TypeFilter::Instant,
+                            TypeFilter::Sorcery,
+                        ]))),
+                        TargetFilter::Typed(
+                            TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                        ),
+                    ],
+                }),
+            };
+            assert!(
+                matches!(&cost.mode, StaticMode::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount, spell_filter: None, dynamic_count: Some(actual) } if *amount == ManaCost::generic(1) && actual == &expected)
+            );
+            assert_eq!(
+                super::super::oracle_static::parse_static_line(text),
+                Some(cost.clone())
+            );
+            assert_eq!(
+                super::super::oracle_static::parse_static_line_multi(text),
+                vec![cost.clone()]
+            );
+        } else {
+            assert_eq!(face.card_type.core_types, vec![CoreType::Sorcery]);
+            assert_eq!(face.card_type.subtypes, vec!["Adventure"]);
+            assert_eq!(face.mana_cost, parse_mana_symbols("{1}{R}").unwrap().0);
+            assert!(face.static_abilities.is_empty());
+            assert_eq!(face.abilities.len(), 1);
+            let discard = &face.abilities[0];
+            assert!(matches!(
+                discard.effect.as_ref(),
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller
+                        }
+                    },
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                discard.sub_ability.as_ref().unwrap().effect.as_ref(),
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller
+                }
+            ));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+        let mut entry = serde_json::to_value(&face).unwrap();
+        entry["layout"] = serde_json::json!("adventure");
+        entry["face_index"] = serde_json::json!(index);
+        exports.insert(name.to_lowercase(), entry);
+        let followed = format!("{text}\nCreatures you control have flying.");
+        let follow = parse_oracle_ir(&followed, name, &[], &card.types, &card.subtypes);
+        assert_eq!(
+            follow.items.last().unwrap().source.fragment(),
+            Some("Creatures you control have flying.")
+        );
+        assert_eq!(
+            follow.items.last().unwrap().source.span().start_byte,
+            text.len() + 1
+        );
+        assert_ne!(follow.items[0].id, follow.items.last().unwrap().id);
+        faces.push(face);
+    }
+    let whole = serde_json::to_string(&exports).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(
+            database.get_face_by_name("Hearth Elemental"),
+            Some(&faces[0])
+        );
+        assert_eq!(database.get_face_by_name("Stoke Genius"), Some(&faces[1]));
+        assert_eq!(
+            database.get_by_name("Hearth Elemental").unwrap().layout,
+            crate::types::card::CardLayout::Adventure(faces[0].clone(), faces[1].clone())
+        );
+        let linked: serde_json::Value = serde_json::from_str(
+            &database.export_subset_json(
+                &["Hearth Elemental".to_owned(), "Stoke Genius".to_owned()]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(linked["hearth elemental"]["layout"], "adventure");
+        assert_eq!(linked["hearth elemental"]["face_index"], 0);
+        assert_eq!(linked["stoke genius"]["face_index"], 1);
+    }
+}
+
+// SHAPE: the ownership query has a stronger root contract than the unchanged
+// legacy detector. Every accepted synthetic activation also uses the document.
+#[test]
+fn grant_root_cost_query_preserves_labels_and_rejects_inline_mana() {
+    for source in [
+        "{1}{G}{U}, {T}: Draw a card.",
+        "{T}: Draw a card.",
+        "{Q}: Draw a card.",
+        "Pay 2 life: Draw a card.",
+        "Six Word Synthetic Flavor Label Here — {1}, Sacrifice this creature: Draw a card.",
+        "{1}, Exile a creature card in your graveyard that has an Adventure: Draw a card.",
+        "Synthetic Flavor Label — {1}, Exile a creature card in your graveyard that has an Adventure: Draw a card.",
+        "{T}: Creatures you control gain \"{T}: Draw a card.\" until end of turn.",
+    ] {
+        assert!(find_activated_colon(source).is_some(), "legacy: {source}");
+        assert!(find_root_activated_colon(source, |_| None).is_some(), "anchored: {source}");
+        assert!(super::super::oracle_static::try_parse_graveyard_keyword_grant_source(source).is_none());
+        let parsed = parse_oracle_text(source, "Synthetic root activation", &[], &["Creature".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1, "{source}: {parsed:#?}");
+        assert_eq!(parsed.abilities[0].kind, AbilityKind::Activated);
+        assert!(!cost_has_unimplemented(parsed.abilities[0].cost.as_ref().unwrap()));
+        assert!(!matches!(parsed.abilities[0].effect.as_ref(), Effect::Unimplemented { .. }));
+    }
+    for source in [
+        "Each instant card in your graveyard has flashback {2}: Draw a card.",
+        "Each instant card in your graveyard has nonsense {2}: Draw a card.",
+        "payoff cards in your graveyard have nonsense: Draw a card.",
+        "exilesomething cards in your graveyard have nonsense: Draw a card.",
+    ] {
+        assert!(
+            find_activated_colon(source).is_some(),
+            "legacy acceptance preserved: {source}"
+        );
+        assert!(
+            find_root_activated_colon(source, |_| None).is_none(),
+            "no anchored root: {source}"
+        );
+    }
+    for source in [
+        "Creatures you control have \"{T}: Draw a card.\".",
+        "Each creature card in your graveyard has \"{T}: Draw a card.\".",
+        "Creatures you control have flying ({T}: this colon is parenthesized).",
+    ] {
+        assert!(find_activated_colon(source).is_none());
+        assert!(find_root_activated_colon(source, |_| None).is_none());
+    }
+    for label in ["", "Synthetic Flavor Label — "] {
+        let source = format!("{label}{{1}}, Exile a creature card in your graveyard that has an Adventure: Draw a card.");
+        let parsed = parse_oracle_text(
+            &source,
+            "Synthetic rooted cost",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        let ability = &parsed.abilities[0];
+        assert_eq!(
+            ability.cost,
+            Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1)
+                    },
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Graveyard),
+                        filter: Some(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard
+                                    },
+                                    FilterProp::HasAdventure
+                                ])
+                        ))
+                    },
+                ]
+            })
+        );
+        assert!(matches!(
+            ability.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+    let ordinary = "Creatures you control have \"{T}: Draw a card.\".";
+    let parsed = parse_oracle_text(
+        ordinary,
+        "Synthetic ordinary quoted grant",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(parsed.statics.len(), 1);
+    assert!(parsed.statics[0].modifications.iter().any(|modification| matches!(modification,
+        ContinuousModification::GrantAbility { definition }
+            if definition.kind == AbilityKind::Activated
+                && definition.cost == Some(AbilityCost::Tap)
+                && matches!(definition.effect.as_ref(), Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::Controller })
+    )));
+}
+
+// SHAPE: complete pinned sources exercise foreign ownership through the public
+// document, native face, serde and both ordinary loaders. Expected components
+// encode the Oracle clauses; unrelated known copy-duration/payment/zone defects
+// are deliberately not promoted to whole-card reference oracles.
+#[test]
+fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
+    for (metadata, expected_json) in [
+        (
+            r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"f9b7bbea-ea20-400b-a5b7-4d6993d8777b"},"layout":"normal","manaCost":"{1}{B}","manaValue":2.0,"name":"Creakwood Safewright","power":"5","subtypes":["Elf","Warrior"],"supertypes":[],"text":"This creature enters with three -1/-1 counters on it.\nAt the beginning of your end step, if there is an Elf card in your graveyard and this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.","toughness":"5","type":"Creature — Elf Warrior","types":["Creature"]}"###,
+            r###"{"triggers":[{"batched":false,"condition":{"conditions":[{"comparator":"GE","lhs":{"qty":{"card_types":[{"Subtype":"Elf"}],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":1},"type":"QuantityComparison"},{"counters":{"data":"M1M1","type":"OfType"},"minimum":1,"type":"HasCounters"}],"type":"And"},"constraint":{"type":"OnlyDuringYourTurn"},"damage_kind":"Any","description":"At the beginning of your end step, if there is an Elf card in your graveyard and ~ has a -1/-1 counter on it, remove a -1/-1 counter from ~.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"RemoveCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"Phase","optional":false,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null}],"replacements":[{"condition":null,"description":"~ enters with three -1/-1 counters on it.","destination_zone":"Battlefield","event":"Moved","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":3},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":{"type":"Mandatory"},"valid_card":{"type":"SelfRef"}}],"keywords":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"d5ea905b-4bb6-48d0-9082-c472703db550"},"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Bloodchief Ascension","subtypes":[],"supertypes":[],"text":"At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)\nWhenever a card is put into an opponent's graveyard from anywhere, if this enchantment has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.","type":"Enchantment","types":["Enchantment"]}"###,
+            r###"{"triggers":[{"batched":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"aggregate":"Max","type":"Opponent"},"type":"LifeLostThisTurn"},"type":"Ref"},"rhs":{"type":"Fixed","value":2},"type":"QuantityComparison"},"constraint":null,"damage_kind":"Any","description":"At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on ~.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"quest","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"Phase","optional":true,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null},{"batched":false,"condition":{"counters":{"data":"quest","type":"OfType"},"minimum":3,"type":"HasCounters"},"constraint":null,"damage_kind":"Any","description":"Whenever a card is put into an opponent's graveyard from anywhere, if ~ has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"target":{"type":"TriggeringPlayer"},"type":"LoseLife"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":{"condition":{"signal":"OptionalEffectPerformed","type":"EffectOutcome"},"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"type":"GainLife"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"sub_link":"SequentialSibling","target_prompt":null},"target_prompt":null},"mode":"ChangesZone","optional":true,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":"Opponent","properties":[],"type":"Typed","type_filters":["Card"]},"valid_source":null,"valid_target":{"controller":"Opponent","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[],"keywords":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"a3635b3f-839c-4fe5-83a5-7c70e8630184"},"keywords":["Menace"],"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Moonshadow","power":"7","subtypes":["Elemental"],"supertypes":[],"text":"Menace\nThis creature enters with six -1/-1 counters on it.\nWhenever one or more permanent cards are put into your graveyard from anywhere while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.","toughness":"7","type":"Creature — Elemental","types":["Creature"]}"###,
+            r###"{"triggers":[{"batched":true,"condition":{"condition":{"counters":{"data":"M1M1","type":"OfType"},"minimum":1,"type":"HasCounters"},"type":"EventTime"},"constraint":null,"damage_kind":"Any","description":"Whenever one or more permanent cards are put into your graveyard from anywhere while ~ has a -1/-1 counter on it, remove a -1/-1 counter from ~.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"RemoveCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZoneAll","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"valid_source":null,"valid_target":{"controller":"You","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[{"condition":null,"description":"~ enters with six -1/-1 counters on it.","destination_zone":"Battlefield","event":"Moved","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":6},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":{"type":"Mandatory"},"valid_card":{"type":"SelfRef"}}],"keywords":["Menace"]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"c429716b-bd3a-4060-b8a3-82e3d6aecd88"},"layout":"normal","manaCost":"{3}{R}","manaValue":4.0,"name":"Sand Strangler","power":"3","subtypes":["Beast"],"supertypes":[],"text":"When this creature enters, if you control a Desert or there is a Desert card in your graveyard, you may have this creature deal 3 damage to target creature.","toughness":"3","type":"Creature — Beast","types":["Creature"]}"###,
+            r###"{"triggers":[{"batched":false,"condition":{"conditions":[{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"}],"type":"Typed","type_filters":[{"Subtype":"Desert"}]},"type":"ControlsType"},{"comparator":"GE","lhs":{"qty":{"card_types":[{"Subtype":"Desert"}],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":1},"type":"QuantityComparison"}],"type":"Or"},"constraint":null,"damage_kind":"Any","description":"When ~ enters, if you control a Desert or there is a Desert card in your graveyard, you may have ~ deal 3 damage to target creature.","destination":"Battlefield","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":3},"target":{"controller":null,"properties":[],"type":"Typed","type_filters":["Creature"]},"type":"DealDamage"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZone","optional":true,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null}],"replacements":[],"keywords":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"256e094a-a9e8-42d9-90e2-7a24ed85e426"},"keywords":["Flash"],"layout":"normal","manaCost":"{3}{U}","manaValue":4.0,"name":"Thought Sponge","power":"1","subtypes":["Sponge"],"supertypes":[],"text":"Flash\nThis creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen this creature dies, draw cards equal to its power.","toughness":"1","type":"Creature — Sponge","types":["Creature"]}"###,
+            r###"{"triggers":[{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ dies, draw cards equal to its power.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"qty":{"scope":{"type":"Anaphoric"},"type":"Power"},"type":"Ref"},"target":{"type":"Controller"},"type":"Draw"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZone","optional":false,"origin":"Battlefield","phase":null,"secondary":false,"trigger_zones":["Graveyard"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null}],"replacements":[{"condition":null,"description":"~ enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.","destination_zone":"Battlefield","event":"Moved","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"qty":{"player":{"aggregate":"Max","type":"Opponent"},"type":"CardsDrawnThisTurn"},"type":"Ref"},"counter_type":"P1P1","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":{"type":"Mandatory"},"valid_card":{"type":"SelfRef"}}],"keywords":["Flash"]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"f1882cc8-c81a-4131-b639-1bd6e083f8ba"},"layout":"normal","manaCost":"{2}{R}","manaValue":3.0,"name":"Frantic Firebolt","subtypes":[],"supertypes":[],"text":"Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","type":"Instant","types":["Instant"]}"###,
+            r###"{"triggers":[],"replacements":[],"abilities":[{"condition":null,"cost":null,"description":"~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","duration":null,"effect":{"amount":{"inner":{"qty":{"card_types":[],"filter":{"filters":[{"controller":null,"properties":[],"type":"Typed","type_filters":[{"AnyOf":["Instant","Sorcery"]}]},{"controller":null,"properties":[{"type":"HasAdventure"}],"type":"Typed","type_filters":["Card"]}],"type":"Or"},"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"offset":2,"type":"Offset"},"target":{"controller":null,"properties":[],"type":"Typed","type_filters":["Creature"]},"type":"DealDamage"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null}],"keywords":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"c14bcef2-6d49-4430-86d0-e5a87ba442d9"},"keywords":["Surveil"],"layout":"normal","manaCost":"{U}{B}","manaValue":2.0,"name":"Lazav, the Multifarious","power":"1","subtypes":["Shapeshifter"],"supertypes":["Legendary"],"text":"When Lazav enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)\n{X}: Lazav becomes a copy of target creature card in your graveyard with mana value X, except its name is Lazav, the Multifarious, it's legendary in addition to its other types, and it has this ability.","toughness":"3","type":"Legendary Creature — Shapeshifter","types":["Creature"]}"###,
+            r###"{"triggers":[{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ enters, surveil 1.","destination":"Battlefield","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"Controller"},"type":"Surveil"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZone","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null}],"replacements":[],"abilities":[{"condition":null,"cost":{"cost":{"generic":0,"shards":["X"],"type":"Cost"},"type":"Mana"},"description":"{X}: ~ becomes a copy of target creature card in your graveyard with mana value X, except its name is ~, it's legendary in addition to its other types, and it has this ability.","duration":"Permanent","effect":{"additional_modifications":[{"name":"Lazav, the Multifarious","type":"SetName"},{"supertype":"Legendary","type":"AddSupertype"},{"source_ability_index":0,"type":"RetainPrintedAbilityFromSource"}],"duration":"Permanent","target":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"},{"comparator":"EQ","type":"Cmc","value":{"qty":{"name":"X","type":"Variable"},"type":"Ref"}}],"type":"Typed","type_filters":["Creature"]},"type":"BecomeCopy"},"forward_result":false,"kind":"Activated","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null}]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"e04560ea-f2bd-4cb7-8f65-3aa0dd58fbdf"},"keywords":["Flying"],"layout":"normal","manaCost":"{U}{B}","manaValue":2.0,"name":"Likeness Looter","power":"1","subtypes":["Faerie","Shapeshifter"],"supertypes":[],"text":"Flying\n{T}: Draw a card, then discard a card.\n{X}: This creature becomes a copy of target creature card in your graveyard with mana value X, except it has flying and this ability. Activate only as a sorcery.","toughness":"1","type":"Creature — Faerie Shapeshifter","types":["Creature"]}"###,
+            r###"{"triggers":[],"replacements":[],"copy_effect":{"additional_modifications":[{"keyword":"Flying","type":"AddKeyword"}],"duration":"Permanent","target":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"},{"comparator":"EQ","type":"Cmc","value":{"qty":{"name":"X","type":"Variable"},"type":"Ref"}}],"type":"Typed","type_filters":["Creature"]},"type":"BecomeCopy"},"loot":{"condition":null,"cost":{"type":"Tap"},"description":"{T}: Draw a card, then discard a card.","duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"Controller"},"type":"Draw"},"forward_result":false,"kind":"Activated","optional":false,"optional_targeting":false,"sub_ability":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"Controller"},"type":"Discard"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"target_prompt":null}}"###,
+        ),
+        (
+            r###"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"73970475-f899-4e93-8498-286240181295"},"layout":"normal","manaCost":"{5}","manaValue":5.0,"name":"Dollhouse of Horrors","subtypes":[],"supertypes":[],"text":"{1}, {T}, Exile a creature card from your graveyard: Create a token that's a copy of the exiled card, except it's a 0/0 Construct artifact in addition to its other types and it has \"This token gets +1/+1 for each Construct you control.\" It gains haste until end of turn. Activate only as a sorcery.","type":"Artifact","types":["Artifact"]}"###,
+            r###"{"triggers":[],"replacements":[],"copy_effect":{"additional_modifications":[{"type":"SetPower","value":0},{"type":"SetToughness","value":0},{"subtype":"Construct","type":"AddSubtype"},{"core_type":"Artifact","type":"AddType"},{"definition":{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":null,"description":"~ gets +1/+1 for each construct you control","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddDynamicPower","value":{"qty":{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":[{"Subtype":"Construct"}]},"type":"ObjectCount"},"type":"Ref"}},{"type":"AddDynamicToughness","value":{"qty":{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":[{"Subtype":"Construct"}]},"type":"ObjectCount"},"type":"Ref"}}]},"type":"GrantStaticAbility"}],"count":{"type":"Fixed","value":1},"enters_attacking":false,"owner":{"type":"Controller"},"tapped":false,"target":{"type":"CostPaidObject"},"type":"CopyTokenOf"},"cost":{"costs":[{"cost":{"generic":1,"shards":[],"type":"Cost"},"type":"Mana"},{"type":"Tap"},{"count":1,"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Creature"]},"type":"Exile","zone":"Graveyard"}],"type":"Composite"}}"###,
+        ),
+        (
+            r###"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"e352f5b9-6406-4914-bc79-f24608be6bc9"},"layout":"normal","manaCost":"{1}{U}{U}","manaValue":3.0,"name":"Tasha's Hideous Laughter","subtypes":[],"supertypes":[],"text":"Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or greater.","type":"Sorcery","types":["Sorcery"]}"###,
+            r###"{"triggers":[],"replacements":[],"abilities":[{"condition":null,"cost":null,"description":"Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or greater.","duration":null,"effect":{"player":{"type":"Controller"},"type":"ExileFromTopUntil","until":{"comparator":"GE","property":"ManaValue","threshold":{"type":"Fixed","value":20},"type":"CumulativeThreshold"}},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"player_scope":{"type":"Opponent"},"sub_ability":null,"target_prompt":null}]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"70b9497f-0dd6-4b66-9675-57c7041fe3c0"},"layout":"normal","manaCost":"{5}{U/B}{U/B}","manaValue":7.0,"name":"Dream Harvest","subtypes":[],"supertypes":[],"text":"Each opponent exiles cards from the top of their library until they have exiled cards with total mana value 5 or greater this way. Until end of turn, you may cast cards exiled this way without paying their mana costs.","type":"Sorcery","types":["Sorcery"]}"###,
+            r###"{"triggers":[],"replacements":[],"abilities":[{"condition":null,"cost":null,"description":"Each opponent exiles cards from the top of their library until they have exiled cards with total mana value 5 or greater this way. Until end of turn, you may cast cards exiled this way without paying their mana costs.","duration":null,"effect":{"player":{"type":"Controller"},"type":"ExileFromTopUntil","until":{"comparator":"GE","property":"ManaValue","threshold":{"type":"Fixed","value":5},"type":"CumulativeThreshold"}},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"player_scope":{"type":"Opponent"},"sub_ability":{"condition":null,"cost":null,"description":null,"duration":"UntilEndOfTurn","effect":{"duration":"UntilEndOfTurn","mode":"Cast","target":{"type":"ParentTarget"},"type":"CastFromZone","without_paying_mana_cost":true},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"sub_link":"SequentialSibling","target_choice_timing":"Resolution","target_prompt":null},"target_prompt":null}]}"###,
+        ),
+        (
+            r###"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"e0321049-a3ed-4378-b607-7fb190b6f0fd"},"keywords":["Those Who Came Before"],"layout":"normal","manaCost":"{10}","manaValue":10.0,"name":"The Capitoline Triad","power":"7","subtypes":["God","Artificer"],"supertypes":["Legendary"],"text":"Those Who Came Before — This spell costs {1} less to cast for each historic card in your graveyard. (Artifacts, legendaries, and Sagas are historic.)\nExile any number of historic cards from your graveyard with total mana value 30 or greater: You get an emblem with \"Creatures you control have base power and toughness 9/9.\"","toughness":"7","type":"Legendary Creature — God Artificer","types":["Creature"]}"###,
+            r###"{"triggers":[],"replacements":[],"emblem":{"statics":[{"active_zones":[],"affected":{"controller":"You","properties":[],"type":"Typed","type_filters":["Creature"]},"affected_zone":null,"characteristic_defining":false,"condition":null,"description":"Creatures you control have base power and toughness 9/9","effect_zone":null,"mode":"Continuous","modifications":[{"type":"SetPower","value":9},{"type":"SetToughness","value":9}]}],"triggers":[],"type":"CreateEmblem"},"static_abilities":[{"active_zones":["Hand","Stack","Command","Graveyard","Exile","Library"],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":null,"description":"Those Who Came Before — This spell costs {1} less to cast for each historic card in your graveyard.","effect_zone":null,"mode":{"ModifyCost":{"amount":{"generic":1,"shards":[],"type":"Cost"},"dynamic_count":{"filter":{"controller":"You","properties":[{"type":"Historic"},{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Card"]},"type":"ObjectCount"},"mode":"Reduce","spell_filter":null}},"modifications":[]}]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"2b6cbd55-5adc-4a34-ac45-8531705a7ee1"},"keywords":["Flash"],"layout":"normal","manaCost":"{2}{U}{U}{U}","manaValue":5.0,"name":"Teferi, Mage of Zhalfir","power":"3","subtypes":["Human","Wizard"],"supertypes":["Legendary"],"text":"Flash\nCreature cards you own that aren't on the battlefield have flash.\nEach opponent can cast spells only any time they could cast a sorcery.","toughness":"4","type":"Legendary Creature — Human Wizard","types":["Creature"]}"###,
+            r###"{"triggers":[],"replacements":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"f2c9957e-d673-4b32-a201-811849c5de31"},"keywords":["Flash"],"layout":"normal","manaCost":"{2}{G}{G}{G}","manaValue":5.0,"name":"Teferi, Druid of Argoth","power":"3","subtypes":["Human","Druid"],"supertypes":["Legendary"],"text":"Flash\nCreature cards you own that aren't on the battlefield have flash.\nEach opponent can cast spells only any time they could cast a sorcery.","toughness":"4","type":"Legendary Creature — Human Druid","types":["Creature"]}"###,
+            r###"{"triggers":[],"replacements":[]}"###,
+        ),
+        (
+            r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"fe7cc414-42d0-4dad-8516-7a0be0860a67"},"keywords":["Connive","Designed Only for Killing","Flying","Lifelink","Mental Organism"],"layout":"normal","manaCost":"{3}{B}{B}","manaValue":5.0,"name":"M.O.D.O.K.","power":"2","subtypes":["Villain"],"supertypes":["Legendary"],"text":"Flying, lifelink\nMental Organism — Pay 3 life: M.O.D.O.K. connives. Activate only during your turn. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)\nDesigned Only for Killing — Creatures your opponents control get -1/-1.","toughness":"2","type":"Legendary Artifact Creature — Villain","types":["Artifact","Creature"]}"###,
+            r###"{}"###,
+        ),
+        (
+            r###"{"colorIdentity":["G","U"],"colors":["G","U"],"identifiers":{"scryfallOracleId":"23320d55-80cb-4da3-a53c-8c75abdc8c8f"},"keywords":["Food"],"layout":"normal","manaCost":"{1}{G}{U}","manaValue":3.0,"name":"Ignis Scientia","power":"2","subtypes":["Human","Advisor"],"supertypes":["Legendary"],"text":"When Ignis Scientia enters, look at the top six cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest on the bottom of your library in a random order.\nI've Come Up with a New Recipe! — {1}{G}{U}, {T}: Exile target card from a graveyard. If a creature card was exiled this way, create a Food token.","toughness":"2","type":"Legendary Creature — Human Advisor","types":["Creature"]}"###,
+            r###"{}"###,
+        ),
+    ] {
+        let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(metadata).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(expected_json).unwrap();
+        let text = card.text.as_deref().unwrap();
+        let mut doc = parse_oracle_ir(
+            text,
+            &card.name,
+            card.keywords.as_deref().unwrap_or(&[]),
+            &card.types,
+            &card.subtypes,
+        );
+        let mut ids = std::collections::HashSet::new();
+        let mut previous = None;
+        for item in &doc.items {
+            assert!(ids.insert(item.id));
+            let span = item.source.span();
+            assert!(span.is_exact());
+            assert_eq!(
+                item.source.fragment(),
+                Some(&text[span.start_byte..span.end_byte])
+            );
+            let position = (span.first_line, span.ordinal_within_span);
+            assert!(previous.is_none_or(|old| old < position));
+            previous = Some(position);
+        }
+        let parsed = lower_oracle_ir(&mut doc);
+        let face = crate::database::synthesis::build_oracle_face(
+            &card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        );
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.name, card.name);
+        assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+        assert_eq!(
+            face.mana_cost,
+            parse_mana_symbols(card.mana_cost.as_deref().unwrap())
+                .unwrap()
+                .0
+        );
+        assert_eq!(face.card_type.subtypes, card.subtypes);
+        assert_eq!(face.static_abilities, parsed.statics);
+        assert_eq!(face.abilities, parsed.abilities);
+        assert_eq!(face.triggers, parsed.triggers);
+        assert_eq!(face.replacements, parsed.replacements);
+        if [
+            "Creakwood Safewright",
+            "Bloodchief Ascension",
+            "Moonshadow",
+            "Sand Strangler",
+            "Thought Sponge",
+        ]
+        .contains(&card.name.as_str())
+        {
+            assert!(
+                face.abilities.is_empty(),
+                "no adopted unsupported ability: {}",
+                card.name
+            );
+            assert!(face.static_abilities.is_empty());
+            assert!(parsed.parse_warnings.is_empty());
+        }
+        if card.name == "Frantic Firebolt" {
+            assert!(face.static_abilities.is_empty());
+            assert!(parsed.parse_warnings.is_empty());
+            assert!(super::super::oracle_static::parse_static_line(text).is_none());
+            assert!(super::super::oracle_static::parse_static_line_multi(text).is_empty());
+        }
+        for (key, field) in [
+            ("abilities", serde_json::to_value(&face.abilities).unwrap()),
+            ("triggers", serde_json::to_value(&face.triggers).unwrap()),
+            (
+                "replacements",
+                serde_json::to_value(&face.replacements).unwrap(),
+            ),
+            (
+                "static_abilities",
+                serde_json::to_value(&face.static_abilities).unwrap(),
+            ),
+            ("keywords", serde_json::to_value(&face.keywords).unwrap()),
+        ] {
+            if let Some(value) = expected.get(key) {
+                // Decode typed defaults before comparing the complete structures.
+                match key {
+                    "abilities" => assert_eq!(
+                        face.abilities,
+                        serde_json::from_value::<Vec<AbilityDefinition>>(value.clone()).unwrap(),
+                        "{}",
+                        card.name
+                    ),
+                    "triggers" => assert_eq!(
+                        face.triggers,
+                        serde_json::from_value::<Vec<TriggerDefinition>>(value.clone()).unwrap(),
+                        "{}",
+                        card.name
+                    ),
+                    "replacements" => assert_eq!(
+                        face.replacements,
+                        serde_json::from_value::<Vec<ReplacementDefinition>>(value.clone())
+                            .unwrap(),
+                        "{}",
+                        card.name
+                    ),
+                    "static_abilities" => assert_eq!(
+                        face.static_abilities,
+                        serde_json::from_value::<Vec<StaticDefinition>>(value.clone()).unwrap(),
+                        "{}",
+                        card.name
+                    ),
+                    _ => assert_eq!(&field, value, "{}: {key}", card.name),
+                }
+            }
+        }
+        if let Some(effect) = expected.get("copy_effect") {
+            let copy = face
+                .abilities
+                .iter()
+                .find(|ability| {
+                    matches!(
+                        ability.effect.as_ref(),
+                        Effect::BecomeCopy { .. } | Effect::CopyTokenOf { .. }
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                copy.effect.as_ref(),
+                &serde_json::from_value::<Effect>(effect.clone()).unwrap()
+            );
+            if let Some(cost) = expected.get("cost") {
+                assert_eq!(
+                    copy.cost.as_ref(),
+                    Some(&serde_json::from_value::<AbilityCost>(cost.clone()).unwrap())
+                );
+            }
+            if let Some(loot) = expected.get("loot") {
+                assert_eq!(
+                    face.abilities[0],
+                    serde_json::from_value::<AbilityDefinition>(loot.clone()).unwrap()
+                );
+                assert!(face.keywords.contains(&Keyword::Flying));
+            }
+        }
+        if let Some(emblem) = expected.get("emblem") {
+            assert_eq!(face.abilities.len(), 1);
+            assert_eq!(
+                face.abilities[0].effect.as_ref(),
+                &serde_json::from_value::<Effect>(emblem.clone()).unwrap()
+            );
+        }
+        if card.name == "Teferi, Mage of Zhalfir" || card.name == "Teferi, Druid of Argoth" {
+            assert_eq!(face.keywords, vec![Keyword::Flash]);
+            assert_eq!(face.static_abilities.len(), 2);
+            assert!(matches!(
+                face.static_abilities[0].mode,
+                StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash
+                }
+            ));
+            assert!(matches!(
+                face.static_abilities[1].mode,
+                StaticMode::CantCastDuring {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                    when: crate::types::statics::CastingProhibitionCondition::NotSorcerySpeed
+                }
+            ));
+            // This finite ownership test does not certify the known Library gap.
+        }
+        if card.name == "M.O.D.O.K." {
+            assert!(face.keywords.contains(&Keyword::Flying));
+            assert!(face.keywords.contains(&Keyword::Lifelink));
+            assert_eq!(face.abilities.len(), 1);
+            assert_eq!(
+                face.abilities[0].cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                })
+            );
+            assert!(matches!(
+                face.abilities[0].effect.as_ref(),
+                Effect::Connive {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ));
+            assert_eq!(
+                face.abilities[0].activation_restrictions,
+                vec![ActivationRestriction::DuringYourTurn]
+            );
+            assert_eq!(face.static_abilities.len(), 1);
+            assert_eq!(
+                face.static_abilities[0].modifications,
+                vec![
+                    ContinuousModification::AddPower { value: -1 },
+                    ContinuousModification::AddToughness { value: -1 }
+                ]
+            );
+        }
+        if card.name == "Ignis Scientia" {
+            assert_eq!(face.triggers.len(), 1);
+            assert_eq!(face.abilities.len(), 1);
+            let recipe = &face.abilities[0];
+            assert_eq!(recipe.kind, AbilityKind::Activated);
+            assert_eq!(
+                recipe.cost,
+                Some(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: parse_mana_symbols("{1}{G}{U}").unwrap().0
+                        },
+                        AbilityCost::Tap
+                    ]
+                })
+            );
+            assert!(matches!(
+                recipe.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: Some(Zone::Graveyard),
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } if *filter == TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Graveyard }])
+            ));
+            let food = recipe.sub_ability.as_ref().unwrap();
+            assert!(
+                matches!(&food.condition, Some(AbilityCondition::ZoneChangedThisWay { filter, .. }) if *filter == TargetFilter::Typed(TypedFilter::creature()))
+            );
+            assert!(
+                matches!(food.effect.as_ref(), Effect::Token { name, count: QuantityExpr::Fixed { value: 1 }, types, .. } if name == "Food" && types == &vec!["Artifact".to_owned(), "Food".to_owned()])
+            );
+            assert!(food.sub_ability.is_none());
+            let expected_etb: Effect = serde_json::from_str(r###"{"type":"Dig","player":{"type":"Controller"},"count":{"type":"Fixed","value":6},"destination":"Battlefield","keep_count":1,"up_to":true,"filter":{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]},"rest_destination":"Library","rest_order":"random","reveal":false,"enter_tapped":true,"enters_attacking":false}"###).unwrap();
+            assert_eq!(face.triggers[0].execute.effect.as_ref(), &expected_etb);
+        }
+        // Every newly delegated line is paired with the complete positive body.
+        let normalized = super::super::oracle_util::normalize_card_name_refs(text, &card.name);
+        for source in normalized.lines() {
+            if source == "Creature cards you own that aren't on the battlefield have flash."
+                || super::super::oracle_classifier::has_trigger_prefix(&source.to_lowercase())
+                || find_root_activated_colon(source, |_| None).is_some()
+                || card.types == ["Sorcery"]
+                || card.name == "Frantic Firebolt"
+                || card.name == "Thought Sponge"
+            {
+                assert!(
+                    super::super::oracle_static::try_parse_graveyard_keyword_grant_source(source)
+                        .is_none(),
+                    "{}: {source}",
+                    card.name
+                );
+                if source != "Creature cards you own that aren't on the battlefield have flash." {
+                    assert!(
+                        super::super::oracle_static::parse_static_line(source).is_none(),
+                        "{}: {source}",
+                        card.name
+                    );
+                    assert!(
+                        super::super::oracle_static::parse_static_line_multi(source).is_empty(),
+                        "{}: {source}",
+                        card.name
+                    );
+                }
+            }
+        }
+        let whole =
+            serde_json::to_string(&serde_json::json!({card.name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(&card.name), Some(&face));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+        let followed = format!("{text}\nCreatures you control have flying.");
+        let mut followed_doc = parse_oracle_ir(
+            &followed,
+            &card.name,
+            card.keywords.as_deref().unwrap_or(&[]),
+            &card.types,
+            &card.subtypes,
+        );
+        let last = followed_doc.items.last().unwrap();
+        assert_eq!(
+            last.source.fragment(),
+            Some("Creatures you control have flying.")
+        );
+        assert_eq!(last.source.span().start_byte, text.len() + 1);
+        assert_eq!(last.source.span().first_line, text.lines().count());
+        let followed_parsed = lower_oracle_ir(&mut followed_doc);
+        assert_eq!(
+            followed_parsed.statics.last().unwrap().modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }]
+        );
+    }
+}
+
+// SHAPE: full real card, source-addressed IR, ordinary synthesis and both loaders.
+// Paid population semantics are exercised by jev_cost_populations::sailors_population_cost.
+#[test]
+fn relative_predicate_cost_keeps_full_sailors_document() {
+    let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(r###"{"name":"Sailors' Bane","text":"This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)","manaCost":"{7}{U}{U}","manaValue":9.0,"power":"7","toughness":"7","types":["Creature"],"subtypes":["Dragon","Turtle"],"supertypes":[],"type":"Creature — Dragon Turtle","colors":["U"],"colorIdentity":["U"],"layout":"normal","keywords":["Ward"],"identifiers":{"scryfallOracleId":"5d22ab00-b454-4407-93d7-65b47f56cbaa"}}"###).unwrap();
+    let text = card.text.as_deref().unwrap();
+    let cost_source = text.lines().next().unwrap();
+    let ward_source = text.lines().nth(1).unwrap();
+    let mut doc = parse_oracle_ir(
+        text,
+        &card.name,
+        card.keywords.as_deref().unwrap(),
+        &card.types,
+        &card.subtypes,
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 2);
+    for (index, (item, source)) in doc.items.iter().zip([cost_source, ward_source]).enumerate() {
+        assert!(item.source.span().is_exact());
+        assert_eq!(item.source.fragment(), Some(source));
+        assert_eq!(item.source.span().first_line, index);
+        assert_eq!(item.source.span().last_line, index);
+        assert_eq!(item.source.span().ordinal_within_span, 0);
+        assert_eq!(
+            &text[item.source.span().start_byte..item.source.span().end_byte],
+            source
+        );
+    }
+    assert_ne!(doc.items[0].id, doc.items[1].id);
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.triggers.is_empty());
+    assert!(parsed.parse_warnings.is_empty());
+    assert_eq!(parsed.statics.len(), 1);
+    assert_eq!(parsed.statics[0].description.as_deref(), Some(cost_source));
+    assert_eq!(parsed.statics[0].affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        parsed.statics[0].active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+    let QuantityExpr::Ref {
+        qty: expected_quantity,
+    } = complete_coordinated_population_quantity()
+    else {
+        unreachable!()
+    };
+    assert!(matches!(&parsed.statics[0].mode, StaticMode::ModifyCost {
+        mode: crate::types::statics::CostModifyMode::Reduce,
+        amount, spell_filter: None, dynamic_count: Some(quantity), ..
+    } if *amount == ManaCost::generic(1) && *quantity == expected_quantity));
+    let ward = Keyword::Ward(crate::types::keywords::WardCost::Mana(ManaCost::generic(4)));
+    assert_eq!(parsed.extracted_keywords, vec![ward.clone()]);
+    let face = crate::database::synthesis::build_oracle_face(
+        &card,
+        card.identifiers.scryfall_oracle_id.clone(),
+    );
+    assert_eq!(face.name, card.name);
+    assert_eq!(face.oracle_text.as_deref(), Some(text));
+    assert_eq!(face.mana_cost, parse_mana_symbols("{7}{U}{U}").unwrap().0);
+    assert_eq!(face.power, Some(crate::types::ability::PtValue::Fixed(7)));
+    assert_eq!(
+        face.toughness,
+        Some(crate::types::ability::PtValue::Fixed(7))
+    );
+    assert_eq!(
+        face.card_type.core_types,
+        vec![crate::types::card_type::CoreType::Creature]
+    );
+    assert_eq!(
+        face.card_type.subtypes,
+        vec!["Dragon".to_owned(), "Turtle".to_owned()]
+    );
+    assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+    assert_eq!(face.static_abilities, parsed.statics);
+    assert_eq!(face.keywords, vec![ward]);
+    assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+    let whole = serde_json::to_string(&serde_json::json!({"sailors' bane": face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(database.get_face_by_name("Sailors' Bane"), Some(&face));
+    }
+    assert_eq!(
+        serde_json::from_str::<crate::types::card::CardFace>(
+            &serde_json::to_string(&face).unwrap()
+        )
+        .unwrap(),
+        face
+    );
+    // Independent following source must retain its own exact offsets and ID.
+    let neighbor = "Creatures you control have flying.";
+    let followed = format!("{text}\n{neighbor}");
+    let doc = parse_oracle_ir(
+        &followed,
+        &card.name,
+        card.keywords.as_deref().unwrap(),
+        &card.types,
+        &card.subtypes,
+    );
+    assert_eq!(doc.items.len(), 3);
+    assert_eq!(doc.items[2].source.fragment(), Some(neighbor));
+    assert_eq!(doc.items[2].source.span().first_line, 2);
+    assert_eq!(doc.items[2].source.span().start_byte, text.len() + 1);
+    assert_ne!(doc.items[1].id, doc.items[2].id);
+}
+
+// SHAPE: failed dedicated sources retain their exact whole-unit refusal while
+// a neighboring independently supported static remains executable.
+#[test]
+fn outer_grant_refusals_keep_exact_documents_and_independent_static() {
+    const INDEPENDENT: &str = "Creatures you control have flying.";
+    for source in [
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has flashback {2}.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that are instant cards and/or have an Adventure has flashback {2}.",
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has nonsense.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that are instant cards and/or have an Adventure has nonsense.",
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that are instant cards and/or have an Adventure has",
+        "Each creature card in your graveyard that are instant cards and/or have nonsense has flashback {2}.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that are instant cards and/or have nonsense has flashback {2}.",
+        "Each creature card in your graveyard that didn't attack a player has flashback {2}.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that didn't attack a player has flashback {2}.",
+        "Each creature card in your graveyard that didn't attack a player has nonsense.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that didn't attack a player has nonsense.",
+        "Each creature card in your graveyard that didn't attack a player has .",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that didn't attack a player has .",
+        "Each creature card in your graveyard that didn't attack a player has",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that didn't attack a player has",
+        "Each creature card in your graveyard that didn't attack a player have",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that didn't attack a player have",
+        "Each instant card in your graveyard has flashback {2}: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback {2}: Draw a card.",
+        "Each instant card in your graveyard has nonsense {2}: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has nonsense {2}: Draw a card.",
+        "Each instant card in your graveyard has {2}: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has {2}: Draw a card.",
+        "Each instant card in your graveyard has : Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has : Draw a card.",
+        "Each instant card in your graveyard has flashback {2}: nonsense.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback {2}: nonsense.",
+        "Each instant card in your graveyard has flashback {2}:",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback {2}:",
+        "Each instant card in your graveyard has nonsense — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has nonsense — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has flashback {2} — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback {2} — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has — Pay 2 life: Draw a card.",
+        "Instant cards in your graveyard have — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Instant cards in your graveyard have — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has nonsense: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has nonsense: Draw a card.",
+        "Each instant card in your graveyard has flashback: Draw a card.",
+        "As long as you have seven or more cards in hand, Each instant card in your graveyard has flashback: Draw a card.",
+        "Each unknown creature card in their graveyard has nonsense — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each unknown creature card in their graveyard has nonsense — Pay 2 life: Draw a card.",
+        "Each in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "As long as you have seven or more cards in hand, Each in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "Each creature card in your graveyard has \"{T}: Draw a card.\".",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard has \"{T}: Draw a card.\".",
+        "Each creature card in your graveyard has flash..",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard has flash..",
+        "Each creature card in your graveyard has flash. Draw a card.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard has flash. Draw a card.",
+        "Each creature card in your graveyard has flash until end of turn.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard has flash until end of turn.",
+        "As long as you have seven or more cards in hand, Each creature card in your graveyard that has an Adventure has flashback {2}.",
+        "As long as you have seven or more cards in hand, each card in your graveyard has nonsense.",
+        "As long as you have seven or more cards in hand, each card in your graveyard has .",
+        "As long as you have seven or more cards in hand, each card in your graveyard has",
+        "As long as you have seven or more cards in hand, each in your graveyard has flashback {2}.",
+        "As long as you have seven or more cards in hand, each creature card in your graveyard has flashback {2}.",
+        "As long as you have seven or more cards in hand, each creature card in your graveyard that has an Adventure has flashback {2}.",
+        "Each creature card in your graveyard that has an Adventure has nonsense.",
+        "Creature cards in your graveyard that have an Adventure have .",
+        "Each creature card in your graveyard that has an Adventure has",
+        "Each creature card in your graveyard that has nonsense has flashback {2}.",
+        "Each creature card in their graveyard that has an Adventure has flashback {2}.",
+        "Each creature card in your hand that has an Adventure has flashback {2}.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2} unknown.",
+        "Each creature card in your graveyard that has an Adventure has flashback. Its encore cost is equal to its mana cost.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2}. Its flashback cost is equal to its mana cost.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2} until end of turn.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2}..",
+    ] {
+        for owned in [source.to_owned(), format!("Threshold — {source}")] {
+            assert!(matches!(try_parse_graveyard_keyword_source_with_label(&owned), Some(Err(original)) if original == owned));
+            assert!(super::super::oracle_static::parse_static_line(&owned).is_none());
+            assert!(super::super::oracle_static::parse_static_line_multi(&owned).is_empty());
+            let text = format!("{owned}\n{INDEPENDENT}");
+            let mut doc = parse_oracle_ir(&text, "Synthetic strict source ownership", &[], &["Enchantment".into()], &[]);
+            assert_eq!(doc.items.len(), 2, "{text}: {doc:#?}");
+            let refusal = &doc.items[0];
+            assert!(matches!(&refusal.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == owned));
+            assert_eq!(refusal.source.fragment(), Some(owned.as_str()));
+            assert_eq!((refusal.source.span().first_line, refusal.source.span().last_line, refusal.source.span().start_byte, refusal.source.span().end_byte, refusal.source.span().ordinal_within_span), (0, 0, 0, owned.len(), 0));
+            assert_eq!(doc.items[1].source.fragment(), Some(INDEPENDENT));
+            assert_eq!(doc.items[1].source.span().first_line, 1);
+            assert_eq!(doc.items[1].source.span().start_byte, owned.len() + 1);
+            assert_ne!(doc.items[0].id, doc.items[1].id);
+            let parsed = lower_oracle_ir(&mut doc);
+            assert_eq!(parsed.statics.len(), 1, "no adopted empty conditional static: {owned}");
+            let expected = super::super::oracle_static::parse_static_line(INDEPENDENT).unwrap();
+            assert_eq!(parsed.statics[0], expected);
+            assert_eq!(parsed.statics[0].modifications, vec![ContinuousModification::AddKeyword { keyword: Keyword::Flying }]);
+            let serialized = serde_json::to_value(&parsed).unwrap();
+            let mut payloads = Vec::new();
+            complete_publication_gap_payloads(&serialized, &mut payloads);
+            assert_eq!(payloads, vec![("static_structure".to_owned(), owned.clone())]);
+            assert_eq!(parsed.abilities.len(), 1);
+            assert_eq!(parsed.abilities[0].description.as_deref(), Some(owned.as_str()));
+        }
+    }
+    // Same-wrapper complete dedicated and ordinary conditional positives prevent
+    // a refusal-only table from passing through an unrelated short circuit.
+    for source in [U22_RETURN, "As long as you have seven or more cards in hand, this creature gets +2/+1 and has first strike."] {
+        let parsed = parse_oracle_text(source, "Synthetic ownership positive", &[], &["Enchantment".into()], &[]);
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(!parsed.statics[0].modifications.is_empty());
+        assert!(parsed.abilities.is_empty());
+        assert!(parsed.parse_warnings.is_empty());
+    }
+}
+
+// SHAPE: full pinned sources and clause-derived expected typed values, including
+// live gates, exact scope, independent bodies and whole quoted granted triggers.
+#[test]
+fn off_zone_grant_does_not_claim_conditional_static_documents() {
+    for (metadata, expected_json) in [
+        (
+            r###"{"name":"Anger","text":"Haste\nAs long as this card is in your graveyard and you control a Mountain, creatures you control have haste.","manaCost":"{3}{R}","manaValue":4.0,"power":"2","toughness":"2","types":["Creature"],"subtypes":["Incarnation"],"supertypes":[],"type":"Creature — Incarnation","colors":["R"],"colorIdentity":["R"],"layout":"normal","keywords":["Haste"],"identifiers":{"scryfallOracleId":"eaabd151-2160-4bff-82c0-3fa88659be98"},"rulings":[{"date":"2004-10-04","text":"The timestamp for the \"in your graveyard\" ability is set at the time that this card goes to your graveyard, regardless of whether you control a Mountain at that time."}]}"###,
+            r###"{"static_abilities":[{"active_zones":["Graveyard"],"affected":{"controller":"You","properties":[],"type":"Typed","type_filters":["Creature"]},"affected_zone":null,"characteristic_defining":false,"condition":{"conditions":[{"type":"SourceInZone","zone":"Graveyard"},{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"}],"type":"Typed","type_filters":[{"Subtype":"Mountain"}]},"type":"IsPresent"}],"type":"And"},"description":"As long as this card is in your graveyard and you control a Mountain, creatures you control have haste.","effect_zone":null,"mode":"Continuous","modifications":[{"keyword":"Haste","type":"AddKeyword"}]}],"triggers":[]}"###,
+        ),
+        (
+            r###"{"name":"Brawn","text":"Trample\nAs long as this card is in your graveyard and you control a Forest, creatures you control have trample.","manaCost":"{3}{G}","manaValue":4.0,"power":"3","toughness":"3","types":["Creature"],"subtypes":["Incarnation"],"supertypes":[],"type":"Creature — Incarnation","colors":["G"],"colorIdentity":["G"],"layout":"normal","keywords":["Trample"],"identifiers":{"scryfallOracleId":"00876e98-d062-4a12-85e6-86a2b20cf867"}}"###,
+            r###"{"static_abilities":[{"active_zones":["Graveyard"],"affected":{"controller":"You","properties":[],"type":"Typed","type_filters":["Creature"]},"affected_zone":null,"characteristic_defining":false,"condition":{"conditions":[{"type":"SourceInZone","zone":"Graveyard"},{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"}],"type":"Typed","type_filters":[{"Subtype":"Forest"}]},"type":"IsPresent"}],"type":"And"},"description":"As long as this card is in your graveyard and you control a Forest, creatures you control have trample.","effect_zone":null,"mode":"Continuous","modifications":[{"keyword":"Trample","type":"AddKeyword"}]}],"triggers":[]}"###,
+        ),
+        (
+            r###"{"name":"Akki Underling","text":"As long as you have seven or more cards in hand, this creature gets +2/+1 and has first strike.","manaCost":"{1}{R}","manaValue":2.0,"power":"2","toughness":"1","types":["Creature"],"subtypes":["Goblin","Warrior"],"supertypes":[],"type":"Creature — Goblin Warrior","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"91f95d83-3637-4cf8-af6c-56bc4e4b2591"}}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"HandSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"As long as you have seven or more cards in hand, ~ gets +2/+1 and has first strike.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":1},{"keyword":"FirstStrike","type":"AddKeyword"}]}],"triggers":[]}"###,
+        ),
+        (
+            r###"{"name":"Carnage Interpreter","text":"When this creature enters, discard your hand, then investigate four times. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nAs long as you have one or fewer cards in hand, this creature gets +2/+2 and has menace.","manaCost":"{1}{B/R}{B/R}","manaValue":3.0,"power":"3","toughness":"3","types":["Creature"],"subtypes":["Devil","Detective"],"supertypes":[],"type":"Creature — Devil Detective","colors":["B","R"],"colorIdentity":["B","R"],"layout":"normal","keywords":["Investigate"],"identifiers":{"scryfallOracleId":"4bc79fb3-81bb-42ed-9bbb-93f8cede3094"},"rulings":[{"date":"2024-02-02","text":"Clue is an artifact type. Even though it appears on some cards with other permanent types, it's never a creature type, a land type, or anything but an artifact type."},{"date":"2024-02-02","text":"If an effect refers to a Clue, it means any Clue artifact, not just a Clue artifact token. For example, you can sacrifice Wrench to pay for Alquist Proft, Master Sleuth's activated ability."},{"date":"2024-02-02","text":"Once Carnage Interpreter has been blocked, causing it to gain menace by removing cards from your hand won't cause it to stop being blocked."},{"date":"2024-02-02","text":"Some abilities trigger \"whenever you sacrifice a Clue\". Those abilities trigger whenever you sacrifice a Clue for any reason, not just to activate a Clue's activated ability."},{"date":"2024-02-02","text":"Some spells and abilities that investigate may require targets. If each target chosen is an illegal target as that spell or ability tries to resolve, it won't resolve. You won't create any Clue tokens."},{"date":"2024-02-02","text":"You can't sacrifice a Clue to pay multiple costs. For example, you can't sacrifice a Clue token to activate its own ability and also to activate Alquist Proft, Master Sleuth's ability."}]}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"LE","lhs":{"qty":{"player":{"type":"Controller"},"type":"HandSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":1},"type":"QuantityComparison"},"description":"As long as you have one or fewer cards in hand, ~ gets +2/+2 and has menace.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Menace","type":"AddKeyword"}]}],"triggers":[{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ enters, discard your hand, then investigate four times.","destination":"Battlefield","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"qty":{"player":{"type":"Controller"},"type":"HandSize"},"type":"Ref"},"target":{"type":"Controller"},"type":"Discard"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"type":"Investigate"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"repeat_for":{"type":"Fixed","value":4},"sub_ability":null,"target_prompt":null},"target_prompt":null},"mode":"ChangesZone","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null}]}"###,
+        ),
+        (
+            r###"{"name":"Akawalli, the Seething Tower","text":"Descend 4 — As long as there are four or more permanent cards in your graveyard, Akawalli gets +2/+2 and has trample.\nDescend 8 — As long as there are eight or more permanent cards in your graveyard, Akawalli gets an additional +2/+2 and can't be blocked by more than one creature.","manaCost":"{1}{B}{G}","manaValue":3.0,"power":"3","toughness":"3","types":["Creature"],"subtypes":["Fungus"],"supertypes":["Legendary"],"type":"Legendary Creature — Fungus","colors":["B","G"],"colorIdentity":["B","G"],"layout":"normal","keywords":["Descend"],"identifiers":{"scryfallOracleId":"0679dcef-e1c3-4739-a769-18a4ffdcfde7"},"rulings":[{"date":"2023-11-10","text":"Cards with the ability word \"descend N\" have abilities that care if you have at least N permanent cards in your graveyard."},{"date":"2023-11-10","text":"Some descend triggered abilities include intervening \"if\" clauses (i.e. \"if you have [four or eight] permanent cards in your graveyard\" in the middle of the ability). Each of these abilities checks your graveyard at the moment it would trigger to see if it does. If you don't have the required number of permanent cards in your graveyard at that time, the ability doesn't trigger at all. If it does trigger, it will check again as it tries to resolve. If you don't have the required number of permanent cards in your graveyard at that time, the ability won't resolve and none of its effects will happen."}]}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":4},"type":"QuantityComparison"},"description":"Descend 4 — As long as there are four or more permanent cards in your graveyard, ~ gets +2/+2 and has trample.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Trample","type":"AddKeyword"}]},{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":8},"type":"QuantityComparison"},"description":"Descend 8 — As long as there are eight or more permanent cards in your graveyard, ~ gets an additional +2/+2 and can't be blocked by more than one creature.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2}]},{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":8},"type":"QuantityComparison"},"description":"Descend 8 — As long as there are eight or more permanent cards in your graveyard, ~ gets an additional +2/+2 and can't be blocked by more than one creature.","effect_zone":null,"mode":{"CantBeBlockedByMoreThan":{"max":1}},"modifications":[]}],"triggers":[]}"###,
+        ),
+        (
+            r###"{"name":"Aven Heartstabber","text":"Flying\nAs long as there are five or more mana values among cards in your graveyard, this creature gets +2/+2 and has deathtouch.\nWhen this creature dies, mill two cards, then draw a card.","manaCost":"{U}{B}","manaValue":2.0,"power":"1","toughness":"1","types":["Creature"],"subtypes":["Bird","Assassin"],"supertypes":[],"type":"Creature — Bird Assassin","colors":["B","U"],"colorIdentity":["B","U"],"layout":"normal","keywords":["Flying","Mill"],"identifiers":{"scryfallOracleId":"fee73267-b0ef-4f43-a0bd-7728691d6f17"},"rulings":[{"date":"2022-04-29","text":"If you have five or more mana values among cards in your graveyard and then some of them are removed such that you have fewer than five mana values among those cards, Aven Heartstabber loses its bonus to power and toughness. Notably, this may cause it to die if it now has damage marked on it greater than its toughness."},{"date":"2022-04-29","text":"The mana value of a double-faced card in your graveyard is always the mana value of the front face."},{"date":"2022-04-29","text":"The mana value of a land card is 0."},{"date":"2022-04-29","text":"The mana value of a split card in the graveyard is the total mana value of both halves of that card. It does not have two mana values."},{"date":"2022-04-29","text":"X is 0 when determining the mana value of a card in your graveyard."},{"date":"2022-04-29","text":"“Five or more mana values among cards in your graveyard” means there are at least five different mana values among those cards."}]}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Card"]},"qualities":["ManaValue"],"type":"ObjectCountDistinct"},"type":"Ref"},"rhs":{"type":"Fixed","value":5},"type":"QuantityComparison"},"description":"As long as there are five or more mana values among cards in your graveyard, ~ gets +2/+2 and has deathtouch.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Deathtouch","type":"AddKeyword"}]}],"triggers":[{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ dies, mill two cards, then draw a card.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":2},"destination":"Graveyard","target":{"type":"Controller"},"type":"Mill"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"Controller"},"type":"Draw"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"target_prompt":null},"mode":"ChangesZone","optional":false,"origin":"Battlefield","phase":null,"secondary":false,"trigger_zones":["Graveyard"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null}]}"###,
+        ),
+        (
+            r###"{"name":"Battlewise Aven","text":"Flying\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1 and has first strike.","manaCost":"{3}{W}","manaValue":4.0,"power":"2","toughness":"2","types":["Creature"],"subtypes":["Bird","Soldier"],"supertypes":[],"type":"Creature — Bird Soldier","colors":["W"],"colorIdentity":["W"],"layout":"normal","keywords":["Flying","Threshold"],"identifiers":{"scryfallOracleId":"f165e482-5b87-4062-87ac-bbe8303f74c9"}}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1 and has first strike.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":1},{"type":"AddToughness","value":1},{"keyword":"FirstStrike","type":"AddKeyword"}]}],"triggers":[]}"###,
+        ),
+        (
+            r###"{"name":"Bloodcurdler","text":"Flying\nAt the beginning of your upkeep, mill a card.\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1 and has \"At the beginning of your end step, exile two cards from your graveyard.\"","manaCost":"{1}{B}","manaValue":2.0,"power":"1","toughness":"1","types":["Creature"],"subtypes":["Horror"],"supertypes":[],"type":"Creature — Horror","colors":["B"],"colorIdentity":["B"],"layout":"normal","keywords":["Flying","Mill","Threshold"],"identifiers":{"scryfallOracleId":"3f53fd3e-9116-4599-81df-a9390461b549"}}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1 and has \"At the beginning of your end step, exile two cards from your graveyard.\"","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":1},{"type":"AddToughness","value":1},{"trigger":{"batched":false,"condition":null,"constraint":{"type":"OnlyDuringYourTurn"},"damage_kind":"Any","description":"At the beginning of your end step, exile two cards from your graveyard.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"destination":"Exile","enter_tapped":false,"enter_transformed":false,"enters_attacking":false,"origin":"Graveyard","owner_library":false,"target":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Card"]},"type":"ChangeZone"},"forward_result":false,"kind":"Spell","multi_target":{"max":{"type":"Fixed","value":2},"min":2},"optional":false,"optional_targeting":false,"sub_ability":null,"target_choice_timing":"Resolution","target_prompt":null},"mode":"Phase","optional":false,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null},"type":"GrantTrigger"}]}],"triggers":[{"batched":false,"condition":null,"constraint":{"type":"OnlyDuringYourTurn"},"damage_kind":"Any","description":"At the beginning of your upkeep, mill a card.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"destination":"Graveyard","target":{"type":"Controller"},"type":"Mill"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"Phase","optional":false,"origin":null,"phase":"Upkeep","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null}]}"###,
+        ),
+        (
+            r###"{"name":"Boneshard Slasher","text":"Flying\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +2/+2 and has \"When this creature becomes the target of a spell or ability, sacrifice it.\"","manaCost":"{1}{B}","manaValue":2.0,"power":"1","toughness":"1","types":["Creature"],"subtypes":["Horror"],"supertypes":[],"type":"Creature — Horror","colors":["B"],"colorIdentity":["B"],"layout":"normal","keywords":["Flying","Threshold"],"identifiers":{"scryfallOracleId":"1098ff82-8cad-4283-8493-5492f12ea200"}}"###,
+            r###"{"static_abilities":[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +2/+2 and has \"When ~ becomes the target of a spell or ability, sacrifice it.\"","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"trigger":{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ becomes the target of a spell or ability, sacrifice it.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"},"type":"Sacrifice"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"BecomesTarget","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null},"type":"GrantTrigger"}]}],"triggers":[]}"###,
+        ),
+    ] {
+        let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(metadata).unwrap();
+        let text = card.text.as_deref().unwrap();
+        let keywords = card.keywords.as_deref().unwrap_or(&[]);
+        let expected: serde_json::Value = serde_json::from_str(expected_json).unwrap();
+        let expected_statics: Vec<StaticDefinition> =
+            serde_json::from_value(expected["static_abilities"].clone()).unwrap();
+        let expected_triggers: Vec<TriggerDefinition> =
+            serde_json::from_value(expected["triggers"].clone()).unwrap();
+        let mut doc = parse_oracle_ir(text, &card.name, keywords, &card.types, &card.subtypes);
+        assert_eq!(doc.source_text, text);
+        let mut ids = std::collections::HashSet::new();
+        let mut previous = None;
+        for item in &doc.items {
+            assert!(ids.insert(item.id), "unique source ID: {}", card.name);
+            let span = item.source.span();
+            assert!(span.is_exact());
+            let position = (span.first_line, span.ordinal_within_span);
+            assert!(
+                previous.is_none_or(|old| old < position),
+                "source order: {}",
+                card.name
+            );
+            previous = Some(position);
+            assert_eq!(
+                item.source.fragment(),
+                Some(&text[span.start_byte..span.end_byte])
+            );
+            assert!(
+                !matches!(item.node, OracleNodeIr::Unsupported { .. }),
+                "{}: {item:#?}",
+                card.name
+            );
+        }
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{}: {:?}",
+            card.name,
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.abilities.is_empty(),
+            "{}: {:?}",
+            card.name,
+            parsed.abilities
+        );
+        assert_eq!(
+            parsed.statics, expected_statics,
+            "complete typed static clauses: {}",
+            card.name
+        );
+        assert_eq!(
+            parsed.triggers, expected_triggers,
+            "complete independent triggers: {}",
+            card.name
+        );
+        let face = crate::database::synthesis::build_oracle_face(
+            &card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        );
+        assert_eq!(face.name, card.name);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+        let face_value = serde_json::to_value(&face).unwrap();
+        assert_eq!(
+            face_value["card_type"]["core_types"],
+            serde_json::json!(card.types)
+        );
+        assert_eq!(
+            face_value["card_type"]["subtypes"],
+            serde_json::json!(card.subtypes)
+        );
+        assert_eq!(
+            face_value["power"],
+            serde_json::json!({"type":"Fixed","value":card.power.as_deref().unwrap().parse::<i32>().unwrap()})
+        );
+        assert_eq!(
+            face_value["toughness"],
+            serde_json::json!({"type":"Fixed","value":card.toughness.as_deref().unwrap().parse::<i32>().unwrap()})
+        );
+        assert_eq!(
+            face.mana_cost,
+            parse_mana_symbols(card.mana_cost.as_deref().unwrap())
+                .unwrap()
+                .0
+        );
+        assert_eq!(face.static_abilities, expected_statics);
+        assert_eq!(face.triggers, expected_triggers);
+        assert_eq!(face.keywords, parsed.extracted_keywords);
+        assert!(
+            crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "{}",
+            card.name
+        );
+        let whole =
+            serde_json::to_string(&serde_json::json!({card.name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(&card.name), Some(&face));
+        }
+        assert_eq!(
+            serde_json::from_str::<crate::types::card::CardFace>(
+                &serde_json::to_string(&face).unwrap()
+            )
+            .unwrap(),
+            face
+        );
+    }
+}
+
 // SHAPE: strict clothing qualification is an exact unsupported semantic unit.
 #[test]
 fn ordinary_destroy_prismatic_whole_source_native_and_loaders_remain_honest() {

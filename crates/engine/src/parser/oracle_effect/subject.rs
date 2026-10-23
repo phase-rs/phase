@@ -8593,6 +8593,22 @@ fn token_starts_predicate(token: &str) -> bool {
         || PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str())
 }
 
+/// Token-only view of the existing subject/predicate vocabulary. It does not
+/// establish ownership without a completely parsed initial subject prefix.
+pub(crate) fn parse_predicate_verb_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(
+            terminated(
+                nom::bytes::complete::take_while1(|c: char| !c.is_whitespace()),
+                peek(alt((nom::character::complete::space1, eof))),
+            ),
+            |token: &&str| token_starts_predicate(token),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 102.1 + CR 608.2c: "who has the most `<property>`" (U2.3's superlative
 /// player-subject copula, e.g. "the player who has the most cards in hand
 /// gains control of ~") is a RELATIVE CLAUSE embedded inside the subject noun

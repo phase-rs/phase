@@ -2,9 +2,10 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until, take_while};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while};
+use nom::character::complete::{multispace0, space0, space1};
+use nom::combinator::{all_consuming, eof, map, opt, peek, value};
+use nom::multi::many1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -12330,24 +12331,8 @@ fn cost_prefix_is_activated(prefix: &str) -> bool {
     // `parse_single_cost` form is an `EffectCost` (excluded from the probe).
     // Recognized with a nom `alt`/`tag` combinator over the lowercased prefix
     // (the parser is the detector; no `starts_with` dispatch).
-    let starts_with_cost_verb = nom_on_lower(trimmed, &trimmed.to_lowercase(), |i| {
-        value(
-            (),
-            alt((
-                tag("sacrifice"),
-                tag("discard"),
-                tag("pay"),
-                tag("remove"),
-                tag("exile"),
-                tag("return"),
-                tag("tap"),
-                tag("untap"),
-                tag("put"),
-            )),
-        )
-        .parse(i)
-    })
-    .is_some();
+    let starts_with_cost_verb =
+        nom_on_lower(trimmed, &trimmed.to_lowercase(), parse_activation_cost_verb).is_some();
     if starts_with_cost_verb {
         return true;
     }
@@ -12355,6 +12340,64 @@ fn cost_prefix_is_activated(prefix: &str) -> bool {
         parse_single_cost(trimmed),
         AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. }
     )
+}
+
+fn parse_activation_cost_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("sacrifice"),
+            tag("discard"),
+            tag("pay"),
+            tag("remove"),
+            tag("exile"),
+            tag("return"),
+            tag("tap"),
+            tag("untap"),
+            tag("put"),
+        )),
+    )
+    .parse(input)
+}
+
+/// Structural root-cost evidence for dedicated source ownership. In particular,
+/// this must not invoke the legacy detector's semantic cost/effect probe.
+pub(super) fn find_root_activated_colon(
+    line: &str,
+    nominate_unframed: impl Fn(&str) -> Option<(String, String)>,
+) -> Option<usize> {
+    let colon = find_top_level_colon(line)?;
+    let prefix = &line[..colon];
+    if has_anchored_activation_cost_head(prefix) {
+        return Some(colon);
+    }
+    let (label, remainder) = split_short_label_prefix(prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS)?;
+    if nominate_unframed(label).is_some() {
+        return None;
+    }
+    has_anchored_activation_cost_head(remainder).then_some(colon)
+}
+
+fn has_anchored_activation_cost_head(input: &str) -> bool {
+    let input = input.trim();
+    let symbols = input.to_ascii_uppercase();
+    if terminated(
+        many1(alt((
+            value((), super::oracle_nom::primitives::parse_mana_cost),
+            value((), tag_no_case("{T}")),
+            value((), tag_no_case("{Q}")),
+        ))),
+        preceded(space0, peek(alt((eof, value("", tag(",")))))),
+    )
+    .parse(symbols.as_str())
+    .is_ok()
+    {
+        return true;
+    }
+    nom_on_lower(input, &input.to_lowercase(), |input| {
+        terminated(parse_activation_cost_verb, peek(alt((space1, eof)))).parse(input)
+    })
+    .is_some()
 }
 
 /// CR 207.2c / CR 207.2d: an ability word (<=4 words) or a flavor word (Universes

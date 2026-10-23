@@ -1,5 +1,383 @@
 use super::anthem::*;
 
+// SHAPE: synthetic malformed sources must be owned before semantic validation,
+// including under the enclosing conditional and a provisional activation label.
+#[test]
+fn grant_root_frames_preserve_strict_unknown_and_empty_sources() {
+    for body in [
+        "Each creature card in your graveyard that didn't attack a player has flashback {2}.",
+        "Each creature card in your graveyard that didn't attack a player has nonsense.",
+        "Each creature card in your graveyard that didn't attack a player has .",
+        "Each creature card in your graveyard that didn't attack a player has",
+        "Each creature card in your graveyard that didn't attack a player have",
+        "Each instant card in your graveyard has flashback {2}: Draw a card.",
+        "Each instant card in your graveyard has nonsense {2}: Draw a card.",
+        "Each instant card in your graveyard has {2}: Draw a card.",
+        "Each instant card in your graveyard has : Draw a card.",
+        "Each instant card in your graveyard has flashback {2}: nonsense.",
+        "Each instant card in your graveyard has flashback {2}:",
+        "Each instant card in your graveyard has nonsense — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has flashback {2} — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has — Pay 2 life: Draw a card.",
+        "Instant cards in your graveyard have — Pay 2 life: Draw a card.",
+        "Each instant card in your graveyard has nonsense: Draw a card.",
+        "Each instant card in your graveyard has flashback: Draw a card.",
+        "Each unknown creature card in their graveyard has nonsense — Pay 2 life: Draw a card.",
+        "Each in your graveyard has flashback — Pay 2 life: Draw a card.",
+        "Each creature card in your graveyard has \"{T}: Draw a card.\".",
+        "Each creature card in your graveyard has flash..",
+        "Each creature card in your graveyard has flash. Draw a card.",
+        "Each creature card in your graveyard has flash until end of turn.",
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has flashback {2}.",
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has nonsense.",
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure has",
+        "Each creature card in your graveyard that are instant cards and/or have nonsense has flashback {2}.",
+    ] {
+        for source in [
+            body.to_owned(),
+            format!("As long as you have seven or more cards in hand, {body}"),
+        ] {
+            assert!(
+                matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source), Some(Err(original)) if original == source),
+                "{source}"
+            );
+            assert!(parse_static_line(&source).is_none(), "{source}");
+            assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+        }
+    }
+    for source in [
+        "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2}.",
+    ] {
+        let complete = super::keyword_grant::try_parse_graveyard_keyword_grant_source(source).unwrap().unwrap();
+        assert_eq!(parse_static_line_multi(source), vec![complete.clone()]);
+        assert_eq!(parse_static_line(source), Some(complete));
+    }
+    let ordinary = "Creature cards you own that aren't on the battlefield have flash.";
+    assert!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(ordinary).is_none());
+    let complete = parse_static_line(ordinary).unwrap();
+    assert!(matches!(
+        complete.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    ));
+    assert_eq!(parse_static_line_multi(ordinary), vec![complete]);
+}
+
+// SHAPE: list-boundary evidence comes from the existing relative grammar,
+// independent of whether its unfinished next payload happens to be supported.
+#[test]
+fn grant_relative_list_boundary_uses_shared_legs_and_separators() {
+    for separator in [
+        ", and/or ",
+        ", and ",
+        ", or ",
+        " and/or ",
+        " and ",
+        " or ",
+        ", ",
+    ] {
+        for payload in ["an Adventure", "nonsense", ""] {
+            let relative = format!("that are instant cards{separator}have {payload}");
+            let boundary = "that are instant cards".len() + separator.len();
+            assert!(
+                super::oracle_target::relative_card_predicate_owns_boundary(&relative, boundary),
+                "{relative}"
+            );
+            let source = format!("This spell costs {{X}} less to cast, where X is the number of cards in your graveyard {relative}");
+            assert!(
+                super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source).is_none(),
+                "{source}"
+            );
+        }
+    }
+    let relative = "that are instant cards and have an Adventure has flashback {2}.";
+    let outer = "that are instant cards and have an Adventure ".len();
+    assert!(!super::oracle_target::relative_card_predicate_owns_boundary(relative, outer));
+    let no_relative = "Each card in your graveyard and/or has nonsense.";
+    assert!(
+        matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(no_relative), Some(Err(original)) if original == no_relative)
+    );
+    let named = "Each creature card in your graveyard named That has flashback {2}.";
+    assert!(parse_static_line(named).is_some());
+    // The shared semantic subject parser does not consume this mixed relative
+    // list. A later genuine outer verb must still nominate an honest refusal.
+    let subject =
+        "Each creature card in your graveyard that are instant cards and/or have an Adventure";
+    let (_, remainder) = parse_type_phrase_folding(subject);
+    assert!(!remainder.trim().is_empty());
+    for payload in ["flashback {2}.", "nonsense.", ""] {
+        let source = format!("{subject} has {payload}");
+        assert!(
+            matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source), Some(Err(original)) if original == source),
+            "{source}"
+        );
+    }
+}
+
+// SHAPE: synthetic relative subjects exercise both candidate orders and the
+// complete dedicated front door, including its intentionally strict refusals.
+#[test]
+fn grant_head_owns_outer_predicate_not_relative_has_have() {
+    use crate::types::keywords::FlashbackCost;
+    for (subject, verb, property) in [
+        (
+            "Each creature card in your graveyard that has an Adventure",
+            "have",
+            FilterProp::HasAdventure,
+        ),
+        (
+            "Creature cards in your graveyard that have an Adventure",
+            "has",
+            FilterProp::HasAdventure,
+        ),
+        (
+            "Each creature card in your graveyard named That",
+            "has",
+            FilterProp::Named {
+                name: "That".into(),
+            },
+        ),
+        (
+            "Each creature card in your graveyard that has a fate counter on it",
+            "has",
+            FilterProp::Counters {
+                counters: crate::types::ability::CounterMatch::OfType(CounterType::Generic(
+                    "fate".into(),
+                )),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ),
+    ] {
+        let source = format!("{subject} {verb} flashback {{2}}.");
+        let definition = parse_static_line(&source).expect(&source);
+        assert_eq!(definition.description.as_deref(), Some(source.as_str()));
+        assert_eq!(
+            definition.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(2))),
+            }]
+        );
+        let TargetFilter::Typed(filter) = definition.affected.as_ref().unwrap() else {
+            panic!("complete relative subject")
+        };
+        assert!(filter.properties.contains(&property));
+        assert!(filter.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert_eq!(parse_static_line_multi(&source), vec![definition]);
+    }
+    // The distributive relative grammar is mana-value grammar, not Adventure
+    // grammar. Its typed parity predicate proves that the relative is retained.
+    let source = "Each creature card in your graveyard that each have mana value of the chosen quality has flashback {2}.";
+    let definition = parse_static_line(source).expect("distributive relative");
+    let TargetFilter::Typed(filter) = definition.affected.as_ref().unwrap() else {
+        panic!("typed")
+    };
+    assert!(filter.properties.contains(&FilterProp::ManaValueParity {
+        parity: crate::types::ability::ParitySource::LastNamedChoice
+    }));
+    assert_eq!(parse_static_line_multi(source), vec![definition]);
+    let sailors = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.";
+    assert!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(sailors).is_none());
+    let definition = parse_static_line(sailors).unwrap();
+    assert!(matches!(
+        definition.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+            ..
+        }
+    ));
+    assert_eq!(parse_static_line_multi(sailors), vec![definition]);
+    assert_eq!(
+        parse_static_line("Creatures you control have flying.")
+            .unwrap()
+            .modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+}
+
+#[test]
+fn outer_grant_refusal_survives_relative_subject_and_unknown_payload() {
+    for source in [
+        "Each creature card in your graveyard that has an Adventure has nonsense.",
+        "Creature cards in your graveyard that have an Adventure have .",
+        "Each creature card in your graveyard that has an Adventure has",
+        "Each creature card in your graveyard that has an Adventure have",
+        "Each creature card in your graveyard that has nonsense has flashback {2}.",
+        "Each in your graveyard has flashback {2}.",
+        "Each creature card in their graveyard that has an Adventure has flashback {2}.",
+        "Each creature card in your hand that has an Adventure has flashback {2}.",
+        "Each creature card in your graveyard in graveyards that has an Adventure has flashback {2}.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2} unknown.",
+        "Each creature card in your graveyard that has an Adventure has flashback. Its encore cost is equal to its mana cost.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2}. Its flashback cost is equal to its mana cost.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2} until end of turn.",
+        "Each creature card in your graveyard that has an Adventure has flashback {2}..",
+    ] {
+        assert!(matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(source), Some(Err(original)) if original == source), "{source}");
+        assert!(parse_static_line(source).is_none(), "{source}");
+        assert!(parse_static_line_multi(source).is_empty(), "{source}");
+    }
+    let positive = "Each creature card in your graveyard that has an Adventure has flashback {2}.";
+    assert!(parse_static_line(positive).is_some());
+    assert_eq!(parse_static_line_multi(positive).len(), 1);
+}
+
+#[test]
+fn conditional_dedicated_grants_refuse_the_original_whole_source() {
+    let ordinary = "As long as you have seven or more cards in hand, this creature gets +2/+1 and has first strike.";
+    assert!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(ordinary).is_none());
+    let positive = parse_static_line(ordinary).unwrap();
+    assert_eq!(
+        positive.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::FirstStrike
+            }
+        ]
+    );
+    assert_eq!(parse_static_line_multi(ordinary), vec![positive]);
+    for body in [
+        "each card in your graveyard has nonsense.",
+        "each card in your graveyard has .",
+        "each card in your graveyard has",
+        "each in your graveyard has flashback {2}.",
+        "each creature card in your graveyard has flashback {2}.",
+        "each creature card in your graveyard that has an Adventure has flashback {2}.",
+    ] {
+        let source = format!("As long as you have seven or more cards in hand, {body}");
+        assert!(
+            matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source), Some(Err(original)) if original == source)
+        );
+        assert!(parse_static_line(&source).is_none(), "{source}");
+        assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+    }
+}
+
+// SHAPE: pinned full Oracle sources. Expected values encode the clauses:
+// source-in-GY plus own land, live hand/permanent-GY/distinct-mana-value/card-GY
+// gates, both Akawalli tiers, and complete gated granted trigger bodies.
+#[test]
+fn off_zone_grant_does_not_claim_conditional_static_subjects() {
+    for (name, text, expected_json) in [
+        (
+            r###"Anger"###,
+            r###"Haste
+As long as this card is in your graveyard and you control a Mountain, creatures you control have haste."###,
+            r###"[{"active_zones":["Graveyard"],"affected":{"controller":"You","properties":[],"type":"Typed","type_filters":["Creature"]},"affected_zone":null,"characteristic_defining":false,"condition":{"conditions":[{"type":"SourceInZone","zone":"Graveyard"},{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"}],"type":"Typed","type_filters":[{"Subtype":"Mountain"}]},"type":"IsPresent"}],"type":"And"},"description":"As long as this card is in your graveyard and you control a Mountain, creatures you control have haste.","effect_zone":null,"mode":"Continuous","modifications":[{"keyword":"Haste","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Brawn"###,
+            r###"Trample
+As long as this card is in your graveyard and you control a Forest, creatures you control have trample."###,
+            r###"[{"active_zones":["Graveyard"],"affected":{"controller":"You","properties":[],"type":"Typed","type_filters":["Creature"]},"affected_zone":null,"characteristic_defining":false,"condition":{"conditions":[{"type":"SourceInZone","zone":"Graveyard"},{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"}],"type":"Typed","type_filters":[{"Subtype":"Forest"}]},"type":"IsPresent"}],"type":"And"},"description":"As long as this card is in your graveyard and you control a Forest, creatures you control have trample.","effect_zone":null,"mode":"Continuous","modifications":[{"keyword":"Trample","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Akki Underling"###,
+            r###"As long as you have seven or more cards in hand, this creature gets +2/+1 and has first strike."###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"HandSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"As long as you have seven or more cards in hand, ~ gets +2/+1 and has first strike.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":1},{"keyword":"FirstStrike","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Carnage Interpreter"###,
+            r###"When this creature enters, discard your hand, then investigate four times. (To investigate, create a Clue token. It's an artifact with "{2}, Sacrifice this token: Draw a card.")
+As long as you have one or fewer cards in hand, this creature gets +2/+2 and has menace."###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"LE","lhs":{"qty":{"player":{"type":"Controller"},"type":"HandSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":1},"type":"QuantityComparison"},"description":"As long as you have one or fewer cards in hand, ~ gets +2/+2 and has menace.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Menace","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Akawalli, the Seething Tower"###,
+            r###"Descend 4 — As long as there are four or more permanent cards in your graveyard, Akawalli gets +2/+2 and has trample.
+Descend 8 — As long as there are eight or more permanent cards in your graveyard, Akawalli gets an additional +2/+2 and can't be blocked by more than one creature."###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":4},"type":"QuantityComparison"},"description":"Descend 4 — As long as there are four or more permanent cards in your graveyard, ~ gets +2/+2 and has trample.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Trample","type":"AddKeyword"}]},{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":8},"type":"QuantityComparison"},"description":"Descend 8 — As long as there are eight or more permanent cards in your graveyard, ~ gets an additional +2/+2 and can't be blocked by more than one creature.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2}]},{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"card_types":["Permanent"],"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"rhs":{"type":"Fixed","value":8},"type":"QuantityComparison"},"description":"Descend 8 — As long as there are eight or more permanent cards in your graveyard, ~ gets an additional +2/+2 and can't be blocked by more than one creature.","effect_zone":null,"mode":{"CantBeBlockedByMoreThan":{"max":1}},"modifications":[]}]"###,
+        ),
+        (
+            r###"Aven Heartstabber"###,
+            r###"Flying
+As long as there are five or more mana values among cards in your graveyard, this creature gets +2/+2 and has deathtouch.
+When this creature dies, mill two cards, then draw a card."###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"filter":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Card"]},"qualities":["ManaValue"],"type":"ObjectCountDistinct"},"type":"Ref"},"rhs":{"type":"Fixed","value":5},"type":"QuantityComparison"},"description":"As long as there are five or more mana values among cards in your graveyard, ~ gets +2/+2 and has deathtouch.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"keyword":"Deathtouch","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Battlewise Aven"###,
+            r###"Flying
+Threshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1 and has first strike."###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1 and has first strike.","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":1},{"type":"AddToughness","value":1},{"keyword":"FirstStrike","type":"AddKeyword"}]}]"###,
+        ),
+        (
+            r###"Bloodcurdler"###,
+            r###"Flying
+At the beginning of your upkeep, mill a card.
+Threshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1 and has "At the beginning of your end step, exile two cards from your graveyard.""###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1 and has \"At the beginning of your end step, exile two cards from your graveyard.\"","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":1},{"type":"AddToughness","value":1},{"trigger":{"batched":false,"condition":null,"constraint":{"type":"OnlyDuringYourTurn"},"damage_kind":"Any","description":"At the beginning of your end step, exile two cards from your graveyard.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"destination":"Exile","enter_tapped":false,"enter_transformed":false,"enters_attacking":false,"origin":"Graveyard","owner_library":false,"target":{"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}],"type":"Typed","type_filters":["Card"]},"type":"ChangeZone"},"forward_result":false,"kind":"Spell","multi_target":{"max":{"type":"Fixed","value":2},"min":2},"optional":false,"optional_targeting":false,"sub_ability":null,"target_choice_timing":"Resolution","target_prompt":null},"mode":"Phase","optional":false,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null},"type":"GrantTrigger"}]}]"###,
+        ),
+        (
+            r###"Boneshard Slasher"###,
+            r###"Flying
+Threshold — As long as there are seven or more cards in your graveyard, this creature gets +2/+2 and has "When this creature becomes the target of a spell or ability, sacrifice it.""###,
+            r###"[{"active_zones":[],"affected":{"type":"SelfRef"},"affected_zone":null,"characteristic_defining":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"type":"Controller"},"type":"GraveyardSize"},"type":"Ref"},"rhs":{"type":"Fixed","value":7},"type":"QuantityComparison"},"description":"Threshold — As long as there are seven or more cards in your graveyard, ~ gets +2/+2 and has \"When ~ becomes the target of a spell or ability, sacrifice it.\"","effect_zone":null,"mode":"Continuous","modifications":[{"type":"AddPower","value":2},{"type":"AddToughness","value":2},{"trigger":{"batched":false,"condition":null,"constraint":null,"damage_kind":"Any","description":"When ~ becomes the target of a spell or ability, sacrifice it.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"},"type":"Sacrifice"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"BecomesTarget","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"type":"SelfRef"},"valid_source":null,"valid_target":null},"type":"GrantTrigger"}]}]"###,
+        ),
+    ] {
+        let expected: Vec<StaticDefinition> = serde_json::from_str(expected_json).unwrap();
+        let normalized = crate::parser::oracle_util::normalize_card_name_refs(text, name);
+        let mut checked_sources = 0;
+        for source in normalized.lines().filter(|source| {
+            expected
+                .iter()
+                .any(|definition| definition.description.as_deref() == Some(*source))
+        }) {
+            checked_sources += 1;
+            assert!(
+                super::oracle::try_parse_graveyard_keyword_source_with_label(source).is_none(),
+                "{name}: {source}"
+            );
+            let definitions = expected
+                .iter()
+                .filter(|definition| definition.description.as_deref() == Some(source))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parse_static_line(source),
+                definitions.first().cloned(),
+                "single {name}: {source}"
+            );
+            assert_eq!(
+                parse_static_line_multi(source),
+                definitions,
+                "multi {name}: {source}"
+            );
+        }
+        assert_eq!(
+            checked_sources,
+            if name == "Akawalli, the Seething Tower" {
+                2
+            } else {
+                1
+            },
+            "every full conditional source was exercised: {name}"
+        );
+        assert_eq!(
+            expected
+                .iter()
+                .map(|definition| definition.description.as_deref().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            if name == "Akawalli, the Seething Tower" {
+                2
+            } else {
+                1
+            }
+        );
+    }
+}
+
 #[test]
 fn u6_complete_grant_sources_preserve_population_turn_kind_and_cost() {
     use crate::types::keywords::FlashbackCost;
@@ -5863,10 +6241,9 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
 /// instant/sorcery/Adventure graveyard predicate and function from hand.
 #[test]
 fn static_hearth_elemental_cost_reduction_includes_adventures() {
-    let def = parse_static_line(
-        "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.",
-    )
-    .expect("Hearth Elemental cost reduction should parse");
+    let source = "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    assert!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(source).is_none());
+    let def = parse_static_line(source).expect("Hearth Elemental cost reduction should parse");
     assert!(matches!(
         def.mode,
         StaticMode::ModifyCost {
@@ -5885,6 +6262,31 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
     assert_eq!(
         def.active_zones,
         crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+    assert_eq!(def.description.as_deref(), Some(source));
+    assert_eq!(parse_static_line_multi(source), vec![def.clone()]);
+    let StaticMode::ModifyCost {
+        dynamic_count:
+            Some(QuantityRef::ZoneCardCount {
+                filter: Some(filter),
+                ..
+            }),
+        ..
+    } = &def.mode
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        filter,
+        &TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery
+                ]))),
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasAdventure])),
+            ]
+        }
     );
 }
 

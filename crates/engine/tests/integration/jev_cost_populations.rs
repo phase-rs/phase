@@ -12,7 +12,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -2079,6 +2079,12 @@ fn sailors_population_cost() {
         // CR 118.7a + CR 601.2f: three qualifying cards remove three generic
         // mana, retaining both blue pips; all hostile cards contribute zero.
         assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().resolution_stack.is_empty());
     }
     let (mut runner, spell) = sailors_board(true, 6);
     runner.state_mut().players[0].mana_pool = (0..6)
@@ -2091,6 +2097,476 @@ fn sailors_population_cost() {
         runner.cast(spell).try_resolve().is_err(),
         "one short cannot pay the locked cost"
     );
+}
+
+#[test]
+fn conditional_head_preserves_paid_akki_underling_bonus() {
+    const AKKI: &str = "As long as you have seven or more cards in hand, this creature gets +2/+1 and has first strike.";
+    for remaining in [7, 6] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Akki Underling", 2, 1)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            })
+            .from_oracle_text(AKKI)
+            .id();
+        for index in 0..remaining {
+            scenario.add_card_to_hand(P0, &format!("Synthetic hand witness {index}"));
+        }
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let mut runner = scenario.build();
+        let committed = runner.cast(spell).commit();
+        // CR 601.2f + CR 601.2h: the full printed 1R is locked and paid.
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        assert_eq!(committed.state().players[0].hand.len(), remaining);
+        assert!(committed.state().stack.iter().any(|entry| entry.id == spell
+            && matches!(
+                entry.kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 2,
+                    ..
+                }
+            )));
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[spell], Zone::Battlefield);
+        assert_eq!(outcome.state().players[0].hand.len(), remaining);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        // CR 208.1 + CR 611.3a: the live seven-card gate adds exactly 2/1.
+        outcome.assert_power_toughness(
+            spell,
+            if remaining == 7 { 4 } else { 2 },
+            if remaining == 7 { 2 } else { 1 },
+        );
+        // CR 613.1f: the same gate grants first strike in the ability layer.
+        assert_eq!(
+            engine::game::keywords::object_has_effective_keyword_kind(
+                outcome.state(),
+                spell,
+                engine::types::keywords::KeywordKind::FirstStrike
+            ),
+            remaining == 7
+        );
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().resolution_stack.is_empty());
+    }
+}
+
+const HEARTH: &str = "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+const STOKE: &str = "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)";
+const FRANTIC: &str = "Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+
+fn stoke_genius_face() -> BackFaceData {
+    let parsed = engine::parser::parse_oracle_text(
+        STOKE,
+        "Stoke Genius",
+        &[],
+        &["Sorcery".into()],
+        &["Adventure".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(matches!(
+        parsed.abilities[0].effect.as_ref(),
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. }
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        parsed.abilities[0]
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .effect
+            .as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            ..
+        }
+    ));
+    BackFaceData {
+        name: "Stoke Genius".into(),
+        layout_kind: Some(LayoutKind::Adventure),
+        mana_cost: ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        },
+        card_types: engine::types::card_type::CardType {
+            core_types: vec![engine::types::card_type::CoreType::Sorcery],
+            subtypes: vec!["Adventure".into()],
+            ..Default::default()
+        },
+        abilities: parsed.abilities,
+        trigger_definitions: parsed.triggers.into(),
+        static_definitions: parsed.statics.into(),
+        replacement_definitions: parsed.replacements.into(),
+        ..Default::default()
+    }
+}
+
+fn coordinated_graveyard_witnesses(
+    scenario: &mut GameScenario,
+    caster: engine::types::player::PlayerId,
+    populated: bool,
+) -> Vec<ObjectId> {
+    if !populated {
+        return vec![];
+    }
+    let other = if caster == P0 { P1 } else { P0 };
+    let overlap = scenario
+        .add_spell_to_graveyard(caster, "Synthetic instant Adventure overlap", true)
+        .id();
+    scenario.add_spell_to_graveyard(caster, "Synthetic own graveyard sorcery", false);
+    let adventure = scenario
+        .add_creature_to_graveyard(caster, "Synthetic own graveyard adventurer", 1, 1)
+        .id();
+    let foreign = scenario
+        .add_spell_to_graveyard(other, "Synthetic foreign instant Adventure", true)
+        .id();
+    scenario.add_spell_to_hand(caster, "Synthetic own Hand instant decoy", true);
+    scenario.add_spell_to_exile(caster, "Synthetic own Exile instant decoy", true);
+    scenario.add_creature_to_graveyard(caster, "Synthetic ordinary graveyard permanent", 1, 1);
+    // CR 715.2a + CR 715.2c: real alternative-characteristic metadata qualifies
+    // an object once, even when that same object also has an Instant card type.
+    vec![overlap, adventure, foreign]
+}
+
+#[test]
+fn coordinated_relative_hearth_elemental_paid_cost() {
+    for caster in [P0, P1] {
+        for (populated, pool, red, succeeds) in [
+            (true, 3, true, true),
+            (false, 6, true, true),
+            (true, 2, true, false),
+            (true, 3, false, false),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = scenario
+                .add_creature_to_hand(caster, "Hearth Elemental", 4, 5)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![ManaCostShard::Red],
+                })
+                .with_subtypes(vec!["Elemental"])
+                .from_oracle_text(HEARTH)
+                .id();
+            let adventures = coordinated_graveyard_witnesses(&mut scenario, caster, populated);
+            scenario.with_mana_pool(
+                caster,
+                (0..pool)
+                    .map(|index| {
+                        ManaUnit::new(
+                            if red && index == 0 {
+                                ManaType::Red
+                            } else {
+                                ManaType::Colorless
+                            },
+                            ObjectId(0),
+                            false,
+                            vec![],
+                        )
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            // Fixture authority is established before the first production action.
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            let back = stoke_genius_face();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&spell)
+                .unwrap()
+                .back_face = Some(back.clone());
+            for id in adventures {
+                runner.state_mut().objects.get_mut(&id).unwrap().back_face = Some(back.clone());
+            }
+            assert_eq!(runner.state().objects[&spell].static_definitions.len(), 1);
+            if !succeeds {
+                assert!(runner
+                    .cast(spell)
+                    .adventure_face(true)
+                    .try_resolve()
+                    .is_err());
+                continue;
+            }
+            let committed = runner.cast(spell).adventure_face(true).commit();
+            let entry = committed
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == spell)
+                .unwrap();
+            // CR 118.7a + CR 601.2f + CR 601.2h: count3 removes only generic3.
+            assert_eq!(entry.source_id, spell);
+            assert_eq!(entry.controller, caster);
+            assert!(
+                matches!(entry.kind, StackEntryKind::Spell { actual_mana_spent, .. } if actual_mana_spent == pool)
+            );
+            assert_eq!(
+                committed.state().players[caster.0 as usize]
+                    .mana_pool
+                    .total(),
+                0
+            );
+            assert_eq!(committed.state().objects[&spell].name, "Hearth Elemental");
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[spell], Zone::Battlefield);
+            outcome.assert_power_toughness(spell, 4, 5);
+            assert_eq!(outcome.state().objects[&spell].controller, caster);
+            assert_eq!(outcome.state().objects[&spell].back_face, Some(back));
+            assert_eq!(outcome.mana_pool_total(caster), 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+        }
+    }
+}
+
+#[test]
+fn coordinated_relative_frantic_firebolt_paid_damage() {
+    for caster in [P0, P1] {
+        for populated in [true, false] {
+            let other = if caster == P0 { P1 } else { P0 };
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(caster, "Frantic Firebolt", true, FRANTIC)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![ManaCostShard::Red],
+                })
+                .id();
+            let target = scenario
+                .add_creature(other, "Synthetic selected target", 1, 20)
+                .id();
+            let untouched = scenario
+                .add_creature(other, "Synthetic other target", 1, 20)
+                .id();
+            let adventures = coordinated_graveyard_witnesses(&mut scenario, caster, populated);
+            scenario.with_mana_pool(
+                caster,
+                [ManaType::Red, ManaType::Colorless, ManaType::Colorless]
+                    .into_iter()
+                    .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            for id in adventures {
+                runner.state_mut().objects.get_mut(&id).unwrap().back_face =
+                    Some(stoke_genius_face());
+            }
+            let committed = runner.cast(spell).target_object(target).commit();
+            let entry = committed
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == spell)
+                .unwrap();
+            // CR 601.2a + CR 601.2c + CR 601.2h: exact source, actor, target and payment.
+            assert_eq!(entry.source_id, spell);
+            assert_eq!(entry.controller, caster);
+            assert_eq!(
+                entry.ability().unwrap().targets,
+                vec![engine::types::ability::TargetRef::Object(target)]
+            );
+            assert!(matches!(
+                entry.kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 3,
+                    ..
+                }
+            ));
+            assert_eq!(
+                committed.state().players[caster.0 as usize]
+                    .mana_pool
+                    .total(),
+                0
+            );
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[spell], Zone::Graveyard);
+            // CR 120.3e + CR 608.2h: the resolving Instant is still on Stack
+            // when count+2 is applied, and does not count itself or change damage later.
+            assert_eq!(
+                outcome.state().objects[&target].damage_marked,
+                if populated { 5 } else { 2 }
+            );
+            assert_eq!(outcome.state().objects[&untouched].damage_marked, 0);
+            outcome.assert_life_delta(P0, 0);
+            outcome.assert_life_delta(P1, 0);
+            assert_eq!(outcome.mana_pool_total(caster), 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+        }
+    }
+}
+
+#[test]
+fn ordinary_teferi_grant_preserves_paid_hand_creature_flash() {
+    const TEFERI: &str = "Flash\nCreature cards you own that aren't on the battlefield have flash.\nEach opponent can cast spells only any time they could cast a sorcery.";
+    for (grantor, creature) in [(true, true), (false, true), (true, false)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = grantor.then(|| {
+            scenario
+                .add_creature_to_hand(P0, "Teferi, Mage of Zhalfir", 3, 4)
+                .with_mana_cost(blue_cost(2, 3))
+                .with_subtypes(vec!["Human", "Wizard"])
+                .from_oracle_text_with_keywords(&["Flash"], TEFERI)
+                .id()
+        });
+        let recipient = if creature {
+            scenario
+                .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Green],
+                })
+                .from_oracle_text("")
+                .id()
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+                .with_mana_cost(blue_cost(2, 1))
+                .id()
+        };
+        let forest = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+        let island = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+        let second_island = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+        scenario.with_library_top(
+            P0,
+            &[
+                "Synthetic draw one",
+                "Synthetic draw two",
+                "Synthetic draw three",
+            ],
+        );
+        scenario.with_library_top(
+            P1,
+            &["Synthetic opponent draw one", "Synthetic opponent draw two"],
+        );
+        mana(&mut scenario, 5);
+        let mut runner = scenario.build();
+        if let Some(source) = source {
+            let committed = runner.cast(source).commit();
+            let entry = committed
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == source)
+                .unwrap();
+            assert_eq!(entry.controller, P0);
+            assert_eq!(entry.source_id, source);
+            assert!(matches!(
+                entry.kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 5,
+                    ..
+                }
+            ));
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[source], Zone::Battlefield);
+            outcome.assert_power_toughness(source, 3, 4);
+            assert_eq!(outcome.mana_pool_total(P0), 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+        }
+        runner.advance_to_end_step();
+        assert_eq!(runner.state().phase, Phase::End);
+        runner.advance_to_upkeep();
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        assert_eq!(runner.state().active_player, P1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        for land in if creature {
+            vec![forest, island]
+        } else {
+            vec![forest, island, second_island]
+        } {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: land,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+        }
+        // CR 702.8a: a creature Hand recipient uses its own controller's live
+        // Flash grant during the opponent's upkeep; a sorcery and no-grant twin cannot.
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            if creature { 2 } else { 3 }
+        );
+        if !grantor || !creature {
+            assert!(runner.cast(recipient).try_resolve().is_err());
+            continue;
+        }
+        let committed = runner.cast(recipient).commit();
+        let entry = committed
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == recipient)
+            .unwrap();
+        assert_eq!(entry.source_id, recipient);
+        assert_eq!(entry.controller, P0);
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 2,
+                ..
+            }
+        ));
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[recipient], Zone::Battlefield);
+        outcome.assert_power_toughness(recipient, 2, 2);
+        assert_eq!(outcome.mana_pool_total(P0), 0);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().resolution_stack.is_empty());
+    }
 }
 
 const CANDLEKEEP: &str = "Until end of turn, creatures you control have base power and toughness X/X, where X is the number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure.";
