@@ -257,6 +257,21 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
+    // Runs before the continuous arm, which would otherwise take "your life total"
+    // as a subject and harvest a later conjunct's keywords onto it.
+    if let Some(clause) = try_parse_life_lock_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
+    }
+
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -2273,31 +2288,6 @@ fn try_parse_subject_restriction_clause(
             optional: false,
             unless_pay: None,
         });
-    }
-
-    // CR 119.7 + CR 119.8: "[possessor] life total can't change" — bidirectional
-    // life-lock for the named player (Teferi's Protection: "your life total can't
-    // change"). Distinct from the generic " can't " split below because the
-    // subject is a possessive noun phrase ("your") rather than a player subject.
-    if let Some((before, _)) = tp.split_around(" life total can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life total cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
     }
 
     // CR 510.1a: "[subject] assigns no combat damage [this turn/this combat]"
@@ -6689,6 +6679,22 @@ fn try_parse_become_choice(
             None => clause,
         },
     )
+}
+
+/// CR 119.7 + CR 119.8: "[possessor] life total(s) can't change" — bidirectional
+/// life-lock for the named player (Teferi's Protection: "your life total can't
+/// change"). The subject is a possessive noun phrase rather than a player subject.
+fn try_parse_life_lock_clause(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, (possessor, _, _)) = (
+        take_until::<_, _, OracleError<'_>>(" life total"),
+        alt((tag(" life totals"), tag(" life total"))),
+        alt((tag(" can't change"), tag(" cannot change"))),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    let scope_filter = life_lock_scope_from_possessor(possessor.trim());
+    Some(build_life_lock_clause(scope_filter))
 }
 
 /// CR 119.7 + CR 119.8: Map the possessive subject of a "life total can't change"
