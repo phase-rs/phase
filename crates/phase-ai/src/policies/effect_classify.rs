@@ -367,6 +367,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Discover { .. }
         | Effect::PhysicalContest { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachPlayerCopyChosen { .. }

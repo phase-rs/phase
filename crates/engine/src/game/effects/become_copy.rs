@@ -1,13 +1,13 @@
 use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::DisplayIdentity;
 use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
     ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
     EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
+use crate::types::card::PrintedLoyalty;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, TransientContinuousEffectBindings,
@@ -90,10 +90,7 @@ pub fn resolve(
         duration_subject: source.incarnation,
         duration,
         values: source.values,
-        display_source: source.display_source,
-        printed_ref: source.printed_ref,
-        token_image_ref: source.token_image_ref,
-        token_art: source.token_art,
+        display: source.display,
         additional_modifications,
         effect_kind: EffectKind::from(&ability.effect),
     };
@@ -112,10 +109,7 @@ pub(crate) struct PrecomputedCopyValues {
     pub duration_subject: ObjectIncarnationRef,
     pub duration: Duration,
     pub values: CopiableValues,
-    pub display_source: DisplaySource,
-    pub printed_ref: Option<PrintedCardRef>,
-    pub token_image_ref: Option<TokenImageRef>,
-    pub token_art: Option<TokenArtDescriptor>,
+    pub display: DisplayIdentity,
     pub additional_modifications: Vec<ContinuousModification>,
     pub effect_kind: EffectKind,
 }
@@ -136,10 +130,7 @@ pub(crate) fn apply_precomputed_copy_values(
         duration_subject,
         duration,
         mut values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         additional_modifications,
         effect_kind,
     } = copy;
@@ -224,10 +215,7 @@ pub(crate) fn apply_precomputed_copy_values(
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
     }];
     if !folded {
         modifications.extend(legacy_layered_modifications.into_iter().cloned());
@@ -1222,7 +1210,7 @@ mod tests {
         // the copy expires.
         let mut state = GameState::new_two_player(42);
 
-        let source_art = TokenArtDescriptor {
+        let source_art = crate::types::card::TokenArtDescriptor {
             power: Some(2),
             toughness: Some(2),
             colors: vec![ManaColor::Green],

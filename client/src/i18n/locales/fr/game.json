@@ -2331,7 +2331,15 @@
     "selfManaCost": "son coût de mana",
     "selfManaValue": "sa valeur de mana",
     "manaCostReduced": "son coût de mana réduit de {{reduction}}",
-    "spliceOnto": "sur {{subtype}} {{cost}}"
+    "spliceOnto": "sur {{subtype}} {{cost}}",
+    "wardDiscardAtRandom_few": "se défausser de {{count}} cartes au hasard",
+    "wardDiscardAtRandom_many": "se défausser de {{count}} cartes au hasard",
+    "wardDiscardAtRandom_one": "se défausser d'une carte au hasard",
+    "wardDiscardAtRandom_other": "se défausser de {{count}} cartes au hasard",
+    "wardDiscard_few": "se défausser de {{count}} cartes",
+    "wardDiscard_many": "se défausser de {{count}} cartes",
+    "wardDiscard_one": "se défausser d'une carte",
+    "wardDiscard_other": "se défausser de {{count}} cartes"
   },
   "resolutionOptionalPayment": {
     "title": "Choisissez un paiement optionnel",

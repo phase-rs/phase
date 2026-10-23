@@ -964,10 +964,10 @@ fn route_debug_token_to_battlefield(
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
     let copy = CopyTokenSpec {
         values: Box::new(values.clone()),
-        display_source: staged.display_source,
-        printed_ref: staged.printed_ref.clone(),
-        token_image_ref: staged.token_image_ref.clone(),
-        token_art: None,
+        display: super::game_object::DisplayIdentity {
+            token_art: None,
+            ..staged.display_identity()
+        },
         extra_keywords: Vec::new(),
         additional_modifications: Vec::new(),
         tapped: false,

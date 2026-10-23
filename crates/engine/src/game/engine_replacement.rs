@@ -2186,26 +2186,17 @@ fn handle_persist_chosen_attribute_choice(
     )?;
     // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
     // source), captured alongside the values — NOT a copiable value itself.
-    let (display_source, printed_ref, token_image_ref, token_art) = state
+    let display = state
         .objects
         .get(&donor_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-                o.token_art.clone(),
-            )
-        })
+        .map(|o| o.display_identity())
         .unwrap_or_default();
 
     // CR 400.7: persist the frozen snapshot on the Aura so it is cleared
     // automatically when the Aura changes zones (exactly the copy's lifetime).
     let snapshot = crate::types::ability::LatchedCopiableSnapshot {
         values: values.clone(),
-        display_source,
-        printed_ref: printed_ref.clone(),
-        token_image_ref: token_image_ref.clone(),
+        display: display.clone(),
     };
     if let Some(aura) = state.objects.get_mut(&source_id) {
         aura.chosen_attributes
@@ -2313,10 +2304,7 @@ fn handle_persist_chosen_attribute_choice(
         duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         additional_modifications: Vec::new(),
         effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
     };
@@ -8434,10 +8422,10 @@ mod tests {
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Token,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: crate::game::game_object::DisplayIdentity {
+                    display_source: crate::game::game_object::DisplaySource::Token,
+                    ..Default::default()
+                },
                 extra_keywords: Vec::new(),
                 additional_modifications: Vec::new(),
                 tapped: false,

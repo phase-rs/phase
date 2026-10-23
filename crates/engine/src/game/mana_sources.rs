@@ -461,6 +461,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
                 actions.push(GameAction::ActivateAbility {
                     source_id: object_id,
                     ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 });
             }
         }
@@ -1098,12 +1099,14 @@ pub(crate) fn activate_mana_source_option_with_output(
         debug_assert!(tapped, "preflighted land tap must transition status");
         events.push(GameEvent::permanent_tapped(state, option.object_id, None));
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
-        // intrinsic mana ability; observe its triggers at that boundary.
+        // intrinsic mana ability; observe its triggers at that boundary. Its
+        // activation cost is the intrinsic "{T}" (CR 305.6).
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             player,
             option.object_id,
             crate::types::events::ActivatedAbilityKind::Mana,
+            crate::types::events::BoundActivationCost::basic_land_intrinsic(),
             None,
             crate::types::zones::Zone::Battlefield,
             events,
@@ -1477,6 +1480,25 @@ fn chain_harms_controller_amount(ability: &AbilityDefinition) -> Option<Option<u
     let mut acc = (false, Some(0_u16));
     walk(ability, &mut acc);
     acc.0.then_some(acc.1)
+}
+
+/// CR 605.3b + CR 119.3: True iff resolving this ability makes its controller
+/// gain life — a controller-scoped `GainLife` anywhere in its effect chain
+/// (Pristine Talisman: "{T}: Add {C}. You gain 1 life."). Presence only: the
+/// amount is what actually resolving the ability gains. Visits the same
+/// `sub_ability` / `else_ability` links as [`chain_harms_controller_amount`].
+pub(crate) fn mana_ability_gains_controller_life(ability: &AbilityDefinition) -> bool {
+    fn walk(ability: &AbilityDefinition) -> bool {
+        matches!(
+            *ability.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ) || ability.sub_ability.as_deref().is_some_and(walk)
+            || ability.else_ability.as_deref().is_some_and(walk)
+    }
+    walk(ability)
 }
 
 /// CR 605.3b: Returns `true` iff the continuation chain (sub_ability /
@@ -6436,6 +6458,49 @@ mod tests {
             .collect();
         assert_eq!(tapped_for_mana.len(), 1);
         assert_eq!(tapped_for_mana[0].as_slice(), &[ManaType::Green]);
+    }
+
+    /// CR 305.6 + CR 602.1a + CR 605.3: tapping a land for its intrinsic
+    /// "{T}: Add [mana symbol]" is a mana activation whose activation cost is
+    /// `{T}`, published on its `AbilityActivated` event.
+    #[test]
+    fn manual_intrinsic_land_tap_publishes_its_tap_activation_cost() {
+        use crate::types::events::{ActivatedAbilityKind, BoundActivationCost};
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        assert!(
+            state.objects[&forest].abilities.is_empty(),
+            "fixture must rely on the CR 305.6 intrinsic mana ability"
+        );
+        let action = activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+            .expect("the engine exposes the intrinsic land-tap selection");
+
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("the engine-authored manual mana action resolves");
+
+        assert!(state.objects[&forest].tapped, "reach: the Forest is tapped");
+        let activations: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::AbilityActivated {
+                    source_id,
+                    kind,
+                    activation_cost,
+                    ..
+                } if *source_id == forest => Some((*kind, activation_cost.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            activations,
+            vec![(
+                ActivatedAbilityKind::Mana,
+                BoundActivationCost::Cost(Box::new(AbilityCost::Tap))
+            )]
+        );
     }
 
     #[test]

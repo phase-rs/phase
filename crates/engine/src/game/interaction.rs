@@ -2564,11 +2564,19 @@ fn amount_assignment_projection(
                 action: AmountAssignmentAction::MoveCounters,
             }
         }
-        WaitingFor::RemoveCountersChoice { available, .. } => {
-            let max_total = available
+        WaitingFor::RemoveCountersChoice {
+            available,
+            max_total: cap,
+            ..
+        } => {
+            let available_total = available
                 .iter()
                 .try_fold(0u32, |total, (_, count)| total.checked_add(*count))
                 .ok_or(InteractionReasonCode::PayloadTooLarge)?;
+            // CR 608.2d: a capped "remove up to N counters" prompt publishes its
+            // engine-computed total bound; "any number" is bounded only by the
+            // counters available (CR 107.1c).
+            let max_total = cap.unwrap_or(available_total);
             AmountAssignmentProjection {
                 candidates: available
                     .iter()
@@ -5865,8 +5873,17 @@ fn project_action_payload(
                 cast_payment_mode_code(*payment_mode),
             );
         }
-        GameAction::ActivateAbility { ability_index, .. } => {
-            push_value_surface(surfaces, InteractionRoleCode::AbilityIndex, ability_index)
+        GameAction::ActivateAbility {
+            ability_index,
+            payment_mode,
+            ..
+        } => {
+            push_value_surface(surfaces, InteractionRoleCode::AbilityIndex, ability_index);
+            push_value_surface(
+                surfaces,
+                InteractionRoleCode::PaymentMode,
+                cast_payment_mode_code(*payment_mode),
+            );
         }
         GameAction::DeclareAttackers { attacks, bands } => {
             for (index, (attacker, target)) in attacks.iter().enumerate() {
@@ -6903,6 +6920,10 @@ fn actor_candidates(
     let manual_cast_candidates = candidates
         .iter()
         .filter_map(|candidate| {
+            // CR 605.3a: a mana ability has no payment of its own to make by hand.
+            if super::casting::activates_mana_ability(state, &candidate.action) {
+                return None;
+            }
             let mut manual = candidate.clone();
             let payment_mode = manual.action.payment_mode_mut()?;
             if *payment_mode == CastPaymentMode::Manual {

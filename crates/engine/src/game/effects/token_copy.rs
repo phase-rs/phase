@@ -1,5 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::{DisplaySource, GameObject};
+use crate::game::game_object::{DisplayIdentity, DisplaySource, GameObject};
 use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -8,7 +8,7 @@ use crate::types::ability::{
     ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
     TriggerDefinition,
 };
-use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
+use crate::types::card::PrintedLoyalty;
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -256,13 +256,13 @@ pub fn resolve(
             count: count as u32,
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(source.values),
-                display_source: source.display_source,
-                printed_ref: source.printed_ref,
-                token_image_ref: source.token_image_ref,
                 // Created copy-tokens derive their descriptor from their
                 // own base at injection (copy exceptions included), so the
                 // source's captured body is deliberately not carried here.
-                token_art: None,
+                display: DisplayIdentity {
+                    token_art: None,
+                    ..source.display
+                },
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -303,10 +303,7 @@ pub(crate) enum CopySourceReferent {
 pub(crate) struct CopySource {
     pub(crate) incarnation: ObjectIncarnationRef,
     pub(crate) values: CopiableValues,
-    pub(crate) display_source: DisplaySource,
-    pub(crate) printed_ref: Option<PrintedCardRef>,
-    pub(crate) token_image_ref: Option<TokenImageRef>,
-    pub(crate) token_art: Option<TokenArtDescriptor>,
+    pub(crate) display: DisplayIdentity,
 }
 
 impl CopySource {
@@ -318,10 +315,7 @@ impl CopySource {
         Some(Self {
             incarnation: ObjectIncarnationRef::from_object(source),
             values,
-            display_source: source.display_source,
-            printed_ref: source.printed_ref.clone(),
-            token_image_ref: source.token_image_ref.clone(),
-            token_art: source.token_art.clone(),
+            display: source.display_identity(),
         })
     }
 
@@ -343,14 +337,16 @@ impl CopySource {
         Some(Self {
             incarnation,
             values,
-            display_source: if token_image_ref.is_some() {
-                DisplaySource::Token
-            } else {
-                DisplaySource::Card
+            display: DisplayIdentity {
+                display_source: if token_image_ref.is_some() {
+                    DisplaySource::Token
+                } else {
+                    DisplaySource::Card
+                },
+                printed_ref: None,
+                token_image_ref,
+                token_art: None,
             },
-            printed_ref: None,
-            token_image_ref,
-            token_art: None,
         })
     }
 }
@@ -704,10 +700,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 ) -> CopyTokenApplyStatus {
     let CopyTokenSpec {
         mut values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -770,10 +763,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 
             let copy_spec = Box::new(CopyTokenSpec {
                 values: values.clone(),
-                display_source,
-                printed_ref: printed_ref.clone(),
-                token_image_ref: token_image_ref.clone(),
-                token_art: token_art.clone(),
+                display: display.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -902,10 +892,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 
         let copy_spec = Box::new(CopyTokenSpec {
             values: values.clone(),
-            display_source,
-            printed_ref: printed_ref.clone(),
-            token_image_ref: token_image_ref.clone(),
-            token_art: token_art.clone(),
+            display: display.clone(),
             extra_keywords: extra_keywords.clone(),
             additional_modifications: additional_modifications.clone(),
             tapped,

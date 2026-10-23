@@ -13,6 +13,7 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -69,6 +70,7 @@ fn blinked_scroll_rack_still_returns_the_cards_it_exiled() {
         .act(GameAction::ActivateAbility {
             source_id: rack,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Scroll Rack");
     if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {

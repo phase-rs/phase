@@ -4118,16 +4118,13 @@ pub(crate) fn deliver_replaced_zone_change(
                     duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
                     duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
                     values: *copy.values,
-                    display_source: copy.display_source,
-                    printed_ref: copy.printed_ref,
-                    token_image_ref: copy.token_image_ref,
                     // The recipient keeps its own base (Clone is a 0/0
                     // Shapeshifter underneath), so it rides the source's
                     // captured descriptor — or the legacy live-field search
-                    // when the source had none — exactly like the exact refs
-                    // above. Created copy-tokens never pass through here;
-                    // their descriptor is derived by the creation injectors.
-                    token_art: copy.token_art,
+                    // when the source had none — exactly like the exact refs.
+                    // Created copy-tokens never pass through here; their
+                    // descriptor is derived by the creation injectors.
+                    display: copy.display,
                     additional_modifications: copy.additional_modifications,
                     effect_kind: EffectKind::BecomeCopy,
                 };

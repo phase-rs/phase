@@ -188,6 +188,11 @@ pub enum GameAction {
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
+        /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference,
+        /// the same opt-in as `CastSpell`'s. `Manual` stops in `ManaPayment`
+        /// after targets so the player activates mana abilities themself.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        payment_mode: CastPaymentMode,
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
@@ -1942,11 +1947,12 @@ impl GameAction {
         )
     }
 
-    /// The cast payment preference carried by this action, if it is one of
-    /// the cast-family variants (CR 601.2g).
+    /// The payment preference carried by this action, if it is one of the
+    /// cast-family variants (CR 601.2g) or an activation (CR 602.2b).
     pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
+            | GameAction::ActivateAbility { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }
             | GameAction::CastSpellAsMiracle { payment_mode, .. }
             | GameAction::CastSpellAsMadness { payment_mode, .. }
@@ -2587,6 +2593,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),

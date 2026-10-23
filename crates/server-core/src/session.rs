@@ -4616,6 +4616,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: source,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 },
             )
             .expect("the activation reaches its election");
@@ -7264,6 +7265,7 @@ mod tests {
             source_id: bearer,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 3)],
+            max_total: None,
             pending_effect: Box::new(pending),
         };
         mgr.try_session(&code).unwrap().state = state;

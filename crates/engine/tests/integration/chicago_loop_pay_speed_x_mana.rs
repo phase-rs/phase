@@ -98,6 +98,7 @@ fn chicago_loop_pay_speed_x_produces_x_mana_and_pays_x_speed() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted");
 
@@ -159,6 +160,7 @@ fn chicago_loop_pay_speed_zero_when_no_speed() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted");
 
@@ -201,6 +203,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate 1");
     runner
@@ -224,6 +227,7 @@ fn chicago_loop_pay_speed_x_is_per_activation() {
         .act(GameAction::ActivateAbility {
             source_id: loop_id,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate 2");
     runner

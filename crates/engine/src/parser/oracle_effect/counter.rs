@@ -9,7 +9,7 @@ use nom::Parser;
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
     DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, XModification,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -1076,8 +1076,16 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
-        let (n, r) = parse_number(rest.trim())?;
-        (QuantityExpr::Fixed { value: n as i32 }, r)
+        // CR 608.2d + CR 107.3a: "remove up to N [kind] counters" lets the
+        // controller choose, at resolution, how many (zero through N) and — for
+        // the untyped form — which kinds. The count is an effect quantity, so
+        // `parse_count_expr` keeps an announced X as `Variable("X")` (Hex
+        // Parasite's "{X}{B/P}: Remove up to X counters") instead of the X→0
+        // reading of `parse_number`. `UpTo` carries the "may remove fewer"
+        // grammar to `resolve_remove`, which caps the interactive selection at
+        // the resolved maximum (Glissa Sunslayer, Gremlin Mine, Render Inert).
+        let (max, r) = parse_count_expr(rest.trim())?;
+        (QuantityExpr::up_to(max), r)
     } else {
         let (n, r) = parse_number(after_remove)?;
         (QuantityExpr::Fixed { value: n as i32 }, r)
@@ -1112,8 +1120,10 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // MULTI-SOURCE choice. The single-source interactive path (Rhys, Tetravus)
     // cannot model "from among", so leave such cards Unimplemented (out of scope)
     // rather than silently collapsing them to a single-source removal (Galloping
-    // Lizrog, Eventide's Shadow). Scoped to the `UpTo` ("any number") branch so
-    // non-interactive removals are untouched.
+    // Lizrog, Eventide's Shadow, and the capped "remove up to three stun
+    // counters from among all permanents" of Sensational Spider-Man). Scoped to
+    // the `UpTo` ("any number" / "up to N") branches so non-interactive removals
+    // are untouched.
     if count.is_up_to()
         && nom_on_lower(target_text, target_text, |i| {
             value((), tag("among ")).parse(i)
@@ -1601,8 +1611,24 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 }
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
-/// mana-doubling, or P/T-doubling.
+/// mana-doubling, or P/T-doubling; CR 107.3e: "double the value of X" to the
+/// triggering spell's X.
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    // CR 107.3e: in a spell-cast trigger body, "the value of X" is the X of the
+    // spell that caused the trigger (the body's object anaphor is pinned to
+    // `TriggeringSource` only by a spell-cast head). Anywhere else nothing names
+    // whose X it is, so the clause stays an honest gap.
+    if all_consuming(tag::<_, _, OracleError<'_>>("double the value of x"))
+        .parse(lower)
+        .is_ok()
+    {
+        return Some(match ctx.object_pronoun_ref {
+            Some(TargetFilter::TriggeringSource) => Effect::ModifyAnnouncedX {
+                modification: XModification::DOUBLE,
+            },
+            _ => Effect::unimplemented("double_value_of_x_without_triggering_spell", lower),
+        });
+    }
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter
     // kinds. The doubled amount is intrinsic to the resolver ("give as many of
     // those counters as already present"), never a `QuantityExpr` carrier.
@@ -3089,7 +3115,137 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+        // CR 608.2d: "up to" is a resolution-time choice of fewer; the count is
+        // the cap, not a fixed removal.
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 }));
+    }
+
+    /// CR 107.3a + CR 608.2d: "remove up to X counters" (Hex Parasite) keeps the
+    /// announced X as `Variable("X")` under the `UpTo` cap — not the X→0 reading
+    /// of a cost-position parser, and not a fixed count that drops "up to".
+    #[test]
+    fn remove_counter_up_to_x_keeps_the_variable_cap() {
+        let result = try_parse_remove_counter(
+            "remove up to x counters from target permanent",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(counter_type, None, "untyped: the controller chooses kinds");
+        assert_eq!(
+            count,
+            QuantityExpr::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            })
+        );
+        assert!(matches!(target, TargetFilter::Typed(_)), "{target:?}");
+    }
+
+    /// CR 608.2d + CR 122.1: the typed form caps a single kind (Gremlin Mine:
+    /// "Remove up to four charge counters from target noncreature artifact").
+    #[test]
+    fn remove_counter_up_to_n_typed_caps_that_kind() {
+        let result = try_parse_remove_counter(
+            "remove up to four charge counters from target noncreature artifact",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(
+            counter_type,
+            Some(CounterType::Generic("charge".to_string()))
+        );
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 4 }));
+    }
+
+    /// CR 608.2d: the capped "up to N ... from among <objects>" is the same
+    /// multi-source distribution as "any number ... from among", which the
+    /// single-source removal cannot model; it stays out of this builder. The
+    /// positive control is the single-source sibling of the same clause.
+    #[test]
+    fn remove_counter_up_to_n_from_among_is_not_a_single_source_removal() {
+        assert!(
+            try_parse_remove_counter(
+                "remove up to three stun counters from target permanent",
+                &mut default_ctx(),
+            )
+            .is_some(),
+            "reach guard: the single-source clause parses"
+        );
+        assert_eq!(
+            try_parse_remove_counter(
+                "remove up to three stun counters from among all permanents",
+                &mut default_ctx(),
+            ),
+            None
+        );
+    }
+
+    /// The full verbatim Hex Parasite line: the removal is capped at X and its
+    /// "for each counter removed this way" rider repeats once per counter the
+    /// removal actually removed (CR 608.2c).
+    #[test]
+    fn hex_parasite_parses_up_to_x_removal_with_a_per_counter_rider() {
+        let parsed = crate::parser::parse_oracle_text(
+            "{X}{B/P}: Remove up to X counters from target permanent. For each counter removed this way, this creature gets +1/+0 until end of turn. ({B/P} can be paid with either {B} or 2 life.)",
+            "Hex Parasite",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(a.effect.as_ref(), Effect::RemoveCounter { .. }))
+            .expect("the activated removal parses");
+        let Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        } = ability.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*counter_type, None);
+        assert_eq!(
+            *count,
+            QuantityExpr::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            })
+        );
+        let rider = ability
+            .sub_ability
+            .as_deref()
+            .expect("the per-counter rider is chained");
+        assert!(
+            matches!(rider.effect.as_ref(), Effect::Pump { .. }),
+            "{rider:?}"
+        );
+        assert!(
+            matches!(
+                rider.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount { .. }
+                })
+            ),
+            "{rider:?}"
+        );
     }
 
     /// CR 608.2k anaphor: "remove those counters" with no "from {target}"

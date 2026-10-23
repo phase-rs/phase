@@ -1640,6 +1640,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::SkipNextStep { .. } => {}
         Effect::AdditionalPhase { .. } => {}
         Effect::Double { .. } => {}
+        Effect::ModifyAnnouncedX { .. } => {}
         Effect::RuntimeHandled { .. } => {}
         Effect::Incubate { .. } => {}
         Effect::Amass { .. } => {}

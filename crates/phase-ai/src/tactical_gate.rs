@@ -310,6 +310,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     if let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     {
         if let Some(object) = ctx.state.objects.get(source_id) {
@@ -1414,6 +1415,7 @@ fn assess_counter_announcement(ctx: &PolicyContext<'_>) -> Option<GateDecision> 
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => {
             let definition = ctx.effective_activated_ability()?;
             if !collect_definition_effects_with(&definition, ModeWalk::All)
@@ -1893,6 +1895,7 @@ fn activated_ueot_pump_source(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     else {
         return None;
@@ -2351,7 +2354,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id: candidate_source,
-                        ability_index: candidate_index,
+                        ability_index: candidate_index, ..
                     } if candidate_source == source_id && candidate_index == ability_index
                 )
             })
@@ -3603,7 +3606,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if source_id == source
                 )
             })
@@ -5991,7 +5994,7 @@ mod tests {
                     &candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if *source_id == untap_source
                 )
             })
@@ -8113,6 +8116,7 @@ mod tests {
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     },
                     Some(index),
                 ) => *source_id == source && *ability_index == index,
@@ -8660,6 +8664,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
             let target = candidate_actions(setup.state())
@@ -8848,6 +8853,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         let target = candidate_actions(setup.state())
@@ -9531,6 +9537,7 @@ mod tests {
                     .act(GameAction::ActivateAbility {
                         source_id: drawback,
                         ability_index: 0,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     })
                     .expect("the engine announces the harmful own ability");
                 assert!(runner.state().stack.iter().any(|entry| {
@@ -9811,6 +9818,122 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// Gate verdict for P0 targeting a P1 creature warded with `ward`, with P0's
+    /// hand staged by `stage_hand`. When `stage_hand` returns the id of a hand
+    /// card, that card is the spell being cast (the decision's pending cast), as
+    /// for a real `TargetSelection`.
+    fn ward_discard_gate(
+        ward: WardCost,
+        stage_hand: impl FnOnce(&mut GameScenario) -> Option<ObjectId>,
+    ) -> GateDecision {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(ward))
+            .id();
+        let spell_being_cast = stage_hand(&mut scenario);
+        let runner = scenario.build();
+        let state = runner.state();
+        let mut decision = damage_target_decision(creature, 3);
+        if let (Some(spell), WaitingFor::TargetSelection { pending_cast, .. }) =
+            (spell_being_cast, &mut decision.waiting_for)
+        {
+            pending_cast.object_id = spell;
+            pending_cast.card_id = state.objects[&spell].card_id;
+        }
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Saruman of Many Colors: "Ward—Discard an enchantment, instant, or
+    /// sorcery card."
+    fn saruman_ward() -> WardCost {
+        use engine::types::ability::{TypeFilter, TypedFilter};
+        WardCost::Discard {
+            count: 1,
+            filter: Some(TargetFilter::Or {
+                filters: [
+                    TypeFilter::Enchantment,
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]
+                .into_iter()
+                .map(|card_type| TargetFilter::Typed(TypedFilter::new(card_type)))
+                .collect(),
+            }),
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        }
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 205.2a + CR 118.3: a card-type-filtered ward
+    /// discard is payable only from a hand card of a listed type.
+    #[test]
+    fn ward_discard_filter_requires_a_matching_hand_card() {
+        let creature_only = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(creature_only, GateDecision::Reject);
+
+        let with_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_spell_to_hand(P0, "Shock", true);
+            None
+        });
+        assert_ne!(with_instant, GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 118.3: a counted ward discard needs that many
+    /// cards in hand.
+    #[test]
+    fn ward_discard_count_requires_enough_hand_cards() {
+        let ward = WardCost::Discard {
+            count: 2,
+            filter: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        };
+        let one_card = ward_discard_gate(ward.clone(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(one_card, GateDecision::Reject);
+
+        let two_cards = ward_discard_gate(ward, |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_creature_to_hand(P0, "Cub", 1, 1);
+            None
+        });
+        assert_ne!(two_cards, GateDecision::Reject);
+    }
+
+    /// CR 601.2a + CR 702.21a: the spell being cast is on the stack, not in
+    /// hand, when the ward trigger resolves, so it cannot pay its own target's
+    /// ward discard.
+    #[test]
+    fn ward_discard_excludes_the_spell_being_cast() {
+        let only_the_spell = ward_discard_gate(saruman_ward(), |scenario| {
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_eq!(only_the_spell, GateDecision::Reject);
+
+        let with_a_second_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_spell_to_hand(P0, "Opt", true);
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_ne!(with_a_second_instant, GateDecision::Reject);
     }
 
     /// CR 702.21a + CR 119.4: Phyrexian Fleshgorger's Ward uses its current
@@ -10614,6 +10737,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
         };

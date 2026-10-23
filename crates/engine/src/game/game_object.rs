@@ -58,6 +58,83 @@ pub enum DisplaySource {
     Token,
 }
 
+/// Image-routing identity of a copy source, bundled so every carrier of it
+/// (`ContinuousModification::CopyValues`, `LatchedCopiableSnapshot`,
+/// `PrecomputedCopyValues`, `CopyTokenSpec`, the merge layer effect) moves the
+/// same four fields together and cannot drop one.
+///
+/// NONE of these fields are CR 707.2 copiable values (status/art are not copied
+/// per CR 707.2) — they are display routing only, deliberately kept off
+/// `CopiableValues`, and mirror the flat `GameObject` storage (`display_source`
+/// discriminates: `Card` => read `printed_ref`; `Token` => read
+/// `token_image_ref`).
+///
+/// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token* stays a
+/// nontoken (token-ness is created by a token-making effect per CR 111.1, and
+/// is not among the CR 707.2 copiable values), but its name is the token's,
+/// which only resolves in the token art database — so the source's
+/// `display_source = Token` and `token_image_ref` must ride along, not just
+/// `printed_ref`.
+///
+/// Serialized with `#[serde(flatten)]` by every carrier; every field defaults,
+/// so payloads that predate any of the keys still deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DisplayIdentity {
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    /// Scryfall oracle-id pointer of the source when it is a printed card.
+    /// `None` when the source is a true token (then `token_image_ref` carries
+    /// the routing).
+    #[serde(default)]
+    pub printed_ref: Option<PrintedCardRef>,
+    /// Exact token-art pointer of the source when it is a true token.
+    /// `None` for printed-card sources.
+    #[serde(default)]
+    pub token_image_ref: Option<TokenImageRef>,
+    /// Intrinsic token-art body of the source, carried so a copy of a token
+    /// without an exact ref still renders from the source's shape rather than
+    /// the recipient's stale descriptor. `None` for printed-card sources and
+    /// pre-descriptor snapshots.
+    #[serde(default)]
+    pub token_art: Option<TokenArtDescriptor>,
+}
+
+impl GameObject {
+    /// Capture this object's live display routing as a [`DisplayIdentity`].
+    pub fn display_identity(&self) -> DisplayIdentity {
+        DisplayIdentity {
+            display_source: self.display_source,
+            printed_ref: self.printed_ref.clone(),
+            token_image_ref: self.token_image_ref.clone(),
+            token_art: self.token_art.clone(),
+        }
+    }
+
+    /// Install a copy source's display routing on the LIVE fields only. Used by
+    /// the Layer-1 `CopyValues` arm (CR 613.1a), where the layer pass resets the
+    /// live fields from their baselines on every recomputation, so the baseline
+    /// (`base_printed_ref`) must stay untouched.
+    pub fn install_display_identity(&mut self, display: &DisplayIdentity) {
+        self.display_source = display.display_source;
+        self.printed_ref = display.printed_ref.clone();
+        self.token_image_ref = display.token_image_ref.clone();
+        self.token_art = display.token_art.clone();
+    }
+
+    /// Install a copy source's display routing as the object's BASE identity
+    /// (the liminal copy-token path, CR 707.2: the token's own base is the
+    /// copied values). Sets `display_source`, `printed_ref`/`base_printed_ref`
+    /// and `token_image_ref`; deliberately leaves `token_art` alone, because a
+    /// created copy-token derives its descriptor from its own base at
+    /// injection (which reflects copy exceptions the source never had).
+    pub fn install_display_identity_as_base(&mut self, display: &DisplayIdentity) {
+        self.display_source = display.display_source;
+        self.printed_ref = display.printed_ref.clone();
+        self.base_printed_ref = display.printed_ref.clone();
+        self.token_image_ref = display.token_image_ref.clone();
+    }
+}
+
 /// CR 702.xxx: Prepared-permanent marker payload (Strixhaven).
 ///
 /// Carried as `GameObject::prepared: Option<PreparedState>`. `Some(_)` means

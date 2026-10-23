@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplaySource};
+use crate::game::game_object::{AttachTarget, DisplayIdentity};
 
 use super::counter::CounterType;
 
@@ -10,7 +10,6 @@ use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
     StaticDefinition, TargetRef,
 };
-use super::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -469,25 +468,19 @@ impl TokenHostRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenSpec {
     pub values: Box<CopiableValues>,
-    pub display_source: DisplaySource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub printed_ref: Option<PrintedCardRef>,
-    /// CR 111.1 + CR 707.2: exact token-art pointer of the copy source when it
-    /// is itself a true token (`display_source == Token`). Carried so a
-    /// token-copy of a token resolves the source token's art instead of falling
-    /// back to a name+filter Scryfall search. `None` for printed-card sources.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_image_ref: Option<TokenImageRef>,
-    /// Intrinsic token-art body of the copy source, captured alongside
-    /// `token_image_ref` by the enter-as-copy replacement selection. Carried
-    /// so an enter-as-copy recipient (which keeps its own base and never
-    /// runs the token creation injectors) renders from the source's printed
-    /// shape even when no exact ref matched. `None` for printed-card
-    /// sources, departed (LKI) sources, and created copy-tokens — the
-    /// latter derive their descriptor from their own base at injection,
-    /// which also reflects copy exceptions the source never had.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_art: Option<TokenArtDescriptor>,
+    /// Display routing of the copy source (see [`DisplayIdentity`]). CR 111.1 +
+    /// CR 707.2: carries the exact token-art pointer when the source is itself a
+    /// true token, so a token-copy of a token resolves the source token's art
+    /// instead of falling back to a name+filter Scryfall search. `token_art` is
+    /// captured by the enter-as-copy replacement selection so an enter-as-copy
+    /// recipient (which keeps its own base and never runs the token creation
+    /// injectors) renders from the source's printed shape even when no exact ref
+    /// matched; it is `None` for printed-card sources, departed (LKI) sources,
+    /// and created copy-tokens — the latter derive their descriptor from their
+    /// own base at injection, which also reflects copy exceptions the source
+    /// never had.
+    #[serde(flatten)]
+    pub display: DisplayIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -38,6 +38,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
     ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::SubtypeSet;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -2158,10 +2159,19 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // dynamic-quantity reading of the counter-kind cardinality (Perrie, the
         // Pulverizer: "X is the number of different kinds of counters among
         // permanents you control") — shares this nest for the same reason.
+        //
+        // CR 205.3: "\<category\> type[s] among <population>" (Tam: planeswalker
+        // types, CR 205.3j; Hoshi/Saavik: creature types, CR 205.3m) — the
+        // category-restricted distinct-subtype count. Reads the population with
+        // `TypePhraseGrammar::Legacy` (REQUIRED: "non-Borg ..." needs Legacy's
+        // `classify_negation`); only the two attested heads bind, unprinted
+        // heads fail closed. Leading tokens are disjoint from every earlier
+        // arm's head, so no commit-before-dispatch hazard.
         alt((
             parse_distinct_subtypes_among,
             parse_turns_taken_this_game,
             parse_distinct_counter_kinds_among_tail,
+            parse_distinct_category_subtypes_among,
         )),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
         // and "different <power|mana value> among <type>" (distinct-by-quality —
@@ -3561,7 +3571,46 @@ fn parse_distinct_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 400.1 / CR 109.2 / CR 601.2a: the shared population grammar. Reads with
     // `TypePhraseGrammar::Legacy`, the grammar this head has always used.
     let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
-    Ok((rest, QuantityRef::DistinctSubtypes { source, exclude }))
+    Ok((
+        rest,
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict: None,
+        },
+    ))
+}
+
+/// CR 205.3: "\<category\> type\[s\] among \<population\>" →
+/// [`QuantityRef::DistinctSubtypes`] with `restrict: Some(set)`.
+///
+/// The category-restricted dual of [`parse_distinct_subtypes_among`]: Tam, the
+/// Possibility ("the number of planeswalker types among planeswalkers you
+/// control", CR 205.3j) and Hoshi Sato / Saavik ("creature types among
+/// non-Borg creatures you control", CR 205.3m). Reads with
+/// [`TypePhraseGrammar::Legacy`] — REQUIRED, not Strict: "non-Borg creatures
+/// you control" needs Legacy's `classify_negation` (unknown →
+/// `Non(Subtype(..))`). Only the two attested heads bind; unprinted heads
+/// ("land types", "artifact types", ...) fail closed (no producer).
+/// Combinator-composed from `alt`/`value`/`opt` — no string dispatch.
+fn parse_distinct_category_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, set) = alt((
+        value(SubtypeSet::Creature, tag("creature")),
+        value(SubtypeSet::Planeswalker, tag("planeswalker")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" type").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
+    Ok((
+        rest,
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude: SubtypeExclusion::None,
+            restrict: Some(set),
+        },
+    ))
 }
 
 /// CR 122.1: Parse "different kind[s] of counters {on|among} <filter>" after
@@ -10612,6 +10661,100 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn test_parse_the_number_of_planeswalker_types_among() {
+        // CR 205.3j: Tam, the Possibility — "the number of planeswalker types
+        // among planeswalkers you control" (category-restricted
+        // distinct-subtype count, not the "different subtypes" peer).
+        let (rest, q) =
+            parse_quantity_ref("the number of planeswalker types among planeswalkers you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctSubtypes {
+                source,
+                exclude,
+                restrict,
+            } => {
+                assert_eq!(exclude, SubtypeExclusion::None);
+                assert_eq!(
+                    restrict,
+                    Some(crate::types::card_type::SubtypeSet::Planeswalker)
+                );
+                match source {
+                    CardTypeSetSource::Objects { filter } => match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.type_filters, vec![TypeFilter::Planeswalker]);
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                        }
+                        other => panic!("expected typed planeswalker filter, got {other:?}"),
+                    },
+                    other => panic!("expected Objects source, got {other:?}"),
+                }
+            }
+            other => panic!("expected DistinctSubtypes, got {other:?}"),
+        }
+        // Neg (same fn): the bare head without among+population must not
+        // wholly bind — proves the positive above reached the new arm rather
+        // than a prefix-tolerant fallback.
+        if let Ok((rest, _)) = parse_quantity_ref("the number of planeswalker types") {
+            assert!(
+                !rest.is_empty(),
+                "bare head without among+population must not wholly bind"
+            );
+        }
+        // Cousin untouched (same fn): Niv-Mizzet's pair counting still
+        // declines the nest — all four arms decline, no whole bind.
+        if let Ok((rest, _)) =
+            parse_quantity_ref("the number of different color pairs among permanents you control")
+        {
+            assert!(!rest.is_empty(), "color-pair cousin must not wholly bind");
+        }
+    }
+
+    #[test]
+    fn test_parse_the_number_of_creature_types_among_non_borg() {
+        // CR 205.3m: Hoshi Sato / Saavik — "the number of creature types among
+        // non-Borg creatures you control".
+        let (rest, q) =
+            parse_quantity_ref("the number of creature types among non-Borg creatures you control")
+                .unwrap();
+        // NOTE (plan-tree delta): the space-separated "non Borg" form does NOT
+        // fold — the shared Legacy negation loop breaks when the negated word
+        // is empty (`end == 0`, oracle_target.rs), so only "non-X"/"nonX"
+        // attach. Pre-existing behavior, out of scope to change (no card
+        // prints the space form; the verbatim Hoshi/Saavik text is hyphenated).
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctSubtypes {
+                source,
+                exclude,
+                restrict,
+            } => {
+                assert_eq!(exclude, SubtypeExclusion::None);
+                assert_eq!(
+                    restrict,
+                    Some(crate::types::card_type::SubtypeSet::Creature)
+                );
+                match source {
+                    CardTypeSetSource::Objects { filter } => match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                            assert_eq!(tf.type_filters.len(), 2);
+                            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                            assert!(tf.type_filters.contains(&TypeFilter::Non(Box::new(
+                                TypeFilter::Subtype("Borg".to_string())
+                            ))));
+                        }
+                        other => panic!("expected typed creature filter, got {other:?}"),
+                    },
+                    other => panic!("expected Objects source, got {other:?}"),
+                }
+            }
+            other => panic!("expected DistinctSubtypes, got {other:?}"),
+        }
     }
 
     #[test]

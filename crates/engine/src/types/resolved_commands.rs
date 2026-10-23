@@ -4359,6 +4359,7 @@ mod tests {
             source_zone: crate::types::zones::Zone::Battlefield,
             ability_tag: None,
             is_loyalty_ability: false,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
             targets: vec![crate::types::game_state::ActivationTargetFact::Player(
                 PlayerId(1),
             )],

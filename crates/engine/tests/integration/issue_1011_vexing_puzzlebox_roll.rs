@@ -41,6 +41,7 @@ fn vexing_puzzlebox_tap_ability_rolls_d20() {
             .act(GameAction::ActivateAbility {
                 source_id: puzzlebox,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation must succeed")
             .events,

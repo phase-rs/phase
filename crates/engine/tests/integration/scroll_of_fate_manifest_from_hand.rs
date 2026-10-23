@@ -68,6 +68,7 @@ fn scroll_of_fate_activated_ability_manifests_a_chosen_noncreature_hand_card() {
         .act(GameAction::ActivateAbility {
             source_id: scroll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Scroll of Fate's registered ability must be activatable");
 

@@ -99,11 +99,7 @@ fn activation_ability(
     engine::types::identifiers::ObjectId,
     engine::types::ability::AbilityDefinition,
 )> {
-    let GameAction::ActivateAbility {
-        source_id,
-        ability_index: _,
-    } = &ctx.candidate.action
-    else {
+    let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
         return None;
     };
     ctx.effective_activated_ability()
@@ -204,6 +200,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -486,6 +483,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -536,6 +534,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

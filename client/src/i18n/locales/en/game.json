@@ -2369,7 +2369,15 @@
     "selfManaCost": "its mana cost",
     "selfManaValue": "its mana value",
     "manaCostReduced": "its mana cost reduced by {{reduction}}",
-    "spliceOnto": "onto {{subtype}} {{cost}}"
+    "spliceOnto": "onto {{subtype}} {{cost}}",
+    "wardDiscardAtRandom_few": "discard {{count}} cards at random",
+    "wardDiscardAtRandom_many": "discard {{count}} cards at random",
+    "wardDiscardAtRandom_one": "discard a card at random",
+    "wardDiscardAtRandom_other": "discard {{count}} cards at random",
+    "wardDiscard_few": "discard {{count}} cards",
+    "wardDiscard_many": "discard {{count}} cards",
+    "wardDiscard_one": "discard a card",
+    "wardDiscard_other": "discard {{count}} cards"
   },
   "resolutionOptionalPayment": {
     "title": "Choose an optional payment",

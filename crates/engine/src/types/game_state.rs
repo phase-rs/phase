@@ -9,6 +9,10 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::database::card_db::CardDbHandle;
+use crate::parser::oracle::{
+    parse_attack_exert_header, parse_unknown_conditioned_attack_exert_header,
+};
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
@@ -1292,6 +1296,15 @@ pub struct AbilityActivationRecord {
     pub ability_tag: Option<crate::types::ability::AbilityTag>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_loyalty_ability: bool,
+    /// CR 602.1a + CR 602.2b: the activation cost of the announcement-bound
+    /// definition, captured with the record's other facts before payment. The
+    /// placement publishes it on the activation's event; the record is its
+    /// transport, never a read site. `Unknown` for a record predating the field.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::events::BoundActivationCost::is_unknown"
+    )]
+    pub activation_cost: crate::types::events::BoundActivationCost,
     /// CR 115.1: the committed targets of the whole chain, empty for an
     /// untargeted ability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -7838,7 +7851,9 @@ fn default_copy_retarget_effect_kind() -> EffectKind {
 /// CR 601.2g-h: Whether the engine may auto-pay an unambiguous spell mana cost
 /// or must pause after announcement so the player can activate mana abilities
 /// manually before committing payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(tag = "type")]
 pub enum CastPaymentMode {
     #[default]
@@ -7848,6 +7863,13 @@ pub enum CastPaymentMode {
     /// that irreversible payment decision explicitly.
     AutoExceptSacrificialMana,
     Manual,
+}
+
+impl CastPaymentMode {
+    /// Whether this is the default mode, which wire formats omit.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, CastPaymentMode::Auto)
+    }
 }
 
 /// CR 601.2g + CR 601.2h + CR 602.2b: POSITIVE signal of which "mana first,
@@ -7913,6 +7935,63 @@ pub struct DeferredSacrificeSelection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CastingPermissionIndex(pub usize);
+
+/// CR 107.4f + CR 118.13a + CR 601.2b: how one Phyrexian-shaped symbol of an
+/// activation's mana cost is to be paid, keyed by its canonical identity: its
+/// index in the activation's ordered mana component and the raw printed symbol
+/// at that index. The index alone is not an identity — a cost can repeat a
+/// symbol — and the symbol alone is not either, so both are carried and both
+/// are validated against the locked cost before a record is honored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationShardChoice {
+    pub shard_index: usize,
+    pub shard: crate::types::mana::ManaCostShard,
+    pub choice: ShardChoice,
+}
+
+/// CR 107.4f + CR 118.13a + CR 601.2b + CR 601.2h: the two distinct Phyrexian
+/// payment authorities of a manually paid activation.
+///
+/// * `native_choices` — CR 118.13a + CR 601.2b: the player's announcement, made
+///   as the ability is proposed (after its modes and X, before its targets and
+///   before its total cost is determined, CR 601.2c + CR 601.2f), of whether
+///   each printed Phyrexian or hybrid Phyrexian symbol will be paid with 2 life
+///   or with the corresponding colored mana. It changes which total locks: a
+///   symbol announced as life is not mana in that cost. Bound once and never
+///   rewritten.
+/// * `payment_choices` — CR 601.2h: the selections made when the locked total
+///   is actually paid, after the CR 601.2g mana-ability opportunity. They may
+///   cover ordinary colored symbols a payment-only permission (K'rrik, Son of
+///   Yawgmoth) lets the player pay with life; such a permission never changes
+///   the cost, so these records never feed the cost lock. Absent until that
+///   payment is selected.
+///
+/// No permission is stored: a payment-only permission is read live at payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationPhyrexianIntent {
+    pub native_choices: Vec<ActivationShardChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_choices: Option<Vec<ActivationShardChoice>>,
+}
+
+impl ActivationPhyrexianIntent {
+    /// CR 118.13a + CR 601.2b: an announcement-only intent, before payment.
+    pub fn announced(native_choices: Vec<ActivationShardChoice>) -> Self {
+        Self {
+            native_choices,
+            payment_choices: None,
+        }
+    }
+
+    /// The announced choice for the symbol at `shard_index`, if it is one of the
+    /// activation's printed Phyrexian symbols.
+    pub fn native_choice_at(&self, shard_index: usize) -> Option<ShardChoice> {
+        self.native_choices
+            .iter()
+            .find(|record| record.shard_index == shard_index)
+            .map(|record| record.choice)
+    }
+}
 
 /// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -8210,6 +8289,14 @@ pub struct PendingCast {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) activation_trigger_collection:
         Option<Box<crate::game::triggers::PendingActivationTriggerCollection>>,
+    /// CR 107.4f + CR 118.13a + CR 601.2b + CR 601.2h: a manually paid
+    /// activation's Phyrexian announcement and, once selected, its actual
+    /// Phyrexian payment (see [`ActivationPhyrexianIntent`]). `None` for spells,
+    /// automatic activations, and a manual activation that has not yet reached
+    /// its announcement. Carried by the activation's own root through every
+    /// pause until its mana is paid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_phyrexian_intent: Option<ActivationPhyrexianIntent>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -8965,6 +9052,7 @@ impl PendingCast {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         }
     }
 
@@ -8976,17 +9064,21 @@ impl PendingCast {
     /// CR 602.2b: the root of an in-flight ACTIVATED ability. Every activation
     /// root is built here, so each one must name its cost-modifier carrier
     /// (`None` only for the mana-free loyalty fast path and legacy callers) —
-    /// the carrier cannot be silently dropped by a fresh root.
+    /// the carrier cannot be silently dropped by a fresh root. Likewise each
+    /// root names the activation's payment mode (CR 602.2b + CR 601.2g-h), so a
+    /// root rebuilt mid-activation cannot fall back to automatic payment.
     pub fn for_activation(
         source_id: ObjectId,
         ability: ResolvedAbility,
         cost: ManaCost,
         ability_index: usize,
         activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+        payment_mode: CastPaymentMode,
     ) -> Self {
         let mut pending = Self::new(source_id, CardId(0), ability, cost);
         pending.activation_ability_index = Some(ability_index);
         pending.activation_cost_snapshot = activation_cost_snapshot;
+        pending.payment_mode = payment_mode;
         pending
     }
 
@@ -14284,6 +14376,62 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
     Ok(())
 }
 
+/// Recover historical attack-cost predicates from the same saved paragraph.
+/// Only the absent semantic leaf changes; retained definitions and their
+/// occurrence, copy, provider and causal authorities remain in place.
+fn migrate_legacy_attack_exert_conditions(value: &mut serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let permission = match object.get("mode").and_then(serde_json::Value::as_str) {
+                Some("Exerted") => serde_json::from_value::<TriggerDefinition>(
+                    serde_json::Value::Object(object.clone()),
+                )
+                .ok(),
+                _ => None,
+            };
+            if let Some(description) = permission
+                .filter(|permission| {
+                    permission.is_attack_exert_permission()
+                        && permission.attack_cost_condition.is_none()
+                })
+                .and_then(|permission| permission.description)
+            {
+                let lower = description.to_lowercase();
+                match nom_on_lower(&description, &lower, parse_attack_exert_header) {
+                    Some((Some(condition), _)) => {
+                        object.insert(
+                            "attack_cost_condition".to_string(),
+                            serde_json::to_value(condition).map_err(|error| error.to_string())?,
+                        );
+                    }
+                    Some((None, _)) => {}
+                    None => {
+                        if nom_on_lower(
+                            &description,
+                            &lower,
+                            parse_unknown_conditioned_attack_exert_header,
+                        )
+                        .is_some()
+                        {
+                            return Err("legacy attack-exert condition cannot be recovered from its saved description".to_string());
+                        }
+                    }
+                }
+            }
+            for child in object.values_mut() {
+                migrate_legacy_attack_exert_conditions(child)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                migrate_legacy_attack_exert_conditions(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried `options: Vec<DungeonId>` and
 /// `WaitingFor::ChooseDungeonRoom` carried `options: Vec<u8>` plus `option_names: Vec<String>`
 /// before each option grew the room's printed name and room-ability text (CR 309.4b-c), so a save
@@ -15169,6 +15317,28 @@ fn reject_legacy_raw_prompt_authority(value: &serde_json::Value) -> Result<(), S
     let Some(kind) = waiting_for.get("type").and_then(serde_json::Value::as_str) else {
         return Ok(());
     };
+    if kind == "ExertChoice" {
+        let data = &waiting_for["data"];
+        if data
+            .get("permission")
+            .is_none_or(serde_json::Value::is_null)
+            || data
+                .get("remaining")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|remaining| {
+                    remaining.iter().any(|pending| {
+                        pending
+                            .get("permission")
+                            .is_none_or(serde_json::Value::is_null)
+                    })
+                })
+        {
+            return Err(
+                "legacy ExertChoice persistence has no exact attack permission authority".into(),
+            );
+        }
+        return Ok(());
+    }
     if !matches!(kind, "NamedChoice" | "OpponentGuess") {
         return Ok(());
     }
@@ -15403,6 +15573,13 @@ impl ZoneOpponentChooserPurpose {
     fn is_ordinary(&self) -> bool {
         matches!(self, Self::Ordinary)
     }
+}
+
+/// CR 508.1g–j: An eligible optional attack cost, bound before any payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttackExert {
+    pub attacker: ObjectId,
+    pub permission: TriggerDefinitionRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15697,15 +15874,17 @@ pub enum WaitingFor {
     },
     /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
     /// pay the optional "exert this creature as it attacks" cost on each
-    /// attacker that has an exert-as-attack ability and hasn't been exerted this
-    /// turn. `attacker` is the creature currently being decided; `remaining` is
+    /// eligible ability occurrence. `attacker` is the creature currently being
+    /// decided; `permission` binds its source incarnation and occurrence. Eligibility
+    /// is latched before payment; `remaining` is
     /// the queue of further exert candidates this declaration. Mirrors the
     /// one-at-a-time loop of `UntapChoice`.
     ExertChoice {
         player: PlayerId,
         attacker: ObjectId,
+        permission: TriggerDefinitionRef,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        remaining: Vec<ObjectId>,
+        remaining: Vec<PendingAttackExert>,
     },
     /// CR 508.1g + CR 702.154a: As attackers are declared, the active player
     /// may tap up to one eligible creature for each Enlist instance on an
@@ -16886,6 +17065,11 @@ pub enum WaitingFor {
         /// selection builds one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+        /// CR 602.2b + CR 601.2g-h: for activated abilities, the activation's
+        /// payment mode, carried like the cost-modifier carrier until mode
+        /// selection builds the `PendingCast`.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        activation_payment_mode: CastPaymentMode,
         /// Mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
         /// CR 700.2: Engine computes which modes have been previously chosen; frontend uses this to disable them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -17972,6 +18156,13 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         counter_type: Option<CounterType>,
         available: Vec<(CounterType, u32)>,
+        /// CR 608.2d: the most counters, in total across every kind, the
+        /// controller may remove — "remove up to N counters" (Hex Parasite's
+        /// announced X, Glissa Sunslayer's three), already bounded by the
+        /// counters `available`. `None` is the uncapped "any number" choice
+        /// (CR 107.1c). Engine-computed so no client derives the limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_total: Option<u32>,
         pending_effect: Box<ResolvedAbility>,
     },
     /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — mid-resolution prompt.
@@ -23938,8 +24129,10 @@ declare_game_state! {
     /// are surfaced by `filter_state_for_viewer` ONLY to `private_look_player`,
     /// so the looking player can see the card while deciding a subsequent
     /// "you may reveal that card" optional, without leaking it to opponents.
-    /// Cleared at depth 0 of `resolve_ability_chain` and at action boundaries
-    /// once no optional-effect decision that depends on the peek is pending.
+    /// Cleared at depth 0 of `resolve_ability_chain` and at every action
+    /// boundary except while the pending prompt is an `OptionalEffectChoice` or
+    /// `RevealChoice`, or a parked ability continuation still holds a
+    /// `DigSource::PriorLook` reader (`engine::private_look_outlives_action_boundary`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_look_ids: Vec<ObjectId>,
     /// CR 701.20e: The player to whom `private_look_ids` is visible (the looker).
@@ -24347,11 +24540,28 @@ declare_game_state! {
     /// existed on the stack (`stack::record_departed_stack_spell`) — keyed by storage id,
     /// then the incarnation the spell had on the stack. Consulted by
     /// `targeting::triggering_spell` / `copy_spell::copy_source_entry` once a
-    /// spell-cast trigger's spell has left the stack. Cleared with
-    /// `lki_by_incarnation` at step transitions.
+    /// spell-cast trigger's spell has left the stack. Cleared at step transitions by
+    /// `clear_departed_stack_records`, with its activated-ability sibling
+    /// `departed_activated_abilities`.
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub departed_stack_spells: im::HashMap<ObjectId, im::HashMap<u64, DepartedStackSpell>>,
+
+    /// CR 113.1c + CR 113.7a + CR 608.2h: an activated ability's stack entry as it last
+    /// existed on the stack (`stack::record_departed_stack_entry`), keyed by the entry's
+    /// own id. An ability on the stack is an object this engine keeps only as its
+    /// `StackEntry` (no `GameObject`), and its id is minted for it alone and never reused,
+    /// so there is no incarnation layer. Consulted by `targeting::triggering_activation`
+    /// once an activation trigger's "that ability" has left the stack without resolving
+    /// (countered, CR 701.6a). Shares every lifecycle site of `departed_stack_spells`:
+    /// `clear_departed_stack_records` (step clear),
+    /// `retain_trigger_referenced_departed_stack_records` (loop prune), and the viewer
+    /// projection (`visibility::redact_hidden_identity_side_tables` drops a record whose
+    /// source is hidden from the viewer; the live-stack redaction loops redact every
+    /// record it keeps).
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
+    pub departed_activated_abilities: im::HashMap<ObjectId, StackEntry>,
 
     /// CR 607.2a + CR 607.2b + CR 113.7a: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
@@ -25069,6 +25279,7 @@ impl GameStateDecode {
         }
         migrate_legacy_turn_face_up_resume(&mut value)?;
         migrate_legacy_dungeon_choice_previews(&mut value)?;
+        migrate_legacy_attack_exert_conditions(&mut value)?;
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
@@ -25135,6 +25346,7 @@ impl GameStateDecode {
         // be paused at either dungeon prompt, so the compatibility boundary has
         // to rebuild those payloads before `RawGameStateFields` sees them.
         migrate_legacy_dungeon_choice_previews(value)?;
+        migrate_legacy_attack_exert_conditions(value)?;
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
@@ -30448,6 +30660,7 @@ impl GameState {
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
             departed_stack_spells: im::HashMap::new(),
+            departed_activated_abilities: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
@@ -31683,9 +31896,10 @@ impl GameState {
                 occurrence.turn_journal_index = 0;
             }
         }
-        // CR 104.4b + CR 608.2h: BEFORE the stack-carrier loop below clears each
+        // CR 104.4b + CR 608.2h: prune both departed stack tables (spells and
+        // activated abilities) BEFORE the stack-carrier loop below clears each
         // trigger's pin (`clear_trigger_identity_recursive`), which the prune reads.
-        clone.retain_trigger_referenced_departed_spells();
+        clone.retain_trigger_referenced_departed_stack_records();
 
         // CR 104.4b + CR 608.2h: which `lki_copiable_values_by_incarnation`
         // entries an ability can still read as its own copy source. Read BEFORE
@@ -31890,12 +32104,27 @@ impl GameState {
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
     /// trigger on the stack or resolving can still name, plus every departure whose spell a
     /// `BecomesTarget` targeter still names (`targeting::event_referent_controller` reads
-    /// that record); the rest are history, not position.
+    /// that record), and the `departed_activated_abilities` records an activation trigger on
+    /// the stack or resolving still names (CR 602.2a: the event names the activation's own
+    /// stack object; `targeting::triggering_activation` reads it); the rest are history, not
+    /// position.
     /// Mirrors `targeting::triggering_spell`: a pinned trigger keeps its pinned record, an
     /// unpinned one the highest key.
-    pub(crate) fn retain_trigger_referenced_departed_spells(&mut self) {
+    pub(crate) fn retain_trigger_referenced_departed_stack_records(&mut self) {
         let mut retained: HashSet<ObjectIncarnationRef> = HashSet::new();
+        let mut retained_activations: HashSet<ObjectId> = HashSet::new();
         for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(GameEvent::AbilityActivated {
+                        stack_entry: Some(activation),
+                        ..
+                    }),
+                ..
+            } = &entry.kind
+            {
+                retained_activations.insert(*activation);
+            }
             if let StackEntryKind::TriggeredAbility {
                 ability,
                 trigger_event: Some(GameEvent::SpellCast { object_id, .. }),
@@ -31918,6 +32147,8 @@ impl GameState {
                 }
             }
         }
+        self.departed_activated_abilities
+            .retain(|activation, _| retained_activations.contains(activation));
         let targeted_announcements = self.targeter_spell_announcements();
         self.departed_stack_spells = std::mem::take(&mut self.departed_stack_spells)
             .into_iter()
@@ -31934,6 +32165,15 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+    }
+
+    /// CR 400.7 + CR 500.2: departed stack records are step-scoped last-known
+    /// information. A step ends only when the stack is empty and all players pass, so
+    /// every trigger that can name a departed spell or activated ability has resolved
+    /// by then. The single clear of both tables.
+    pub(crate) fn clear_departed_stack_records(&mut self) {
+        self.departed_stack_spells.clear();
+        self.departed_activated_abilities.clear();
     }
 
     /// CR 104.4b: renumbers spell announcements (CR 601.2a) and incarnations (CR 400.7) by
@@ -33475,6 +33715,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
         departed_stack_spells: _,
+        departed_activated_abilities: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
@@ -33822,6 +34063,7 @@ impl PartialEq for GameState {
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
             && self.departed_stack_spells == other.departed_stack_spells
+            && self.departed_activated_abilities == other.departed_activated_abilities
             && self.city_blessing == other.city_blessing
             && self.enduring_story == other.enduring_story
             && self.planar_deck == other.planar_deck
@@ -34282,6 +34524,14 @@ mod forced_cascade_window_tests {
                 WaitingFor::ExertChoice {
                     player: PlayerId(0),
                     attacker: ObjectId(8),
+                    permission: crate::types::ability::TriggerDefinitionRef {
+                        source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(8), 0),
+                        occurrence:
+                            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                                printed_index: 0,
+                            },
+                    },
                     remaining: Vec::new(),
                 },
             ),
@@ -34992,8 +35242,10 @@ mod drain_stack_reentrancy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, EffectScope,
         PostReplacementContinuation, QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter,
@@ -35008,6 +35260,541 @@ mod tests {
     use crate::types::phase::PhaseGroup;
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+
+    /// CR 602.1a + CR 602.2b: the record's bound activation cost survives
+    /// serialization, and a record predating the field decodes as `Unknown`
+    /// (no binding), never as a cost-less activation.
+    #[test]
+    fn ability_activation_record_activation_cost_round_trips_and_defaults_to_unknown() {
+        use crate::types::events::BoundActivationCost;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Record Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut record = AbilityActivationRecord {
+            activator: PlayerId(0),
+            source,
+            source_lki: state.objects[&source].snapshot_public_characteristics(),
+            source_zone: Zone::Battlefield,
+            ability_tag: None,
+            is_loyalty_ability: false,
+            activation_cost: BoundActivationCost::Cost(Box::new(
+                crate::types::ability::AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+            )),
+            targets: Vec::new(),
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert!(json.get("activation_cost").is_some(), "{json}");
+        let back: AbilityActivationRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, record);
+
+        record.activation_cost = BoundActivationCost::Unknown;
+        // The record without the key is exactly a record predating the field.
+        let legacy = serde_json::to_value(&record).unwrap();
+        assert!(
+            legacy.get("activation_cost").is_none(),
+            "an unknown cost is omitted: {legacy}"
+        );
+        let decoded: AbilityActivationRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.activation_cost, BoundActivationCost::Unknown);
+    }
+
+    fn historical_exert_schema_leaf() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy_attack_exert_permission.json"
+        ))
+        .expect("fixed historical producer leaf")
+    }
+
+    #[test]
+    fn legacy_attack_exert_migration_changes_only_missing_conditional_leaf() {
+        let old = historical_exert_schema_leaf();
+        let mut expected = old.clone();
+        expected["attack_cost_condition"] =
+            serde_json::json!({"type":"Not","condition":{"type":"SourceExertedThisTurn"}});
+        for null_gate in [false, true] {
+            let mut old = old.clone();
+            if null_gate {
+                old["attack_cost_condition"] = serde_json::Value::Null;
+            }
+            let mut value = serde_json::json!({"nested":[old], "unrelated":{"description":"unchanged", "mode":"Spell"}});
+            migrate_legacy_attack_exert_conditions(&mut value).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"nested":[expected.clone()], "unrelated":{"description":"unchanged", "mode":"Spell"}})
+            );
+            let once = value.clone();
+            migrate_legacy_attack_exert_conditions(&mut value).unwrap();
+            assert_eq!(value, once, "raw migration is exactly idempotent");
+        }
+        let (warrior, standalone, observer) = unconditional_exert_schema_leaves();
+        for leaf in [
+            warrior.clone(),
+            standalone,
+            observer,
+            {
+                let mut leaf = warrior;
+                leaf["attack_cost_condition"] = serde_json::Value::Null;
+                leaf
+            },
+            {
+                let mut leaf = old.clone();
+                leaf["description"] = serde_json::Value::Null;
+                leaf
+            },
+            {
+                let mut leaf = old.clone();
+                leaf.as_object_mut().unwrap().remove("description");
+                leaf
+            },
+            {
+                let mut leaf = old.clone();
+                leaf["attack_cost_condition"] = serde_json::json!({"type":"SourceExertedThisTurn"});
+                leaf["description"] =
+                    "If the moon is made of cheese, you may exert it as it attacks.".into();
+                leaf
+            },
+            serde_json::json!({"mode":"Exerted", "description":"not a typed trigger"}),
+        ] {
+            let mut value = serde_json::json!([{"opaque":leaf}]);
+            let before = value.clone();
+            migrate_legacy_attack_exert_conditions(&mut value).unwrap();
+            assert_eq!(
+                value, before,
+                "typed/unconditional/programmatic/malformed shapes are not rewritten"
+            );
+        }
+    }
+
+    fn unconditional_exert_schema_leaves(
+    ) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+        let warrior = parse_oracle_text(
+            "You may exert this creature as it attacks. When you do, it gets +1/+0 and gains deathtouch until end of turn. (An exerted creature won't untap during your next untap step.)",
+            "Bitterblade Warrior", &[], &["Creature".into()], &["Jackal".into(), "Warrior".into()],
+        );
+        assert_eq!(warrior.triggers.len(), 1);
+        let survivors = parse_oracle_text(
+            "You may exert this creature as it attacks. (It won't untap during your next untap step.)\nWhenever you exert a creature, this creature deals 1 damage to each opponent and you gain 1 life.",
+            "Resolute Survivors", &[], &["Creature".into()], &["Human".into(), "Warrior".into()],
+        );
+        assert_eq!(survivors.triggers.len(), 2);
+        assert!(survivors.triggers[0].is_standalone_attack_exert_permission());
+        assert!(!survivors.triggers[1].is_attack_exert_permission());
+        (
+            serde_json::to_value(&warrior.triggers[0]).unwrap(),
+            serde_json::to_value(&survivors.triggers[0]).unwrap(),
+            serde_json::to_value(&survivors.triggers[1]).unwrap(),
+        )
+    }
+
+    fn exert_schema_copy_state() -> GameState {
+        // SHAPE fixture: an isolated, typed remaining copy, not printed gameplay.
+        let mut source = GameObject::new(
+            ObjectId(41),
+            CardId(41),
+            PlayerId(0),
+            "Schema copy source".into(),
+            Zone::Battlefield,
+        );
+        source
+            .install_trigger_base_definitions(Arc::new(vec![serde_json::from_value(
+                historical_exert_schema_leaf(),
+            )
+            .unwrap()]))
+            .unwrap();
+        let mut state = GameState::new_two_player(42);
+        state
+            .resolution_stack
+            .push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![],
+                remaining: VecDeque::from([PendingCopyTokenBatch {
+                    owner: PlayerId(0),
+                    count: 1,
+                    copy: Box::new(CopyTokenSpec {
+                        values: Box::new(intrinsic_copiable_values(&source)),
+                        display: Default::default(),
+                        extra_keywords: vec![Keyword::Haste],
+                        additional_modifications: vec![],
+                        tapped: false,
+                        enters_attacking: false,
+                        sacrifice_at: None,
+                        source_id: ObjectId(42),
+                        controller: PlayerId(0),
+                    }),
+                }]),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: ObjectId(42),
+            });
+        state
+    }
+
+    fn schema_copy_wire(state: &GameState, version: u64) -> serde_json::Value {
+        if version == 0 {
+            return serde_json::to_value(state).unwrap();
+        }
+        if version == 1 {
+            let mut raw = serde_json::to_value(state).unwrap();
+            let stack = raw
+                .as_object_mut()
+                .unwrap()
+                .remove("resolution_stack")
+                .unwrap();
+            let frames = stack["frames"].as_array().unwrap();
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0]["type"], "CopyToken");
+            raw["pending_copy_token_resolution"] = frames[0]["data"].clone();
+            raw["resolution_state_version"] = 1.into();
+            return raw;
+        }
+        let mut wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        assert!(state
+            .resolution_stack
+            .iter()
+            .all(|frame| matches!(frame, ResolutionFrame::CopyToken(_))));
+        wire["resolution_state_version"] = version.into();
+        wire
+    }
+
+    fn schema_remaining_leaf_mut(
+        value: &mut serde_json::Value,
+        version: u64,
+    ) -> &mut serde_json::Value {
+        let pending = match version {
+            0 => &mut value["resolution_stack"]["frames"][0]["data"],
+            1 => &mut value["pending_copy_token_resolution"],
+            _ => &mut value["resolution_frames"]["frames"][0]["data"],
+        };
+        assert_eq!(pending["remaining"].as_array().unwrap().len(), 1);
+        &mut pending["remaining"][0]["copy"]["values"]["trigger_definitions"][0]
+    }
+
+    fn decode_exert_schema_wire(
+        mut value: serde_json::Value,
+        version: u64,
+        ingress: u8,
+    ) -> Result<GameState, String> {
+        match ingress {
+            0 if version == 0 => {
+                serde_json::from_value::<GameState>(value).map_err(|e| e.to_string())
+            }
+            0 => serde_json::from_value::<ResolutionStateWire>(value)
+                .map(ResolutionStateWire::into_game_state)
+                .map_err(|e| e.to_string()),
+            1 => serde_json::from_value::<PersistedGameState>(value)
+                .map(PersistedGameState::into_game_state_unchecked)
+                .map_err(|e| e.to_string()),
+            2 => {
+                if version == 0 {
+                    // Trusted writers declare a wire version. Declaration moves
+                    // the carrier without interpreting its corrupted leaves.
+                    let frames_before = value.get("resolution_stack").cloned();
+                    crate::types::resolution::declare_raw_resolution_wire(&mut value)?;
+                    assert_eq!(value.get("resolution_frames"), frames_before.as_ref());
+                    assert!(value
+                        .get("resolution_state_version")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some());
+                }
+                let mut envelope = serde_json::to_value(PersistedGameState::capture(
+                    GameState::new_two_player(42),
+                ))
+                .unwrap();
+                envelope["state"] = value;
+                serde_json::from_value::<PersistedGameState>(envelope)
+                    .map(PersistedGameState::into_game_state_unchecked)
+                    .map_err(|e| e.to_string())
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn legacy_attack_exert_migration_precedes_resolution_payload_extraction() {
+        let state = exert_schema_copy_state();
+        let old = historical_exert_schema_leaf();
+        let (warrior, standalone, observer) = unconditional_exert_schema_leaves();
+        let gate = serde_json::json!({"type":"Not", "condition":{"type":"SourceExertedThisTurn"}});
+        // Direct decode, V1 sidecar extraction, and every declared typed version.
+        for version in 0..=crate::types::resolution::RESOLUTION_STATE_WIRE_VERSION {
+            for ingress in 0..=2 {
+                for null_gate in [false, true] {
+                    let mut value = schema_copy_wire(&state, version);
+                    let leaf = schema_remaining_leaf_mut(&mut value, version);
+                    assert_eq!(leaf, &old, "positive nonempty historical carrier");
+                    if null_gate {
+                        leaf["attack_cost_condition"] = serde_json::Value::Null;
+                    }
+                    let restored = decode_exert_schema_wire(value, version, ingress)
+                        .unwrap_or_else(|error| {
+                            panic!("supported v{version}/ingress{ingress}: {error}")
+                        });
+                    let pending = restored
+                        .resolution_stack
+                        .active_copy_token()
+                        .expect("remaining frame survived extraction");
+                    assert_eq!(pending.remaining.len(), 1);
+                    let mut expected =
+                        serde_json::to_value(state.resolution_stack.active_copy_token().unwrap())
+                            .unwrap();
+                    expected["remaining"][0]["copy"]["values"]["trigger_definitions"][0]
+                        ["attack_cost_condition"] = gate.clone();
+                    assert_eq!(serde_json::to_value(pending).unwrap(), expected);
+                    let again: ResolutionStateWire = serde_json::from_value(
+                        serde_json::to_value(ResolutionStateWire::from_game_state(restored))
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(
+                            again
+                                .game_state()
+                                .resolution_stack
+                                .active_copy_token()
+                                .unwrap()
+                        )
+                        .unwrap(),
+                        expected
+                    );
+
+                    let mut unknown = schema_copy_wire(&state, version);
+                    let leaf = schema_remaining_leaf_mut(&mut unknown, version);
+                    leaf["description"] = "If the moon is made of cheese, you may exert it as it attacks. When you do, draw a card.".into();
+                    if null_gate {
+                        leaf["attack_cost_condition"] = serde_json::Value::Null;
+                    }
+                    let error = decode_exert_schema_wire(unknown, version, ingress)
+                        .expect_err("unknown saved conditional must refuse");
+                    assert!(
+                        error.contains("legacy attack-exert condition"),
+                        "right compatibility diagnostic: {error}"
+                    );
+                }
+                for (name, leaf) in [
+                    ("current typed authority", {
+                        let mut leaf = old.clone();
+                        leaf["attack_cost_condition"] =
+                            serde_json::json!({"type":"SourceExertedThisTurn"});
+                        leaf["description"] = "You may exert it as it attacks.".into();
+                        leaf
+                    }),
+                    ("unconditional omitted", { warrior.clone() }),
+                    ("unconditional null", {
+                        let mut leaf = warrior.clone();
+                        leaf["attack_cost_condition"] = serde_json::Value::Null;
+                        leaf
+                    }),
+                    ("standalone", standalone.clone()),
+                    ("actor observer", observer.clone()),
+                    ("unrelated mode", {
+                        let mut leaf = old.clone();
+                        leaf["mode"] = "Attacks".into();
+                        leaf
+                    }),
+                    ("descriptionless programmatic", {
+                        let mut leaf = old.clone();
+                        leaf["description"] = serde_json::Value::Null;
+                        leaf
+                    }),
+                ] {
+                    let mut value = schema_copy_wire(&state, version);
+                    *schema_remaining_leaf_mut(&mut value, version) = leaf.clone();
+                    let restored = decode_exert_schema_wire(value, version, ingress)
+                        .unwrap_or_else(|e| panic!("{name} v{version}: {e}"));
+                    let actual = &restored
+                        .resolution_stack
+                        .active_copy_token()
+                        .unwrap()
+                        .remaining[0]
+                        .copy
+                        .values
+                        .trigger_definitions[0];
+                    assert_eq!(
+                        actual,
+                        &serde_json::from_value::<TriggerDefinition>(leaf).unwrap(),
+                        "{name}"
+                    );
+                }
+                let empty = GameState::new_two_player(42);
+                let value = if version == 0 {
+                    serde_json::to_value(&empty).unwrap()
+                } else {
+                    let mut value =
+                        serde_json::to_value(ResolutionStateWire::from_game_state(empty)).unwrap();
+                    if version == 1 {
+                        value.as_object_mut().unwrap().remove("resolution_frames");
+                    }
+                    value["resolution_state_version"] = version.into();
+                    value
+                };
+                assert!(decode_exert_schema_wire(value, version, ingress)
+                    .unwrap()
+                    .resolution_stack
+                    .is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_attack_exert_debug_faces_migrate_before_typed_extraction() {
+        // SHAPE fixture: typed front/back/outside faces, not printed gameplay.
+        let old: TriggerDefinition =
+            serde_json::from_value(historical_exert_schema_leaf()).unwrap();
+        let face = CardFace {
+            name: "Front schema face".into(),
+            triggers: vec![old.clone()],
+            ..Default::default()
+        };
+        let source = DebugCardEntrySource {
+            face: face.clone(),
+            back_face: Some(BackFaceData {
+                name: "Back schema face".into(),
+                trigger_definitions: vec![old.clone()].into(),
+                ..Default::default()
+            }),
+            outside_game_faces: OutsideGameFaces {
+                paper: vec![face.clone()],
+                digital: vec![face],
+            },
+        };
+        let pending = PendingDebugCardEntries {
+            source,
+            owner: PlayerId(0),
+            attach_to: None,
+            nonlegendary: true,
+            creation_kind: DebugCardCreationKind::Token,
+            remaining: 2,
+        };
+        let mut state = GameState::new_two_player(42);
+        state
+            .resolution_stack
+            .push_debug_card_entries(pending.clone());
+        for version in
+            std::iter::once(0).chain(2..=crate::types::resolution::RESOLUTION_STATE_WIRE_VERSION)
+        {
+            for ingress in 0..=2 {
+                let mut value = if version == 0 {
+                    serde_json::to_value(&state).unwrap()
+                } else {
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                        .unwrap()
+                };
+                if version != 0 {
+                    value["resolution_state_version"] = version.into();
+                }
+                let restored = decode_exert_schema_wire(value.clone(), version, ingress).unwrap();
+                let actual = restored
+                    .resolution_stack
+                    .active_debug_card_entries()
+                    .unwrap();
+                let mut expected = pending.clone();
+                let recovered = Some(StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceExertedThisTurn),
+                });
+                expected.source.face.triggers[0].attack_cost_condition = recovered.clone();
+                expected
+                    .source
+                    .back_face
+                    .as_mut()
+                    .unwrap()
+                    .trigger_definitions = vec![old
+                    .clone()
+                    .attack_cost_condition(recovered.clone().unwrap())]
+                .into();
+                expected.source.outside_game_faces.paper[0].triggers[0].attack_cost_condition =
+                    recovered.clone();
+                expected.source.outside_game_faces.digital[0].triggers[0].attack_cost_condition =
+                    recovered;
+                assert_eq!(
+                    actual, &expected,
+                    "all four positively present leaves recover; every other field remains"
+                );
+                let frames_key = if version == 0 {
+                    "resolution_stack"
+                } else {
+                    "resolution_frames"
+                };
+                let paths = [
+                    "face/triggers/0",
+                    "back_face/trigger_definitions/0",
+                    "outside_game_faces/paper/0/triggers/0",
+                    "outside_game_faces/digital/0/triggers/0",
+                ];
+                for path in paths {
+                    let mut unknown = value.clone();
+                    // All other leaves are CURRENT so only this exact carrier
+                    // can supply the compatibility refusal under test.
+                    unknown[frames_key]["frames"][0]["data"] =
+                        serde_json::to_value(&expected).unwrap();
+                    let pointer = format!("/{frames_key}/frames/0/data/source/{path}");
+                    let leaf = unknown
+                        .pointer_mut(&pointer)
+                        .expect("positively present face leaf");
+                    *leaf = historical_exert_schema_leaf();
+                    leaf["description"] =
+                        "If the moon is made of cheese, you may exert it as it attacks.".into();
+                    let error = decode_exert_schema_wire(unknown, version, ingress)
+                        .expect_err("unknown conditional refuses from this exact face");
+                    assert!(
+                        error.contains("legacy attack-exert condition"),
+                        "{path}: {error}"
+                    );
+                }
+                let (warrior, _, _) = unconditional_exert_schema_leaves();
+                for leaf in [
+                    {
+                        let mut leaf = historical_exert_schema_leaf();
+                        leaf["attack_cost_condition"] =
+                            serde_json::json!({"type":"SourceExertedThisTurn"});
+                        leaf["description"] =
+                            "If the moon is made of cheese, you may exert it as it attacks.".into();
+                        leaf
+                    },
+                    warrior.clone(),
+                    {
+                        let mut leaf = warrior;
+                        leaf["attack_cost_condition"] = serde_json::Value::Null;
+                        leaf
+                    },
+                ] {
+                    let mut control = value.clone();
+                    for path in paths {
+                        let pointer = format!("/{frames_key}/frames/0/data/source/{path}");
+                        *control.pointer_mut(&pointer).unwrap() = leaf.clone();
+                    }
+                    let decoded = decode_exert_schema_wire(control, version, ingress)
+                        .expect("current/unconditional faces retain semantics");
+                    let actual = serde_json::to_value(
+                        decoded
+                            .resolution_stack
+                            .active_debug_card_entries()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let typed = serde_json::to_value(
+                        serde_json::from_value::<TriggerDefinition>(leaf).unwrap(),
+                    )
+                    .unwrap();
+                    let mut expected = serde_json::to_value(&pending).unwrap();
+                    for path in paths {
+                        let pointer = format!("/source/{path}");
+                        *expected.pointer_mut(&pointer).unwrap() = typed.clone();
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
 
     fn state_with_recorded_exploit() -> (GameState, GameEvent) {
         let mut state = GameState::new_two_player(42);
@@ -38832,6 +39619,13 @@ mod tests {
         prompt_rest.waiting_for = WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(9_104),
+            permission: crate::types::ability::TriggerDefinitionRef {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(9_104), 0),
+                occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: Vec::new(),
         };
 
@@ -43232,6 +44026,139 @@ mod tests {
         );
     }
 
+    /// A `departed_activated_abilities` record: an `{X}` activation of source 30
+    /// with the given entry id and announced X.
+    fn departed_activation(id: u64, x: u32) -> StackEntry {
+        use crate::types::ability::Effect;
+
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(30), PlayerId(0));
+        ability.chosen_x = Some(x);
+        StackEntry {
+            id: ObjectId(id),
+            source_id: ObjectId(30),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(30),
+                ability: Box::new(ability),
+            },
+        }
+    }
+
+    /// CR 104.4b + CR 602.2a + CR 608.2h: a `departed_activated_abilities`
+    /// record no activation trigger on the stack names is history, not position —
+    /// pruned like a departed spell. The record the waiting trigger's event names
+    /// remains, and a change to it remains loop-meaningful.
+    #[test]
+    fn normalize_for_loop_keeps_only_the_departed_activation_a_trigger_names() {
+        use crate::types::ability::Effect;
+        use crate::types::events::{
+            ActivatedAbilityKind, ActivationTriggerState, BoundActivationCost,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(40),
+            source_id: ObjectId(31),
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(31),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    ObjectId(31),
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::AbilityActivated {
+                    player_id: PlayerId(0),
+                    source_id: ObjectId(30),
+                    kind: ActivatedAbilityKind::Normal,
+                    departed_source_lki: None,
+                    trigger_state: ActivationTriggerState::Pending,
+                    stack_entry: Some(ObjectId(41)),
+                    activation_cost: BoundActivationCost::Unknown,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+            .departed_activated_abilities
+            .insert(ObjectId(41), departed_activation(41, 2));
+
+        // An unreachable record 42 must not block loop confirmation, and only
+        // the named record 41 survives normalization.
+        let mut b = state.clone();
+        b.departed_activated_abilities
+            .insert(ObjectId(42), departed_activation(42, 1));
+        assert_ne!(
+            state, b,
+            "fixture differs by an unreachable departed activation"
+        );
+        let normalized = state.normalize_for_loop();
+        assert!(
+            loop_states_equal(&normalized, &b.normalize_for_loop()),
+            "an unreachable departed activation must not block loop recurrence"
+        );
+        assert_eq!(
+            normalized
+                .departed_activated_abilities
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ObjectId(41)],
+            "only the departed activation the trigger names remains"
+        );
+
+        // A change to the named record remains meaningful.
+        let mut changed = state.clone();
+        changed
+            .departed_activated_abilities
+            .insert(ObjectId(41), departed_activation(41, 3));
+        assert!(
+            !loop_states_equal(&normalized, &changed.normalize_for_loop()),
+            "a change to the named departed activation remains loop-meaningful"
+        );
+    }
+
+    /// CR 608.2h: a `GameState` holding a `departed_activated_abilities`
+    /// record round-trips through serde, and a payload without the key
+    /// deserializes to an empty map.
+    #[test]
+    fn departed_activated_abilities_round_trip_and_absent_key_is_empty() {
+        let mut state = GameState::new_two_player(7);
+        state
+            .departed_activated_abilities
+            .insert(ObjectId(41), departed_activation(41, 2));
+
+        let json = serde_json::to_value(&state).expect("state must serialize");
+        assert!(
+            json.get("departed_activated_abilities").is_some(),
+            "a populated map must serialize its key"
+        );
+        let restored: GameState = serde_json::from_value(json).expect("state must round-trip");
+        assert_eq!(
+            restored.departed_activated_abilities, state.departed_activated_abilities,
+            "the record must survive the round trip"
+        );
+
+        let empty_json =
+            serde_json::to_value(GameState::new_two_player(7)).expect("state must serialize");
+        assert!(
+            empty_json.get("departed_activated_abilities").is_none(),
+            "an empty map must be omitted (skip_serializing_if)"
+        );
+        let restored_empty: GameState =
+            serde_json::from_value(empty_json).expect("payload without the key must deserialize");
+        assert!(
+            restored_empty.departed_activated_abilities.is_empty(),
+            "a payload without the key must yield an empty map"
+        );
+    }
+
     /// The Devour snapshot is rules-bearing while a prompt is live, but remains
     /// intentionally outside the state-equality key just as it was before the
     /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
@@ -45403,6 +46330,7 @@ mod tests {
                 activation_cost_committed: false,
                 alt_cost_grant_source: None,
                 activation_trigger_collection: None,
+                activation_phyrexian_intent: None,
             })
         }
 
@@ -45682,6 +46610,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: vec![],
+            activation_payment_mode: CastPaymentMode::Auto,
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -45951,6 +46880,7 @@ mod tests {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
@@ -46063,6 +46993,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: CastPaymentMode::Auto,
         };
         let members = [
             WaitingFor::ModalFaceChoice {
@@ -46233,6 +47164,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: CastPaymentMode::Auto,
         };
         assert!(!ability_modes.allows_cancel_cast());
 
@@ -47501,10 +48433,10 @@ mod tests {
                 TargetFilter::SpecificObject { id: ObjectId(12) },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(copied_values.clone()),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: Some(printed_ref.clone()),
-                    token_image_ref: None,
-                    token_art: None,
+                    display: crate::game::game_object::DisplayIdentity {
+                        printed_ref: Some(printed_ref.clone()),
+                        ..Default::default()
+                    },
                 }],
                 None,
                 TransientContinuousEffectBindings {
@@ -47598,10 +48530,10 @@ mod tests {
                 TargetFilter::SpecificObject { id: ObjectId(12) },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(copied_values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: Some(top_printed_ref),
-                    token_image_ref: None,
-                    token_art: None,
+                    display: crate::game::game_object::DisplayIdentity {
+                        printed_ref: Some(top_printed_ref),
+                        ..Default::default()
+                    },
                 }],
                 None,
                 TransientContinuousEffectBindings {

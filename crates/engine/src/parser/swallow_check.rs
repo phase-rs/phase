@@ -30,7 +30,8 @@ use super::oracle_ir::feature::{
     audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
-use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
+use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
@@ -2782,7 +2783,7 @@ fn ward_power_life_payments(cost: &WardCost) -> usize {
         WardCost::PayLifeEqualToPower => 1,
         WardCost::Mana(_)
         | WardCost::PayLife(_)
-        | WardCost::DiscardCard
+        | WardCost::Discard { .. }
         | WardCost::Sacrifice { .. }
         | WardCost::Waterbend(_)
         | WardCost::GetPlayerCounters { .. }
@@ -4622,6 +4623,36 @@ fn cast_this_way_alt_cost_is_only_if_marker(stripped: &str, evidence: &UnitEvide
     !has_other_if
 }
 
+/// CR 603.4 + CR 603.2: the distributed `{X}`-in-cost intervening-if of a split
+/// cast-or-activate trigger ("Whenever you cast an instant or sorcery spell or
+/// activate an ability, if that spell's mana cost or that ability's activation
+/// cost contains {X}, …" — Unbound Flourishing). The trigger parser answers
+/// each disjunct once, in its own half's event filter
+/// (`FilterProp::HasXInManaCost` on the spell half, CR 202.1;
+/// `FilterProp::HasXInActivationCost` on the activation half, CR 602.1a), so
+/// no condition slot is populated although the condition is represented.
+///
+/// Recognition and lowering cannot disagree: the clause is located with the
+/// combinator that folds it (`oracle_trigger::parse_distributed_x_cost_condition`),
+/// and both folded properties must be present in the unit's evidence. It is
+/// text-scoped: only the recognized clause is removed before the residual scan,
+/// so any other bare " if " in the unit still flags.
+fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let folded = |prop: FilterProp| evidence.any::<FilterProp>(|found| *found == prop);
+    if !(folded(FilterProp::HasXInManaCost) && folded(FilterProp::HasXInActivationCost)) {
+        return false;
+    }
+    let Some((before, (), after)) = scan_preceded(stripped, parse_distributed_x_cost_condition)
+    else {
+        return false;
+    };
+    let residual = format!("{before}{after}");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -4763,6 +4794,13 @@ fn detect_condition_if(
         return;
     }
     if play_from_exile_alt_ability_cost_is_only_if_marker(&stripped, parsed) {
+        return;
+    }
+    // CR 603.4: the distributed `{X}`-in-cost intervening-if of a split
+    // cast-or-activate trigger (Unbound Flourishing) is answered in each half's
+    // event filter. Text-scoped: suppresses only when that clause is the
+    // unit's only bare " if ".
+    if distributed_x_cost_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -15699,5 +15737,130 @@ mod detect_condition_if_replacement_exemption_tests {
             result, " if a player would sacrifice a permanent, exile it instead.",
             "only the represented sentence should have been stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod distributed_x_cost_if_exemption_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Unbound Flourishing, verbatim from MTGJSON.
+    const UNBOUND_FLOURISHING: &str = "Whenever you cast a permanent spell with a mana cost that contains {X}, double the value of X.\nWhenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Unbound Flourishing's second line, verbatim.
+    const UNBOUND_COPY_LINE: &str = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Vazi, Keen Negotiator's third line, verbatim: a cast-or-activate
+    /// intervening-if that is not the `{X}`-in-cost restatement.
+    const VAZI_LINE: &str = "Whenever an opponent casts a spell or activates an ability, if mana from a Treasure was spent to cast it or activate it, put a +1/+1 counter on target creature, then draw a card.";
+
+    /// Evidence carrying both folded halves of the distributed condition.
+    const FOLDED: &str = r#"{"triggers":[
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}},
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}
+    ]}"#;
+
+    fn has_condition_if_swallow(diagnostics: &[OracleDiagnostic]) -> bool {
+        diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+    }
+
+    fn no_parsed_abilities() -> ParsedAbilities {
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// Runs Detector G on one unit's text, cleaned as `check_swallowed_clauses`
+    /// cleans it, against `evidence_json`.
+    fn condition_if_fires(text: &str, evidence_json: &str) -> bool {
+        let cleaned = strip_parens(&text.to_ascii_lowercase());
+        let evidence = UnitEvidence::from_json_for_test(evidence_json);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            text,
+            &evidence,
+            &no_parsed_abilities(),
+            &mut diagnostics,
+        );
+        has_condition_if_swallow(&diagnostics)
+    }
+
+    /// CR 603.4: Unbound Flourishing's line-2 intervening-if is folded into each
+    /// half's event filter, so the real parse raises no swallowed `Condition_If`.
+    /// Reach guards: the line lowers to its spell-cast and activation halves and
+    /// nothing on the card is unimplemented, so the per-unit audit is not
+    /// skipped. Paired positive: the same line with the condition left unfolded
+    /// (no `HasXIn*Cost` evidence) still warns.
+    #[test]
+    fn unbound_copy_line_is_not_a_swallowed_condition_if() {
+        let parsed = parse_oracle_text(
+            UNBOUND_FLOURISHING,
+            "Unbound Flourishing",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let modes: Vec<&TriggerMode> = parsed.triggers.iter().map(|t| &t.mode).collect();
+        assert_eq!(
+            modes,
+            vec![
+                &TriggerMode::SpellCast,
+                &TriggerMode::SpellCast,
+                &TriggerMode::AbilityActivated
+            ]
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach: the audit must run over line 2: {parsed:?}"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "{:?}",
+            parsed.parse_warnings
+        );
+
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, "{}"));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// The exemption needs both folded properties: one half's evidence alone
+    /// does not represent a condition that names both cost slots.
+    #[test]
+    fn distributed_x_cost_if_needs_both_folded_halves() {
+        let mana_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}}"#;
+        let activation_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}"#;
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, mana_only));
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, activation_only));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// Text-scoped: only the recognized restatement is removed, so another bare
+    /// " if " in the same unit still flags (SYNTHETIC: Unbound's line with a
+    /// trailing "if you control an artifact"; no printed card pairs the
+    /// restatement with a second condition), and an intervening-if the
+    /// combinator does not recognize (Vazi's, verbatim) is never exempted.
+    #[test]
+    fn distributed_x_cost_if_exempts_only_the_recognized_clause() {
+        let with_second_if = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy if you control an artifact.";
+        assert!(condition_if_fires(with_second_if, FOLDED));
+        assert!(condition_if_fires(VAZI_LINE, FOLDED));
     }
 }

@@ -1085,6 +1085,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::CopySpell { .. } => Axes::CONSERVATIVE,
+        Effect::ModifyAnnouncedX { .. } => Axes::CONSERVATIVE,
         Effect::EpicCopy { .. } => Axes::CONSERVATIVE,
         Effect::CastCopyOfCard {
             target,
@@ -2675,7 +2676,16 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // not decomposed here because no caller needs a narrower answer.
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::SharedCardTypes { .. } => Axes::CONSERVATIVE,
-        QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
+        // `restrict` narrows which subtype VALUES tally within the same
+        // population scan (a value filter, not a new state axis — the
+        // population read is unchanged), so the verdict stays `CONSERVATIVE`.
+        // Explicit destructure (not `{ .. }`) so the next field addition is
+        // compiler-visible.
+        QuantityRef::DistinctSubtypes {
+            source: _,
+            exclude: _,
+            restrict: _,
+        } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,
         QuantityRef::ZoneCardCount {
@@ -3869,6 +3879,7 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         // ---- read-bearing: scanned into `acc` below ----
         execute,
         condition,
+        attack_cost_condition,
         // CR 603.2 + CR 603.2h: a fire-count / fire-window gate, which can carry
         // its own spell filter. NOT an event matcher, and no firewall surface
         // reads it (`analysis::resource` reads only `condition` and `execute`), so
@@ -3960,6 +3971,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
     let mut acc = Axes::NONE;
     if let Some(exec) = execute {
         acc = acc.or(ability_definition_axes(exec, mode));
+    }
+    if let Some(condition) = attack_cost_condition {
+        acc = acc.or(scan_static_condition(condition, mode));
     }
     if let Some(cond) = condition {
         acc = acc.or(scan_trigger_condition(cond, mode));
@@ -4766,6 +4780,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             projected: true,
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
+        StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
         StaticCondition::SourceHasDealtDamage => Axes {
             event: false,
             sibling: false,
@@ -7075,6 +7090,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
@@ -7497,6 +7513,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EpicCopy { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad

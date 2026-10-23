@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, CostReduction, FilterProp,
-    QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, CardSelectionMode, Comparator, CostObjectCount,
+    CostReduction, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -602,14 +602,28 @@ pub enum ProtectionColorSet {
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): payloads
+/// written before the discard cost carried its axes (`{"type":"DiscardCard"}`)
+/// still load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
-    DiscardCard,
+    /// CR 702.21a + CR 701.9a + CR 701.9b: Discard `count` cards from the paying
+    /// player's hand, restricted to cards matching `filter` when present
+    /// ("Ward—Discard an enchantment, instant, or sorcery card."), chosen by the
+    /// payer or at random ("Ward—Discard a card at random."). Mirrors
+    /// `AbilityCost::Discard`'s axes minus `self_scope`: a ward cost is always
+    /// paid from the payer's hand.
+    Discard {
+        count: u32,
+        filter: Option<TargetFilter>,
+        selection: CardSelectionMode,
+    },
     /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
     Sacrifice {
         count: u32,
@@ -630,6 +644,39 @@ pub enum WardCost {
         counter_kind: crate::types::player::PlayerCounterKind,
         count: u32,
     },
+}
+
+impl Serialize for WardCost {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        WardCost::serialize(self, serializer)
+    }
+}
+
+/// Decode-only staging for `WardCost` payloads that predate the reshaped
+/// discard variant; never constructed.
+/// Pre-reshape payloads stored the one-chosen-card discard as the unit form
+/// `{"type":"DiscardCard"}`.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LegacyWardCost {
+    DiscardCard,
+}
+
+impl<'de> Deserialize<'de> for WardCost {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        match WardCost::deserialize(raw.clone()) {
+            Ok(cost) => Ok(cost),
+            Err(current_err) => match serde_json::from_value::<LegacyWardCost>(raw) {
+                Ok(LegacyWardCost::DiscardCard) => Ok(WardCost::Discard {
+                    count: 1,
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                }),
+                Err(_) => Err(serde::de::Error::custom(current_err)),
+            },
+        }
+    }
 }
 
 /// CR 702.54a + CR 702.54b: Bloodthirst has fixed-N and X-count forms.
@@ -6428,6 +6475,31 @@ mod tests {
         .collect()
     }
 
+    /// Discard ward costs parsed from Oracle text (CR 702.21a + CR 701.9), keyed
+    /// by that text: the plain and random one-card costs, a counted cost, and a
+    /// card-type-filtered cost (the client shows no detail for the filtered one).
+    fn parsed_ward_discard_samples() -> std::collections::BTreeMap<&'static str, Keyword> {
+        [
+            "Ward\u{2014}Discard a card.",
+            "Ward\u{2014}Discard a card at random.",
+            "Ward\u{2014}Discard two cards.",
+            "Ward\u{2014}Discard an enchantment, instant, or sorcery card.",
+        ]
+        .into_iter()
+        .map(|oracle| {
+            let lower = oracle.to_lowercase();
+            let (kw, rest) = crate::parser::oracle_keyword::parse_keyword_line_core(&lower)
+                .unwrap_or_else(|| panic!("{oracle} parses as a keyword line"));
+            assert!(rest.is_empty(), "{oracle} left {rest:?} unconsumed");
+            assert!(
+                matches!(&kw, Keyword::Ward(WardCost::Discard { .. })),
+                "{oracle} parses as a discard ward, got {kw:?}"
+            );
+            (oracle, kw)
+        })
+        .collect()
+    }
+
     /// Engine-authored wire golden for the client's keyword-detail formatter
     /// (`client/src/viewmodel/keywordProps.ts`). The client once formatted a
     /// hand-written, externally tagged `ManaCost` shape that the engine never
@@ -6441,6 +6513,7 @@ mod tests {
         let wire = serde_json::json!({
             "samples": samples,
             "parsed_ward": parsed_ward_samples(),
+            "parsed_ward_discard": parsed_ward_discard_samples(),
         });
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6460,6 +6533,49 @@ mod tests {
         assert_eq!(
             wire, committed,
             "the client's keyword payload golden drifted — re-run with UPDATE_WIRE_GOLDEN=1"
+        );
+    }
+
+    /// CR 702.21a + CR 701.9: ward discard costs written before the discard
+    /// variant carried its axes were the unit form `{"type":"DiscardCard"}`,
+    /// meaning one chosen card; they must keep loading, at the top level and
+    /// nested in a compound cost, and the current shape must round-trip.
+    #[test]
+    fn ward_discard_legacy_unit_payload_decodes_as_one_chosen_card() {
+        let one_chosen = WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        };
+
+        let top_level: Keyword =
+            serde_json::from_str(r#"{"Ward":{"type":"DiscardCard"}}"#).unwrap();
+        assert_eq!(top_level, Keyword::Ward(one_chosen.clone()));
+
+        let nested: Keyword = serde_json::from_str(
+            r#"{"Ward":{"type":"Compound","data":[{"type":"DiscardCard"},{"type":"Mana","data":{"type":"Cost","shards":[],"generic":2}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            Keyword::Ward(WardCost::Compound(vec![
+                one_chosen,
+                WardCost::Mana(ManaCost::generic(2)),
+            ]))
+        );
+
+        let current = Keyword::Ward(WardCost::Discard {
+            count: 2,
+            filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+            selection: CardSelectionMode::Random,
+        });
+        let round_trip: Keyword =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(round_trip, current);
+
+        assert!(
+            serde_json::from_str::<Keyword>(r#"{"Ward":{"type":"Bogus"}}"#).is_err(),
+            "an unknown ward cost must still be rejected, not defaulted"
         );
     }
 

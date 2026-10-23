@@ -94,6 +94,7 @@ fn two_cross_paying_signets_terminate_without_recursion() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: gruul,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),
@@ -143,6 +144,7 @@ fn signet_activates_normally_with_a_sibling_costed_rock_present() {
         .act(GameAction::ActivateAbility {
             source_id: gruul,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Gruul Signet activates normally with a bootstrap land available");
 
@@ -184,6 +186,7 @@ fn single_signet_activates_normally() {
         .act(GameAction::ActivateAbility {
             source_id: dimir,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("lone Signet activates normally");
 

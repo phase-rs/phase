@@ -2331,7 +2331,15 @@
     "selfManaCost": "seine Manakosten",
     "selfManaValue": "sein Manawert",
     "manaCostReduced": "seine Manakosten, verringert um {{reduction}}",
-    "spliceOnto": "auf {{subtype}} {{cost}}"
+    "spliceOnto": "auf {{subtype}} {{cost}}",
+    "wardDiscardAtRandom_few": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_many": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_one": "eine Karte nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_other": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscard_few": "{{count}} Karten abwerfen",
+    "wardDiscard_many": "{{count}} Karten abwerfen",
+    "wardDiscard_one": "eine Karte abwerfen",
+    "wardDiscard_other": "{{count}} Karten abwerfen"
   },
   "resolutionOptionalPayment": {
     "title": "Optionale Zahlung wählen",

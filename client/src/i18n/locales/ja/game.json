@@ -2374,7 +2374,15 @@
     "selfManaCost": "そのマナ・コスト",
     "selfManaValue": "そのマナ総量",
     "manaCostReduced": "そのマナ・コストから{{reduction}}少ないコスト",
-    "spliceOnto": "{{subtype}}へ {{cost}}"
+    "spliceOnto": "{{subtype}}へ {{cost}}",
+    "wardDiscardAtRandom_few": "カードを{{count}}枚無作為に選んで捨てる",
+    "wardDiscardAtRandom_many": "カードを{{count}}枚無作為に選んで捨てる",
+    "wardDiscardAtRandom_one": "カードを1枚無作為に選んで捨てる",
+    "wardDiscardAtRandom_other": "カードを{{count}}枚無作為に選んで捨てる",
+    "wardDiscard_few": "カードを{{count}}枚捨てる",
+    "wardDiscard_many": "カードを{{count}}枚捨てる",
+    "wardDiscard_one": "カードを1枚捨てる",
+    "wardDiscard_other": "カードを{{count}}枚捨てる"
   },
   "resolutionOptionalPayment": {
     "title": "任意の支払いを選択",

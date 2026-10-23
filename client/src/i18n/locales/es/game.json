@@ -2331,7 +2331,15 @@
     "selfManaCost": "su coste de maná",
     "selfManaValue": "su valor de maná",
     "manaCostReduced": "su coste de maná reducido en {{reduction}}",
-    "spliceOnto": "a {{subtype}} {{cost}}"
+    "spliceOnto": "a {{subtype}} {{cost}}",
+    "wardDiscardAtRandom_few": "descarta {{count}} cartas al azar",
+    "wardDiscardAtRandom_many": "descarta {{count}} cartas al azar",
+    "wardDiscardAtRandom_one": "descarta una carta al azar",
+    "wardDiscardAtRandom_other": "descarta {{count}} cartas al azar",
+    "wardDiscard_few": "descarta {{count}} cartas",
+    "wardDiscard_many": "descarta {{count}} cartas",
+    "wardDiscard_one": "descarta una carta",
+    "wardDiscard_other": "descarta {{count}} cartas"
   },
   "resolutionOptionalPayment": {
     "title": "Elige un pago opcional",

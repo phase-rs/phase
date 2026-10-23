@@ -1693,7 +1693,15 @@
     "manaCostReduced": "其法术力费用减少{{reduction}}",
     "selfManaCost": "其法术力费用",
     "selfManaValue": "其总法术力费用",
-    "spliceOnto": "通联于{{subtype}}{{cost}}"
+    "spliceOnto": "通联于{{subtype}}{{cost}}",
+    "wardDiscardAtRandom_few": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_many": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_one": "随机弃一张牌",
+    "wardDiscardAtRandom_other": "随机弃{{count}}张牌",
+    "wardDiscard_few": "弃{{count}}张牌",
+    "wardDiscard_many": "弃{{count}}张牌",
+    "wardDiscard_one": "弃一张牌",
+    "wardDiscard_other": "弃{{count}}张牌"
   },
   "kickDialog": {
     "body": "他们将放弃此盘游戏，且无法重新加入。",

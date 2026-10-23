@@ -9,7 +9,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -33,7 +33,7 @@ use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::filter::FilterContext;
-use crate::game::game_object::{BackFaceData, DisplaySource};
+use crate::game::game_object::{BackFaceData, DisplayIdentity};
 use crate::types::events::{ActivatedAbilityKind, ClashResult, PlayerActionKind};
 
 // ---------------------------------------------------------------------------
@@ -3172,6 +3172,28 @@ pub enum DoubleTarget {
     /// CR 701.10f: Double the amount of a type of mana in a player's mana pool.
     /// None = all mana colors.
     ManaPool { color: Option<ManaColor> },
+}
+
+/// CR 107.3: how an effect changes the value of X of a spell or ability already
+/// on the stack (`Effect::ModifyAnnouncedX`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum XModification {
+    /// CR 107.3c (note): X ← X × factor. "Double the value of X" is
+    /// `Times { factor: 2 }` (`XModification::DOUBLE`), matching
+    /// `QuantityModification::Times` / `ManaModification::Multiply`.
+    Times { factor: u32 },
+}
+
+impl XModification {
+    pub const DOUBLE: Self = Self::Times { factor: 2 };
+
+    /// The new value of X given its current value.
+    pub fn apply(&self, current: u32) -> u32 {
+        match self {
+            Self::Times { factor } => current.saturating_mul(*factor),
+        }
+    }
 }
 
 /// CR 701.10a: Which P/T characteristics to double.
@@ -10070,10 +10092,22 @@ pub enum QuantityRef {
     /// `exclude` (CR 205.3m) drops subtypes that are creature types when set to
     /// `CreatureTypes`; `#[serde(default)]` keeps old saves (implicitly `None`)
     /// deserializable.
+    ///
+    /// `restrict` (CR 205.3) narrows the tally to one subtype category:
+    /// `Some(set)` counts only subtype values belonging to that `SubtypeSet`
+    /// (Tam, the Possibility — "the number of planeswalker types among
+    /// planeswalkers you control", CR 205.3j; Hoshi Sato — "the number of
+    /// creature types among non-Borg creatures you control", CR 205.3m).
+    /// `None` counts every subtype value (Subgoyf). The two axes are mutually
+    /// exclusive by grammar (different heads) and conjunctive in the resolver
+    /// (defense in depth for hand-built payloads). `#[serde(default)]` keeps
+    /// old saves deserializable and the key absent on re-serialize.
     DistinctSubtypes {
         source: CardTypeSetSource,
         #[serde(default)]
         exclude: SubtypeExclusion,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restrict: Option<SubtypeSet>,
     },
     /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
     /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
@@ -13349,6 +13383,8 @@ pub enum StaticCondition {
     /// yet" (Palladia-Mors, the Ruiner; Karakyk Guardian). The "hasn't" negation
     /// wraps this in `StaticCondition::Not`.
     SourceHasDealtDamage,
+    /// CR 701.43b: The source has been exerted during the current turn.
+    SourceExertedThisTurn,
     /// CR 601.2 + CR 611.3a: True when the source permanent was cast (its
     /// `cast_from_zone` is `Some`). `zone: None` = cast from any zone; `Some(z)`
     /// = cast specifically from zone `z`. Used for "as long as it was cast"
@@ -13573,6 +13609,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -13686,6 +13723,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -13922,6 +13960,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -14043,6 +14082,7 @@ impl StaticCondition {
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
             | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -18349,6 +18389,11 @@ pub enum Effect {
         /// The literal `QuantityExpr::Fixed { value: -1 }` is the legacy
         /// "remove all" sentinel — `resolve_remove` keys off `< 0` to strip
         /// every counter of the named type (Vampire Hexmage).
+        /// CR 608.2d: `QuantityExpr::UpTo { max }` is the controller's
+        /// resolution-time choice of which counters to remove, at most `max`
+        /// in total ("remove up to X counters", Hex Parasite); over the
+        /// "remove all" sentinel it is the uncapped "remove any number of
+        /// counters" (CR 107.1c, Rhys, the Evermore).
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
@@ -21521,6 +21566,15 @@ pub enum Effect {
         #[serde(default)]
         attacker_restriction: Option<TargetFilter>,
     },
+    /// CR 107.3a + CR 107.3e: change the value of X of the spell named by the
+    /// spell-cast trigger event ("double the value of X" — Unbound Flourishing).
+    /// CR 107.3c's closing note is the only rule text that acknowledges an X
+    /// changing on the stack. CR 701.10 is the printed verb only: it defines no
+    /// doubled X. The value is applied through `stack::rewrite_stack_object_x`,
+    /// the single authority for every X channel of a stack object.
+    ModifyAnnouncedX {
+        modification: XModification,
+    },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
     /// Existing DoublePT/DoublePTAll handle CR 701.10a-c (power/toughness).
@@ -23788,6 +23842,7 @@ impl Effect {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -24036,6 +24091,7 @@ impl Effect {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -24605,6 +24661,7 @@ impl Effect {
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
             | Effect::Learn
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -25065,6 +25122,7 @@ impl Effect {
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
             | Effect::Learn
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::Forage
             | Effect::CompletePlayerAction { .. }
             | Effect::Harness
@@ -25689,6 +25747,7 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::Detain { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::DoublePT { .. }
             | Effect::DoublePTAll { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
@@ -25935,6 +25994,7 @@ impl Effect {
             | Effect::DiscardCard { .. }
             | Effect::Discover { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::DoublePT { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Draw { .. }
@@ -26782,6 +26842,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::TurnFaceUp { .. }
             | Effect::TurnFaceDown { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Specialize
             | Effect::Learn
@@ -27131,6 +27192,7 @@ impl Effect {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -27342,6 +27404,7 @@ impl Effect {
             | Effect::LoseAllPlayerCounters { .. }
             | Effect::PutOnTopOrBottom { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
@@ -27611,6 +27674,7 @@ impl Effect {
             | Effect::LoseAllPlayerCounters { .. }
             | Effect::PutOnTopOrBottom { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
@@ -27943,6 +28007,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
         Effect::Double { .. } => "Double",
+        Effect::ModifyAnnouncedX { .. } => "ModifyAnnouncedX",
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
         },
@@ -28200,6 +28265,7 @@ pub enum EffectKind {
     SkipNextStep,
     AdditionalPhase,
     Double,
+    ModifyAnnouncedX,
     RuntimeHandled,
     Learn,
     Forage,
@@ -28493,6 +28559,7 @@ impl From<&Effect> for EffectKind {
             Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
             Effect::Double { .. } => EffectKind::Double,
+            Effect::ModifyAnnouncedX { .. } => EffectKind::ModifyAnnouncedX,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
             Effect::Learn => EffectKind::Learn,
             Effect::Forage => EffectKind::Forage,
@@ -33152,6 +33219,10 @@ pub struct TriggerDefinition {
     pub constraint: Option<TriggerConstraint>,
     #[serde(default)]
     pub condition: Option<TriggerCondition>,
+    /// CR 508.1g: Pre-payment eligibility of the linked optional attack cost.
+    /// Unlike an intervening-if, this is not rechecked after payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_cost_condition: Option<StaticCondition>,
     /// Optional filter for counter-related trigger modes (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_filter: Option<CounterTriggerFilter>,
@@ -33828,6 +33899,20 @@ impl Default for TriggerOccurrenceState {
 }
 
 impl TriggerDefinition {
+    /// CR 701.43d: The self-referential exert component grants an optional
+    /// attack cost; an actor-filtered exert observer grants no such permission.
+    pub fn is_attack_exert_permission(&self) -> bool {
+        self.mode == TriggerMode::Exerted
+            && self.valid_card == Some(TargetFilter::SelfRef)
+            && self.valid_target.is_none()
+    }
+
+    /// CR 701.43d + CR 603.1: Without a linked effect, this aggregate contains
+    /// only the static attack permission, not a triggered ability.
+    pub fn is_standalone_attack_exert_permission(&self) -> bool {
+        self.is_attack_exert_permission() && self.execute.is_none()
+    }
+
     pub fn new(mode: TriggerMode) -> Self {
         Self {
             mode,
@@ -33850,6 +33935,7 @@ impl TriggerDefinition {
             description: None,
             constraint: None,
             condition: None,
+            attack_cost_condition: None,
             counter_filter: None,
             saga_chapter: None,
             unless_pay: None,
@@ -33951,6 +34037,11 @@ impl TriggerDefinition {
 
     pub fn condition(mut self, condition: TriggerCondition) -> Self {
         self.condition = Some(condition);
+        self
+    }
+
+    pub fn attack_cost_condition(mut self, condition: StaticCondition) -> Self {
+        self.attack_cost_condition = Some(condition);
         self
     }
 
@@ -35683,19 +35774,15 @@ pub enum CopiedNameOrigin {
 /// Per CR 707.2c the copiable values a static copy effect grants are determined
 /// only when the effect first starts to apply, and per CR 707.2b later changes
 /// to the chosen object never propagate — so the values are frozen here rather
-/// than re-read live. The display trio (`display_source` / `printed_ref` /
-/// `token_image_ref`) is art routing only (NOT a CR 707.2 copiable value),
-/// carried so the enchanted host renders the chosen creature's art; it mirrors
-/// the identical trio on `ContinuousModification::CopyValues`.
+/// than re-read live. The `display` identity is art routing only (NOT a CR 707.2
+/// copiable value; see [`DisplayIdentity`]), carried so the enchanted host
+/// renders the chosen creature's art; it mirrors the identical identity on
+/// `ContinuousModification::CopyValues`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatchedCopiableSnapshot {
     pub values: CopiableValues,
-    #[serde(default)]
-    pub display_source: DisplaySource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub printed_ref: Option<PrintedCardRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_image_ref: Option<TokenImageRef>,
+    #[serde(flatten)]
+    pub display: DisplayIdentity,
 }
 
 /// CR 707.2 + CR 707.2c: Why a `WaitingFor::CopyTargetChoice` was raised, which
@@ -35760,35 +35847,10 @@ pub enum ContinuousModification {
         values: Box<CopiableValues>,
         /// Image-routing identity of the copy source, carried so the copy renders
         /// the source's art and reverts through the same layer pass as the copied
-        /// characteristics. NONE of these three are CR 707.2 copiable values
-        /// (status/art are not copied per CR 707.2) — they are display routing
-        /// only, deliberately kept off `CopiableValues`, and mirror the flat
-        /// `GameObject`/`CopyTokenSpec` storage (`display_source` discriminates:
-        /// `Card` ⇒ read `printed_ref`; `Token` ⇒ read `token_image_ref`).
-        ///
-        /// CR 111.1 + CR 707.2: a permanent that becomes a copy of a *token*
-        /// stays a nontoken (token-ness is created by a token-making effect per
-        /// CR 111.1, and is not among the CR 707.2 copiable values), but its name
-        /// is the token's, which only resolves in the token art database — so the
-        /// source's `display_source = Token` and `token_image_ref` must ride
-        /// along, not just `printed_ref`.
-        #[serde(default)]
-        display_source: DisplaySource,
-        /// Scryfall oracle-id pointer of the source when it is a printed card.
-        /// `None` when the source is a true token (then `token_image_ref` carries
-        /// the routing).
-        #[serde(default)]
-        printed_ref: Option<PrintedCardRef>,
-        /// Exact token-art pointer of the source when it is a true token.
-        /// `None` for printed-card sources.
-        #[serde(default)]
-        token_image_ref: Option<TokenImageRef>,
-        /// Intrinsic token-art body of the source, carried so a copy of a
-        /// token without an exact ref still renders from the source's shape
-        /// rather than the recipient's stale descriptor. `None` for
-        /// printed-card sources and pre-descriptor snapshots.
-        #[serde(default)]
-        token_art: Option<TokenArtDescriptor>,
+        /// characteristics. Display routing only — see [`DisplayIdentity`] for the
+        /// CR 707.2 / CR 111.1 rationale.
+        #[serde(flatten)]
+        display: DisplayIdentity,
     },
     /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
     /// "enchanted creature is a copy of the chosen creature" (Metamorphic
@@ -37897,6 +37959,7 @@ impl ResolvedAbility {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -39705,6 +39768,17 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
     use syn::__private::ToTokens;
+
+    /// X-1 (CR 107.3): doubling X multiplies the current value, keeps 0 at 0
+    /// (Unbound Flourishing ruling: X = 0 doubles to 0), and saturates instead
+    /// of wrapping.
+    #[test]
+    fn x_modification_double_multiplies_and_saturates() {
+        assert_eq!(XModification::DOUBLE.apply(0), 0);
+        assert_eq!(XModification::DOUBLE.apply(2), 4);
+        assert_eq!(XModification::DOUBLE.apply(u32::MAX), u32::MAX);
+        assert_eq!(XModification::Times { factor: 3 }.apply(2), 6);
+    }
 
     #[test]
     fn names_one_player_is_the_declared_and_bound_player_only() {
@@ -42261,6 +42335,56 @@ mod tests {
     }
 
     #[test]
+    fn distinct_subtypes_restrict_absent_by_default_and_round_trips() {
+        // CR 205.3: Subgoyf's committed old-shape node (no `restrict` key)
+        // deserializes with `restrict: None` and re-serializes WITHOUT the key
+        // (byte-identity); a Tam-shaped node WITH the key round-trips.
+        let old_node = serde_json::json!({
+            "type": "DistinctSubtypes",
+            "source": {"type": "Zone", "zone": "Graveyard", "scope": "All"},
+            "exclude": {"type": "CreatureTypes"},
+        });
+        let parsed: QuantityRef =
+            serde_json::from_value(old_node.clone()).expect("old shape deserializes");
+        assert_eq!(
+            parsed,
+            QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::All,
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
+            }
+        );
+        let reserialized = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(
+            reserialized, old_node,
+            "absent key stays absent (Subgoyf byte-identity)"
+        );
+
+        // Reach-guard: the new node WITH the key round-trips losslessly.
+        let new = QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+            exclude: SubtypeExclusion::None,
+            restrict: Some(SubtypeSet::Planeswalker),
+        };
+        let new_json = serde_json::to_value(&new).expect("serialize");
+        assert_eq!(
+            new_json.get("restrict"),
+            Some(&serde_json::json!("Planeswalker")),
+            "the category axis serializes as the SubtypeSet name"
+        );
+        assert_eq!(
+            serde_json::from_value::<QuantityRef>(new_json).expect("round trip"),
+            new
+        );
+    }
+
+    #[test]
     fn restricted_color_choice_value_rejects_excluded_color() {
         assert_eq!(
             ChoiceValue::from_choice(
@@ -42788,6 +42912,35 @@ mod tests {
         assert_eq!(deserialized, cost);
     }
 
+    #[test]
+    fn attack_exert_permission_classification_preserves_triggered_components() {
+        // CR 701.43d + CR 603.1: Only the permission with no linked effect
+        // lacks a triggered component; unsupported effects still have one.
+        let permission =
+            TriggerDefinition::new(TriggerMode::Exerted).valid_card(TargetFilter::SelfRef);
+        assert!(permission.is_attack_exert_permission());
+        assert!(permission.is_standalone_attack_exert_permission());
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Effect::unimplemented("ExertLinkedBody", "unsupported linked effect"),
+        ] {
+            let linked = permission
+                .clone()
+                .execute(AbilityDefinition::new(AbilityKind::Spell, effect));
+            assert!(linked.is_attack_exert_permission());
+            assert!(!linked.is_standalone_attack_exert_permission());
+        }
+        let observer = permission.valid_target(TargetFilter::Controller);
+        assert!(!observer.is_attack_exert_permission());
+        assert!(!observer.is_standalone_attack_exert_permission());
+        let unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        assert!(unrelated.execute.is_none());
+        assert!(!unrelated.is_standalone_attack_exert_permission());
+    }
+
     // --- Serde roundtrip tests for new typed definitions ---
 
     #[test]
@@ -42819,6 +42972,7 @@ mod tests {
             description: Some("When ~ dies, draw a card.".to_string()),
             constraint: None,
             condition: None,
+            attack_cost_condition: None,
             counter_filter: None,
             saga_chapter: None,
             unless_pay: None,
@@ -46857,6 +47011,7 @@ mod static_condition_traversal_tests {
             StaticCondition::RecipientAttackingOwnerTarget {
                 target: crate::types::triggers::AttackTargetFilter::Player,
             },
+            StaticCondition::SourceExertedThisTurn,
             StaticCondition::SourceIsTapped,
             StaticCondition::None,
         ] {

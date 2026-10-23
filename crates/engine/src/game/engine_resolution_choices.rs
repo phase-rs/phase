@@ -3455,11 +3455,11 @@ pub(super) fn handle_resolution_choice(
                                     count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
                                         values: growth.profile.clone(),
-                                        display_source:
-                                            crate::game::game_object::DisplaySource::Token,
-                                        printed_ref: None,
-                                        token_image_ref: None,
-                                        token_art: None,
+                                        display: crate::game::game_object::DisplayIdentity {
+                                            display_source:
+                                                crate::game::game_object::DisplaySource::Token,
+                                            ..Default::default()
+                                        },
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,
