@@ -24146,6 +24146,89 @@ fn trigger_oversold_cemetery_upkeep_creature_graveyard_gate() {
     assert!(def.optional);
 }
 
+/// CR 400.3 + CR 109.5: a "put into [your | an opponent's] graveyard" possessive
+/// scopes the moving card's OWNER (`FilterProp::Owned`) and leaves
+/// `TypedFilter.controller` unset (no "you control" in the subject). Returns the
+/// typed filter for further checks.
+fn assert_owner_scoped(valid_card: &Option<TargetFilter>, owner: ControllerRef) -> &TypedFilter {
+    let Some(TargetFilter::Typed(tf)) = valid_card else {
+        panic!("Expected Typed valid_card owned by {owner:?}, got {valid_card:?}");
+    };
+    assert_eq!(
+        tf.controller, None,
+        "the possessive must not scope the controller-at-death, got {tf:?}"
+    );
+    assert!(
+        tf.properties
+            .contains(&FilterProp::Owned { controller: owner }),
+        "Expected FilterProp::Owned in {tf:?}"
+    );
+    tf
+}
+
+/// CR 400.3 + CR 109.5 + CR 700.4: Daretti, Scrap Savant's emblem — "an artifact
+/// is put into your graveyard from the battlefield" scopes the artifact's owner,
+/// not the controller it had when it died.
+#[test]
+fn trigger_put_into_your_graveyard_from_battlefield_scopes_owner() {
+    let def = parse_trigger_line(
+        "Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.",
+        "Daretti, Scrap Savant",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You
+            }])
+        ))
+    );
+    let execute = def.execute.as_deref().expect("emblem trigger has a body");
+    assert!(!has_unimplemented(execute), "{execute:?}");
+}
+
+/// A subject's own "you control" stays on the controller axis (CR 603.10a look-back)
+/// while the destination possessive adds the owner scope: Volrath's ability.
+#[test]
+fn trigger_subject_you_control_put_into_your_graveyard_keeps_both_axes() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control is put into your graveyard from the battlefield, you may put it on top of your library.",
+        "Volrath",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("Expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "subject: you control"
+    );
+    assert!(tf.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You
+    }));
+}
+
+/// Pins a KNOWN GAP, not the desired end state: a self-referential subject is not
+/// owner-scoped (wrapping `SelfRef` would hide the identity the self-trigger
+/// consumers key on), so a stolen Zodiac Dragon still fires. Positive twin of the
+/// tests above, which do scope their non-self subjects.
+#[test]
+fn trigger_self_put_into_your_graveyard_stays_self_ref() {
+    let def = parse_trigger_line(
+        "When this creature is put into your graveyard from the battlefield, you may return it to your hand.",
+        "Zodiac Dragon",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
 #[test]
 fn trigger_put_into_your_graveyard_from_library() {
     let def = parse_trigger_line(
@@ -24155,16 +24238,9 @@ fn trigger_put_into_your_graveyard_from_library() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, Some(Zone::Library));
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: "your graveyard" narrows valid_card.controller (the field
+    // CR 400.3 + CR 109.5: "your graveyard" scopes valid_card ownership (the field
     // match_changes_zone actually consults) — not just valid_target.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::You));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=You, got {:?}",
-            def.valid_card
-        );
-    }
+    assert_owner_scoped(&def.valid_card, ControllerRef::You);
     assert_eq!(
         def.valid_target,
         Some(TargetFilter::Typed(
@@ -24186,15 +24262,8 @@ fn trigger_put_into_your_graveyard_from_library_or_hand_union() {
     assert_eq!(def.origin, None);
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::You));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=You, got {:?}",
-            def.valid_card
-        );
-    }
+    // CR 400.3 + CR 109.5: the union must not disturb the graveyard-possessive scope.
+    assert_owner_scoped(&def.valid_card, ControllerRef::You);
 }
 
 /// The full-form union ("from your library or your hand") lowers to the same
@@ -24420,15 +24489,8 @@ fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
     assert_eq!(def.origin, None);
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    // CR 400.3 + CR 109.5: the union must not disturb the graveyard-possessive scope.
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
 }
 
 /// CR 109.5 + CR 400.3 (fail-closed): an opponent-qualified union against an
@@ -24586,24 +24648,14 @@ fn trigger_put_into_opponent_graveyard_from_their_library() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, Some(Zone::Library));
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(
-            tf.controller,
-            Some(ControllerRef::Opponent),
-            "valid_card.controller must be Opponent so the trigger does not \
-                 fire on the source's own death"
-        );
-        assert!(
-            tf.type_filters.contains(&TypeFilter::Creature),
-            "Expected Creature type filter, got {:?}",
-            tf.type_filters
-        );
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    // valid_card must be owned by an opponent so the trigger does not fire on the
+    // source's own death.
+    let tf = assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Expected Creature type filter, got {:?}",
+        tf.type_filters
+    );
     assert_eq!(
         def.valid_target,
         Some(TargetFilter::Typed(
@@ -24625,14 +24677,7 @@ fn trigger_put_into_opponent_graveyard_from_anywhere() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, None);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
 }
 
 /// CR 109.5: "a player's graveyard from any library" — owner-unscoped form.
@@ -24680,24 +24725,15 @@ fn trigger_one_or_more_creature_cards_put_into_graveyard_from_library() {
             TypedFilter::default().controller(ControllerRef::You)
         ))
     );
-    // CR 109.5: Subject filter must carry both the creature type AND the
-    // owner-narrowed controller scope so the matcher fires only for the
+    // CR 400.3 + CR 109.5: Subject filter must carry both the creature type AND the
+    // owner scope from "your graveyard" so the matcher fires only for the
     // controller's cards.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert!(
-            tf.type_filters.contains(&TypeFilter::Creature),
-            "Expected Creature in type_filters, got {:?}",
-            tf.type_filters
-        );
-        assert_eq!(
-            tf.controller,
-            Some(ControllerRef::You),
-            "Expected controller=You merged from 'your graveyard', got {:?}",
-            tf.controller
-        );
-    } else {
-        panic!("Expected Typed creature filter, got {:?}", def.valid_card);
-    }
+    let tf = assert_owner_scoped(&def.valid_card, ControllerRef::You);
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Expected Creature in type_filters, got {:?}",
+        tf.type_filters
+    );
 }
 
 #[test]
@@ -24809,13 +24845,15 @@ fn trigger_one_or_more_cards_put_into_graveyard_from_anywhere() {
     assert_eq!(def.origin, None);
     assert_eq!(def.destination, Some(Zone::Graveyard));
     assert!(def.batched);
-    // "your graveyard" scopes the affected cards to the controller even
-    // when "cards" carries no additional type restriction.
+    // CR 400.3 + CR 109.5: "your graveyard" scopes the affected cards to the ones
+    // the controller owns even when "cards" carries no additional type restriction.
     assert_eq!(
         def.valid_card,
-        Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You)
-        ))
+        Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        ])))
     );
 }
 

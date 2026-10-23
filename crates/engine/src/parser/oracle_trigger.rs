@@ -22064,26 +22064,6 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterRemoved, def))
 }
 
-/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
-/// [from <origin-possessive>]" patterns.
-///
-/// Handles all forms:
-/// - "is put into a graveyard from anywhere" (no origin restriction)
-/// - "is put into a graveyard from the battlefield" (equivalent to "dies")
-/// - "is put into your graveyard [from your library]" (controller filter + optional origin)
-/// - "is put into an opponent's graveyard from anywhere" (opponent controller filter)
-/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
-///   anaphor binds back to the previously named opponent — Undead Alchemist class)
-/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
-/// - "are put into your graveyard from your library" (plural form for batched triggers)
-///
-/// The graveyard's possessive narrows `valid_card.controller` (CR 109.5: a card
-/// going into player P's graveyard is P's card). This is what `match_changes_zone`
-/// actually reads when deciding to fire — historically the possessive only set
-/// `valid_target`, which `match_changes_zone` ignores for ChangesZone, so the
-/// trigger fired for any card going to any graveyard. `valid_target` is also
-/// preserved so downstream effect resolution (e.g. `target: ParentTarget`) keeps
-/// the narrowed scope.
 /// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.
 /// Handles "from the battlefield" → `Equals`, "from anywhere other than the
 /// battlefield" → `NotEquals`, "from anywhere" / no clause → `Any`, and the
@@ -22297,10 +22277,8 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
-        let valid_card = match possessive {
-            Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-            None => Some(subject.clone()),
-        };
+        // CR 400.3 + CR 109.5: the graveyard possessive scopes the card's owner.
+        let valid_card = Some(scope_to_destination_owner(subject.clone(), possessive));
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
@@ -22368,6 +22346,27 @@ fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneCh
     (clauses.len() >= 2).then_some(clauses)
 }
 
+/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
+/// [from <origin-possessive>]" patterns.
+///
+/// Handles all forms:
+/// - "is put into a graveyard from anywhere" (no origin restriction)
+/// - "is put into a graveyard from the battlefield" (equivalent to "dies")
+/// - "is put into your graveyard [from your library]" (owner scope + optional origin)
+/// - "is put into an opponent's graveyard from anywhere" (opponent owner scope)
+/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
+///   anaphor binds back to the previously named opponent — Undead Alchemist class)
+/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
+/// - "are put into your graveyard from your library" (plural form for batched triggers)
+///
+/// The graveyard's possessive scopes `valid_card` ownership via `FilterProp::Owned`
+/// (CR 400.3 + CR 109.5: a card is only ever put into its owner's graveyard, so
+/// "your graveyard" means a card you own — see `scope_to_destination_owner`).
+/// This is what `match_changes_zone` actually reads when deciding to fire —
+/// historically the possessive only set `valid_target`, which `match_changes_zone`
+/// ignores for ChangesZone, so the trigger fired for any card going to any
+/// graveyard. `valid_target` carries the same possessive for the parse-details
+/// display only; `match_changes_zone` does not read it.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -22408,10 +22407,11 @@ fn try_parse_put_into_graveyard(
         return None;
     }
 
-    let valid_card = match possessive.clone() {
-        Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-        None => Some(subject.clone()),
-    };
+    // CR 400.3 + CR 109.5: the graveyard possessive scopes the card's owner.
+    let valid_card = Some(scope_to_destination_owner(
+        subject.clone(),
+        possessive.clone(),
+    ));
     let valid_target =
         possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
 
@@ -22446,6 +22446,28 @@ fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<Controller
         value(None, tag("a player's graveyard")),
     ))
     .parse(input)
+}
+
+/// CR 400.3 + CR 109.5: a possessive on an owner-keyed destination zone (library,
+/// graveyard, hand — "put into your graveyard") names that zone's owner, and an
+/// object only ever goes to its owner's library/graveyard/hand — so the possessive
+/// scopes the moving object's OWNER (`FilterProp::Owned`), never its controller.
+/// `TypedFilter.controller` stays the subject's own "you control" (the CR 603.10a
+/// look-back reading), and the zone-change record matcher reads `Owned` against
+/// `record.arrival.owner`.
+///
+/// `owner == None` ("a graveyard", "a player's graveyard") scopes nothing. A
+/// `SelfRef` subject ("when this creature is put into your graveyard") is left
+/// as-is: wrapping it would hide the `valid_card == SelfRef` identity that the
+/// self-trigger consumers key on, and it is the pre-existing behaviour
+/// (`add_controller` is a no-op on `SelfRef`). Known gap of the same phrase class,
+/// left for a separate change.
+fn scope_to_destination_owner(subject: TargetFilter, owner: Option<ControllerRef>) -> TargetFilter {
+    match (subject, owner) {
+        (subject, None) => subject,
+        (TargetFilter::SelfRef, Some(_)) => TargetFilter::SelfRef,
+        (subject, Some(owner)) => with_owner_scope(subject, owner),
+    }
 }
 
 /// CR 603.6c + CR 109.5: Parse the origin zone for a put-into-graveyard trigger.
@@ -22942,15 +22964,13 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
-        // CR 109.5: Merge the graveyard owner's controller scope into valid_card
-        // (the field `match_changes_zone` actually consults). valid_target is
-        // preserved for downstream effect targeting / displays.
+        // CR 400.3 + CR 109.5: Scope the graveyard owner's possessive onto
+        // valid_card (the field `match_changes_zone` actually consults) as card
+        // ownership. valid_target keeps the possessive for the parse-details
+        // display only.
         let valid_card = match (base_filter, possessive.clone()) {
-            (Some(f), Some(ctrl)) => Some(add_controller(f, ctrl)),
-            (Some(f), None) => Some(f),
-            (None, Some(ctrl)) => {
-                Some(TargetFilter::Typed(TypedFilter::default().controller(ctrl)))
-            }
+            (Some(f), p) => Some(scope_to_destination_owner(f, p)),
+            (None, Some(ctrl)) => Some(scope_to_destination_owner(TargetFilter::Any, Some(ctrl))),
             (None, None) => None,
         };
         let valid_target =
