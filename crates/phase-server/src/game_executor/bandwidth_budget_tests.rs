@@ -166,7 +166,7 @@ struct SeatBudget {
 fn load_budget() -> Budget {
     serde_json::from_str(BUDGET_JSON).unwrap_or_else(|error| {
         panic!(
-            "bandwidth_budget.json is malformed ({error}); fix the file or regenerate it with:\n  {UPDATE_COMMAND}"
+            "bandwidth_budget.json is malformed ({error}); fix it by hand: the update command below keeps schema, scenario and tolerances from this file, so it needs a parseable file:\n  {UPDATE_COMMAND}"
         )
     })
 }
@@ -638,9 +638,8 @@ fn play_round() -> Vec<SeatBudget> {
         Zone::Graveyard,
         "Lightning Bolt killed the Llanowar Elves"
     );
-    assert_eq!(
-        state.objects[&game.bolt_victim].owner,
-        seat(1),
+    assert!(
+        state.players[1].graveyard.contains(&game.bolt_victim),
         "the Bolted creature is in its owner's graveyard"
     );
     assert!(
