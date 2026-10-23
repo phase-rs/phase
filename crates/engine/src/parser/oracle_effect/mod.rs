@@ -20881,6 +20881,14 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
 }
 
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    lower_imperative_clause_with_enclosing_source(text, ctx, None)
+}
+
+fn lower_imperative_clause_with_enclosing_source(
+    text: &str,
+    ctx: &mut ParseContext,
+    enclosing_target_subject_source: Option<DamageSource>,
+) -> ParsedEffectClause {
     // CR 601.2c: the announced target count for a "… to each of ⟨N⟩ …" head is a
     // property of THIS clause only. `parse_imperative_effect` is also reached
     // from sites that never consume this field (the shared-`ctx`
@@ -21000,7 +21008,11 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     }
 
     // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
-    if let Some(clause) = try_split_damage_compound(text, ctx) {
+    let damage_compound = match enclosing_target_subject_source {
+        Some(source) => try_split_damage_compound_with_enclosing_source(text, ctx, Some(source)),
+        None => try_split_damage_compound(text, ctx),
+    };
+    if let Some(clause) = damage_compound {
         return clause;
     }
 
@@ -23363,11 +23375,25 @@ fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    try_parse_multi_target_damage_chain_with_enclosing_source(text, ctx, None)
+}
+
+/// `enclosing_target_subject_source` records a source already selected by an
+/// enclosing subject; `wrap_target_subject_damage` binds it to the effects later.
+fn try_parse_multi_target_damage_chain_with_enclosing_source(
+    text: &str,
+    ctx: &mut ParseContext,
+    enclosing_target_subject_source: Option<DamageSource>,
+) -> Option<ParsedEffectClause> {
     // This recognizer speculatively parses the whole clause. A failed attempt
     // must leave every parser-context field (especially the target chooser)
     // untouched for the fallback compound parser.
     let mut tentative_ctx = ctx.clone();
-    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx, None)?;
+    let clause = try_parse_multi_target_damage_chain_inner(
+        text,
+        &mut tentative_ctx,
+        enclosing_target_subject_source,
+    )?;
     *ctx = tentative_ctx;
     Some(clause)
 }
@@ -23375,7 +23401,7 @@ fn try_parse_multi_target_damage_chain(
 fn try_parse_multi_target_damage_chain_inner(
     text: &str,
     ctx: &mut ParseContext,
-    damage_source: Option<DamageSource>,
+    enclosing_target_subject_source: Option<DamageSource>,
 ) -> Option<ParsedEffectClause> {
     // A target-subject damage sentence has a target declaration for its damage
     // source before its first recipient. Keep that declaration outside this
@@ -23424,7 +23450,7 @@ fn try_parse_multi_target_damage_chain_inner(
             damage_source: None,
             excess: None,
             ..
-        } if damage_source.is_none()
+        } if enclosing_target_subject_source.is_none()
             && not(tag::<_, _, OracleError<'_>>("target "))
                 .parse(lower)
                 .is_ok()
@@ -24165,6 +24191,14 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
 }
 
 fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    try_split_damage_compound_with_enclosing_source(text, ctx, None)
+}
+
+fn try_split_damage_compound_with_enclosing_source(
+    text: &str,
+    ctx: &mut ParseContext,
+    enclosing_target_subject_source: Option<DamageSource>,
+) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
         return None;
@@ -24201,7 +24235,13 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // amount/target pairs (Cone of Flame, Banshee, Serpentine Spike). Must
     // run before the general single-and split so the comma-separated chain
     // isn't bisected by the "and" connector at the final segment.
-    if let Some(clause) = try_parse_multi_target_damage_chain(text, ctx) {
+    let chain = match enclosing_target_subject_source {
+        Some(source) => {
+            try_parse_multi_target_damage_chain_with_enclosing_source(text, ctx, Some(source))
+        }
+        None => try_parse_multi_target_damage_chain(text, ctx),
+    };
+    if let Some(clause) = chain {
         return Some(clause);
     }
 
@@ -28108,7 +28148,11 @@ fn lower_subject_predicate_ast_body(
             // recipient slots; `wrap_target_subject_damage` remains the sole
             // authority for the source and inherited self-damage bindings.
             if subject.target.is_some() {
-                if let Some(clause) = try_parse_multi_target_damage_chain(&text, ctx) {
+                if let Some(clause) = try_parse_multi_target_damage_chain_with_enclosing_source(
+                    &text,
+                    ctx,
+                    Some(DamageSource::Target),
+                ) {
                     if let Some(wrapped) = wrap_target_subject_damage(clause, &subject) {
                         return wrapped;
                     }
@@ -28349,7 +28393,13 @@ fn lower_subject_predicate_ast_body(
             // moved-object ChangeZone/ChangeZoneAll leg ALONE (see the resolution-
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
-            let mut clause = lower_imperative_clause(&text, ctx);
+            // CR 120.1 + CR 608.2c: a declined early chain still has the same
+            // enclosing target subject when the general damage splitter retries.
+            let mut clause = lower_imperative_clause_with_enclosing_source(
+                &text,
+                ctx,
+                subject.target.as_ref().map(|_| DamageSource::Target),
+            );
             let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
             if clause.multi_target.is_none() {
                 clause.multi_target = placement_target_set;
@@ -52920,16 +52970,43 @@ mod parent_controller_population_tests {
                 Effect::DamageAll { target: TargetFilter::Typed(filter), .. }
                 if filter.controller == Some(ControllerRef::ParentTargetController)));
         }
-        for text in [
-            "~ deals 3 damage to each of two target creatures and 1 damage to each other creature with the same controller.",
-            "~ deals 3 damage to up to one target creature and 1 damage to each other creature with the same controller.",
-            "~ deals 3 damage to target creature, 2 damage to target creature, and 1 damage to each other creature with the same controller.",
-            "Target creature deals 3 damage to target creature and 1 damage to each other creature with the same controller.",
-            "~ deals 3 damage to target creature and 1 damage to each other creature with the same controllers.",
+        for (head, population) in [
+            (
+                "~ deals 3 damage to each of two target creatures",
+                "each other creature with the same controller",
+            ),
+            (
+                "~ deals 3 damage to up to one target creature",
+                "each other creature with the same controller",
+            ),
+            (
+                "~ deals 3 damage to target creature, 2 damage to target creature",
+                "each other creature with the same controller",
+            ),
+            (
+                "Target creature deals 3 damage to target creature",
+                "each other creature with the same controller",
+            ),
+            (
+                "~ deals 3 damage to target creature",
+                "each other creature with the same controllers",
+            ),
         ] {
+            let ordinary = format!("{head} and 1 damage to each creature.");
+            let control =
+                try_parse_multi_target_damage_chain(&ordinary, &mut ParseContext::default())
+                    .unwrap_or_else(|| {
+                        panic!("refusal head must reach an ordinary continuation: {ordinary}")
+                    });
+            assert_reaches_uniform_population(&control);
+
+            let text = format!("{head} and 1 damage to {population}.");
             let mut ctx = ParseContext::default();
             let before = ctx.clone();
-            assert!(try_parse_multi_target_damage_chain(text, &mut ctx).is_none(), "{text}");
+            assert!(
+                try_parse_multi_target_damage_chain(&text, &mut ctx).is_none(),
+                "{text}"
+            );
             assert_eq!(ctx, before, "failed whole-chain speculation must roll back");
         }
         for antecedent in [TargetFilter::EventTarget, TargetFilter::TriggeringSource] {
@@ -52937,7 +53014,101 @@ mod parent_controller_population_tests {
                 object_pronoun_ref: Some(antecedent),
                 ..Default::default()
             };
+            let control = try_parse_multi_target_damage_chain(
+                "~ deals X damage to target creature and 1 damage to each creature.",
+                &mut ctx.clone(),
+            )
+            .expect("event-relative context must still parse an ordinary population");
+            assert_reaches_uniform_population(&control);
             assert!(try_parse_multi_target_damage_chain(text, &mut ctx).is_none());
         }
+    }
+
+    fn assert_reaches_uniform_population(clause: &ParsedEffectClause) {
+        assert!(matches!(
+            clause.effect,
+            Effect::DealDamage { .. } | Effect::TargetOnly { .. }
+        ));
+        let mut tail = clause.sub_ability.as_deref().expect("damage continuation");
+        while let Some(next) = tail.sub_ability.as_deref() {
+            tail = next;
+        }
+        assert!(matches!(
+            tail.effect.as_ref(),
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(filter),
+                player_filter: None,
+                ..
+            } if filter.type_filters == vec![TypeFilter::Creature]
+        ));
+    }
+
+    fn assert_unbound_target_subject_population(definition: &AbilityDefinition) {
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(source),
+        } = definition.effect.as_ref()
+        else {
+            panic!("expected the enclosing source target: {definition:?}")
+        };
+        assert_eq!(source.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(source.controller, Some(ControllerRef::You));
+        let head = definition
+            .sub_ability
+            .as_deref()
+            .expect("targeted damage recipient");
+        assert!(matches!(
+            head.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(target),
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            } if target.type_filters == vec![TypeFilter::Creature]
+        ));
+        let population = head.sub_ability.as_deref().expect("population instruction");
+        let Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(filter),
+            player_filter: None,
+            ..
+        } = population.effect.as_ref()
+        else {
+            panic!("expected population: {population:?}")
+        };
+        // CR 115.10a + CR 608.2h: an enclosing source target cannot authorize a
+        // recipient-relative population. Preserve the unsupported suffix's
+        // unbound filter rather than claiming which of the two targets it names.
+        assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(filter.controller, None);
+        assert_eq!(filter.properties, vec![FilterProp::Another]);
+        assert!(population.sub_ability.is_none());
+    }
+
+    #[test]
+    fn target_subject_population_via_effect_chain_keeps_unbound_filter() {
+        let text = "Target creature you control deals 3 damage to target creature and 1 damage to each other creature with the same controller.";
+        let control = try_parse_multi_target_damage_chain_with_enclosing_source(
+            "deals 3 damage to target creature and 1 damage to each creature.",
+            &mut ParseContext::default(),
+            Some(DamageSource::Target),
+        )
+        .expect("target-subject predicate reaches the normal chain");
+        assert_reaches_uniform_population(&control);
+        let definition = parse_effect_chain(text, AbilityKind::Spell);
+        assert_unbound_target_subject_population(&definition);
+    }
+
+    #[test]
+    fn target_subject_population_via_oracle_text_keeps_unbound_filter() {
+        let parsed = parse_oracle_text(
+            "Target creature you control deals 3 damage to target creature and 1 damage to each other creature with the same controller.",
+            "Target Subject Probe",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_unbound_target_subject_population(&parsed.abilities[0]);
     }
 }
