@@ -2313,6 +2313,10 @@ pub(super) fn handle_resolution_choice(
                 pending,
                 ignore_indices,
                 events,
+                // CR 608.2c: suspension-resume paths have no ability in
+                // scope; the parked frame's targets feed the modifier read
+                // through the parked-targets channel.
+                None,
             )
             .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
             // CR 608.2c: re-suspended for another interactive choice, else the

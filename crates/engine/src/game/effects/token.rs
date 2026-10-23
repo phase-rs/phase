@@ -690,6 +690,7 @@ pub(crate) fn resolve_with_host_override(
             // the side map never outlives its `tracked_object_sets` entry.
             state.tracked_set_member_causes.remove(&id);
             state.tracked_set_participants.remove(&id);
+            state.tracked_set_member_origins.remove(&id);
         }
     }
 

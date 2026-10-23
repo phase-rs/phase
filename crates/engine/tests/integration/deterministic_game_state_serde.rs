@@ -21,7 +21,7 @@ use engine::types::game_state::{
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
     StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
-    WaitingFor,
+    TrackedMemberOrigin, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -97,6 +97,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attribution", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_object_sets", map_key_types: &["TrackedSetId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_set_member_causes", map_key_types: &["TrackedSetId", "ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_set_member_origins", map_key_types: &["TrackedSetId", "ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_set_participants", map_key_types: &["TrackedSetId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::commander_cast_count", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::commander_cast_owners", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -342,6 +343,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "tracked_set_member_causes",
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "tracked_set_member_origins",
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
@@ -1262,7 +1272,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        58,
+        59,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1591,6 +1601,46 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             im::HashMap::from_iter([
                 (ObjectId(21), ThisWayCause::Destroyed),
                 (ObjectId(22), ThisWayCause::Milled),
+            ]),
+        ),
+    ]);
+    state.tracked_set_member_origins = im::HashMap::from_iter([
+        (
+            TrackedSetId(1),
+            im::HashMap::from_iter([
+                (
+                    ObjectId(11),
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: 7,
+                    },
+                ),
+                (
+                    ObjectId(12),
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Graveyard,
+                        departure_incarnation: 9,
+                    },
+                ),
+            ]),
+        ),
+        (
+            TrackedSetId(2),
+            im::HashMap::from_iter([
+                (
+                    ObjectId(21),
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Hand,
+                        departure_incarnation: 3,
+                    },
+                ),
+                (
+                    ObjectId(22),
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Exile,
+                        departure_incarnation: 5,
+                    },
+                ),
             ]),
         ),
     ]);
@@ -1960,6 +2010,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "attribution",
         "tracked_object_sets",
         "tracked_set_member_causes",
+        "tracked_set_member_origins",
         "tracked_set_participants",
         "commander_cast_count",
         "commander_cast_owners",
@@ -2002,7 +2053,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        45,
+        46,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2019,6 +2070,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     }
     for field in [
         "tracked_set_member_causes",
+        "tracked_set_member_origins",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
         "departed_stack_spells",

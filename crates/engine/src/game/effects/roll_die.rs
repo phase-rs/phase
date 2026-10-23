@@ -2,10 +2,10 @@ use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
+    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
@@ -53,12 +53,21 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
 /// The result is clamped to a u8-representable non-negative integer so a large
 /// subtract doesn't wrap; branches with `min`/`max` already in u8 simply won't
 /// match when the actual result is 0.
+///
+/// CR 608.2c: the modifier resolves in the resolving ability's context, so a
+/// later instruction can name what an earlier target-selection clause chose
+/// (the ability's chosen targets). Suspension-resume paths have no ability in
+/// scope and pass `None`, in which case the parked context feeds the
+/// distinguished parked-targets channel — the local members plus the
+/// chain-root/legality/pin context indexed reads need, frozen at park time.
 fn apply_modifier(
     state: &mut GameState,
     natural: u8,
     modifier: Option<&DieRollModifier>,
     controller: PlayerId,
     source_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
+    parked: crate::game::filter::ParkedTargets<'_>,
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -66,13 +75,20 @@ fn apply_modifier(
     // Carry the sign as the saturating operation rather than negating the
     // resolved delta: `-resolve_quantity(..)` would panic in debug builds (and
     // wrap in release) when the quantity resolves to `i32::MIN`.
-    let combined =
-        match m {
-            DieRollModifier::Add { value } => (natural as i32)
-                .saturating_add(resolve_quantity(state, value, controller, source_id)),
-            DieRollModifier::Subtract { value } => (natural as i32)
-                .saturating_sub(resolve_quantity(state, value, controller, source_id)),
-        };
+    let resolve = |state: &GameState, value: &crate::types::ability::QuantityExpr| match ability {
+        Some(ability) => {
+            crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
+        }
+        None => crate::game::quantity::resolve_quantity_with_parked_targets(
+            state, value, controller, source_id, parked,
+        ),
+    };
+    let combined = match m {
+        DieRollModifier::Add { value } => (natural as i32).saturating_add(resolve(state, value)),
+        DieRollModifier::Subtract { value } => {
+            (natural as i32).saturating_sub(resolve(state, value))
+        }
+    };
     combined.clamp(0, u8::MAX as i32) as u8
 }
 
@@ -204,6 +220,9 @@ pub(crate) fn resolve_step(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
+    // Slot context must be captured while `ability` is still in scope — past
+    // the proposal below, a CR 616.1 suspension drops it.
+    let parked = crate::game::targeting::capture_parked_slot_context(state, ability);
     let instruction = PendingDieRollInstruction {
         source_id: ability.source_id,
         controller: ability.controller,
@@ -224,6 +243,31 @@ pub(crate) fn resolve_step(
         // target once that branch runs (see
         // `build_resolved_from_def_with_chain_root`'s doc).
         chain_root_targets: ability.context.chain_root_targets.clone(),
+        // CR 608.2b + CR 400.7: capture the declared-slot legality stamp and
+        // the announced pins aligned with the chain-root list, so a resumed
+        // indexed read applies the same slot/legality/incarnation authority
+        // the live path would.
+        illegal_target_slots: crate::game::targeting::carrier_illegal_slots(state, ability),
+        chain_root_target_pins: ability
+            .context
+            .chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        // CR 608.2c + CR 608.2b + CR 400.7: capture the slot-base declared
+        // entries, the base offset, and the node's own pins through the
+        // single capture authority — first-match pin lookup would collapse
+        // repeated IDs, and raw root indexing ignores modal/downstream
+        // offsets. Resume prefers these over the legacy chain-root list.
+        // This capture ran through the single capture authority above, so
+        // even an empty list is authoritative on resume.
+        declared_capture: Some((&parked).into()),
+        local_target_pins: parked.local_pins,
+        keyed_target_incarnations: parked.keyed_target_incarnations,
+        declared_player: Some(parked.declared_player),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -243,7 +287,7 @@ pub(crate) fn resolve_step(
         state.pending_die_roll_instruction = None;
     }
 
-    execute_roll(state, instruction, sides, proposal, events)
+    execute_roll(state, instruction, sides, proposal, events, Some(ability))
 }
 
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
@@ -261,6 +305,7 @@ fn execute_roll(
     sides: u8,
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 706.1: a die roll is defined by its kind ("roll a d20"); a zero-sided
     // die names no distribution, so there is nothing to roll. This is not a
@@ -328,6 +373,12 @@ fn execute_roll(
         // the results-table route by construction.
         continuation: _,
         chain_root_targets,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -350,6 +401,12 @@ fn execute_roll(
         // path drops it alongside whatever the roller picks from the tie.
         forced_ignored: outcome.forced.clone(),
         chain_root_targets,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -357,7 +414,7 @@ fn execute_roll(
     // replacement in play), "a unique lowest per rule", and the stacked-Lowest
     // run whose N lowest rolls are distinct.
     if !outcome.needs_choice() {
-        return resume_after_ignore(state, pending, outcome.forced, events);
+        return resume_after_ignore(state, pending, outcome.forced, events, ability);
     }
 
     // CR 706.6, 2nd sentence: "if multiple results are tied for the lowest, the
@@ -438,7 +495,7 @@ pub(crate) fn resume_roll_dice_after_replacement(
     // context before rolling, exactly as the `DieKeepChoice` resume does.
     state.die_result_this_resolution = instruction.die_result;
 
-    execute_roll(state, *instruction, sides, proposal, events)
+    execute_roll(state, *instruction, sides, proposal, events, None)
 }
 
 /// CR 706.4 + CR 608.2c: the immediate parent resumes with the completed
@@ -487,7 +544,7 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     let prev_die_result = state.die_result_this_resolution;
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
-    match resume_after_ignore(state, pending, ignore_indices, events) {
+    match resume_after_ignore(state, pending, ignore_indices, events, None) {
         // Re-suspended on yet another branch choice: the frame re-parked itself
         // with the cursor advanced, so leave the restored context in place for
         // that continuation to read.
@@ -550,11 +607,15 @@ fn inherit_activation_incarnation(state: &GameState, branch: &mut ResolvedAbilit
 /// `inherit_activation_incarnation`; a triggered ability's rows stay unstamped). A
 /// source that left and re-entered the zone meanwhile is a new object and does not
 /// receive its old activation's rows.
-pub(crate) fn resume_after_ignore(
+///
+/// `pub` (not `pub(crate)`): this branch's integration tests drive this
+/// resume boundary directly with staged `PendingDieRoll` fixtures.
+pub fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
         source_id,
@@ -578,6 +639,12 @@ pub(crate) fn resume_after_ignore(
         // frame's own copy is only a carrier across the suspension.
         forced_ignored: _,
         chain_root_targets,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -613,7 +680,24 @@ pub(crate) fn resume_after_ignore(
         }
 
         // CR 706.2: apply the modifier to produce this die's actual result.
-        let actual = apply_modifier(state, natural, modifier.as_ref(), controller, source_id);
+        let actual = apply_modifier(
+            state,
+            natural,
+            modifier.as_ref(),
+            controller,
+            source_id,
+            ability,
+            crate::game::filter::ParkedTargets {
+                local: &targets,
+                local_pins: &local_target_pins,
+                root: &chain_root_targets,
+                illegal_slots: &illegal_target_slots,
+                root_pins: &chain_root_target_pins,
+                declared_capture: declared_capture.as_ref(),
+                keyed_target_incarnations: &keyed_target_incarnations,
+                declared_player,
+            },
+        );
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
         // the post-modifier value already resolved, and only for a surviving
@@ -695,6 +779,12 @@ pub(crate) fn resume_after_ignore(
                     // roller committed to.
                     forced_ignored: ignore_indices.clone(),
                     chain_root_targets: chain_root_targets.clone(),
+                    illegal_target_slots: illegal_target_slots.clone(),
+                    chain_root_target_pins: chain_root_target_pins.clone(),
+                    declared_capture: declared_capture.clone(),
+                    local_target_pins: local_target_pins.clone(),
+                    keyed_target_incarnations: keyed_target_incarnations.clone(),
+                    declared_player,
                 };
                 // CR 706.3a + CR 608.2c: the die owner waits outside the
                 // branch's entire child stack, not merely its top frame.
@@ -1587,9 +1677,17 @@ mod tests {
             rolled_any: false,
             forced_ignored: vec![],
             chain_root_targets: vec![],
+            illegal_target_slots: vec![],
+            chain_root_target_pins: vec![],
+            // Hand-built without a capture: no declared context, so the
+            // legacy path applies (no indexed reads run here either way).
+            declared_capture: None,
+            local_target_pins: vec![],
+            keyed_target_incarnations: vec![],
+            declared_player: None,
         };
         let mut events = Vec::new();
-        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
         assert_eq!(
             waiting,
             ResolutionProgress::Complete,

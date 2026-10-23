@@ -29,7 +29,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{
+    loop_states_equal, GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+};
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -5274,7 +5276,8 @@ macro_rules! history_members {
         pub(crate) enum HistoryMember {
             $($sv,)*
             $($pv,)*
-            /// The tracked object set store (CR 608.2c), with its id counter and member causes.
+            /// The tracked object set store (CR 608.2c), with its id counter,
+            /// member causes, and member departure origins.
             TrackedObjectSets,
             /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
             LastKnownRecords,
@@ -5298,9 +5301,14 @@ macro_rules! history_members {
                             &mut into.tracked_set_member_causes,
                             &from.tracked_set_member_causes,
                         );
+                        let origins = equalize_field(
+                            &mut into.tracked_set_member_origins,
+                            &from.tracked_set_member_origins,
+                        );
                         equalize_field(&mut into.next_tracked_set_id, &from.next_tracked_set_id)
                             || sets
                             || causes
+                            || origins
                     }
                     HistoryMember::LastKnownRecords => {
                         let records = equalize_field(&mut into.lki_cache, &from.lki_cache);
@@ -5690,8 +5698,54 @@ fn turn_stamps_keep_their_relation(prior: &GameState, current: &GameState) -> bo
     })
 }
 
+/// CR 608.2c: what one origin selects for member reads — the fallback kind
+/// on a record gap plus the selected snapshot's content. Incarnation numbers
+/// advance as members re-depart; comparing selection rather than identity
+/// keeps immaterial re-stamps (same characteristics) covered while a changed
+/// snapshot still refuses. Mirrors [`tracked_member_read_authority`]'s
+/// selection exactly (snapshot presence first, zone recording-kind second).
+fn origin_read_key<'s>(
+    state: &'s GameState,
+    member: ObjectId,
+    origin: &TrackedMemberOrigin,
+) -> (bool, Option<&'s LKISnapshot>) {
+    let snapshot = state
+        .lki_by_incarnation
+        .get(&member)
+        .and_then(|history| history.get(&origin.departure_incarnation));
+    (
+        crate::game::quantity::zone_departure_records_lki(origin.departed_from),
+        snapshot,
+    )
+}
+
+/// CR 608.2c: `prior`'s origins read the same in `current` — same key sets,
+/// same selected snapshot content per member. A re-stamp naming an
+/// identical snapshot stays covered; a changed snapshot, a changed fallback
+/// kind, or an asymmetric stamp refuses.
+fn origins_read_same(prior: &GameState, current: &GameState) -> bool {
+    prior
+        .tracked_set_member_origins
+        .iter()
+        .all(|(id, origins)| {
+            current
+                .tracked_set_member_origins
+                .get(id)
+                .is_some_and(|cur| {
+                    cur.len() == origins.len()
+                        && origins.iter().all(|(member, origin)| {
+                            cur.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                })
+        })
+}
+
 /// CR 608.2c: the period only appended tracked sets, and the latest non-empty set, which the
-/// sentinel's fallback reads, holds the same members for the same causes in both frames.
+/// sentinel's fallback reads, holds the same members for the same causes and origin-selected
+/// reads in both frames.
 fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let floor = prior.next_tracked_set_id;
     let earlier_unchanged = current
@@ -5707,7 +5761,8 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
         && prior
             .tracked_set_member_causes
             .iter()
-            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes));
+            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes))
+        && origins_read_same(prior, current);
     let latest = |state: &GameState| {
         crate::game::targeting::latest_tracked_set_id(state).map(|id| {
             (
@@ -5716,7 +5771,35 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
             )
         })
     };
-    earlier_unchanged && latest(prior) == latest(current)
+    // The sentinel fallback reads the latest set's member characteristics
+    // through origins: same members and causes plus same selected reads.
+    // Latest sets differ by id across appended periods, so origins compare
+    // by selection (see `origins_read_same`), never by raw incarnation.
+    let latest_origins_same = match (
+        crate::game::targeting::latest_tracked_set_id(prior),
+        crate::game::targeting::latest_tracked_set_id(current),
+    ) {
+        (Some(a), Some(b)) => {
+            let ao = prior.tracked_set_member_origins.get(&a);
+            let bo = current.tracked_set_member_origins.get(&b);
+            match (ao, bo) {
+                (Some(ao), Some(bo)) => {
+                    ao.len() == bo.len()
+                        && ao.iter().all(|(member, origin)| {
+                            bo.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    earlier_unchanged && latest(prior) == latest(current) && latest_origins_same
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: when `copy`'s inserted-unit records extend `prior`'s by
@@ -6240,6 +6323,8 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     let window_floor = pa.next_tracked_set_id;
     b.tracked_object_sets.retain(|id, _| id.0 < window_floor);
     b.tracked_set_member_causes
+        .retain(|id, _| id.0 < window_floor);
+    b.tracked_set_member_origins
         .retain(|id, _| id.0 < window_floor);
     b.next_tracked_set_id = a.next_tracked_set_id;
     a == b
@@ -26120,6 +26205,173 @@ mod tests {
             &prior,
             &with_sets(&[(1, &[901]), (2, &[])])
         ));
+    }
+
+    /// CR 608.2c: cover compares origins by what they select for member reads,
+    /// not by incarnation identity. A re-stamp naming an identical snapshot
+    /// (a blink with no characteristic change) stays covered; a changed
+    /// snapshot, a changed fallback kind, or an asymmetric stamp refuses.
+    #[test]
+    fn origins_read_same_ignores_immaterial_restamps_but_catches_changed_reads() {
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: "Member".to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        fn staged(incarnation: u64, power: Option<i32>, zone: Zone) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![member]);
+            if let Some(power) = power {
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(incarnation, snapshot(power));
+            }
+            state
+                .tracked_set_member_origins
+                .entry(TrackedSetId(1))
+                .or_default()
+                .insert(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: zone,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            state
+        }
+
+        let prior = staged(7, Some(5), Zone::Battlefield);
+        // Same characteristics under a new incarnation: covered.
+        assert!(origins_read_same(
+            &prior,
+            &staged(9, Some(5), Zone::Battlefield)
+        ));
+        // Changed snapshot content: refuses.
+        assert!(!origins_read_same(
+            &prior,
+            &staged(9, Some(2), Zone::Battlefield)
+        ));
+        // Changed fallback kind (recording to non-recording): refuses.
+        assert!(!origins_read_same(&prior, &staged(9, Some(5), Zone::Hand)));
+        // Asymmetric stamp (no origins at all): refuses.
+        let mut unstamped = GameState::new_two_player(42);
+        unstamped
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(50)]);
+        assert!(!origins_read_same(&prior, &unstamped));
+    }
+
+    /// B2 — FRESH-SET accumulation: a blink board appends one tracked set per
+    /// cycle, each stamping the same member's newest departure (Board A:
+    /// set 2 names M@2, set 4 names M@4, all even departures reading
+    /// identically). The growth-invariant remainder must cover the pair:
+    /// older sets' superseded stamps are history, not position, so loop
+    /// normalization must not accumulate every stamp's snapshot across
+    /// periods (prior retaining {M@2} while current retains {M@2, M@4}
+    /// compares artefactually unequal maps). Fails while retention keeps
+    /// every set's stamps.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamps_without_accumulating_snapshots() {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(name: &str, power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        // Set ids 2, 4, ... each naming the member's departure incarnation,
+        // with that departure's snapshot in history. Every staged departure
+        // reads identically (Board A's every aura departure).
+        fn staged(stamps: &[(u64, u64)]) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            for (set, incarnation) in stamps {
+                let set = TrackedSetId(*set);
+                state.tracked_object_sets.insert(set, vec![member]);
+                state.tracked_set_member_causes.insert(
+                    set,
+                    [(member, ThisWayCause::Discarded)].into_iter().collect(),
+                );
+                state
+                    .tracked_set_member_origins
+                    .entry(set)
+                    .or_default()
+                    .insert(
+                        member,
+                        TrackedMemberOrigin {
+                            departed_from: Zone::Battlefield,
+                            departure_incarnation: *incarnation,
+                        },
+                    );
+                state.next_tracked_set_id = state.next_tracked_set_id.max(set.0 + 1);
+                let even = incarnation % 2 == 0;
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(*incarnation, snapshot("Member", if even { 5 } else { 2 }));
+            }
+            state
+        }
+
+        let prior = staged(&[(2, 2)]);
+        let current = staged(&[(2, 2), (4, 4)]);
+        assert!(
+            eq_except_growable(&prior, &current, &HashSet::new()),
+            "a fresh set re-stamping the same member's identical departure must stay covered"
+        );
     }
 
     /// CR 500.8: a run of identical self-resuming inserted units unwinds to the same step at any
