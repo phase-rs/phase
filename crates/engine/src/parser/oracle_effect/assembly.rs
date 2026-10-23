@@ -27,9 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectScope, FilterProp, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, ReturnResultId, SharedQuality, SharedQualityRelation,
-    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -4535,6 +4536,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     if let Some(ref continuation) = ir.repeat_until {
         result.repeat_until = Some(continuation.clone());
     }
+    // CR 608.2c: "If C, do A and repeat this process" — loop the chain while
+    // the repeat directive (a tail child of A's gated clause) is reached.
+    if bind_repeat_directives(&mut result) && result.repeat_until.is_none() {
+        result.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RepeatDirectiveReached,
+            }),
+            max_iterations: None,
+        });
+    }
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
@@ -4555,6 +4566,48 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
     result
+}
+
+/// CR 608.2c: validate the structural "repeat this process" directives of an
+/// assembled chain and report whether one survives (the root then loops on
+/// `EffectOutcomeSignal::RepeatDirectiveReached`).
+///
+/// A directive is meaningful only as the TAIL child of a GATED clause: the gate
+/// is what decides whether the process repeats, and a gated sub is skipped
+/// together with its continuation children. An ungated parent or a directive
+/// with successors cannot express that, so the directive is replaced by an
+/// `Effect::unimplemented` gap (fail closed: no loop is stamped, and coverage
+/// stays honest) rather than left to loop until a zone runs dry. Validation lives
+/// at assembly because an outer "if" scope is applied after the nested body parse.
+pub(super) fn bind_repeat_directives(root: &mut AbilityDefinition) -> bool {
+    let mut survives = false;
+    let mut node = root;
+    loop {
+        let gated = node.condition.is_some();
+        let invalid = node.sub_ability.as_ref().is_some_and(|sub| {
+            sub.effect.is_repeat_directive() && (!gated || sub.sub_ability.is_some())
+        });
+        if invalid {
+            // Replace the invalid directive in place with an honest gap, keeping
+            // its position and successors linked: the clause must not read as a
+            // clean supported parse with its "repeat this process" dropped.
+            if let Some(sub) = node.sub_ability.as_deref_mut() {
+                *sub.effect = super::gap_diagnosis::clause_gap_unimplemented("repeat this process");
+            }
+            continue;
+        }
+        if node
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.effect.is_repeat_directive())
+        {
+            survives = true;
+        }
+        match node.sub_ability.as_deref_mut() {
+            Some(next) => node = next,
+            None => return survives,
+        }
+    }
 }
 
 // ===========================================================================

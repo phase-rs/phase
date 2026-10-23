@@ -128,6 +128,8 @@ pub fn resolve(
         // copy of a spell cast as a prepare spell is itself a prepare spell;
         // `FilterProp::PrepareSpell` relies on this inheritance.
         let mut copy_obj = source_obj.clone();
+        // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
+        crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;
         // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).

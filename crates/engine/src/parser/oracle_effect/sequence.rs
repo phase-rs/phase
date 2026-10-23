@@ -3445,6 +3445,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("transform ")),
     ))
     .or(value((), tag("cast ")))
+    // CR 608.2c: "<instruction> and repeat this process" — split only the
+    // terminal bare directive (anchored to the end of the segment) so
+    // "... and repeat this process for first strike" and the counted / "any
+    // number of times" shapes are not newly split.
+    .or(value(
+        (),
+        terminated(tag("repeat this process"), (opt(tag(".")), eof)),
+    ))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
     // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two

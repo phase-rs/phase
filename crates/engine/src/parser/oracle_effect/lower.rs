@@ -2387,6 +2387,9 @@ pub(super) fn target_choice_timing_for_parsed(
     // printed text, so its lowercased fragment is computed once and shared.
     let lower = fragment.to_ascii_lowercase();
     let has_untargeted_resolution_choice = match &parsed.effect {
+        // CR 115.10a + CR 608.2d: a described sticker recipient is chosen
+        // during this instruction, independently of later printed targets.
+        Effect::PutSticker { target, .. } if !target.is_context_ref() => true,
         // CR 115.1d + CR 608.2d: an Attach instruction whose ATTACHMENT operand
         // is itself an untargeted choice ("attach an Equipment", "cast that
         // card") resolves that choice while the effect resolves; its explicit

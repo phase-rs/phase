@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-10-22T00:00:00Z",
+  "updated": "2026-10-23T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -648,8 +648,8 @@
           "name": "Floodpits Drowner"
         },
         {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
+          "count": 2,
+          "name": "Multiversal Passage"
         },
         {
           "count": 4,
@@ -657,15 +657,11 @@
         },
         {
           "count": 4,
-          "name": "Kaito, Bane of Nightmares"
+          "name": "Mutavault"
         },
         {
           "count": 1,
           "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
         },
         {
           "count": 1,
@@ -673,47 +669,15 @@
         },
         {
           "count": 4,
-          "name": "Darkslick Shores"
-        },
-        {
-          "count": 4,
           "name": "Watery Grave"
         },
         {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 3,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 3,
+          "count": 2,
           "name": "Island"
         },
         {
           "count": 4,
-          "name": "Mockingbird"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Nowhere to Run"
-        },
-        {
-          "count": 4,
-          "name": "Faerie Miscreant"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Kaito, Bane of Nightmares"
         },
         {
           "count": 2,
@@ -721,7 +685,43 @@
         },
         {
           "count": 4,
+          "name": "Mockingbird"
+        },
+        {
+          "count": 1,
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
           "name": "Gloomlake Verge"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Darkslick Shores"
+        },
+        {
+          "count": 4,
+          "name": "Faerie Miscreant"
+        },
+        {
+          "count": 3,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
         }
       ],
       "sideboard": [
@@ -731,31 +731,27 @@
         },
         {
           "count": 1,
-          "name": "Languish"
+          "name": "Enduring Curiosity"
         },
         {
           "count": 2,
-          "name": "Change the Equation"
+          "name": "Duress"
         },
         {
           "count": 2,
           "name": "Tishana's Tidebinder"
         },
         {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
           "count": 4,
           "name": "Leyline of the Void"
         },
         {
-          "count": 1,
-          "name": "Enduring Curiosity"
+          "count": 2,
+          "name": "Languish"
         },
         {
           "count": 2,
-          "name": "Duress"
+          "name": "Change the Equation"
         }
       ]
     },

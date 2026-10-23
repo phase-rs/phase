@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 220,
+      "date": "2026-10-19",
+      "title": "Nicol Bolas borrows every loyalty ability",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "localization"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Nicol Bolas, Dragon-God has every loyalty ability of each other planeswalker on the battlefield, used at sorcery speed and once per turn like his own\n• Comet, Stellar Pup works across every die result, including dealing damage to a creature or player you pick as the ability resolves, and activating Comet's loyalty ability two more times on a 6\n• Tataru Taru is supported, and \"target opponent may draw a card\" now asks only the opponent you targeted instead of every opponent\n• Activated abilities that remove counters as a cost now know how many were removed, so \"for each counter removed this way\" and \"that much\" read the right number (Essence Bottle, Molten Hydra, Relic Amulet, Geometric Nexus, Sage of Hours, the storage lands and the mana batteries)\n\n🛠️ Cards That Now Work Right\n• Loyalty abilities granted by other cards can only be activated at sorcery speed, once per turn (Way of the Pyromancer and the rest of its cycle, the Talent cycle, Ichormoon Gauntlet, Sanctum Lurker, Kiora of Salt and Sand)\n• \"Whenever a creature with power 3 or greater enters\" checks the creature as it entered, so counters and pumps added later by the same spell no longer count, while counters it enters with still do (Elemental Bond); What Must Be Done's creature enters with its two extra counters\n• Searches that reveal a card and then decide where it goes put it in the right place (Nazahn, Revered Bladesmith; Ruin in Their Wake; Selfie Preservation; Guidelight Pathmaker; Stoic Farmer)\n• Return-to-hand costs for more than one land are paid in full instead of letting the spell be cast for free (Ensnare, Thwart, Gush)\n• Fireblast, Force of Will and other spells with a printed alternative cost can use it when cast from exile through impulse draw (Wrenn's Resolve, Experimental Synthesizer)\n• Luxior, Ignited's +1 can be activated with no creature to attach to\n• Aberrant Return, Plow Under and Rebuking Ceremony keep all of their targets, and Aberrant Return's creatures enter with their -1/-1 counter\n• Kashi-Tribe Warriors, Matsu-Tribe Decoy, Orochi Ranger and similar creatures tap and freeze the creature they dealt combat damage to\n• Nezumi Graverobber flips when it exiles the last card from an opponent's graveyard\n• Fold into Aether lets the countered spell's controller put a creature card from their hand onto the battlefield\n• Flamerush Rider's token copy enters tapped and attacking\n\n⚔️ Combat & Gameplay\n• Loop shortcuts for draining combos (Exquisite Blood with Enduring Tenacity) offer the exact number of repetitions that ends the game, and never suggest a count that would make you lose first\n\n🖥️ Interface\n• Random deck selection uses pools you curate: toggle whole folders or individual decks, with separate pools for you and the AI\n• Choice overlays with long option lists show fades and a chevron when there's more to scroll\n\n🤖 AI\n• The AI no longer counters its own counterspell (Spell Pierce on its own Counterspell)\n\n🌍 Localization\n• Sandbox tool controls and the turn banner are fully translated into Japanese",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1561894436185571379"
+    },
+    {
       "id": 219,
       "date": "2026-10-18",
       "title": "Staring contests and one-time boons arrive",
