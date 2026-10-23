@@ -2054,14 +2054,16 @@ fn stub_applier(
 // --- 1. Moved (ZoneChange) ---
 
 fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    // CR 616.1f + CR 614.6: a token batch that an applied redirect (or a token
+    // substitution) has zeroed puts nothing onto the battlefield, so no
+    // battlefield-entry replacement applies to it any more.
     matches!(
         event,
         ProposedEvent::ZoneChange {
             to: Zone::Battlefield,
             ..
-        } | ProposedEvent::CreateToken { .. }
-            | ProposedEvent::TokenEntry { .. }
-    )
+        } | ProposedEvent::TokenEntry { .. }
+    ) || matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
 fn change_zone_applier(
@@ -4793,7 +4795,11 @@ fn remove_counter_applier(
 // --- 9. CreateToken ---
 
 fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::CreateToken { .. })
+    // CR 616.1f + CR 614.6 + CR 701.7a: a batch that an applied replacement has
+    // zeroed (an entry redirect, or a Jinnie Fay / Moonlit Meditation / Esix
+    // substitution) creates nothing, so no token-creation replacement applies to
+    // it any more. Same shape as `remove_counter_matcher`'s `count > 0` guard.
+    matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
 fn is_choose_token_substitution(def: &AbilityDefinition) -> bool {
@@ -8782,9 +8788,10 @@ pub fn find_applicable_replacements(
     // Safety: every existing pending entry's registry matcher is event-specific
     // (a damage entry uses `damage_done_matcher`, matching only `Damage`; a
     // zone-change entry uses `change_zone_matcher`, matching only
-    // `ZoneChange{to: Battlefield}`/`CreateToken`). So a damage entry can never
-    // be a candidate for a non-damage event and vice versa — the new gates are
-    // reachable only by non-damage entries on non-damage events.
+    // `ZoneChange{to: Battlefield}`, `TokenEntry`, and a non-zero `CreateToken`).
+    // So a damage entry can never be a candidate for a non-damage event and vice
+    // versa — the new gates are reachable only by non-damage entries on
+    // non-damage events.
     {
         for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
             let rid = ReplacementId {
@@ -9173,11 +9180,11 @@ pub(crate) fn proposed_event_prompt_cause(
 /// `predicted_axes` both read it, so the resolver and the witness cannot drift
 /// about which variants are accounted.
 ///
-/// THREE ZERO-PAYLOAD GUARDS ride the same rule, because a zero-valued event
+/// FOUR ZERO-PAYLOAD GUARDS ride the same rule, because a zero-valued event
 /// writes no axis while still drawing candidates: candidate selection carries
-/// `> 0` gates (the shield-damage arm and the CR 702.150a Compleated loyalty
-/// arm), so a still-zero amount must be honest-red rather than silently
-/// candidate-free.
+/// `> 0` gates (the shield-damage arm, the CR 702.150a Compleated loyalty arm,
+/// and the `change_zone_matcher` / `create_token_matcher` token-batch arms), so
+/// a still-zero amount must be honest-red rather than silently candidate-free.
 pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
     match event {
         // ---- accounted: the applier's principal board write, or its own
@@ -9189,8 +9196,10 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         // Object / player counters. Zero-payload guard: the CR 702.150a
         // Compleated virtual candidate is drawn under `count > 0`.
         ProposedEvent::AddCounter { count, .. } => *count > 0,
-        // `zones::create_object` ⇒ battlefield cardinality.
-        ProposedEvent::CreateToken { .. } => true,
+        // `zones::create_object` ⇒ battlefield cardinality. Zero-payload guard:
+        // both candidate matchers (`change_zone_matcher`, `create_token_matcher`)
+        // are drawn under `count > 0` (CR 616.1f).
+        ProposedEvent::CreateToken { count, .. } => *count > 0,
         // CR 120.3a: the player branch DELEGATES its life write to a companion
         // `LifeLoss`, but keeps `state.damage_dealt_this_turn`. Zero-payload
         // guard: the shield-damage virtual candidate is drawn under `amount > 0`.
@@ -10424,37 +10433,46 @@ fn apply_single_replacement(
                 }
                 // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
                 if let Some(zone) = modifiers.redirect_zone {
-                    if let ProposedEvent::ZoneChange {
-                        ref mut to,
-                        ref mut cause,
-                        ..
-                    } = new_event
-                    {
-                        *to = zone;
-                        // CR 607.2b: the redirecting replacement's own source is
-                        // the "exiled with [this object]" linked-ability
-                        // authority for whatever this event ultimately
-                        // delivers to. Stamp it unconditionally (last-applied-
-                        // wins, mirroring `controller_override` above) so
-                        // `zone_pipeline::apply_zone_delivery_tail`'s exile-link
-                        // attribution (`cause.or(source_id)`) sees the correct
-                        // object even when the caller (SBA-driven death,
-                        // `Effect::Destroy`, `Effect::Sacrifice`) has no
-                        // `ResolvedAbility` of its own to compute this from.
-                        //
-                        // `cause` has one other reader: the parked CR 616.1
-                        // ordering-choice resume path
-                        // (`engine_replacement.rs`'s
-                        // `handle_replacement_choice_inner`) forwards it as
-                        // `DeliveryCtx.source_id`, which — for a
-                        // redirect that lands on the battlefield — drives the CR
-                        // 603.6a `entered_via_ability_source` anti-recursion
-                        // stamp. That is the correct authority there too: the
-                        // ability that actually delivered the object onto the
-                        // battlefield is the WINNING replacement candidate,
-                        // i.e. this same `rid.source`, not the pre-redirect
-                        // event's original (often unrelated or absent) cause.
-                        *cause = Some(rid.source);
+                    match &mut new_event {
+                        ProposedEvent::ZoneChange { to, cause, .. } => {
+                            *to = zone;
+                            // CR 607.2b: the redirecting replacement's own source is
+                            // the "exiled with [this object]" linked-ability
+                            // authority for whatever this event ultimately
+                            // delivers to. Stamp it unconditionally (last-applied-
+                            // wins, mirroring `controller_override` above) so
+                            // `zone_pipeline::apply_zone_delivery_tail`'s exile-link
+                            // attribution (`cause.or(source_id)`) sees the correct
+                            // object even when the caller (SBA-driven death,
+                            // `Effect::Destroy`, `Effect::Sacrifice`) has no
+                            // `ResolvedAbility` of its own to compute this from.
+                            //
+                            // `cause` has one other reader: the parked CR 616.1
+                            // ordering-choice resume path
+                            // (`engine_replacement.rs`'s
+                            // `handle_replacement_choice_inner`) forwards it as
+                            // `DeliveryCtx.source_id`, which — for a
+                            // redirect that lands on the battlefield — drives the CR
+                            // 603.6a `entered_via_ability_source` anti-recursion
+                            // stamp. That is the correct authority there too: the
+                            // ability that actually delivered the object onto the
+                            // battlefield is the WINNING replacement candidate,
+                            // i.e. this same `rid.source`, not the pre-redirect
+                            // event's original (often unrelated or absent) cause.
+                            *cause = Some(rid.source);
+                        }
+                        // CR 614.6 + CR 701.7a + CR 111.7: creating a token is
+                        // putting it onto the battlefield. When that entry is
+                        // replaced "instead" by a move to another zone (Hallowed
+                        // Moonlight: "exile it instead"), the tokens never reach
+                        // the battlefield, and a token anywhere else ceases to
+                        // exist — so the batch creates nothing. Residual: no
+                        // transient token object is materialized in the
+                        // redirect zone, so nothing observes that brief move.
+                        ProposedEvent::CreateToken { count, .. } if zone != Zone::Battlefield => {
+                            *count = 0;
+                        }
+                        _ => {}
                     }
                 }
                 if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =
@@ -25255,6 +25273,162 @@ mod tests {
             candidates.is_empty(),
             "non-creature must be excluded by the valid_card gate (got {candidates:?})"
         );
+    }
+
+    // ---- Battlefield-entry redirect applied to token creation (CR 614.6, CR 701.7a) ----
+
+    /// The floating "if a creature would enter and it wasn't cast, exile it
+    /// instead" redirect (Hallowed Moonlight shape): `valid_card` is a creature
+    /// carrying the `Not(WasPlayed)` "wasn't cast" gate plus `extra_props`
+    /// (`NonToken` for the Mistcaller / Containment Priest shape).
+    fn enter_wasnt_cast_exile_global_replacement(
+        extra_props: Vec<FilterProp>,
+    ) -> ReplacementDefinition {
+        let mut props = extra_props;
+        props.push(FilterProp::Not {
+            prop: Box::new(FilterProp::WasPlayed),
+        });
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().properties(props),
+            ))
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    /// Install `def` as a floating (pending) replacement and run a proposed
+    /// one-token `CreateToken` of `spec` through `replace_event`, returning the
+    /// surviving count.
+    fn floating_redirect_token_count(def: ReplacementDefinition, spec: TokenSpec) -> u32 {
+        let mut state = GameState::new_two_player(42);
+        state.pending_damage_replacements.push(def);
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        match replace_event(&mut state, proposed, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::CreateToken { count, .. }) => count,
+            other => panic!("expected Execute(CreateToken), got {other:?}"),
+        }
+    }
+
+    /// CR 614.6 + CR 701.7a + CR 111.7: creating a creature token under a
+    /// floating "exile it instead" entry redirect puts nothing onto the
+    /// battlefield — the batch's count is zeroed. Before the CreateToken arm of
+    /// the redirect block the event came back unchanged with `count == 1`.
+    #[test]
+    fn enter_exile_redirect_zeroes_creature_token_batch() {
+        let creature = token_spec_of("Soldier", CoreType::Creature, "Soldier");
+        assert_eq!(
+            floating_redirect_token_count(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                creature
+            ),
+            0,
+            "a creature token that would enter is exiled instead and never created"
+        );
+    }
+
+    /// The redirect's `valid_card` creature gate still filters token batches: a
+    /// noncreature token is created normally. Paired with the creature positive.
+    #[test]
+    fn enter_exile_redirect_keeps_noncreature_token_batch() {
+        let positive = token_spec_of("Soldier", CoreType::Creature, "Soldier");
+        assert_eq!(
+            floating_redirect_token_count(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                positive
+            ),
+            0,
+            "reach-guard: the same definition zeroes a creature batch"
+        );
+        let treasure = token_spec_of("Treasure", CoreType::Artifact, "Treasure");
+        assert_eq!(
+            floating_redirect_token_count(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                treasure
+            ),
+            1,
+            "a noncreature token is not a creature entering: count kept"
+        );
+    }
+
+    /// A `NonToken`-gated redirect (Mistcaller / Containment Priest shape) and the
+    /// Don't Blink redirect (`EnteredFromZone`: a created token has no physical
+    /// origin and no cast origin) never apply to a token batch. Each negative is
+    /// paired with the unfiltered creature positive.
+    #[test]
+    fn nontoken_and_from_zone_redirects_keep_creature_token_batch() {
+        assert_eq!(
+            floating_redirect_token_count(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            0,
+            "reach-guard: the unfiltered redirect zeroes the creature batch"
+        );
+        assert_eq!(
+            floating_redirect_token_count(
+                enter_wasnt_cast_exile_global_replacement(vec![FilterProp::NonToken]),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            1,
+            "a NonToken-gated redirect must not apply to a token"
+        );
+        assert_eq!(
+            floating_redirect_token_count(
+                dont_blink_global_replacement(),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            1,
+            "an EnteredFromZone redirect must not apply to a newly created token"
+        );
+    }
+
+    /// CR 616.1f: a token batch zeroed by an applied redirect draws no candidate
+    /// (`change_zone_matcher` and `create_token_matcher` are gated on
+    /// `count > 0`), so the accounted partition must refuse it rather than treat
+    /// a candidate-free zero batch as accounted. Paired with the `count == 1`
+    /// positive.
+    #[test]
+    fn create_token_zero_count_is_not_accounted() {
+        for (accounted, count) in [(false, 0u32), (true, 1u32)] {
+            assert_eq!(
+                event_is_accounted(&ProposedEvent::CreateToken {
+                    owner: PlayerId(0),
+                    spec: Box::new(token_spec_of("Soldier", CoreType::Creature, "Soldier")),
+                    copy: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    count,
+                    applied: HashSet::new(),
+                }),
+                accounted,
+                "the token-batch candidates are gated on `count > 0`, so a zero-count \
+                 CreateToken must be honest-red rather than silently candidate-free"
+            );
+        }
     }
 
     /// CR 109.1 (issue #8485): a card-shaped `valid_card` recipient

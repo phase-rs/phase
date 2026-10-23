@@ -17,7 +17,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
-    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -492,13 +492,7 @@ fn drain_copy_token_resolution(
             continue;
         }
         let stack_depth_before_batch = state.resolution_stack.capture_child_boundary();
-        let spec = super::token::copy_probe_spec_for(
-            batch.copy.source_id,
-            batch.copy.controller,
-            batch.copy.sacrifice_at.clone(),
-            &batch.copy.values,
-        );
-        let mut spec = spec;
+        let mut spec = copy_entry_probe_spec(&batch.copy, &state.all_creature_types);
         spec.tapped = batch.copy.tapped;
         spec.enters_attacking = batch.copy.enters_attacking;
         let enter_tapped = EtbTapState::from_seeded_tapped(batch.copy.tapped);
@@ -1813,6 +1807,67 @@ pub(crate) fn copy_token_modifications_are_liminal_immediate(
                 | ContinuousModification::SetToughnessDynamic { .. }
         )
     })
+}
+
+/// CR 707.9b + CR 707.9a + CR 614.12: the `TokenSpec` a copy batch's
+/// `CreateToken` replacement consult sees — the single authority for that
+/// probe.
+///
+/// A characteristic modified as part of the copying process ("except it's a
+/// 1/1 Soldier creature in addition to its other types") is part of the copy's
+/// copiable values (CR 707.9b), as is an ability gained that way (CR 707.9a,
+/// `extra_keywords`). A replacement deciding whether "a creature would enter"
+/// must therefore see the entrant as it will exist on the battlefield
+/// (CR 614.12) — the same view the liminal `TokenEntry` projection and the
+/// non-liminal `entrant_projection` already take through
+/// `apply_immediate_copy_token_modifications_to_object`. The body is built by
+/// the single copy-body authority `token::materialize_token_copy_body` on a
+/// scratch object and only projected into the spec's characteristics.
+///
+/// Probe-only: the copy apply path reads nothing from the spec except
+/// `enter_with_counters`, so token bodies are unchanged. Continuous effects
+/// that would modify the token are not applied here. Exception-free batches
+/// keep the raw-values probe from `copy_probe_spec_for` byte for byte.
+fn copy_entry_probe_spec(copy: &CopyTokenSpec, all_creature_types: &[String]) -> TokenSpec {
+    let mut spec = super::token::copy_probe_spec_for(
+        copy.source_id,
+        copy.controller,
+        copy.sacrifice_at.clone(),
+        &copy.values,
+    );
+    if copy.additional_modifications.is_empty() && copy.extra_keywords.is_empty() {
+        return spec;
+    }
+    // The sentinel id, turn number and timestamp are inert on a scratch probe
+    // that never enters any zone collection.
+    let mut probe = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        copy.controller,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    super::token::materialize_token_copy_body(
+        &mut probe,
+        copy,
+        &ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: all_creature_types.to_vec(),
+        },
+        0,
+        0,
+        copy.tapped,
+    );
+    let characteristics = &mut spec.characteristics;
+    characteristics.display_name = probe.name;
+    characteristics.power = probe.power;
+    characteristics.toughness = probe.toughness;
+    characteristics.core_types = probe.card_types.core_types;
+    characteristics.subtypes = probe.card_types.subtypes;
+    characteristics.supertypes = probe.card_types.supertypes;
+    characteristics.colors = probe.color;
+    characteristics.keywords = probe.keywords;
+    spec
 }
 
 /// CR 707.2 + CR 707.9: apply immediate copy exceptions to a liminal token's

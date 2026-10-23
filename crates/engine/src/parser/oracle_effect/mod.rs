@@ -12027,6 +12027,21 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // CR 611.2a + CR 614.1a + CR 514.2: floating turn-bound "if a [nontoken]
+    // creature would enter and it wasn't cast, exile it instead" (Mistcaller,
+    // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
+    // reason as the Don't Blink lift above: the duration-stripped recursive call
+    // reaches it and the window is re-attached as `AbilityDefinition.duration`.
+    // Gated on the stated window (CR 611.2a: created by resolution, not printed),
+    // so an un-windowed clause keeps its honest guard gap.
+    if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
+        &lower,
+        text,
+        ctx.stated_clause_duration.as_ref(),
+    ) {
+        return parsed_clause(effect);
+    }
+
     // CR 614.1a + CR 514.2: floating turn-bound life-floor replacement
     // ("Until end of turn, damage that would reduce your life total to less
     // than 1 reduces it to 1 instead." — Angel's Grace; Angel of Grace's ETB

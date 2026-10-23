@@ -390,10 +390,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // that exiles creatures which enter without having been cast. E.g.
     // Containment Priest:
     //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
-    // Only the clean, always-on static form is handled here; the duration-scoped
-    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
-    // self-referential form ("if this creature would enter ...": Primeval Spawn)
-    // are deliberately excluded (see the guards inside).
+    // Only the clean, always-on static form is handled here. The duration-scoped
+    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) reach the
+    // same builder only through the resolution-install front door
+    // `parse_windowed_enter_wasnt_cast_exile_install`, with text the clause
+    // pipeline has already stripped of its window; a windowed line never matches
+    // here because the builder requires a leading "if ". The self-referential form
+    // ("if this creature would enter ...": Primeval Spawn) stays excluded (see the
+    // guards inside).
     if let Some(def) = parse_creature_enter_wasnt_cast_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
@@ -7432,17 +7436,28 @@ fn parse_creature_die_exile_replacement(
 }
 
 /// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
-/// cast, exile it instead." (Containment Priest). A static ETB replacement
-/// gated on the entering object not having been cast. Only the always-on,
-/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
-/// and self-referential ("if this creature would enter ...") variants return
-/// `None`.
+/// cast, exile it instead." (Containment Priest). An ETB replacement gated on
+/// the entering object not having been cast. The builder recognizes the
+/// un-windowed, non-self sentence: the static arm in `parse_replacement_line`
+/// hosts it as a printed static (CR 604.2), and
+/// [`parse_windowed_enter_wasnt_cast_exile_install`] installs it when a window
+/// was stated (CR 611.2a). Self-referential forms ("if this creature would
+/// enter ...") return `None`.
 ///
 /// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
 /// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
-/// (see `game/filter.rs`), and a nontoken creature only ever enters via casting
-/// or via an effect that puts it onto the battlefield, so `Not(WasPlayed)` is
-/// exactly "entered without being cast." Because a cast Containment Priest sets
+/// (see `game/filter.rs`). A creature reaches the battlefield by resolving as a
+/// cast spell (CR 601.2; `cast_from_zone` survives the stack→battlefield move),
+/// by an effect that puts it there, or — a land creature such as Dryad Arbor —
+/// by being played as a land, a special action that is never casting
+/// (CR 305.1 + CR 305.9). The land play reads not-cast here only because
+/// `played_from_zone` is stamped AFTER the land's entry is delivered
+/// (`engine.rs::handle_play_land` → `mark_land_played_from_zone`), so this
+/// replacement consults the land while it is still the hand object with
+/// `played_from_zone == None`. Moving that stamp before `replace_event` would
+/// let a played creature land escape this gate; the Dryad Arbor rows in
+/// `tests/integration/mistcaller_enter_wasnt_cast_exile.rs` pin the ordering.
+/// Because a cast Containment Priest sets
 /// `cast_from_zone`, this gate also stops the replacement from exiling the
 /// permanent's own casting — the reported bug in issue #4761.
 fn parse_creature_enter_wasnt_cast_exile_replacement(
@@ -7544,6 +7559,39 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// CR 611.2a + CR 614.1a + CR 614.12: the RESOLUTION-INSTALL front door for the
+/// "if a [filter] would enter and it wasn't cast, exile it instead" family
+/// ("Until end of turn, ..." — Mistcaller, Hallowed Moonlight) — the mirror
+/// image of the printed-static arm in `parse_replacement_line`, as
+/// [`parse_windowed_graveyard_redirect_install`] is for the graveyard family.
+///
+/// `stated_window` is the window the clause pipeline peeled off this clause
+/// (`ParseContext::stated_clause_duration`); its presence is the CR 611.2a
+/// discriminator between an effect created by a resolving spell or ability and
+/// a printed static (CR 604.2), so an un-windowed clause is declined and keeps
+/// its honest guard gap. The window itself is not mapped here: it travels on
+/// `AbilityDefinition.duration`, and the install resolver derives the lifetime
+/// through `expiry_from_duration` (refusing unenforceable windows through
+/// `replacement_install_is_refused`), so the definition's own `expiry` stays
+/// `None` — the same contract as the Don't Blink floating redirect.
+///
+/// The created effect is independent of its source (CR 113.7a — Mistcaller is
+/// sacrificed as a cost) and applies to every object that enters afterwards
+/// while it lasts (CR 611.2c), matched as the object would exist on the
+/// battlefield (CR 614.12).
+pub(crate) fn parse_windowed_enter_wasnt_cast_exile_install(
+    norm_lower: &str,
+    original_text: &str,
+    stated_window: Option<&Duration>,
+) -> Option<Effect> {
+    stated_window?;
+    let def = parse_creature_enter_wasnt_cast_exile_replacement(norm_lower, original_text)?;
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
+    })
 }
 
 fn split_dealt_damage_subject_condition(
@@ -24690,7 +24738,8 @@ mod tests {
     fn enter_wasnt_cast_exile_excludes_duration_and_self_variants() {
         // Duration-scoped ("Until end of turn, ...") and self-referential
         // ("if this creature would enter ...") variants must NOT be captured by
-        // the Containment Priest static arm — they need separate handling.
+        // the Containment Priest static arm — windowed variants are installed by
+        // `parse_windowed_enter_wasnt_cast_exile_install` at the clause seam.
         assert!(
             parse_replacement_line(
                 "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.",
