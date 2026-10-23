@@ -106,9 +106,10 @@ use super::oracle_quantity::{
 };
 use super::oracle_target::{
     parse_anaphoric_target_ref, parse_definite_parent_reference, parse_event_context_ref,
-    parse_fight_target, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target, TargetSyntax,
+    parse_fight_target, parse_parent_target_controller_population, parse_target,
+    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -23366,7 +23367,7 @@ fn try_parse_multi_target_damage_chain(
     // must leave every parser-context field (especially the target chooser)
     // untouched for the fallback compound parser.
     let mut tentative_ctx = ctx.clone();
-    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx)?;
+    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx, None)?;
     *ctx = tentative_ctx;
     Some(clause)
 }
@@ -23374,6 +23375,7 @@ fn try_parse_multi_target_damage_chain(
 fn try_parse_multi_target_damage_chain_inner(
     text: &str,
     ctx: &mut ParseContext,
+    damage_source: Option<DamageSource>,
 ) -> Option<ParsedEffectClause> {
     // A target-subject damage sentence has a target declaration for its damage
     // source before its first recipient. Keep that declaration outside this
@@ -23412,6 +23414,32 @@ fn try_parse_multi_target_damage_chain_inner(
     // the count has to be captured here and attached below or a chain headed by
     // "each of ⟨N⟩ target ⟨type⟩" silently degrades to one mandatory target.
     let primary_damage_multi_target = ctx.pending_damage_multi_target.take();
+    // CR 608.2c + CR 608.2h: only an unambiguous, mandatory object head can
+    // supply the immediate population's referent. A target-subject source is
+    // already an additional declaration, even before its wrapper is lowered.
+    let primary_text = &text[..text.len() - remainder.len()];
+    let parent_object_target = match &primary_effect {
+        Effect::DealDamage {
+            target: target @ TargetFilter::Typed(_),
+            damage_source: None,
+            excess: None,
+            ..
+        } if damage_source.is_none()
+            && not(tag::<_, _, OracleError<'_>>("target "))
+                .parse(lower)
+                .is_ok()
+            && primary_damage_multi_target.is_none()
+            && extract_optional_target_multi_target(primary_text, &primary_effect).is_none()
+            && lower::target_filter_is_single_object_target(target)
+            && super::oracle_target::resolve_pronoun_target(ctx, "it")
+                == TargetFilter::ParentTarget
+            && ctx.player_antecedents().object_controller
+                == Some(ControllerRef::ParentTargetController) =>
+        {
+            Some(target)
+        }
+        _ => None,
+    };
     // CR 608.2c + CR 115.1a: a player the head announces is who its continuations'
     // "that player controls" / "they control" name.
     let announced_player = has_explicit_player_target(&primary_effect).then(|| {
@@ -23498,7 +23526,9 @@ fn try_parse_multi_target_damage_chain_inner(
         // CR 601.2c: likewise clear the pending count, so a segment without an
         // "each of ⟨N⟩" head cannot inherit the previous segment's.
         ctx.pending_damage_multi_target = None;
-        let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
+        let parent_object_target = parent_object_target.filter(|_| segments.is_empty());
+        let (segment_effect, leftover) =
+            parse_bare_damage_continuation(after_separator, ctx, parent_object_target)?;
         // CR 115.6: only the consumed segment is evidence — the `leftover`
         // begins at the next separator and belongs to a later segment.
         let consumed = &after_separator[..after_separator.len() - leftover.len()];
@@ -23592,7 +23622,11 @@ fn try_parse_target_subject_multi_target_damage_chain(
         inherits_parent: application.inherits_parent,
         is_optional: application.is_optional,
     };
-    let clause = try_parse_multi_target_damage_chain_inner(predicate, &mut tentative_ctx)?;
+    let clause = try_parse_multi_target_damage_chain_inner(
+        predicate,
+        &mut tentative_ctx,
+        Some(DamageSource::Target),
+    )?;
     let wrapped = wrap_target_subject_damage(clause, &subject)?;
     *ctx = tentative_ctx;
     Some(wrapped)
@@ -23878,6 +23912,7 @@ fn parse_bare_counter_continuation<'a>(
 fn parse_bare_damage_continuation<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
+    parent_object_target: Option<&TargetFilter>,
 ) -> Option<(Effect, &'a str)> {
     let lower = text.to_lowercase();
     let (amount, after_damage_offset) =
@@ -23979,7 +24014,9 @@ fn parse_bare_damage_continuation<'a>(
         // "each <object filter>" → uniform mass object damage (`DamageAll`). A
         // trailing "and each <player>" composite scope is lifted into
         // `player_filter`, mirroring the primary each-branch classification.
-        let (target, rem) = parse_target_with_ctx(after_to, ctx);
+        let (target, rem) =
+            parse_parent_target_controller_population(after_to, ctx, parent_object_target)
+                .unwrap_or_else(|| parse_target_with_ctx(after_to, ctx));
         let (target, rem) = refine_damage_target_remainder(target, rem);
         let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
@@ -52804,6 +52841,103 @@ mod structural_marker_tests {
             "the chosen player controls",
         ] {
             assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod parent_controller_population_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    const FFF: &str = "Damage can't be prevented this turn. Fear, Fire, Foes! deals X damage to target creature and 1 damage to each other creature with the same controller.";
+
+    #[test]
+    fn full_controller_population_chain() {
+        let parsed = parse_oracle_text(FFF, "Fear, Fire, Foes!", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let restriction = &parsed.abilities[0];
+        // CR 615.12: the restriction precedes both damage instructions.
+        assert!(matches!(
+            restriction.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: crate::types::ability::GameRestriction::DamagePreventionDisabled {
+                    expiry: crate::types::ability::RestrictionExpiry::EndOfTurn,
+                    scope: None,
+                    ..
+                }
+            }
+        ));
+        let head = restriction
+            .sub_ability
+            .as_deref()
+            .expect("targeted damage instruction");
+        assert!(matches!(head.effect.as_ref(), Effect::DealDamage {
+            amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+            target: TargetFilter::Typed(target),
+            damage_source: None, excess: None,
+        } if name == "X" && target.type_filters == vec![TypeFilter::Creature]));
+        assert!(head.multi_target.is_none());
+        assert!(head.distribute.is_none());
+        assert!(!head.optional_targeting);
+        let population = head.sub_ability.as_deref().expect("untargeted population");
+        let Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(filter),
+            player_filter: None,
+            damage_source: None,
+        } = population.effect.as_ref()
+        else {
+            panic!("{population:?}")
+        };
+        // CR 115.10a + CR 608.2h: no additional target; controller and identity refer to the head.
+        assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(
+            filter.controller,
+            Some(ControllerRef::ParentTargetController)
+        );
+        assert_eq!(
+            filter.properties,
+            vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }]
+        );
+        assert!(population.sub_ability.is_none());
+    }
+
+    #[test]
+    fn damage_chain_only_grants_permission_to_the_immediate_single_object_population() {
+        let text = "~ deals X damage to target creature and 1 damage to each other creature with the same controller.";
+        for subject in [None, Some(TargetFilter::SelfRef)] {
+            let mut ctx = ParseContext {
+                subject,
+                ..Default::default()
+            };
+            let clause =
+                try_parse_multi_target_damage_chain(text, &mut ctx).expect("eligible head");
+            assert!(matches!(clause.effect, Effect::DealDamage { .. }));
+            assert!(matches!(clause.sub_ability.unwrap().effect.as_ref(),
+                Effect::DamageAll { target: TargetFilter::Typed(filter), .. }
+                if filter.controller == Some(ControllerRef::ParentTargetController)));
+        }
+        for text in [
+            "~ deals 3 damage to each of two target creatures and 1 damage to each other creature with the same controller.",
+            "~ deals 3 damage to up to one target creature and 1 damage to each other creature with the same controller.",
+            "~ deals 3 damage to target creature, 2 damage to target creature, and 1 damage to each other creature with the same controller.",
+            "Target creature deals 3 damage to target creature and 1 damage to each other creature with the same controller.",
+            "~ deals 3 damage to target creature and 1 damage to each other creature with the same controllers.",
+        ] {
+            let mut ctx = ParseContext::default();
+            let before = ctx.clone();
+            assert!(try_parse_multi_target_damage_chain(text, &mut ctx).is_none(), "{text}");
+            assert_eq!(ctx, before, "failed whole-chain speculation must roll back");
+        }
+        for antecedent in [TargetFilter::EventTarget, TargetFilter::TriggeringSource] {
+            let mut ctx = ParseContext {
+                object_pronoun_ref: Some(antecedent),
+                ..Default::default()
+            };
+            assert!(try_parse_multi_target_damage_chain(text, &mut ctx).is_none());
         }
     }
 }
