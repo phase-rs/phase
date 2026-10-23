@@ -1514,7 +1514,11 @@ struct BatchEntry<'a> {
 ///   gates) WITHOUT applying any damage yet.
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
-///   event but aggregates each `Prevention::All` shield's prevented amount.
+///   event but aggregates continuous all-damage and one-shot prevention riders.
+///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
+///   `DamagePrevented` events per portion. `Prevention { All }` with
+///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+///   path and emits its aggregate event at the rider boundary.
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -1891,13 +1895,15 @@ fn drain_combat_lifelink(
 }
 
 /// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
-/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
-/// aggregate prevented amount.
+/// continuous all-damage or one-shot prevention shield's runtime rider once with
+/// the aggregate prevented amount.
 ///
-/// Each `DamagePrevented` event for the batch is emitted here (the per-source
-/// applier suppressed them so the rider sees one un-fragmented amount). The
-/// aggregate prevented amount is stamped into `last_effect_count` immediately
-/// before the single rider call so the rider's `QuantityRef::EventContextAmount`
+/// Continuous shields, including `Prevention { All }` with `consume_on_apply`
+/// (Impulsive Maneuvers' lose branch), emit their aggregate `DamagePrevented` here.
+/// `ShieldKind::PreventionOneShot` (Awe Strike) already emitted real
+/// source/recipient events per portion; only its rider amount is aggregated.
+/// The total is stamped into `last_effect_count`
+/// immediately before the rider call so its `QuantityRef::EventContextAmount`
 /// (e.g. Inkshield's "for each 1 damage prevented this way") resolves against
 /// the whole batch total.
 fn fire_combat_prevention_riders(
@@ -1935,19 +1941,22 @@ fn fire_combat_prevention_riders(
             continue;
         };
 
-        // CR 615.13: The `DamagePrevented` event for the whole batch — informational
-        // (no trigger consumes it yet). Target derived from the shield's player scope.
-        let prevented_target = match &repl_def.damage_target_filter {
-            Some(crate::types::ability::DamageTargetFilter::Player {
-                player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
-            }) => TargetRef::Player(*player),
-            _ => TargetRef::Object(rid.source),
-        };
-        events.push(GameEvent::DamagePrevented {
-            source_id: rid.source,
-            target: prevented_target,
-            amount: total_prevented as u32,
-        });
+        // CR 615.13 + CR 615.5: Only ShieldKind::PreventionOneShot retains real
+        // source/recipient provenance in the per-portion applier; aggregate its
+        // rider here without a duplicate floating-shield sentinel-source event.
+        if repl_def.shield_kind != crate::types::ability::ShieldKind::PreventionOneShot {
+            let prevented_target = match &repl_def.damage_target_filter {
+                Some(crate::types::ability::DamageTargetFilter::Player {
+                    player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
+                }) => TargetRef::Player(*player),
+                _ => TargetRef::Object(rid.source),
+            };
+            events.push(GameEvent::DamagePrevented {
+                source_id: rid.source,
+                target: prevented_target,
+                amount: total_prevented as u32,
+            });
+        }
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
         // damage prevented this way, create a token"). Stamp the aggregate

@@ -24716,17 +24716,28 @@ declare_game_state! {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-    /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
-    /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
-    /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
-    /// branch of the damage-replacement applier accumulates each prevented
-    /// amount into this map (keyed by the shield's `ReplacementId`) instead of
-    /// stamping `last_effect_count` per source. After the batch, the combat
-    /// resolver reads the aggregate to fire each shield's `runtime_execute`
-    /// rider exactly once (CR 615.13). Always `None` at every `apply()`
-    /// boundary, so it is excluded from serialization and structural equality.
+    /// CR 510.2 + CR 615.5: Transient per-shield combat-damage prevention tally.
+    /// Set to `Some(empty)` by `replace_combat_damage_batch` for one simultaneous
+    /// combat-damage batch. Continuous all-damage and one-shot prevention shields
+    /// accumulate amounts under their `AppliedReplacementKey`; the combat resolver
+    /// fires each aggregate runtime rider once with the total.
+    /// `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
+    /// source/recipient `DamagePrevented` events separately. `Prevention { All }`
+    /// with `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the
+    /// continuous-All path and emits its aggregate event at the rider boundary.
+    /// Always `None` at every `apply()` boundary, so this execution-local field
+    /// is excluded from serialization and structural equality.
     #[serde(skip)]
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
+    /// CR 510.2 + CR 700.1 + CR 615.8: Successful one-shot applications to a
+    /// damage source's current simultaneous combat-damage instance. A consumed
+    /// replacement stays eligible only for that same source inside this batch.
+    /// Only this ledger is suspended during independent follow-ups, then restored
+    /// before the next portion; the prevention tally remains active.
+    /// Restored to its prior value before returning; excluded from serialization
+    /// and equality like the prevention tally.
+    #[serde(skip)]
+    pub(crate) combat_one_shot_applications: Option<Vec<(AppliedReplacementKey, ObjectId)>>,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -30660,6 +30671,7 @@ impl GameState {
             archenemy,
             initiative: None,
             combat_prevention_tally: None,
+            combat_one_shot_applications: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -33715,6 +33727,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         archenemy: _,
         initiative: _,
         combat_prevention_tally: _,
+        combat_one_shot_applications: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops

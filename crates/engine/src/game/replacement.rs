@@ -2494,6 +2494,14 @@ fn redirect_damage_event(
 
     match redirect_amount {
         PreventionAmount::All => {
+            let redirected = new_recipient.is_some();
+            let event = ProposedEvent::Damage {
+                source_id,
+                target: new_recipient.unwrap_or(target),
+                amount: damage_amount,
+                is_combat,
+                applied,
+            };
             // CR 614.5: The one-shot opportunity is spent on this event whether
             // or not the redirection succeeds — consume the shield in both the
             // success and the "does nothing" (illegal recipient per CR 614.9)
@@ -2503,19 +2511,23 @@ fn redirect_damage_event(
             // re-fire for every damage event within their lifetime.
             if consume_after_redirect {
                 consume_prevention_shield(state, rid, None);
+                // CR 510.2 + CR 700.1 + CR 614.9: A successful redirection
+                // covers this source's whole simultaneous combat instance.
+                // Zero-damage events returned above; illegal recipients do nothing.
+                if redirected {
+                    record_combat_one_shot_application(
+                        state,
+                        AppliedReplacementKey::for_event(&event, rid),
+                        source_id,
+                    );
+                }
             }
 
             // CR 614.9: A legal recipient takes the damage instead; an illegal
             // one (left the battlefield, no longer a battle/creature/
             // planeswalker, or a player who left the game) makes the redirection
             // do nothing, so the damage stays on the original recipient.
-            ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount: damage_amount,
-                is_combat,
-                applied,
-            })
+            ApplyResult::Modified(event)
         }
         PreventionAmount::AllBut(_) => {
             // CR 615.1a vs CR 614.9: `AllBut` is exclusively a *prevention*
@@ -2738,12 +2750,16 @@ fn damage_done_applier(
                     }
                 }
             };
-            // CR 614.5: A one-shot effect-created amount replacement (Desperate
-            // Gambit) gets a single opportunity, then is consumed. Continuous
-            // statics (Furnace of Rath) keep `ShieldKind::None` and are never
-            // consumed here — they re-apply to every damage event.
-            if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
+            // CR 614.5: Consume a one-shot damage replacement after applying it.
+            // The batch ledger retains only successful amount changes.
+            if matches!(
+                shield_kind_for_rid(state, rid),
+                Some(ShieldKind::DamageReplacementOneShot)
+            ) {
                 consume_prevention_shield(state, rid, None);
+                if amount > 0 && new_amount != amount {
+                    record_combat_one_shot_application(state, applied_key, source_id);
+                }
             }
             // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
             // prevention provenance of the shared `Minus` subtraction — CR 702.64
@@ -3066,16 +3082,12 @@ fn damage_done_applier(
         }
     }
 
-    // CR 615.3 + CR 615.1a: One-shot prevention shield ("the next time [target
-    // creature] would deal damage this turn, prevent that damage" — Awe Strike).
-    // Single opportunity bounded by the "the next time" qualifier (CR 615.3);
-    // the `Prevention { All }`-style body absorbs any magnitude of the single
-    // matching damage event. The one-shot consumption itself is handled by the
-    // generic `consume_on_apply` contract (applier `Prevented`/`Modified` arms)
-    // rather than here. Per-event path throughout — even inside a combat-damage
-    // batch the shield matches at most one event (it is consumed on apply), so
-    // the per-event `DamagePrevented` + `last_effect_count` stamp fires the
-    // rider once with the exact prevented amount.
+    // CR 615.8 + CR 510.2: One-shot prevention covers the chosen source's
+    // entire next instance, including every simultaneous combat recipient.
+    // The generic `consume_on_apply` arms consume immediately; the batch ledger
+    // keeps only this source's remaining portions eligible. CR 615.5: Aggregate
+    // the runtime rider's amount, while template/source-reflecting riders retain
+    // their existing per-event continuation path.
     //
     // CR 120.8: A 0-damage event is not damage at all — it has no event to
     // replace. The shield must not "prevent" it (no DamagePrevented, no
@@ -3112,16 +3124,73 @@ fn damage_done_applier(
                 target: target.clone(),
                 amount: dmg,
             });
-            // CR 615.5: stamp the prevented amount for the rider's
-            // `EventContextAmount` ("You gain life equal to the damage
-            // prevented this way").
-            state.last_effect_count = Some(dmg as i32);
+            let accumulated_in_batch = if !reflects_per_event {
+                if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                    *tally.entry(applied_key).or_insert(0) += dmg as i32;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            // CR 615.13 + CR 615.5: Keep real source/recipient provenance above;
+            // only the runtime rider's amount is aggregated, without emitting a
+            // second, sentinel-source prevention event at the rider boundary.
+            if !accumulated_in_batch || shield_has_per_event_execute_followup(state, rid) {
+                state.last_effect_count = Some(dmg as i32);
+            }
             return ApplyResult::Prevented;
         }
     }
 
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
+}
+
+/// CR 510.2 + CR 700.1 + CR 615.8: A consumed one-shot may still cover another
+/// portion of the same damage source's current simultaneous combat instance.
+fn consumed_replacement_applies_in_combat_batch(
+    state: &GameState,
+    event: &ProposedEvent,
+    rid: ReplacementId,
+) -> bool {
+    match event {
+        ProposedEvent::Damage {
+            source_id,
+            is_combat: true,
+            ..
+        } => state
+            .combat_one_shot_applications
+            .as_ref()
+            .is_some_and(|applications| {
+                applications.contains(&(AppliedReplacementKey::for_event(event, rid), *source_id))
+            }),
+        _ => false,
+    }
+}
+
+/// CR 609.7b + CR 700.1: Record only successful one-shot damage applications;
+/// CR 615.7: finite Next(N) depletion never records.
+fn record_combat_one_shot_application(
+    state: &mut GameState,
+    key: AppliedReplacementKey,
+    damage_source: ObjectId,
+) {
+    if matches!(
+        shield_kind_for_rid(state, key.as_replacement_id()),
+        Some(ShieldKind::Prevention {
+            amount: PreventionAmount::Next(_)
+        })
+    ) {
+        return;
+    }
+    if let Some(applications) = state.combat_one_shot_applications.as_mut() {
+        let application = (key, damage_source);
+        if !applications.contains(&application) {
+            applications.push(application);
+        }
+    }
 }
 
 /// CR 614.5: Mark a one-shot replacement as consumed after it successfully applies.
@@ -7499,8 +7568,9 @@ fn object_replacement_candidate_applies(
         }
     }
 
-    // CR 701.19: skip consumed one-shot replacements such as used regeneration.
-    if repl_def.is_consumed {
+    // CR 614.5 + CR 615.8: Only the same source's current combat instance may
+    // reuse a consumed one-shot; all other consumed replacements stay spent.
+    if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) {
         return false;
     }
     // CR 708.3 + CR 708.2a: An object put onto the battlefield FACE DOWN is turned
@@ -8717,14 +8787,15 @@ pub fn find_applicable_replacements(
     // reachable only by non-damage entries on non-damage events.
     {
         for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
-            if repl_def.is_consumed {
-                continue;
-            }
-
             let rid = ReplacementId {
                 source: ObjectId(0),
                 index,
             };
+            if repl_def.is_consumed
+                && !consumed_replacement_applies_in_combat_batch(state, event, rid)
+            {
+                continue;
+            }
 
             if event.already_applied(&rid) {
                 continue;
@@ -9843,9 +9914,9 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
-                // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
-                // resolving spell (e.g. Inkshield) captures a `runtime_execute`
-                // rider at resolution time and fires it once post-batch against the
+                // CR 510.2 + CR 615.5: All-damage and one-shot prevention shields
+                // created by resolving spells capture a `runtime_execute` rider
+                // and fire it once post-batch against the
                 // aggregate prevented amount. Suppress the per-event stash here for
                 // such shields so `fire_combat_prevention_riders` owns the single
                 // continuation.
@@ -9867,16 +9938,8 @@ fn apply_single_replacement(
                 // condition `PostReplacementDamageSourceMatchesFilter` (and/or a
                 // `PostReplacementDamageSource` reflection target) is the per-source
                 // marker; Inkshield/New Way Forward carry neither and keep batching.
-                //
-                // CR 615.3 + CR 615.5 (Awe Strike): the one-shot `PreventionOneShot`
-                // shield stays on the per-event path even inside a combat-damage
-                // batch — it is single-opportunity (consumed on first apply), so the
-                // batch contains at most one matching event from the one captured
-                // source, and the per-event stash + inline drain in
-                // `replace_combat_damage_batch` fires its template rider exactly
-                // once. The batch aggregation path would require the post-batch
-                // rider firing in `combat_damage.rs`, which this shield deliberately
-                // does not use.
+                // CR 615.8 + CR 615.5: One-shot runtime riders (Awe Strike) also
+                // use the total across the chosen source's simultaneous portions.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
                     && !repl_def
@@ -9887,7 +9950,7 @@ fn apply_single_replacement(
                         repl_def.shield_kind,
                         ShieldKind::Prevention {
                             amount: PreventionAmount::All
-                        }
+                        } | ShieldKind::PreventionOneShot
                     );
                 let post_effect = match (branch, &repl_def.mode) {
                     // CR 614.6 + CR 611.2b: SearchFound binds its exact
@@ -10250,6 +10313,22 @@ fn apply_single_replacement(
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
+    // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
+    // or prevented. Capture scalar provenance only; do not clone damage events.
+    let combat_one_shot_application =
+        state
+            .combat_one_shot_applications
+            .as_ref()
+            .and_then(|_| match &proposed {
+                ProposedEvent::Damage {
+                    source_id, amount, ..
+                } if *amount > 0 => Some((
+                    AppliedReplacementKey::for_event(&proposed, rid),
+                    *source_id,
+                    *amount,
+                )),
+                _ => None,
+            });
     // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
     // *successfully applies*. The single exception is a `PreventionOneShot`
     // damage shield whose applier returns the event UNMODIFIED — the
@@ -10426,6 +10505,24 @@ fn apply_single_replacement(
                     || (pre_applier_event.is_none() && consume_on_apply)
                 {
                     mark_replacement_consumed(state, rid);
+                    if let Some((key, damage_source, damage_amount)) = combat_one_shot_application {
+                        let changed = match &new_event {
+                            ProposedEvent::Damage {
+                                source_id,
+                                target,
+                                amount,
+                                ..
+                            } => {
+                                *source_id != damage_source
+                                    || *amount != damage_amount
+                                    || Some(target) != proposed_event_target.as_ref()
+                            }
+                            _ => true,
+                        };
+                        if changed {
+                            record_combat_one_shot_application(state, key, damage_source);
+                        }
+                    }
                 }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement
                 // effect when it has work beyond the event modifiers (e.g., a Choose
@@ -10488,6 +10585,9 @@ fn apply_single_replacement(
             ApplyResult::Prevented => {
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
+                    if let Some((key, damage_source, _)) = combat_one_shot_application {
+                        record_combat_one_shot_application(state, key, damage_source);
+                    }
                 }
                 // CR 615.5: A prevention effect's additional effect (e.g.
                 // Phyrexian Hydra's "Put a -1/-1 counter on ~ for each 1 damage
@@ -12266,14 +12366,16 @@ pub fn replace_event(
 /// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
 /// simultaneous combat-damage batch.
 ///
-/// Each proposed `Damage` event is passed through `replace_event` individually
-/// (the pipeline is inherently per-event), but for the duration of the batch
-/// `state.combat_prevention_tally` is active: the damage-replacement applier's
-/// `Prevention::All` branch routes each prevented amount into a per-shield
-/// aggregate keyed by `ReplacementId` instead of stamping `last_effect_count`
-/// or emitting a per-source `DamagePrevented`. `Prevention::Next(N)` shields
-/// keep the existing per-event sequential path — depletion-style shields are
-/// not aggregated here.
+/// Each proposed `Damage` event runs through the pipeline individually. The
+/// batch-local one-shot ledger keeps a successfully consumed replacement eligible
+/// only for the same damage source's remaining portions (CR 700.1 + CR 615.8).
+/// Definitions stay consumed immediately; a later damage batch starts empty.
+/// `combat_prevention_tally` aggregates continuous all-damage and one-shot runtime
+/// riders. `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
+/// source/recipient `DamagePrevented` events. `Prevention { All }` with
+/// `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+/// path, whose aggregate event is emitted at the rider boundary.
+/// `Prevention::Next(N)` retains sequential depletion, with no ledger membership.
 ///
 /// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
 /// player choice — out of scope (#314 is Prevention::All)`. When two or more
@@ -12285,7 +12387,7 @@ pub fn replace_event(
 /// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
 /// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
 /// `None` means that source's damage was fully prevented or skipped. The
-/// `HashMap` is the per-`Prevention::All`-shield aggregate prevented amount.
+/// `HashMap` holds each aggregating shield's total prevented amount.
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -12299,6 +12401,13 @@ pub(crate) fn replace_combat_damage_batch(
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
+    let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
+    // AppliedReplacementKey is registry-index based, exactly as combat_prevention_tally's keys are.
+    // Absolute indices stay valid only while the replacement lists are unchanged between portions:
+    // consumption marks entries in place, but a follow-up drain can rebuild or prune lists (layer flush;
+    // layers.rs prune_controller_controls_source_on_leave; turns.rs prunes the pending registry outside
+    // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
+    // such a mutation. Printed cards in this class run no such follow-up between portions.
 
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
@@ -12306,17 +12415,21 @@ pub(crate) fn replace_combat_damage_batch(
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);
         // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
-        // by the applier (the `Prevention::All` batch path suppresses its stash
-        // and fires once post-batch instead). Resolve any such per-event
+        // by the applier (the all-damage and one-shot prevention batch paths
+        // suppress their stash and fire once post-batch instead). Resolve any such per-event
         // continuation inline — for both full prevention (`Prevented`) and
         // partial prevention (`Modified` → `Execute`) — so a depletion-shield
         // rider fires "immediately afterward" and never leaks past the batch.
         if !matches!(result, ReplacementResult::NeedsChoice(_))
             && state.has_post_replacement_drain()
         {
+            // CR 700.1: Follow-up damage is an independent event, even if its
+            // source also participates in the original simultaneous instance.
+            let applications = state.combat_one_shot_applications.take();
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
             );
+            state.combat_one_shot_applications = applications;
         }
         match result {
             ReplacementResult::Execute(survivor) => survivors.push(Some(survivor)),
@@ -12337,6 +12450,7 @@ pub(crate) fn replace_combat_damage_batch(
 
     let tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
+    state.combat_one_shot_applications = restore_applications;
     (survivors, tally)
 }
 
