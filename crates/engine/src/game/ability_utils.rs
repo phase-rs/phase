@@ -7212,6 +7212,12 @@ fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivation> 
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
+        // CR 115.1 + CR 601.2c + CR 111.2: a token count read off a target-bound
+        // population ("a number of tokens equal to the number of creatures target
+        // player controls": Will of the Mardu, Ferrafor) announces that player as
+        // its own slot. The tokens' owner stays the controller (CR 111.2), so
+        // `target_filter()` surfaces no slot for it.
+        | Effect::Token { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
@@ -24021,6 +24027,51 @@ mod tests {
                 excess: None,
             }),
             "DealDamage{{TargetZoneCardCount, Typed(creature)}} needs the opponent slot",
+        );
+        // Will of the Mardu / Ferrafor shape: the tokens' owner is the
+        // controller (no player slot from `owner`), while the count reads a
+        // "target player controls" population — the count's slot must fire.
+        let token_with_count = |count: QuantityExpr| Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Warrior".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count,
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert!(
+            effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                    ),
+                },
+            })),
+            "Token{{ObjectCount{{controller TargetPlayer}}, Controller}} (Will of the Mardu) needs the player slot",
+        );
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Fixed {
+                value: 1,
+            })),
+            "Token{{Fixed}} must NOT need a slot",
+        );
+        // Anaphoric "that creature's mana value" counts ride an earlier
+        // announcement and surface no slot of their own.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })),
+            "Token{{ObjectManaValue{{Target}}}} must NOT need a slot",
         );
         // Baseline: no quantity target, no slot.
         assert!(

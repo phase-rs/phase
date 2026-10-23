@@ -1634,6 +1634,7 @@ mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
 mod wickerfolk_indomitable_composite_gerund_cost;
 mod wilhelt_decayed_intervening_if_5937;
+mod will_of_the_mardu_target_player_token_count;
 mod willie_lumpkin_cant_attack;
 mod winnowing;
 mod wise_mothman_milled_trigger;
