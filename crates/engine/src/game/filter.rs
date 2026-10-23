@@ -4472,9 +4472,22 @@ fn bind_absent_search_node(filter: &mut TargetFilter) {
     }
 }
 
+/// The constant property a bound predicate folds to: the empty disjunction
+/// (`AnyOf { [] }`) is false, and its negation is true.
+fn filter_prop_truth(value: bool) -> FilterProp {
+    let never = FilterProp::AnyOf { props: vec![] };
+    if value {
+        FilterProp::Not {
+            prop: Box::new(never),
+        }
+    } else {
+        never
+    }
+}
+
 fn bind_absent_search_property(prop: &mut FilterProp) {
     if matches!(prop, FilterProp::InTrackedSet { id } if id.0 == 0) {
-        *prop = FilterProp::AnyOf { props: vec![] };
+        *prop = filter_prop_truth(false);
     }
 }
 
@@ -4482,10 +4495,47 @@ fn bind_absent_search_property_after_children(prop: &mut FilterProp) {
     if matches!(prop, FilterProp::DistinctFrom { reference }
         if absent_search_predicate_truth(reference) == Some(false))
     {
-        *prop = FilterProp::Not {
-            prop: Box::new(FilterProp::AnyOf { props: vec![] }),
-        };
+        *prop = filter_prop_truth(true);
     }
+}
+
+/// CR 602.1a + CR 603.2 + CR 603.10: bind every `HasXInActivationCost` in an
+/// activation trigger's filter to the `AbilityActivated` event's own bound cost
+/// (`BoundActivationCost`, captured before payment) before the filter is
+/// evaluated against the source. CR 113.7a: live and departed-LKI evaluation
+/// both see the one bound fact.
+///
+/// Transactional, like the other binders over this walk: the rewrite runs on a
+/// copy and is published only when the bounded walk reached every property. An
+/// incomplete walk (a `CardTypeSetSource::AnyOf` population nested past
+/// `UNION_DEPTH_BUDGET`) leaves `filter` unchanged and returns `false`, so the
+/// caller fails closed instead of evaluating a filter with an occurrence left
+/// unbound.
+#[must_use]
+pub(crate) fn bind_activation_cost_x(
+    filter: &mut TargetFilter,
+    cost: &crate::types::events::BoundActivationCost,
+) -> bool {
+    let has_x = crate::game::casting_costs::bound_activation_cost_has_x(cost);
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if matches!(prop, FilterProp::HasXInActivationCost) {
+                *prop = filter_prop_truth(has_x);
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
 }
 
 // This summary reads Boolean composition only. It never replaces a descriptor
@@ -9659,6 +9709,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::FaceDown => {
             record.cast_variant == crate::types::game_state::CastingVariant::FaceDown
         }
+        // CR 602.1a: a fact of an activation, not of a spell. An activation
+        // trigger's matcher binds it from its `AbilityActivated` event before
+        // evaluation (`bind_activation_cost_x`), so a spell record never
+        // answers it.
         FilterProp::HasXInActivationCost => false,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
@@ -10755,12 +10809,11 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
-        // CR 107.3 + CR 601.2f: "{X} in its activation cost" — consult the
-        // pending activation record for the matched source object. Composes with
-        // typed type/controller filters via `TargetFilter::And`/`Or`.
-        FilterProp::HasXInActivationCost => {
-            crate::game::casting_costs::pending_activation_cost_has_x(state, object_id)
-        }
+        // CR 602.1a: "{X} in its activation cost" is a fact of an activation,
+        // not a characteristic of an object. It is answered only from the
+        // `AbilityActivated` event the trigger matches (`bind_activation_cost_x`,
+        // bound before evaluation); an unbound read names no activation.
+        FilterProp::HasXInActivationCost => false,
         FilterProp::WasKicked => {
             if let Some(pending) = state.pending_cast.as_ref() {
                 if pending.object_id == object_id {
@@ -12046,6 +12099,10 @@ fn zone_change_record_matches_property(
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
+        // CR 602.1a: a fact of an activation, not of an object. An activation
+        // trigger's matcher binds it from its `AbilityActivated` event before
+        // the departed-source branch (`bind_activation_cost_x`), so this record
+        // path never answers it.
         | FilterProp::HasXInActivationCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
@@ -16282,15 +16339,26 @@ mod tests {
         );
     }
 
-    /// CR 107.3 + CR 601.2f: `FilterProp::HasXInActivationCost` consults the
-    /// pending activation record and composes with typed filters via `And`.
+    /// CR 602.1a + CR 603.2: `FilterProp::HasXInActivationCost` is answered only
+    /// by the activation event's bound cost (`bind_activation_cost_x`), composes
+    /// with typed filters via `And` and inside `AnyOf`, and an unbound read never
+    /// consults `pending_activations` (an AI guard, not a rules input).
     #[test]
-    fn pending_activation_has_x_in_activation_cost_composes_with_type_filter() {
+    fn bound_activation_cost_x_composes_with_type_filter_and_ignores_pending_activations() {
         use crate::types::ability::{
             AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter as Tf,
             TypedFilter,
         };
+        use crate::types::events::BoundActivationCost;
         use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X],
+            },
+        }));
+        let non_x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Tap));
 
         let mut state = GameState::new_two_player(42);
         let source = add_creature(&mut state, PlayerId(0), "X Activator");
@@ -16319,15 +16387,97 @@ mod tests {
                 ),
             ],
         };
+
+        let mut bound_true = filter.clone();
+        assert!(bind_activation_cost_x(&mut bound_true, &x_cost));
         assert!(
-            matches_target_filter(&state, source, &filter, source),
-            "creature source with pending X activation must match composed filter"
+            matches_target_filter(&state, source, &bound_true, source),
+            "a creature source whose activation carried {{X}} matches the composed filter"
         );
-        state.pending_activations.clear();
+        let mut bound_false = filter.clone();
+        assert!(bind_activation_cost_x(&mut bound_false, &non_x_cost));
+        assert!(
+            !matches_target_filter(&state, source, &bound_false, source),
+            "an activation whose cost carried no {{X}} fails the composed filter"
+        );
+
+        let nested =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::HasXInActivationCost],
+            }]));
+        let mut nested_true = nested.clone();
+        assert!(bind_activation_cost_x(&mut nested_true, &x_cost));
+        assert!(
+            matches_target_filter(&state, source, &nested_true, source),
+            "a property nested in AnyOf is bound too"
+        );
+        let mut nested_false = nested;
+        assert!(bind_activation_cost_x(&mut nested_false, &non_x_cost));
+        assert!(!matches_target_filter(
+            &state,
+            source,
+            &nested_false,
+            source
+        ));
+
         assert!(
             !matches_target_filter(&state, source, &filter, source),
-            "without pending activation, HasXInActivationCost must fail"
+            "an unbound HasXInActivationCost names no activation, whatever \
+             pending_activations holds"
         );
+    }
+
+    /// CR 602.1a + CR 603.2: binding an activation's cost into a filter is
+    /// transactional. Within the union budget every occurrence is bound; past
+    /// it nothing is published (not even the visible top-level occurrence the
+    /// walk did reach) and the binder reports the incomplete walk.
+    #[test]
+    fn activation_cost_x_binding_is_transactional_at_population_budget() {
+        use crate::types::ability::{AbilityCost, CardTypeSetSource, UNION_DEPTH_BUDGET};
+        use crate::types::events::BoundActivationCost;
+
+        let not_x = |x: FilterProp| FilterProp::Not { prop: Box::new(x) };
+        let population = |depth: u32, x: FilterProp| {
+            let member = || CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![not_x(x.clone())]),
+                ),
+            };
+            let mut source = member();
+            for _ in 0..depth {
+                source = CardTypeSetSource::any_of(vec![source, member()]).unwrap();
+            }
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                not_x(x.clone()),
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctCardTypes { source },
+                    },
+                },
+            ]))
+        };
+        let non_x_cost = BoundActivationCost::Cost(Box::new(AbilityCost::Tap));
+
+        let mut within = population(2, FilterProp::HasXInActivationCost);
+        assert!(bind_activation_cost_x(&mut within, &non_x_cost));
+        assert_eq!(
+            within,
+            population(2, filter_prop_truth(false)),
+            "every occurrence, nested population members included, is bound"
+        );
+
+        let mut rejected = population(UNION_DEPTH_BUDGET, FilterProp::HasXInActivationCost);
+        let before = rejected.clone();
+        assert!(
+            filter_contains_filter_prop(&rejected, &|prop| matches!(
+                prop,
+                FilterProp::HasXInActivationCost
+            )),
+            "visible rewritable occurrence guards rejection reach"
+        );
+        assert!(!bind_activation_cost_x(&mut rejected, &non_x_cost));
+        assert_eq!(rejected, before, "no reachable prefix is published");
     }
 
     #[test]

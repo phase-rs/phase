@@ -37,7 +37,7 @@ use crate::types::ability::{
     ZoneRef,
 };
 use crate::types::card::CardFace;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -1871,15 +1871,38 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_characteristic_population_bounded(source)
             )
         }
-        QuantityRef::DistinctSubtypes { source, exclude } => {
-            let suffix = match exclude {
-                crate::types::ability::SubtypeExclusion::CreatureTypes => {
-                    " other than creature types"
-                }
-                crate::types::ability::SubtypeExclusion::None => "",
-            };
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict,
+        } => {
             let scope_desc = fmt_characteristic_population_bounded(source);
-            format!("subtypes{suffix} among {scope_desc}")
+            // CR 205.3: the category axis renders its own noun — derived from
+            // the `SubtypeSet`, not a second table. Only Creature/Planeswalker
+            // are producible today; the rest still render sanely.
+            match restrict {
+                Some(set) => {
+                    let noun = match set {
+                        SubtypeSet::Creature => "creature",
+                        SubtypeSet::Land => "land",
+                        SubtypeSet::Artifact => "artifact",
+                        SubtypeSet::Enchantment => "enchantment",
+                        SubtypeSet::Planeswalker => "planeswalker",
+                        SubtypeSet::Spell => "spell",
+                        SubtypeSet::Battle => "battle",
+                    };
+                    format!("{noun} types among {scope_desc}")
+                }
+                None => {
+                    let suffix = match exclude {
+                        crate::types::ability::SubtypeExclusion::CreatureTypes => {
+                            " other than creature types"
+                        }
+                        crate::types::ability::SubtypeExclusion::None => "",
+                    };
+                    format!("subtypes{suffix} among {scope_desc}")
+                }
+            }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
@@ -4277,6 +4300,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     fmt_target(restriction),
                 ));
             }
+        }
+        Effect::ModifyAnnouncedX { modification } => {
+            d.push(("modifies X".into(), format!("{modification:?}")));
         }
         Effect::Double {
             target_kind,

@@ -446,6 +446,67 @@ pub fn apply_resolved_stack_push(
     Ok(())
 }
 
+/// The X a stack object had and has after a rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct XRewrite {
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+}
+
+/// CR 107.3a + CR 107.3i + CR 107.3k + CR 107.3m + CR 202.3e: the single
+/// authority that changes the value of X of a spell or activated ability
+/// already on the stack (CR 107.3c's note). It reads the current X and writes
+/// every channel together:
+/// - a spell: the object's `cost_x_paid` (CR 107.3m / CR 202.3e), its CR 601.2i
+///   paid snapshot `x_value` (read first by a resolving permanent's intrinsic
+///   counters), and its ability chain's `chosen_x` (CR 107.3i);
+/// - an activated ability: only its own chain's `chosen_x` (CR 107.3k — never
+///   the source object's cast X).
+///
+/// Triggered abilities and combat damage have no announced X (CR 107.3a names
+/// spells and activated abilities). A keyword-action entry (CR 113.3b) is an
+/// activated ability but carries no announced X: equip/crew/saddle/station
+/// costs have no {X} to announce, and a granted equip {X} is text-defined
+/// (CR 107.3c). Payment state is never
+/// touched (CR 601.2h: costs were paid while casting).
+pub(crate) fn rewrite_stack_object_x(
+    state: &mut GameState,
+    entry_id: ObjectId,
+    modify: impl FnOnce(u32) -> u32,
+) -> Option<XRewrite> {
+    let object_x = state.objects.get(&entry_id).and_then(|obj| obj.cost_x_paid);
+    let entry = state.stack.iter_mut().rev().find(|e| e.id == entry_id)?;
+    match &mut entry.kind {
+        // CR 107.3i: every instance of X on the spell shares one value, so the
+        // object, its paid snapshot and its ability chain move together.
+        StackEntryKind::Spell { ability, .. } => {
+            let from = object_x?;
+            let to = modify(from);
+            if let Some(a) = ability.as_mut() {
+                a.set_chosen_x_recursive(to);
+            }
+            if let Some(obj) = state.objects.get_mut(&entry_id) {
+                obj.cost_x_paid = Some(to);
+            }
+            if let Some(paid) = state.stack_paid_facts.get_mut(&entry_id) {
+                paid.x_value = Some(to);
+            }
+            Some(XRewrite { from, to })
+        }
+        // CR 107.3k: an activated ability's X is its own, independent of any X
+        // its source object has.
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            let from = ability.chosen_x?;
+            let to = modify(from);
+            ability.set_chosen_x_recursive(to);
+            Some(XRewrite { from, to })
+        }
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
+    }
+}
+
 /// Installs one already-resolved CR 601.2i cast finalization verbatim.
 ///
 /// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
@@ -665,8 +726,9 @@ fn remove_stack_entry_at_unobserved(
 /// cast was never finalized and has no CR 707.2 choices to remember. Called
 /// from the zone-exit path
 /// (`zones.rs::apply_zone_exit_cleanup`, before the `cast_occurrence` clear
-/// that would make this guard vacuous) and `remove_nonresolving_stack_entry_at`
-/// below — a resolution pop (`pop_top_stack_entry`) calls neither.
+/// that would make this guard vacuous) and, through `record_departed_stack_entry`,
+/// `remove_nonresolving_stack_entry_at` below — a resolution pop
+/// (`pop_top_stack_entry`) calls neither.
 pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEntry) {
     let StackEntryKind::Spell { .. } = &entry.kind else {
         return;
@@ -689,6 +751,36 @@ pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEn
         .insert(incarnation, record);
 }
 
+/// CR 701.6a + CR 113.3b + CR 608.2h: record a stack object removed without
+/// resolving (countered, or removed with its controller under CR 800.4a), as it last
+/// existed on the stack, for a trigger that still names it. The non-resolving-removal
+/// writer of both departed-stack tables, called only from
+/// `remove_nonresolving_stack_entry_at` (a departed spell is also recorded at its zone
+/// exit, `zones.rs::apply_zone_exit_cleanup`). A resolution pop records nothing: the
+/// object resolved. An end-the-turn exile
+/// (CR 724.1b, `pop_nonresolving_top_stack_entry`) records nothing either, because
+/// every trigger that could name the object is exiled in the same pass.
+fn record_departed_stack_entry(state: &mut GameState, entry: &StackEntry) {
+    match &entry.kind {
+        StackEntryKind::Spell { .. } => record_departed_stack_spell(state, entry),
+        // CR 113.1c + CR 113.7a: an activated ability on the stack is an object that
+        // exists independently of its source; its whole last-known state is its entry,
+        // kept under the id its activation event names (CR 602.2a).
+        StackEntryKind::ActivatedAbility { .. } => {
+            state
+                .departed_activated_abilities
+                .insert(entry.id, entry.clone());
+        }
+        // No trigger event names these as "that spell or ability": a spell-cast event
+        // names a spell, an activation event names an activated ability's entry, a
+        // keyword-action entry is named by no activation event, and combat damage is
+        // not an ability.
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => {}
+    }
+}
+
 /// Removes a stack entry for a non-resolution reason and observes the exact
 /// firing only after the entry and side tables have been settled.
 pub(super) fn remove_nonresolving_stack_entry_at(
@@ -698,7 +790,7 @@ pub(super) fn remove_nonresolving_stack_entry_at(
 ) -> Option<PoppedStackEntry> {
     let popped = remove_stack_entry_at_unobserved(state, index)?;
     release_departed_entry_reveals(state, &popped);
-    record_departed_stack_spell(state, &popped.entry);
+    record_departed_stack_entry(state, &popped.entry);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -6169,6 +6261,266 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// A-1 (CR 107.3i + CR 107.3k + CR 601.2h): the X-rewrite authority moves
+    /// every X channel of a spell together, only an activated ability's own
+    /// chain, nothing for a kind with no announced X, and never payment state.
+    #[test]
+    fn rewrite_stack_object_x_moves_each_kinds_x_channels() {
+        let draw = |source: ObjectId, x: Option<u32>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            ability.chosen_x = x;
+            ability
+        };
+        let spell_entry = |id: ObjectId, ability: Option<Box<ResolvedAbility>>| StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 5,
+            },
+        };
+        // An object with a cast X and its paid-facts row, in `zone`.
+        let x_object = |state: &mut GameState, zone: Zone, x: Option<u32>| {
+            let id = create_object(state, CardId(1), PlayerId(0), "X Spell".to_string(), zone);
+            state.objects.get_mut(&id).unwrap().cost_x_paid = x;
+            state.stack_paid_facts.insert(
+                id,
+                StackPaidSnapshot {
+                    actual_mana_spent: 5,
+                    x_value: x,
+                    ..Default::default()
+                },
+            );
+            id
+        };
+        let no_x = |_: u32| -> u32 { unreachable!("no X to rewrite") };
+        let mut state = setup();
+
+        // (1) A spell with an ability chain: object, paid snapshot, root and
+        // sub-ability all move; the mana spent does not.
+        let spell = x_object(&mut state, Zone::Stack, Some(3));
+        let mut root = draw(spell, Some(3));
+        root.sub_ability = Some(Box::new(draw(spell, Some(3))));
+        state
+            .stack
+            .push_back(spell_entry(spell, Some(Box::new(root))));
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, spell, |x| x * 2),
+            Some(XRewrite { from: 3, to: 6 })
+        );
+        assert_eq!(state.objects[&spell].cost_x_paid, Some(6));
+        let paid = &state.stack_paid_facts[&spell];
+        assert_eq!((paid.x_value, paid.actual_mana_spent), (Some(6), 5));
+        let StackEntryKind::Spell {
+            ability: Some(chain),
+            actual_mana_spent,
+            ..
+        } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the spell entry keeps its chain");
+        };
+        assert_eq!(chain.chosen_x, Some(6));
+        assert_eq!(chain.sub_ability.as_ref().unwrap().chosen_x, Some(6));
+        assert_eq!(*actual_mana_spent, 5);
+
+        // (2) A permanent spell with no ability chain: object and paid only.
+        let permanent = x_object(&mut state, Zone::Stack, Some(1));
+        state.stack.push_back(spell_entry(permanent, None));
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, permanent, |x| x * 2),
+            Some(XRewrite { from: 1, to: 2 })
+        );
+        assert_eq!(state.objects[&permanent].cost_x_paid, Some(2));
+        assert_eq!(state.stack_paid_facts[&permanent].x_value, Some(2));
+
+        // (3) An activated ability: its own chain only; its source's cast X and
+        // paid row stay put (CR 107.3k).
+        let source = x_object(&mut state, Zone::Battlefield, Some(7));
+        let activation = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: activation,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(draw(source, Some(2))),
+            },
+        });
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, activation, |x| x * 2),
+            Some(XRewrite { from: 2, to: 4 })
+        );
+        let StackEntryKind::ActivatedAbility { ability, .. } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the activation stays on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(4));
+        assert_eq!(state.objects[&source].cost_x_paid, Some(7));
+        assert_eq!(state.stack_paid_facts[&source].x_value, Some(7));
+
+        // (4) A triggered ability has no announced X: untouched.
+        let trigger = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: trigger,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(draw(source, Some(5))),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        assert_eq!(rewrite_stack_object_x(&mut state, trigger, no_x), None);
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the trigger stays on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(5));
+
+        // (5) An id with no stack entry.
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, ObjectId(9_999), no_x),
+            None
+        );
+
+        // (6) A spell with no announced X: nothing written.
+        let plain = x_object(&mut state, Zone::Stack, None);
+        state
+            .stack
+            .push_back(spell_entry(plain, Some(Box::new(draw(plain, None)))));
+        assert_eq!(rewrite_stack_object_x(&mut state, plain, no_x), None);
+        assert_eq!(state.objects[&plain].cost_x_paid, None);
+        assert_eq!(state.stack_paid_facts[&plain].x_value, None);
+        let StackEntryKind::Spell {
+            ability: Some(chain),
+            ..
+        } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the spell entry keeps its chain");
+        };
+        assert_eq!(chain.chosen_x, None);
+    }
+
+    /// S-1 (CR 701.6a + CR 113.7a + CR 608.2h): a non-resolving removal of an
+    /// activated ability records its entry whole under the entry's id; a
+    /// non-resolving removal of a triggered ability records nothing, and neither
+    /// does the CR 405.5 resolution pop of an activated ability.
+    #[test]
+    fn a_nonresolving_removal_records_an_activated_ability_whole_and_no_trigger() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let push_entry = |state: &mut GameState, kind: StackEntryKind| {
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let entry = StackEntry {
+                id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind,
+            };
+            state.stack.push_back(entry.clone());
+            entry
+        };
+        let ability = |x: Option<u32>| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+            ability.chosen_x = x;
+            Box::new(ability)
+        };
+
+        // (1) A countered activated ability is recorded exactly as it was.
+        let activated = push_entry(
+            &mut state,
+            StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: ability(Some(2)),
+            },
+        );
+        let popped = remove_nonresolving_stack_entry_at(
+            &mut state,
+            0,
+            super::super::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("reach guard: the activated entry was removed");
+        assert_eq!(popped.entry.id, activated.id, "reach guard: that entry");
+        assert_eq!(
+            state.departed_activated_abilities.get(&activated.id),
+            Some(&activated),
+            "the countered activated ability is recorded whole"
+        );
+
+        // (2) A countered triggered ability is not recorded.
+        let triggered = push_entry(
+            &mut state,
+            StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: ability(None),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        );
+        remove_nonresolving_stack_entry_at(
+            &mut state,
+            0,
+            super::super::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("reach guard: the triggered entry was removed");
+        assert!(
+            !state
+                .departed_activated_abilities
+                .contains_key(&triggered.id),
+            "a triggered ability is never recorded"
+        );
+        assert_eq!(state.departed_activated_abilities.len(), 1);
+
+        // (3) The resolution pop of an activated ability records nothing.
+        let resolving = push_entry(
+            &mut state,
+            StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: ability(Some(1)),
+            },
+        );
+        let popped = pop_top_stack_entry(&mut state).expect("reach guard: popped");
+        assert_eq!(popped.entry.id, resolving.id, "reach guard: that entry");
+        assert!(
+            !state
+                .departed_activated_abilities
+                .contains_key(&resolving.id),
+            "a resolving ability is not departed"
+        );
+        assert_eq!(state.departed_activated_abilities.len(), 1);
     }
 
     /// CR 608.2b (typed composition, not printed Oracle): an unjudged

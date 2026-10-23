@@ -15,6 +15,7 @@ use crate::game::filter::{
     target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
 };
 use crate::game::speed::effective_speed;
+use crate::game::targeting::TriggeringSpell;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, AttachmentReferent,
     BasicLandType, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
@@ -27,7 +28,7 @@ use crate::types::ability::{
     ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind,
     TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -5859,16 +5860,26 @@ fn resolve_ref(
         // `state.all_creature_types` are skipped (Subgoyf: "different subtypes
         // other than creature types"). Subtype values are stored capitalized
         // (e.g. "Goblin"); inserted as-is to preserve consistent casing.
-        QuantityRef::DistinctSubtypes { source, exclude } => {
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict,
+        } => {
             // CR 205.3m: skip subtypes that are creature types when excluding
             // creature types. Subtype values are stored capitalized ("Goblin")
             // and inserted as-is; a card with three subtypes contributes three.
             let exclude_creature = matches!(exclude, SubtypeExclusion::CreatureTypes);
+            // CR 205.3: `restrict` narrows the tally to one subtype category —
+            // `Some(Creature)` reuses this same set (positive membership,
+            // mirroring the exclude path); other `Some(set)` reads the static
+            // table; `None` keeps today's path untouched. Conjunctive with the
+            // exclude check below (defense in depth; no grammar produces both).
+            let restrict_creature = matches!(restrict, Some(SubtypeSet::Creature));
             // Collect the creature-type names into a set ONCE for O(1) membership,
             // rather than a linear scan of `all_creature_types` (hundreds of entries)
             // per subtype per object — layer 7a recomputes this every pass, so the
             // inner loop is hot.
-            let creature_types: HashSet<&str> = if exclude_creature {
+            let creature_types: HashSet<&str> = if exclude_creature || restrict_creature {
                 state
                     .all_creature_types
                     .iter()
@@ -5892,6 +5903,15 @@ fn resolve_ref(
                 controller,
                 &mut |_, view, _| {
                     for sub in view.subtypes() {
+                        // The binding filter first: skip unless in-category.
+                        let in_category = match restrict {
+                            None => true,
+                            Some(SubtypeSet::Creature) => creature_types.contains(sub.as_str()),
+                            Some(set) => noncreature_subtype_set(sub.as_str()) == Some(*set),
+                        };
+                        if !in_category {
+                            continue;
+                        }
                         if exclude_creature && creature_types.contains(sub.as_str()) {
                             continue;
                         }
@@ -8928,9 +8948,12 @@ where
     }
 }
 
-/// CR 601.2i + CR 202.3e: a `SpellCast` event's cast-time record preserves the
-/// announced X value after the spell leaves the stack, where the live object's
-/// mana value correctly treats X as zero.
+/// CR 608.2h + CR 202.3e + CR 601.2i: a spell-cast trigger's "its / that spell's
+/// mana value". While the event's spell is on the stack at the pinned
+/// incarnation, its current mana value; once it has left the stack without
+/// resolving, its last known information (the pinned departed-spell record, as
+/// it last existed on the stack); otherwise the event's cast-time record, where
+/// the live object's mana value would treat X as zero.
 fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Option<i32> {
     let GameEvent::SpellCast {
         cast_mana_value,
@@ -8942,9 +8965,32 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
         return None;
     };
 
-    // CR 603.2 + CR 603.3 + CR 608.2k: the event-bound value is the authority
-    // for the exact cast that caused this trigger. It remains distinct when the
-    // same object id is cast again before an earlier trigger resolves.
+    // CR 608.2h + CR 202.3e: the spell's current mana value while it is on the
+    // stack as the incarnation this trigger was bound to; once it has left, its
+    // last known information: the departed record, captured as it last existed
+    // on the stack (X still counts, and reflects any change made on the stack,
+    // CR 107.3c's note). The pinned lookup keeps a same-id recast from answering
+    // for an earlier cast (CR 400.7).
+    match crate::game::targeting::triggering_spell(state) {
+        Some(TriggeringSpell::OnStack(entry)) if entry.id == *object_id => {
+            if let Some(obj) = state.objects.get(object_id) {
+                return Some(u32_to_i32_saturating(obj.spell_mana_value()));
+            }
+        }
+        Some(TriggeringSpell::Departed(record)) if record.entry.id == *object_id => {
+            return Some(u32_to_i32_saturating(record.object.spell_mana_value()));
+        }
+        Some(
+            TriggeringSpell::OnStack(_) | TriggeringSpell::Departed(_) | TriggeringSpell::Gone,
+        )
+        | None => {}
+    }
+
+    // CR 603.2 + CR 603.3 + CR 608.2k: with neither a live spell nor a departed
+    // record for this trigger's cast (it resolved, or this is a detection-time
+    // read), the event-bound value is the authority for the exact cast that
+    // caused this trigger. It remains distinct when the same object id is cast
+    // again before an earlier trigger resolves.
     if let Some(value) = cast_mana_value {
         return Some(u32_to_i32_saturating(*value));
     }
@@ -9151,9 +9197,11 @@ fn resolve_object_mana_value(
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
         // `Demonstrative` ("that spell's mana value", Mana Drain) shares this
         // resolution — same earlier-instruction referent named by a noun phrase.
-        // CR 202.3e: include cost_x_paid for on-stack event sources. For a
-        // SpellCast event, prefer the CR 601.2i cast-time record so this value
-        // remains correct after the spell leaves the stack.
+        // CR 202.3e + CR 608.2h: for a SpellCast event, the spell's live mana
+        // value while it is on the stack at the pinned incarnation; once it has
+        // left the stack without resolving, its last known information (the
+        // pinned departed-spell record); otherwise the CR 601.2i cast-time
+        // record (see spell_cast_mana_value_for_event).
         ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
@@ -12700,6 +12748,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: union(),
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong { source: union() },
             QuantityRef::PropertyAggregate(
@@ -14462,6 +14511,131 @@ mod tests {
             .map(|subtype| (*subtype).to_string())
             .collect();
         id
+    }
+
+    /// CR 205.3j + CR 205.3m: `restrict` narrows the distinct-subtype tally to
+    /// one subtype category (Tam, the Possibility / Hoshi Sato). Population
+    /// carries subtypes {Jace, Bear}: `Planeswalker` counts Jace only,
+    /// `Creature` counts Bear only, `None` counts both (positive reach-guard
+    /// proving the visitor reached both members).
+    #[test]
+    fn distinct_subtypes_restrict_narrows_to_one_category() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Bear".to_string()];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Creature", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        for (restrict, expected) in [
+            (Some(SubtypeSet::Planeswalker), 1),
+            (Some(SubtypeSet::Creature), 1),
+            (None, 2),
+        ] {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict,
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+                expected,
+                "restrict={restrict:?} over subtypes {{Jace, Bear}}"
+            );
+        }
+
+        // Hostile (same fn): a crewed Smuggler's Copter (Artifact Creature —
+        // Vehicle) contributes nothing under `restrict: Creature` ("Vehicle" ∉
+        // `all_creature_types` → skipped); Grizzly Bears still counts → 1.
+        let mut copter_state = GameState::new_two_player(43);
+        copter_state.all_creature_types = vec!["Bear".to_string()];
+        let copter = add_creature_with_subtypes(
+            &mut copter_state,
+            PlayerId(0),
+            "Smuggler's Copter",
+            &["Vehicle"],
+        );
+        copter_state
+            .objects
+            .get_mut(&copter)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        add_creature_with_subtypes(&mut copter_state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let copter_expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source,
+                exclude: SubtypeExclusion::None,
+                restrict: Some(SubtypeSet::Creature),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&copter_state, &copter_expr, PlayerId(0), ObjectId(0)),
+            1,
+            "Vehicle is not a creature type → skipped; Bear counts"
+        );
+    }
+
+    /// CR 205.3: `restrict` counts DISTINCT subtype values, not members — two
+    /// planeswalkers sharing type Jace + one Chandra → 2, not 3 (a
+    /// HashSet→counter regression reads 3). Reach-guard: three distinct → 3.
+    #[test]
+    fn distinct_subtypes_restrict_dedupes_shared_values() {
+        let mut state = GameState::new_two_player(42);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace One", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Jace Two", &["Jace"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Chandra", &["Chandra"]);
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source: source.clone(),
+                exclude: SubtypeExclusion::None,
+                restrict: Some(SubtypeSet::Planeswalker),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            2,
+            "two Jaces + one Chandra = 2 distinct planeswalker types"
+        );
+
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Teferi", &["Teferi"]);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            3,
+            "reach-guard: three distinct planeswalker types = 3"
+        );
+    }
+
+    /// `exclude` + `restrict` apply conjunctively (defense in depth for
+    /// hand-built payloads — no grammar produces both): Creature-excluded +
+    /// Creature-restricted over a creature-subtyped population → 0.
+    #[test]
+    fn distinct_subtypes_exclude_and_restrict_conjoin() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Bear".to_string()];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Grizzly Bears", &["Bear"]);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                exclude: SubtypeExclusion::CreatureTypes,
+                restrict: Some(SubtypeSet::Creature),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "in-category (Bear) but excluded (creature type) → 0"
+        );
     }
 
     #[test]
@@ -19874,6 +20048,118 @@ mod tests {
             resolve_quantity_with_targets(&state, &expr, &ability),
             5,
             "an unambiguous legacy event should retain its history fallback"
+        );
+    }
+
+    /// Q-1 (CR 608.2h + CR 202.3e + CR 400.7, supplemental reader-level
+    /// coverage): a spell-cast trigger's "its / that spell's mana value" reads
+    /// the spell live while it is on the stack at the incarnation the trigger
+    /// was pinned to, so an X changed on the stack is seen. A pin naming an
+    /// earlier incarnation of the same id has neither a live spell nor a
+    /// departed record, so it keeps the event's cast-time value (the recast
+    /// guarantee). Teval, Arbiter of Virtue's trigger is put on the stack by
+    /// the real cast pipeline; the live X and the pin are then set by hand.
+    #[test]
+    fn spell_cast_mana_value_reads_the_pinned_live_spell() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::StackEntryKind;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        const TEVAL: &str = "Flying, lifelink\nSpells you cast have delve. (Each card you exile from your graveyard while casting those spells pays for {1}.)\nWhenever you cast a spell, you lose life equal to its mana value.";
+        const ENDLESS_ONE: &str = "This creature enters with X +1/+1 counters on it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let teval = scenario
+            .add_creature_from_oracle(P0, "Teval, Arbiter of Virtue", 6, 6, TEVAL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Black,
+                    ManaCostShard::Green,
+                    ManaCostShard::Blue,
+                ],
+                generic: 2,
+            })
+            .id();
+        let endless_one = scenario
+            .add_creature_to_hand_from_oracle(P0, "Endless One", 0, 0, ENDLESS_ONE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        for _ in 0..2 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        drop(runner.cast(endless_one).x(2).commit());
+
+        let state = runner.state_mut();
+        let trigger = state.stack.back().cloned().expect("Teval's trigger");
+        let StackEntryKind::TriggeredAbility {
+            source_id,
+            trigger_event,
+            ..
+        } = &trigger.kind
+        else {
+            panic!("the top of the stack is Teval's trigger: {trigger:?}");
+        };
+        assert_eq!(*source_id, teval);
+        assert!(
+            matches!(
+                trigger_event,
+                Some(GameEvent::SpellCast {
+                    object_id,
+                    cast_mana_value: Some(2),
+                    ..
+                }) if *object_id == endless_one
+            ),
+            "the event keeps the cast-time mana value: {trigger_event:?}"
+        );
+        let Effect::LoseLife { amount, .. } = &trigger.ability().unwrap().effect else {
+            panic!("Teval's trigger loses life: {trigger:?}");
+        };
+        let amounts = [
+            amount.clone(),
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            },
+        ];
+        let live = state.objects[&endless_one].incarnation;
+        let earlier = live
+            .checked_sub(1)
+            .expect("casting moved Endless One from hand to the stack");
+        // The X changed on the stack (as a doubling would): live mana value 4.
+        state.objects.get_mut(&endless_one).unwrap().cost_x_paid = Some(4);
+
+        let read_pinned_at = |state: &mut GameState, incarnation: u64| {
+            let mut entry = trigger.clone();
+            entry.ability_mut().unwrap().context.triggering_spell =
+                Some(ObjectIncarnationRef::of(endless_one, incarnation));
+            state.resolving_stack_entry = Some(entry.clone());
+            state.current_trigger_event = trigger_event.clone();
+            amounts
+                .iter()
+                .map(|expr| resolve_quantity_with_targets(state, expr, entry.ability().unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            read_pinned_at(state, live),
+            vec![4, 4],
+            "the pinned live spell answers its current mana value"
+        );
+        assert_eq!(
+            read_pinned_at(state, earlier),
+            vec![2, 2],
+            "an earlier incarnation's trigger keeps its cast-time value"
         );
     }
 

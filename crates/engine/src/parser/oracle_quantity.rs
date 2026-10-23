@@ -9255,6 +9255,7 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
             })
         );
     }
@@ -9271,7 +9272,24 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             })
+        );
+    }
+
+    /// CR 205.3 scope cut: unprinted category heads fail closed — "land types"
+    /// and "artifact types" have no producer (only the attested creature /
+    /// planeswalker heads bind) and must stay `None`. Reach-guard: the P2/R4
+    /// positives pass in the same run.
+    #[test]
+    fn cda_unprinted_category_heads_fail_closed() {
+        assert_eq!(
+            parse_cda_quantity("the number of land types among lands you control"),
+            None
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of artifact types among artifacts you control"),
+            None
         );
     }
 

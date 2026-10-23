@@ -3,7 +3,9 @@ use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    DigSource, DurationEvent, Effect, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
+};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
@@ -11626,6 +11628,43 @@ fn revoke_resolve_all_consent(
     restore_resolve_all_priority_snapshot(state)
 }
 
+/// CR 701.20e + CR 701.20a: Whether the controller's private "look at" window
+/// must survive the action now being applied. Looking follows the rules for
+/// revealing, so a looked-at card stays looked-at only "for as long as
+/// necessary to complete the parts of the effect that card is relevant to".
+/// The window survives while either holds:
+/// - the pending prompt is an `OptionalEffectChoice` or a `RevealChoice`
+///   (kept unconditionally, as before: these cover the dependent "you may
+///   reveal that card" decision and a private look-at-hand); or
+/// - CR 608.2c: a parked ability continuation still holds an instruction that
+///   reads them — a `DigSource::PriorLook` Dig on any `sub_ability` /
+///   `else_ability` link (Birthing Ritual's "from among those cards" Dig,
+///   parked behind the multi-candidate sacrifice `EffectZoneChoice`).
+///
+/// A parked continuation with no remaining PriorLook reader (e.g. the
+/// instructions parked behind an already-presented PriorLook `DigChoice`) does
+/// not keep the window open. A new top-level resolution also ends it
+/// (`effects::reset_top_level_resolution_state`).
+fn private_look_outlives_action_boundary(state: &GameState) -> bool {
+    matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::RevealChoice { .. }
+    ) || state
+        .resolution_stack
+        .ability_continuations()
+        .any(|parked| {
+            triggers::any_reachable_link(&parked.chain, &|link| {
+                matches!(
+                    link.effect,
+                    Effect::Dig {
+                        source: DigSource::PriorLook,
+                        ..
+                    }
+                )
+            })
+        })
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11668,16 +11707,10 @@ fn apply_action(
         state.revealed_cards.clear();
     }
 
-    // CR 701.20e: A bare "look at the top card" peek is visible to the looker
-    // only until they act on it. The peek window must survive the action that
-    // serves the dependent "you may reveal that card" optional (the looked-at
-    // card is shown while that `OptionalEffectChoice` is pending) and any
-    // `RevealChoice` opened by a private look-at-hand, then clear on the next
-    // action boundary — mirroring the momentary `revealed_cards` reveal.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::RevealChoice { .. }
-    ) {
+    // CR 701.20e + CR 701.20a: end the private look window at this boundary
+    // unless the looked-at cards are still relevant to an unfinished part of
+    // the effect (`private_look_outlives_action_boundary`).
+    if !private_look_outlives_action_boundary(state) {
         state.private_look_ids.clear();
         state.private_look_player = None;
     }
