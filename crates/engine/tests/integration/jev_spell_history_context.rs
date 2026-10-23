@@ -1406,6 +1406,21 @@ fn herbie_independent_mana_abilities_pay_and_choose_green() {
             };
             assert_eq!(*player, P0);
             assert!(options.contains(&ManaType::Green));
+            assert_eq!(
+                options
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green
+                ]
+                .into_iter()
+                .collect()
+            );
             assert_eq!(options.len(), 5);
             runner
                 .act(GameAction::ChooseManaColor {
@@ -1475,11 +1490,13 @@ fn mister_copies_selected_real_phase_trigger_twice_with_actual_payment() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mister = scenario.add_real_card(P0, "Mister Fantastic", Zone::Battlefield, &db);
-    scenario.add_enchantment_from_oracle(
-        P0,
-        "Synthetic independent draw host",
-        "At the beginning of combat on your turn, draw a card.",
-    );
+    let other_host = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Synthetic independent draw host",
+            "At the beginning of combat on your turn, draw a card.",
+        )
+        .id();
     let history = paid_history_spell(&mut scenario, CoreType::Instant);
     let own_spell = scenario
         .add_spell_to_hand_from_oracle(
@@ -1525,12 +1542,33 @@ fn mister_copies_selected_real_phase_trigger_twice_with_actual_payment() {
     };
     assert_eq!(*player, P0);
     assert_eq!(triggers.len(), 2);
+    assert_eq!(
+        triggers
+            .iter()
+            .map(|trigger| trigger.source_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [mister, other_host].into_iter().collect()
+    );
+    let ordered_sources = [triggers[1].source_id, triggers[0].source_id];
     runner
         .act(GameAction::OrderTriggers { order: vec![1, 0] })
         .unwrap();
     let eligible: Vec<_> = runner.state().stack.iter().map(|entry| entry.id).collect();
     assert_eq!(eligible.len(), 2);
+    for (entry, expected_source) in runner.state().stack.iter().zip(ordered_sources) {
+        let engine::types::game_state::StackEntryKind::TriggeredAbility {
+            source_id, ability, ..
+        } = &entry.kind
+        else {
+            panic!("each original option is a real phase trigger")
+        };
+        assert_eq!(*source_id, expected_source);
+        assert_eq!(entry.controller, P0);
+        assert_eq!(ability.source_id, expected_source);
+    }
     let chosen = eligible[0];
+    let chosen_entry = runner.state().stack[0].clone();
+    assert_ne!(chosen, *eligible.last().unwrap());
     runner.cast(own_spell).commit();
     runner.act(GameAction::PassPriority).unwrap();
     runner.cast(foreign_spell).commit();
@@ -1584,6 +1622,12 @@ fn mister_copies_selected_real_phase_trigger_twice_with_actual_payment() {
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     runner.resolve_top();
     assert_eq!(runner.state().stack.len(), 7);
+    for copy in runner.state().stack.iter().rev().take(2) {
+        assert_ne!(copy.id, chosen);
+        assert_eq!(copy.controller, P0);
+        assert_eq!(copy.source_id, chosen_entry.source_id);
+        assert_eq!(copy.kind, chosen_entry.kind);
+    }
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().players[0].hand.len(), before + 4);
     settled(&runner);
@@ -1691,7 +1735,22 @@ fn sift_named_histories_drive_real_peer_choices_discard_and_exact_search() {
         assert_eq!(*player, P0);
         assert_eq!(*count, 1);
         assert!(cards.len() >= 2);
-        let discard = *cards.last().unwrap();
+        let expected_hand = match prior {
+            1 => vec![peer, looked[0], found_reach, looked[2]],
+            2 => vec![peer, looked[0], found_reach, looked[2], looked[3]],
+            3 => draws.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(cards.len(), expected_hand.len());
+        assert_eq!(
+            cards
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_hand.iter().copied().collect()
+        );
+        let discard = if prior == 3 { draws[1] } else { looked[2] };
+        assert_ne!(discard, cards[0]);
         runner
             .act(GameAction::SelectCards {
                 cards: vec![discard],
@@ -1900,12 +1959,17 @@ fn mister_queued_trigger_survives_source_departure_and_uses_original_library() {
     let draw = scenario.add_card_to_library_top(P0, "Original controller draw");
     let foreign_draw = scenario.add_card_to_library_top(P1, "Other controller draw");
     blue_pool(&mut scenario, P0, 3);
+    // CR 106.4: the initial pool empties before the paid combat-step response.
+    let response_land = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
     let mut runner = scenario.build();
     runner.cast(history).resolve();
     settled(&runner);
     runner.advance_to_phase(Phase::BeginCombat);
     assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(!runner.state().objects[&response_land].tapped);
     runner.cast(bounce).target_object(host).commit();
+    assert!(runner.state().objects[&response_land].tapped);
     runner.resolve_top();
     assert_eq!(runner.state().objects[&host].zone, Zone::Hand);
     assert_eq!(runner.state().stack.len(), 1);
@@ -2839,10 +2903,8 @@ fn activation_history_includes_stack_and_countered_cast_then_resets() {
                 .with_mana_cost(ManaCost::generic(0))
                 .id();
             let keep = scenario.add_card_to_hand(P0, "Activation retained card");
-            scenario.with_library_top(
-                P0,
-                &["Activation draw", "Next own draw", "Guard draw", "Reserve"],
-            );
+            scenario.with_library_top(P0, &["Next own draw", "Guard draw", "Reserve"]);
+            let activation_draw = scenario.add_card_to_library_top(P0, "Activation draw");
             scenario.with_library_top(P1, &["Other draw", "Reserve"]);
             for _ in 0..2 {
                 scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
@@ -2880,6 +2942,14 @@ fn activation_history_includes_stack_and_countered_cast_then_resets() {
                 assert_eq!(*player, P0);
                 assert_eq!(*count, 1);
                 assert!(cards.contains(&keep));
+                assert_eq!(cards.len(), 2);
+                assert_eq!(
+                    cards
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [keep, activation_draw].into_iter().collect()
+                );
                 runner
                     .act(GameAction::SelectCards { cards: vec![keep] })
                     .unwrap();
@@ -3387,13 +3457,18 @@ fn queued_combat_trigger_keeps_controller_after_real_flash_creature_theft() {
         let foreign_draw = scenario.add_card_to_library_top(P1, "Unrelated controller draw");
         blue_pool(&mut scenario, P0, 1);
         blue_pool(&mut scenario, P1, 1);
+        // CR 106.4: every theft-loop member funds its response after the phase boundary.
+        let response_land = scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
         let mut runner = scenario.build();
         runner.cast(history).resolve();
         settled(&runner);
         runner.advance_to_phase(Phase::BeginCombat);
         assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+        assert!(!runner.state().objects[&response_land].tapped);
         runner.act(GameAction::PassPriority).unwrap();
         runner.cast(theft).target_object(host).resolve();
+        assert!(runner.state().objects[&response_land].tapped);
         settled(&runner);
         assert_eq!(runner.state().objects[&host].owner, P0);
         assert_eq!(runner.state().objects[&host].controller, P1);

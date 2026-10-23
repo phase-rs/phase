@@ -91,6 +91,356 @@ mod retained_spell_publication {
         }
     }
 
+    // SHAPE: these are hand-authored contracts from the pinned English instructions.
+    // Constructors supply only the type's ordinary empty/default envelope; none
+    // of the expected rules vectors is copied from a parser result or export.
+    fn expected_spell(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    }
+
+    fn expected_effect(value: serde_json::Value) -> Effect {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn expected_move(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
+        expected_effect(serde_json::json!({
+            "type": "ChangeZone", "origin": origin,
+            "destination": destination, "target": target
+        }))
+    }
+
+    fn expected_draw(count: i32) -> AbilityDefinition {
+        expected_spell(Effect::Draw {
+            count: QuantityExpr::Fixed { value: count },
+            target: TargetFilter::Controller,
+        })
+    }
+
+    fn expected_counter(count: i32) -> AbilityDefinition {
+        expected_spell(Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::P1P1,
+            count: QuantityExpr::Fixed { value: count },
+            target: TargetFilter::SelfRef,
+        })
+    }
+
+    fn expected_history_static(
+        filter: TargetFilter,
+        comparator: Comparator,
+        value: i32,
+    ) -> StaticCondition {
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(filter),
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        }
+    }
+
+    fn expected_phase(
+        description: &str,
+        phase: Phase,
+        condition: Option<TriggerCondition>,
+        execute: AbilityDefinition,
+        own_turn: bool,
+    ) -> TriggerDefinition {
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(phase)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(execute)
+            .description(description.into());
+        trigger.condition = condition;
+        if own_turn {
+            trigger.constraint = Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn);
+        }
+        trigger
+    }
+
+    fn expected_cost_static(
+        description: &str,
+        amount: i32,
+        filter: Option<TargetFilter>,
+        affected: TargetFilter,
+    ) -> StaticDefinition {
+        StaticDefinition::new(StaticMode::ModifyCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            amount: crate::types::mana::ManaCost::generic(amount as u32),
+            spell_filter: filter,
+            dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        })
+        .affected(affected)
+        .description(description.into())
+    }
+
+    fn expected_public_vectors(
+        name: &str,
+    ) -> (
+        Vec<AbilityDefinition>,
+        Vec<TriggerDefinition>,
+        Vec<StaticDefinition>,
+        Vec<Keyword>,
+    ) {
+        use crate::types::ability::{AbilityCost, PlayerFilter, SubAbilityLink};
+        use crate::types::mana::{ManaColor, ManaCost};
+        use serde_json::json;
+        let noncreature = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        );
+        let own_spells = TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You));
+        let mut abilities = vec![];
+        let mut triggers = vec![];
+        let mut statics = vec![];
+        let mut keywords = vec![];
+        let phase_condition = || Some(history(TypeFilter::Non(Box::new(TypeFilter::Creature))));
+        let mana_cost = |generic, shards| AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, shards },
+        };
+        let rgba = mana_cost(
+            0,
+            vec![
+                crate::types::mana::ManaCostShard::Red,
+                crate::types::mana::ManaCostShard::Green,
+                crate::types::mana::ManaCostShard::White,
+                crate::types::mana::ManaCostShard::Blue,
+            ],
+        );
+        match name {
+            "Alicia Masters, Skilled Sculptor" => {
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a Treasure token.", Phase::BeginCombat, phase_condition(), expected_spell(expected_token("Treasure",0,0,&["Artifact","Treasure"],&[])), true));
+                let mut restore = expected_spell(Effect::GainControlAll { target: TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned { controller: ControllerRef::ScopedPlayer }])) });
+                restore.player_scope = Some(PlayerFilter::All);
+                triggers.push(expected_phase("At the beginning of your end step, each player gains control of all creatures they own.",Phase::End,None,restore,true));
+            }
+            "Council of Reeds" => {
+                statics.push(StaticDefinition::new(StaticMode::LegendRuleDoesntApply).affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))).description("The \"legend rule\" doesn't apply to creatures you control.".into()));
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a token that's a copy of ~.",Phase::BeginCombat,phase_condition(),expected_spell(Effect::CopyTokenOf { target:TargetFilter::SelfRef,owner:TargetFilter::Controller,source_filter:None,enters_attacking:false,tapped:false,count:QuantityExpr::Fixed { value:1 },extra_keywords:vec![],additional_modifications:vec![] }),true));
+            }
+            "Eshki Dragonclaw" | "Fae Offering" => {
+                let both = Some(TriggerCondition::And { conditions:vec![history(TypeFilter::Creature),history(TypeFilter::Non(Box::new(TypeFilter::Creature)))] });
+                if name == "Eshki Dragonclaw" {
+                    keywords = serde_json::from_value(json!(["Trample","Vigilance",{"Ward":{"type":"Mana","data":{"type":"Cost","generic":1,"shards":[]}}}])).unwrap();
+                    let mut draw = expected_draw(1);
+                    draw.sub_ability = Some(Box::new(expected_counter(2)));
+                    triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast both a creature spell and a noncreature spell this turn, draw a card and put two +1/+1 counters on ~.",Phase::BeginCombat,both,draw,true));
+                } else {
+                    let mut clue = expected_spell(expected_token("Clue",0,0,&["Artifact","Clue"],&[]));
+                    let mut food = expected_spell(expected_token("Food",0,0,&["Artifact","Food"],&[]));
+                    let mut treasure = expected_spell(expected_token("Treasure",0,0,&["Artifact","Treasure"],&[]));
+                    food.description=Some("create a Food token".into());
+                    treasure.description=Some("create a Treasure token".into());
+                    food.sub_ability = Some(Box::new(treasure));
+                    clue.sub_ability = Some(Box::new(food));
+                    triggers.push(expected_phase("At the beginning of each end step, if you've cast both a creature spell and a noncreature spell this turn, create a Clue token, a Food token, and a Treasure token.",Phase::End,both,clue,false));
+                }
+            }
+            "H.E.R.B.I.E., Lovable Robot" => {
+                keywords = vec![Keyword::Flying];
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, surveil 1.",Phase::BeginCombat,phase_condition(),expected_spell(Effect::Surveil { count:QuantityExpr::Fixed {value:1},target:TargetFilter::Controller }),true));
+                for (cost, produced, description) in [
+                    (AbilityCost::Tap,json!({"type":"Colorless","count":{"type":"Fixed","value":1}}),"{T}: Add {C}."),
+                    (AbilityCost::Composite { costs:vec![mana_cost(1,vec![]),AbilityCost::Tap] },json!({"type":"AnyOneColor","count":{"type":"Fixed","value":1},"color_options":["White","Blue","Black","Red","Green"]}),"{1}, {T}: Add one mana of any color."),
+                ] {
+                    let mut ability = AbilityDefinition::new(AbilityKind::Activated,expected_effect(json!({"type":"Mana","produced":produced})));
+                    ability.cost=Some(cost); ability.description=Some(description.into()); abilities.push(ability);
+                }
+            }
+            "Mister Fantastic" => {
+                keywords=vec![Keyword::Reach,Keyword::Vigilance];
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, draw a card.",Phase::BeginCombat,phase_condition(),expected_draw(1),true));
+                let mut copy = AbilityDefinition::new(AbilityKind::Activated,expected_effect(json!({"type":"CopySpell","target":{"type":"StackAbility","controller":"You","kind":"Triggered"},"retarget":{"type":"MayChooseNewTargets"}})));
+                copy.cost=Some(AbilityCost::Composite {costs:vec![rgba,AbilityCost::Tap]});
+                copy.repeat_for=Some(QuantityExpr::Fixed {value:2});
+                copy.description=Some("{R}{G}{W}{U}, {T}: Copy target triggered ability you control twice. You may choose new targets for the copies.".into());
+                abilities.push(copy);
+            }
+            "Franklin Richards, Ascendant" => {
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, discover 6.",Phase::BeginCombat,phase_condition(),expected_spell(Effect::Discover {mana_value_limit:QuantityExpr::Fixed {value:6},player:TargetFilter::Controller}),true));
+            }
+            "Human Torch" | "Invisible Woman" | "The Thing" => {
+                let (description, parent) = match name {
+                    "Human Torch" => {
+                        let mut grant=expected_spell(Effect::GenericEffect { static_abilities:vec![StaticDefinition::continuous().affected(TargetFilter::SelfRef).modifications(vec![ContinuousModification::AddKeyword {keyword:Keyword::Flying},ContinuousModification::AddKeyword {keyword:Keyword::DoubleStrike},ContinuousModification::AddKeyword {keyword:Keyword::Haste}]).description("gain flying, double strike, and haste".into())],duration:Some(Duration::UntilEndOfTurn),target:None,end_cost:None });
+                        grant.duration=Some(Duration::UntilEndOfTurn);
+                        ("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, ~ gains flying, double strike, and haste until end of turn.",grant)
+                    },
+                    "Invisible Woman" => ("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a 0/3 colorless Wall creature token with defender and reach.",expected_spell(expected_token("Wall",0,3,&["Creature","Wall"],&[Keyword::Defender,Keyword::Reach]))),
+                    "The Thing" => { keywords=vec![Keyword::Trample]; ("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on ~.",expected_counter(4)) },
+                    _ => unreachable!(),
+                };
+                triggers.push(expected_phase(description,Phase::BeginCombat,phase_condition(),parent,true));
+                // These are the complete retained phase25 payment/reflexive bodies.
+                // Their existing cost-support/gap classification is preserved;
+                // these shape contracts do not claim their deferred execution.
+                let (mode, description, child) = match name {
+                    "Human Torch" => (TriggerMode::Attacks,"Whenever ~ attacks, you may pay {R}{G}{W}{U}. If you do, until end of turn, whenever he deals combat damage to an opponent, he deals that much damage to each other opponent.",json!({"kind":"Spell","effect":{"type":"CreateDelayedTrigger","condition":{"type":"WheneverEvent","trigger":{"mode":"DamageDone","trigger_zones":["Battlefield"],"damage_kind":"CombatOnly","valid_target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"valid_source":{"type":"SelfRef"}}},"effect":{"kind":"Spell","effect":{"type":"DamageEachPlayer","amount":{"type":"Ref","qty":{"type":"EventContextAmount"}},"player_filter":{"type":"OpponentOtherThanTriggering"}}},"uses_tracked_set":false},"duration":"UntilEndOfTurn","condition":{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},"sub_link":"SequentialSibling"})),
+                    "Invisible Woman" => (TriggerMode::YouAttack,"Whenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.",json!({"kind":"Spell","effect":{"type":"Pump","power":{"type":"Quantity","value":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":["Creature"],"controller":"You","properties":[]}}}},"toughness":{"type":"Fixed","value":0},"target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]}},"duration":"UntilEndOfTurn","condition":{"type":"WhenYouDo"},"sub_link":"SequentialSibling","sub_ability":{"kind":"Spell","effect":{"type":"GenericEffect","static_abilities":[{"mode":"CantBeBlocked","modifications":[{"type":"AddStaticMode","mode":"CantBeBlocked"}]}],"duration":"UntilEndOfTurn"}}})),
+                    "The Thing" => (TriggerMode::Attacks,"Whenever ~ attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",json!({"kind":"Spell","effect":{"type":"Double","target_kind":{"type":"Counters","data":{"counter_type":null}},"target":{"type":"Typed","type_filters":["Permanent"],"controller":"You","properties":[]}},"condition":{"type":"WhenYouDo"},"multi_target":{"min":0,"max":null},"sub_link":"SequentialSibling"})),
+                    _ => unreachable!(),
+                };
+                let mut pay=expected_spell(Effect::PayCost {cost:rgba,scale:None,payer:TargetFilter::Controller});
+                pay.optional=true; pay.sub_ability=Some(Box::new(serde_json::from_value(child).unwrap()));
+                let mut attack=TriggerDefinition::new(mode).trigger_zones(vec![Zone::Battlefield]).execute(pay).description(description.into()).optional();
+                if name != "Invisible Woman" {attack.valid_card=Some(TargetFilter::SelfRef);}
+                triggers.push(attack);
+            }
+            "Lockjaw, Slobbering Teleporter" => {
+                keywords=vec![Keyword::Vigilance];
+                let mut parent=expected_counter(1);
+                let mut child=expected_spell(expected_effect(json!({"type":"GenericEffect","static_abilities":[{"mode":"CantBeBlocked","affected":{"type":"SelfRef"},"modifications":[{"type":"AddStaticMode","mode":"CantBeBlocked"}],"description":"can't be blocked"}],"duration":"UntilEndOfTurn"})));
+                child.duration=Some(Duration::UntilEndOfTurn);
+                let mut other=expected_spell(expected_effect(json!({"type":"GenericEffect","static_abilities":[{"mode":"CantBeBlocked","affected":{"type":"ParentTarget"},"modifications":[{"type":"AddStaticMode","mode":"CantBeBlocked"}],"description":"can't be blocked"}],"duration":"UntilEndOfTurn","target":{"type":"Typed","type_filters":["Creature"],"controller":"You","properties":[{"type":"Another"}]}})));
+                other.duration=Some(Duration::UntilEndOfTurn);
+                other.multi_target=Some(crate::types::ability::MultiTargetSpec::fixed(0,1));
+                child.sub_ability=Some(Box::new(other));
+                child.condition=Some(crate::types::ability::AbilityCondition::WhenYouDo);
+                child.sub_link=SubAbilityLink::SequentialSibling;
+                parent.sub_ability=Some(Box::new(child));
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, put a +1/+1 counter on ~. When you do, ~ and up to one other target creature you control can't be blocked this turn.",Phase::BeginCombat,phase_condition(),parent,true));
+            }
+            "Seeker of Insight" | "Tapestry of the Ages" => {
+                let mut draw=expected_draw(1); draw.kind=AbilityKind::Activated;
+                let (cost, description)=if name=="Seeker of Insight" {
+                    let discard=expected_spell(expected_effect(json!({"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}})));
+                    draw.sub_ability=Some(Box::new(discard));
+                    (AbilityCost::Tap,"{T}: Draw a card, then discard a card. Activate only if you've cast a noncreature spell this turn.")
+                } else {(AbilityCost::Composite {costs:vec![mana_cost(2,vec![]),AbilityCost::Tap]},"{2}, {T}: Draw a card. Activate only if you've cast a noncreature spell this turn.")};
+                draw.cost=Some(cost); draw.description=Some(description.into());
+                draw.activation_restrictions=serde_json::from_value(json!([{"type":"RequiresCondition","data":{"condition":{"type":"QuantityComparison","lhs":{"type":"Ref","qty":{"type":"SpellsCastThisTurn","scope":"Controller","filter":noncreature}},"comparator":"GE","rhs":{"type":"Fixed","value":1}}}}])).unwrap();
+                abilities.push(draw);
+            }
+            "Traxos, Academy Guardian" => {
+                keywords=vec![Keyword::Flying,Keyword::Prowess,Keyword::Vigilance];
+                let mut reducer=expected_cost_static("This spell costs {2} less to cast if you've cast a noncreature spell this turn.",2,None,TargetFilter::SelfRef);
+                reducer.condition=Some(expected_history_static(noncreature,Comparator::GE,1));
+                reducer.active_zones=vec![Zone::Hand,Zone::Stack,Zone::Command,Zone::Graveyard,Zone::Exile,Zone::Library];
+                statics.push(reducer);
+            }
+            "Lyse Hext" => {
+                keywords=vec![Keyword::Prowess];
+                statics.push(expected_cost_static("Noncreature spells you cast cost {1} less to cast.",1,Some(noncreature.clone()),own_spells));
+                statics.push(StaticDefinition::continuous().affected(TargetFilter::SelfRef).modifications(vec![ContinuousModification::AddKeyword {keyword:Keyword::DoubleStrike}]).condition(expected_history_static(noncreature,Comparator::GE,2)).description("As long as you've cast two or more noncreature spells this turn, ~ has double strike.".into()));
+            }
+            "Silburlind Snapper" | "Sword Coast Serpent" | "Relic Runner" => {
+                let (mode,description,condition)=match name {
+                    "Silburlind Snapper"=>(StaticMode::CantAttack,"~ can't attack unless you've cast a noncreature spell this turn.",StaticCondition::Not {condition:Box::new(expected_history_static(noncreature,Comparator::GE,1))}),
+                    "Sword Coast Serpent"=>(StaticMode::CantBeBlocked,"~ can't be blocked as long as you've cast a noncreature spell this turn.",expected_history_static(noncreature,Comparator::GE,1)),
+                    "Relic Runner"=>(StaticMode::CantBeBlocked,"~ can't be blocked if you've cast a historic spell this turn.",expected_history_static(TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),Comparator::GE,1)),
+                    _=>unreachable!(),
+                };
+                statics.push(StaticDefinition::new(mode).affected(TargetFilter::SelfRef).condition(condition).description(description.into()));
+            }
+            "Capsizing Wave" => {
+                let mut bounce=expected_spell(expected_move(None,Zone::Hand,TargetFilter::Typed(TypedFilter::creature())));
+                bounce.description=Some("Return target creature to its owner's hand.".into()); abilities.push(bounce);
+            }
+            "Gaddock Teeg" => {
+                for (description,property) in [("Noncreature spells with mana value 4 or greater can't be cast.",FilterProp::Cmc {comparator:Comparator::GE,value:QuantityExpr::Fixed {value:4}}),("Noncreature spells with {X} in their mana costs can't be cast.",FilterProp::HasXInManaCost)] {
+                    statics.push(StaticDefinition::new(StaticMode::CantBeCast {who:crate::types::statics::ProhibitionScope::AllPlayers}).affected(TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))).properties(vec![property]))).description(description.into()));
+                }
+            }
+            "Ethersworn Canonist" => statics.push(StaticDefinition::new(StaticMode::PerTurnCastLimit {who:crate::types::statics::ProhibitionScope::AllPlayers,max:1,spell_filter:Some(TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))))}).description("Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.".into())),
+            "Heartwood Storyteller Avatar" => {
+                for (index,description) in ["The first creature spell you cast each turn costs {1} less to cast.","The first noncreature spell each opponent casts each turn costs {1} more to cast."].into_iter().enumerate() {
+                    let filter=if index==0 {TargetFilter::Typed(TypedFilter::creature())} else {noncreature.clone()};
+                    let mut definition=expected_cost_static(description,1,Some(filter.clone()),TargetFilter::Typed(TypedFilter::card().controller(if index==0 {ControllerRef::You}else{ControllerRef::Opponent})));
+                    if index==1 {if let StaticMode::ModifyCost {mode,..}=&mut definition.mode {*mode=crate::types::statics::CostModifyMode::Raise;}}
+                    definition.condition=Some(expected_history_static(filter,Comparator::EQ,0)); statics.push(definition);
+                }
+            }
+            "Nightscape Familiar" | "Jhoira's Familiar" => {
+                let (filter,description)=if name=="Nightscape Familiar" {
+                    let mut regenerate=AbilityDefinition::new(AbilityKind::Activated,Effect::Regenerate {target:TargetFilter::SelfRef});
+                    regenerate.cost=Some(mana_cost(1,vec![crate::types::mana::ManaCostShard::Black])); regenerate.description=Some("{1}{B}: Regenerate ~.".into()); abilities.push(regenerate);
+                    (TargetFilter::Or {filters:[ManaColor::Blue,ManaColor::Red].into_iter().map(|color|TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {color}]))).collect()},"Blue spells and red spells you cast cost {1} less to cast.")
+                } else {keywords=vec![Keyword::Flying]; (TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),"Historic spells you cast cost {1} less to cast.")};
+                statics.push(expected_cost_static(description,1,Some(filter),own_spells));
+            }
+            "Calamity's Wake" | "Permission Denied" | "Ranger-Captain of Eos" => {
+                let mut ban=expected_spell(expected_effect(json!({"type":"AddRestriction","restriction":{"type":"ProhibitActivity","source":0,"affected_players":{"type":if name=="Calamity's Wake" {"AllPlayers"}else{"OpponentsOfSourceController"}},"expiry":{"type":"EndOfTurn"},"activity":{"type":"CastSpells","spell_filter":noncreature}}})));
+                ban.duration=Some(Duration::UntilEndOfTurn);
+                if name=="Calamity's Wake" {
+                    let mut exile_self=expected_spell(expected_move(None,Zone::Exile,TargetFilter::SelfRef));
+                    exile_self.sub_link=SubAbilityLink::SequentialSibling;
+                    ban.sub_ability=Some(Box::new(exile_self)); ban.sub_link=SubAbilityLink::SequentialSibling;
+                    let mut exile=expected_spell(expected_effect(json!({"type":"ChangeZoneAll","origin":"Graveyard","destination":"Exile","target":{"type":"Typed","type_filters":["Card"],"properties":[{"type":"InZone","zone":"Graveyard"}]}})));
+                    exile.sub_ability=Some(Box::new(ban)); exile.description=Some("Exile all graveyards. Players can't cast noncreature spells this turn. Exile ~.".into()); abilities.push(exile);
+                } else if name=="Permission Denied" {
+                    let mut counter=expected_spell(expected_effect(json!({"type":"Counter","target":{"type":"And","filters":[{"type":"StackSpell"},{"type":"Typed","type_filters":[{"Non":"Creature"}],"properties":[]}]}})));
+                    ban.sub_link=SubAbilityLink::SequentialSibling;
+                    counter.sub_ability=Some(Box::new(ban)); counter.description=Some("Counter target noncreature spell. Your opponents can't cast noncreature spells this turn.".into()); abilities.push(counter);
+                } else {
+                    ban.kind=AbilityKind::Activated;
+                    ban.cost=Some(serde_json::from_value(json!({"type":"Sacrifice","target":{"type":"SelfRef"},"count":1})).unwrap());
+                    ban.description=Some("Sacrifice ~: Your opponents can't cast noncreature spells this turn.".into()); abilities.push(ban);
+                    let mut search=expected_spell(expected_effect(json!({"type":"SearchLibrary","filter":{"type":"Typed","type_filters":["Creature"],"properties":[{"type":"Cmc","comparator":"LE","value":{"type":"Fixed","value":1}}]},"count":{"type":"Fixed","value":1},"reveal":true})));
+                    let mut move_card=expected_spell(expected_move(Some(Zone::Library),Zone::Hand,TargetFilter::Any));
+                    move_card.sub_ability=Some(Box::new(expected_spell(Effect::Shuffle {target:TargetFilter::Controller})));
+                    search.sub_ability=Some(Box::new(move_card)); search.optional=true;
+                    let mut etb=TriggerDefinition::new(TriggerMode::ChangesZone).valid_card(TargetFilter::SelfRef).destination(Zone::Battlefield).trigger_zones(vec![Zone::Battlefield]).execute(search).optional().description("When ~ enters, you may search your library for a creature card with mana value 1 or less, reveal it, put it into your hand, then shuffle.".into());
+                    etb.origin=None; triggers.push(etb);
+                }
+            }
+            "Sift Through Sands" => {
+                let named_history=|name:&str|json!({"type":"QuantityCheck","lhs":{"type":"Ref","qty":{"type":"SpellsCastThisTurn","scope":"Controller","filter":{"type":"Typed","type_filters":["Card"],"properties":[{"type":"Named","name":name}]}}},"comparator":"GE","rhs":{"type":"Fixed","value":1}});
+                let gate=json!({"type":"And","conditions":[named_history("peer through depths"),named_history("reach through mists")]});
+                let mut shuffle=expected_spell(Effect::Shuffle {target:TargetFilter::Controller});
+                shuffle.condition=Some(serde_json::from_value(gate.clone()).unwrap());
+                let mut move_card=expected_spell(expected_move(Some(Zone::Library),Zone::Battlefield,TargetFilter::Any));
+                move_card.sub_ability=Some(Box::new(shuffle));
+                let mut search=expected_spell(expected_effect(json!({"type":"SearchLibrary","filter":{"type":"Typed","type_filters":[],"properties":[{"type":"Named","name":"the unspeakable"}]},"count":{"type":"Fixed","value":1},"reveal":false})));
+                search.sub_ability=Some(Box::new(move_card)); search.optional=true;
+                search.condition=Some(serde_json::from_value(gate).unwrap()); search.sub_link=SubAbilityLink::SequentialSibling;
+                let mut discard=expected_spell(expected_effect(json!({"type":"Discard","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}})));
+                discard.sub_ability=Some(Box::new(search));
+                let mut draw=expected_draw(2); draw.sub_ability=Some(Box::new(discard));
+                draw.description=Some("Draw two cards, then discard a card.\nIf you've cast a spell named Peer Through Depths and a spell named Reach Through Mists this turn, you may search your library for a card named The Unspeakable, put it onto the battlefield, then shuffle.".into()); abilities.push(draw);
+            }
+            "Impending Flux" => {
+                keywords=serde_json::from_value(json!([{"Foretell":{"type":"Cost","generic":1,"shards":["Red","Red"]}}])).unwrap();
+                let mut damage=expected_spell(expected_effect(json!({"type":"DamageAll","amount":{"type":"Offset","inner":{"type":"Ref","qty":{"type":"SpellsCastThisTurn","scope":"Controller","filter":{"type":"Typed","type_filters":["Card"],"properties":[{"type":"InAnyZone","zones":["Graveyard","Library","Exile","Command"]}]}}},"offset":1},"target":{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]},"player_filter":{"type":"Opponent"}})));
+                damage.description=Some("Paradox — ~ deals X damage to each opponent and each creature they control, where X is 1 plus the number of spells you've cast from anywhere other than your hand this turn.".into()); abilities.push(damage);
+            }
+            "Demon of Fate's Design" => {
+                keywords=vec![Keyword::Flying,Keyword::Trample];
+                let mut alt=StaticDefinition::new(StaticMode::CastWithAlternativeCost {cost:AbilityCost::PayLife {amount:QuantityExpr::Ref {qty:QuantityRef::SelfManaValue}},timing_permission:None,frequency:crate::types::statics::CastFrequency::OncePerTurn}).affected(TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Enchantment).controller(ControllerRef::You))).condition(StaticCondition::DuringYourTurn).description("Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.".into());
+                alt.active_zones=vec![Zone::Battlefield]; statics.push(alt);
+                let mut pump=AbilityDefinition::new(AbilityKind::Activated,expected_effect(json!({"type":"Pump","power":{"type":"Quantity","value":{"type":"Ref","qty":{"type":"ObjectManaValue","scope":{"type":"CostPaidObject"}}}},"toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}})));
+                pump.cost=Some(serde_json::from_value(json!({"type":"Composite","costs":[{"type":"Mana","cost":{"type":"Cost","generic":2,"shards":["Black"]}},{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Enchantment"],"properties":[{"type":"Another"}]},"count":1}]})).unwrap());
+                pump.duration=Some(Duration::UntilEndOfTurn);
+                pump.description=Some("{2}{B}, Sacrifice another enchantment: ~ gets +X/+0 until end of turn, where X is the sacrificed enchantment's mana value.".into()); abilities.push(pump);
+            }
+            "Conspiracy Unraveler" => {
+                keywords=vec![Keyword::Flying];
+                let mut alt=StaticDefinition::new(StaticMode::CastWithAlternativeCost {cost:AbilityCost::CollectEvidence {amount:10},timing_permission:None,frequency:crate::types::statics::CastFrequency::Unlimited}).affected(own_spells).description("You may collect evidence 10 rather than pay the mana cost for spells you cast.".into());
+                alt.active_zones=vec![Zone::Battlefield]; statics.push(alt);
+            }
+            "Ichneumon Druid" => {
+                let instant=TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Instant));
+                let mut trigger=TriggerDefinition::new(TriggerMode::SpellCast).valid_card(instant.clone()).valid_target(TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))).trigger_zones(vec![Zone::Battlefield]).execute(expected_spell(Effect::DealDamage {amount:QuantityExpr::Fixed {value:4},target:TargetFilter::TriggeringPlayer,damage_source:None,excess:None})).description("Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, ~ deals 4 damage to that player.".into());
+                trigger.constraint=Some(crate::types::ability::TriggerConstraint::NthSpellThisTurn {n:1,comparator:Comparator::GT,filter:Some(instant)}); triggers.push(trigger);
+            }
+            "Peer Through Depths" => {
+                let mut dig=expected_spell(expected_effect(json!({"type":"Dig","player":{"type":"Controller"},"count":{"type":"Fixed","value":5},"destination":"Hand","keep_count":1,"up_to":true,"filter":{"type":"Or","filters":[{"type":"Typed","type_filters":["Instant"],"properties":[]},{"type":"Typed","type_filters":["Sorcery"],"properties":[]}]},"rest_destination":"Library","rest_order":"player_choice","reveal":true})));
+                dig.description=Some("Look at the top five cards of your library. You may reveal an instant or sorcery card from among them and put it into your hand. Put the rest on the bottom of your library in any order.".into()); abilities.push(dig);
+            }
+            "Reach Through Mists" => {let mut draw=expected_draw(1); draw.description=Some("Draw a card.".into()); abilities.push(draw);}
+            "The Unspeakable" => {
+                keywords=vec![Keyword::Flying,Keyword::Trample];
+                let mut retrieve=expected_spell(expected_move(Some(Zone::Graveyard),Zone::Hand,TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Subtype("Arcane".into())).controller(ControllerRef::You).properties(vec![FilterProp::InZone {zone:Zone::Graveyard}]))));
+                retrieve.optional=true;
+                let mut trigger=TriggerDefinition::new(TriggerMode::DamageDone).trigger_zones(vec![Zone::Battlefield]).valid_source(TargetFilter::SelfRef).valid_target(TargetFilter::Player).execute(retrieve).optional().description("Whenever ~ deals combat damage to a player, you may return target Arcane card from your graveyard to your hand.".into());
+                trigger.damage_kind=crate::types::ability::DamageKindFilter::CombatOnly; triggers.push(trigger);
+            }
+            _ => panic!("missing independently derived complete vector contract: {name}"),
+        }
+        (abilities, triggers, statics, keywords)
+    }
+
     #[test]
     fn complete_spell_context_cohort_retains_ir_filters_metadata_and_both_loaders() {
         let mut exports = serde_json::Map::new();
@@ -137,6 +487,25 @@ mod retained_spell_publication {
                 previous = (span.start_byte, span.ordinal_within_span);
             }
             let parsed = lower_oracle_ir(&mut doc);
+            let (expected_abilities, expected_triggers, expected_statics, expected_keywords) =
+                expected_public_vectors(name);
+            assert_eq!(
+                parsed.abilities, expected_abilities,
+                "complete lowered abilities: {name}"
+            );
+            assert_eq!(
+                parsed.triggers, expected_triggers,
+                "complete lowered triggers: {name}"
+            );
+            assert_eq!(
+                parsed.statics, expected_statics,
+                "complete lowered statics: {name}"
+            );
+            assert_eq!(
+                parsed.replacements,
+                vec![],
+                "complete lowered replacements: {name}"
+            );
             let face = if multi {
                 crate::database::synthesis::build_oracle_face_multi(
                     &atomic,
@@ -212,6 +581,10 @@ mod retained_spell_publication {
             assert_eq!(face.triggers, parsed.triggers);
             assert_eq!(face.static_abilities, parsed.statics);
             assert_eq!(face.replacements, parsed.replacements);
+            assert_eq!(
+                face.keywords, expected_keywords,
+                "complete printed keyword vector: {name}"
+            );
             let expected_counts = match name {
                 "Alicia Masters, Skilled Sculptor" => (0, 2, 0, 0),
                 "Council of Reeds" => (0, 1, 1, 0),
@@ -587,6 +960,34 @@ mod retained_spell_publication {
         ] {
             for face in &faces {
                 assert_eq!(database.get_face_by_name(&face.name), Some(face));
+                let loaded = database.get_face_by_name(&face.name).unwrap();
+                let (abilities, triggers, statics, keywords) = expected_public_vectors(&face.name);
+                assert_eq!(
+                    loaded.abilities, abilities,
+                    "loaded complete abilities: {}",
+                    face.name
+                );
+                assert_eq!(
+                    loaded.triggers, triggers,
+                    "loaded complete triggers: {}",
+                    face.name
+                );
+                assert_eq!(
+                    loaded.static_abilities, statics,
+                    "loaded complete statics: {}",
+                    face.name
+                );
+                assert_eq!(
+                    loaded.replacements,
+                    vec![],
+                    "loaded complete replacements: {}",
+                    face.name
+                );
+                assert_eq!(
+                    loaded.keywords, keywords,
+                    "loaded complete keywords: {}",
+                    face.name
+                );
             }
             let serpent = database.get_face_by_name("Sword Coast Serpent").unwrap();
             let wave = database.get_face_by_name("Capsizing Wave").unwrap();
