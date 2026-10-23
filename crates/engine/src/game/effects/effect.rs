@@ -601,7 +601,9 @@ fn register_transient_effect(
     // local target list, whichever other targets were carried.
     let declared_player_binding =
         application_filter.is_some_and(|f| matches!(f, TargetFilter::DeclaredPlayer { .. }));
-    let direct_binding_uses_targets = target_filter.is_some()
+    // CR 109.5: "you" names the controller, never a target, so an inherited parent target must not rebind it.
+    let direct_binding_uses_targets = target_filter
+        .is_some_and(|f| !matches!(f, TargetFilter::Controller))
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target
         || declared_player_binding;

@@ -2359,6 +2359,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
+        // CR 608.2c: ", and <permanents> you control gain …" after a complete clause is a new
+        // instruction; a comma inside the head means a serial subject list ("Auras, Equipment,
+        // and … you control"). A mana-spent-gated head is owned by `starts_mana_spent_conjunct`.
+        if starts_you_control_subject_predicate(after_and)
+            && super::subject_has_no_clause_boundary(&current_lower)
+            && !nom_primitives::scan_contains(&current_lower, MANA_SPENT_TO_CAST)
+        {
+            return Some((ClauseBoundary::Comma, whitespace_len));
+        }
     }
 
     None

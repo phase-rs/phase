@@ -1329,6 +1329,7 @@ mod pitfall_trap_attacking_count_alt_cost;
 mod plaguecrafter_etb_class;
 mod play_trace;
 mod player_action_recording_after_choice;
+mod player_hexproof_shroud_grants;
 mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
 mod ponder_decline_shuffle_regression;
