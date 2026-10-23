@@ -5,8 +5,8 @@
 //! "At the beginning of combat on your turn, flip a coin until you lose a flip." with no
 //! reward clause. At the base commit the parser lowered every until-loss run with an
 //! `Effect::unimplemented("flip_coin_until_lose_stub", ..)` as its `win_effect`, which only
-//! a following "for each flip you won" sentence could replace, so all three cards were
-//! marked unsupported.
+//! a following clause, absorbed by `consolidate_die_and_coin_defs`, could replace, so all
+//! three cards were marked unsupported.
 //!
 //! What this file proves, and what it does not:
 //!
@@ -398,7 +398,7 @@ fn combat_trigger_on_the_stack_is_a_complete_until_loss_run() {
 // --- PRESERVATION PINS (pass at BASE; derived from Oracle text + CR) ---------------------------
 
 /// Z1. Derived: the controller flips until the first loss, so W,W,L is three `CoinFlipped`
-/// events for P0 (CR 705.1, 705.2). "Whenever a player wins a coin flip" triggers once per
+/// events for P0 (CR 705.1 + CR 705.2). "Whenever a player wins a coin flip" triggers once per
 /// won flip (CR 603.2c), so P0 draws 2. PRESERVATION PIN, passes at BASE.
 #[test]
 fn zndrsplt_draws_once_per_won_flip_until_the_loss() {
@@ -436,7 +436,7 @@ fn zndrsplt_immediate_loss_draws_nothing() {
 }
 
 /// O1. Derived: Okaun's printed 3/3 doubles once per won flip: two wins give 6/6 then
-/// 12/12 (2018-07-13 doubling ruling; CR 603.2c one trigger per win). PRESERVATION PIN.
+/// 12/12 (CR 701.10b + 2018-06-08 doubling ruling; CR 603.2c one trigger per win). PRESERVATION PIN.
 #[test]
 fn okaun_doubles_once_per_won_flip() {
     let mut scenario = two_player_table();

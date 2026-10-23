@@ -627,7 +627,7 @@ fn flip_a_coin_still_parses_to_flip_coin() {
     } = &*until_lose.effect
     else {
         panic!(
-            "CR 705.1: the Krark-style repeat coin flip is a complete instruction, got {:?}",
+            "CR 705.1: the until-loss coin-flip run is a complete instruction, got {:?}",
             until_lose.effect
         );
     };
