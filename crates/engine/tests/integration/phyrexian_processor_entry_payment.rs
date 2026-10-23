@@ -11,7 +11,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{PayableResource, PendingReplacement, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayableResource, PendingReplacement, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -42,6 +42,8 @@ const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 l
 const RITE_ORACLE: &str = "Kicker {5} (You may pay an additional {5} as you cast this spell.)\nCreate a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.";
 const ANOINTED_PROCESSION_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 const SAW_ORACLE: &str = "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.";
+const HUMILITY_ORACLE: &str =
+    "All creatures lose all abilities and have base power and toughness 1/1.";
 
 fn add_mana_for(runner: &mut GameRunner, player: PlayerId, ty: ManaType, count: usize) {
     let idx = runner
@@ -497,6 +499,7 @@ fn embalm_token_copying_minion_completes_exactly_once() {
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -1687,6 +1690,7 @@ fn procession_doubled_embalm_tokens_each_pay_for_minion() {
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -2978,6 +2982,117 @@ fn saw_in_half_nameless_cap_zero_auto_commits() {
             birth.entry_choices,
             vec![ChosenAttribute::Number(0)],
             "token {id:?} journals its determined-0 answer"
+        );
+    }
+}
+
+/// Round-4 review discriminator: Humility removes the copied payment ability
+/// (CR 613.1f ability-removing + CR 614.12 continuous effects applying to the
+/// entrant), so Saw copies of a Humiliated Minion issue NO payment prompt.
+/// Cast Minion (pay 5 → 5/5), resolve Humility (Minion now 1/1), Saw it:
+/// two completed 1/1 tokens, life unchanged across Saw, no prompt, no parked
+/// continuation/replacement.
+#[test]
+fn saw_in_half_humiliated_minion_copies_pay_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let minion = scenario
+        .add_creature_to_hand_from_oracle(P0, "Minion of the Wastes", 0, 0, MINION_ORACLE)
+        .with_mana_cost(cost_with_shards(
+            vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            3,
+        ))
+        .id();
+    let humility = scenario
+        .add_spell_to_hand(P0, "Humility", false)
+        .as_enchantment()
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::White], 1))
+        .from_oracle_text(HUMILITY_ORACLE)
+        .id();
+    let saw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_ORACLE)
+        .with_mana_cost(cost_with_shards(vec![ManaCostShard::Black], 2))
+        .id();
+    let mut runner = scenario.build();
+    // Minion {3}{B}{B}{B} + Humility {1}{W} + Saw {2}{B}.
+    add_mana_for(&mut runner, P0, ManaType::Colorless, 6);
+    add_mana_for(&mut runner, P0, ManaType::Black, 4);
+    add_mana_for(&mut runner, P0, ManaType::White, 1);
+
+    // Original Minion enters first and latches 5 → 5/5: payment works
+    // pre-Humility (positive control — the suppression below is Humility's).
+    let outcome = runner.cast(minion).resolve();
+    assert_pay_prompt(outcome.final_waiting_for(), P0, 0, 20, minion);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 5 })
+        .expect("Minion answers");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 15);
+
+    // Humility resolves: the original is now a 1/1 with no abilities.
+    runner.cast(humility).resolve();
+    runner.advance_until_stack_empty();
+    let orig = runner.state().objects.get(&minion).unwrap();
+    assert_eq!(
+        (orig.power, orig.toughness),
+        (Some(1), Some(1)),
+        "Humility makes the original a 1/1"
+    );
+
+    // Saw destroys it: NO payment prompt — Humility removed the copied ability
+    // (CR 614.12: existing continuous effects apply to the entrant).
+    let life_before_saw = runner.life(P0);
+    runner.cast(saw).target_object(minion).resolve();
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ),
+        "no copy payment under Humility, got {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+
+    // Completion boundary: Priority, empty stack, no stranded pause.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completed to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "no parked entry payment remains"
+    );
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "no stranded continuation"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before_saw,
+        "life unchanged across Saw"
+    );
+
+    // Two completed 1/1 tokens (halved 1/1 LKI, Humility-kept), latch-free.
+    let tokens = battlefield_tokens(&runner);
+    assert_eq!(tokens.len(), 2, "Saw mints two copy tokens");
+    for id in &tokens {
+        let token = runner.state().objects.get(id).unwrap();
+        assert_eq!(token.name, "Minion of the Wastes");
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(1), Some(1)),
+            "token {id:?} is 1/1 under Humility"
+        );
+        assert_eq!(
+            chosen_number_of(&runner, *id),
+            None,
+            "no payment latch without the ability"
         );
     }
 }

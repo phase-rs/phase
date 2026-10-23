@@ -35430,6 +35430,8 @@ mod tests {
                         sacrifice_at: None,
                         source_id: ObjectId(42),
                         controller: PlayerId(0),
+                        // Test batch: no donor in scope (no dynamic P/T mods).
+                        donor: None,
                     }),
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,

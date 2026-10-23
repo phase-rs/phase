@@ -941,6 +941,12 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // and the rest of the batch — behind the player's answer. The prompt
         // is the funnel's own (`PayAmountChoice` raised by the surface call);
         // nothing here hand-raises a second one.
+        // CR 614.12 + CR 613.1f: realize continuous effects for this entrant
+        // BEFORE discovering its copied payment — an ability-removing effect
+        // (Humility) must suppress a payment the entrant must not have.
+        // Mirrors `finish_copy_target_choice_entry` (`engine_replacement.rs:2927`).
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
         if crate::game::replacement::surface_copied_entry_payment(state, token_id, events).is_some()
         {
             state.last_created_token_ids = created_ids.clone();
