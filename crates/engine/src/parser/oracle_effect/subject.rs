@@ -257,6 +257,38 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
+    // Complete restrictions own their interior timing phrase (for example,
+    // "this turn except by ...") before generic modification publication.
+    // Only the first predicate can select this owner: a restriction inside a
+    // quoted grant or a later companion cannot claim the whole instruction.
+    if let Some(ast) = try_parse_source_and_other_restriction_clause(text, ctx) {
+        return Some(ast);
+    }
+    let restriction_head = find_predicate_start(text).is_some_and(|start| {
+        alt((
+            tag::<_, _, OracleError<'_>>("can't "),
+            tag("cannot "),
+            tag("doesn't untap"),
+            tag("don't untap"),
+        ))
+        .parse(text[start..].to_lowercase().as_str())
+        .is_ok()
+    });
+    if restriction_head {
+        if let Some(clause) = try_parse_subject_restriction_clause(text, ctx) {
+            return Some(subject_predicate_ast_from_clause(
+                text,
+                clause,
+                |effect, duration, sub_ability| PredicateAst::Restriction {
+                    effect,
+                    duration,
+                    sub_ability,
+                },
+                ctx,
+            ));
+        }
+    }
+
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -319,16 +351,6 @@ pub(super) fn try_parse_subject_predicate_ast(
     // Thermal Flux). Runs after the become arm because its subject is always
     // targeted, never a carried-over conjunct.
     if let Some(ast) = try_parse_subject_supertype_removal_clause(text, ctx) {
-        return Some(ast);
-    }
-
-    // CR 509.1b + CR 611.2c: "<source> and up to N other target creature(s) can't
-    // be blocked this turn" (Martha Jones) — conjoined-subject evasion grant.
-    // Builds its own ClauseAst (with the source as the primary subject and the
-    // targeted creature as a sub_ability) so the secondary target/multi_target
-    // does not leak onto the source grant. Must run before the generic
-    // restriction split, which can't resolve the compound subject.
-    if let Some(ast) = try_parse_source_and_other_restriction_clause(text, ctx) {
         return Some(ast);
     }
 
@@ -4801,7 +4823,7 @@ fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> Ta
 /// `AttachedTo`, `ParentTarget`) identify one specific permanent and must
 /// lower to `Effect::Pump`. Only class filters (e.g., `Typed { Creature, You }`)
 /// that match multiple permanents lower to `Effect::PumpAll`.
-fn build_pump_effect(
+pub(super) fn build_pump_effect(
     application: &SubjectApplication,
     power: PtValue,
     toughness: PtValue,
@@ -5325,9 +5347,81 @@ fn build_pt_choice_clause(
     })
 }
 
-/// Continuous-clause builder. Unstated durations default to Permanent at four
-/// keyword-driven arms: Suspend, in-addition-to-types, Licid attachable
-/// subtypes, and pure `GrantTrigger` grants (CR 611.2a).
+/// CR 611.2a: stated local/outer windows win over typed unbounded defaults.
+/// This decision owns only this grant, never the contents of a quoted ability.
+fn continuous_grant_duration(
+    affected: &TargetFilter,
+    predicate: &str,
+    modifications: &[ContinuousModification],
+    local: Option<Duration>,
+    outer: Option<Duration>,
+    names_deferred: bool,
+) -> Option<Duration> {
+    if let Some(duration) = local.or(outer) {
+        return Some(duration);
+    }
+    let suspend = matches!(
+        modifications,
+        [ContinuousModification::AddKeyword {
+            keyword: Keyword::Suspend { .. }
+        }]
+    );
+    let additive = has_in_addition_to_other_types(predicate)
+        && modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddType { .. } | ContinuousModification::AddSubtype { .. }
+            )
+        });
+    // CR 303.4: source-self transformations can remain attached until ended;
+    // granting an attachable subtype to another recipient is a different case.
+    let attachable = matches!(affected, TargetFilter::SelfRef)
+        && super::modifications_grant_attachable_subtype(modifications);
+    let pure_trigger = !names_deferred
+        && !modifications.is_empty()
+        && modifications
+            .iter()
+            .all(|m| matches!(m, ContinuousModification::GrantTrigger { .. }));
+    let pure_activation = !names_deferred && !modifications.is_empty()
+        && modifications.iter().all(|m| matches!(m, ContinuousModification::GrantAbility { definition } if definition.kind == AbilityKind::Activated));
+    (suspend || additive || attachable || pure_trigger || pure_activation)
+        .then_some(Duration::Permanent)
+}
+
+/// Recover the source-aware default at the direct fallback constructor. Its
+/// embedded EOT is an imperative-parser placeholder, not a stated Oracle window.
+pub(super) fn retain_fallback_grant_duration(
+    clause: &mut ParsedEffectClause,
+    original: &str,
+    affected: Option<&TargetFilter>,
+    ctx: &ParseContext,
+) {
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &mut clause.effect
+    else {
+        return;
+    };
+    let [definition] = static_abilities.as_slice() else {
+        return;
+    };
+    let local = super::strip_trailing_duration(original).1;
+    let window = continuous_grant_duration(
+        affected.unwrap_or(&TargetFilter::None),
+        original,
+        &definition.modifications,
+        local,
+        ctx.stated_clause_duration.clone(),
+        clause_names_deferred_parser(original),
+    );
+    if let Some(window) = window {
+        *duration = Some(window.clone());
+        clause.duration = Some(window);
+    }
+}
+
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -5404,8 +5498,7 @@ fn build_continuous_clause(
     let norm_lower = normalized.to_lowercase();
     let norm_tp = TextPair::new(&normalized, &norm_lower);
     let (without_where, _) = super::strip_trailing_where_x(norm_tp);
-    let duration_source = strip_for_each_for_duration(without_where.original);
-    let (_, duration) = super::strip_trailing_duration(duration_source);
+    let duration = super::lower::duration_before_for_each(without_where.original);
 
     let (predicate_text, fallback_duration) = super::strip_trailing_duration(&normalized);
     let duration = duration.or(fallback_duration);
@@ -5438,94 +5531,14 @@ fn build_continuous_clause(
         return None;
     }
 
-    // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
-    // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
-    // has a time counter) until its last time counter is removed (CR 702.62b). CR
-    // 611.2a: a continuous effect with no stated duration lasts until end of game.
-    // Unlike an ordinary "gains <keyword>" combat trick (correctly UntilEndOfTurn
-    // via the chain default in effect.rs), the suspend grant's lifetime is owned by
-    // the suspend mechanic, so its parsed duration is Permanent. Keyed on the typed
-    // Keyword::Suspend variant — never a string. Mirrors the build_become_clause
-    // precedent (CR 611.2b default-permanent).
-    let duration = if matches!(
-        modifications.as_slice(),
-        [ContinuousModification::AddKeyword {
-            keyword: crate::types::keywords::Keyword::Suspend { .. },
-        }]
-    ) {
-        Some(Duration::Permanent)
-    } else {
-        duration
-    };
-
-    // CR 205.1b + CR 611.2a: an additive type grant — "becomes a <type> in
-    // addition to its other [creature] types" (Sensei Golden-Tail's training
-    // grant: "gains bushido 1 and becomes a Samurai in addition to its other
-    // creature types") — states no duration and therefore lasts until end of
-    // game: the granted type/keyword is added for as long as the affected object
-    // exists. Without this the unstated `None` duration flips to UntilEndOfTurn in
-    // `effect.rs::resolve` and the grant is swept by `prune_end_of_turn_effects`,
-    // so it wrongly "wears off" after the turn. Only fires when NO duration was
-    // parsed, so an explicit "... in addition to its other types until end of
-    // turn" keeps its stated turn-scoped duration. Mirrors the Suspend and
-    // `build_become_clause` (CR 611.2b) default-permanent precedents.
-    let duration = if duration.is_none() && has_in_addition_to_other_types(predicate_text) {
-        Some(Duration::Permanent)
-    } else {
-        duration
-    };
-
-    // CR 611.2a + CR 301.5 + CR 303.4: an animate-then-attach grant — the source
-    // itself "becomes an Aura enchantment with enchant creature" (all 12 Licids)
-    // or an Equipment — states no duration, and CR 611.2a says a continuous
-    // effect with no stated duration lasts until the end of the game. Left at
-    // `None` it would flip to `UntilEndOfTurn` in `effect.rs::resolve`, and at
-    // cleanup the source would stop being an Aura while STAYING attached. That
-    // is now cleaned up by `sba::check_illegal_attachment_unattach` (CR 704.5p
-    // sentence 1: a reverted Licid is a Creature, so it unattaches), but the
-    // permanent duration is still the CR 611.2a-correct model — the SBA is a
-    // safety net for an illegal state, not a licence to create one. The source's
-    // "Enchanted creature can't attack" static keys purely on `attached_to`, so
-    // relying on the wrong duration would also leave a one-SBA-check window in
-    // which the victim is locked down. Gated on the affected set
-    // being the source itself, so an Aura that grants the Aura/Equipment subtype
-    // to some OTHER permanent keeps its parsed/default duration. Mirrors the
-    // Suspend and "in addition to its other types" default-permanent precedents
-    // above rather than flipping the global `effect.rs` fallback, which is
-    // deliberately overloaded at that seam.
-    let duration = if duration.is_none()
-        && matches!(
-            static_affected_for_application(&application),
-            TargetFilter::SelfRef
-        )
-        && super::modifications_grant_attachable_subtype(&modifications)
-    {
-        Some(Duration::Permanent)
-    } else {
-        duration
-    };
-
-    // CR 611.2a: a pure quoted-trigger grant stating no duration ("it gains
-    // 'When this creature enters, ...'" — Bloodrage Alpha's boon body) lasts
-    // until end of game. Mirrors the GrantReplacement promotion's mixed-def
-    // line in `effect.rs`: any non-trigger modification keeps the parsed
-    // duration. The `stated_clause_duration` guard keeps single-clause leading
-    // durations load-bearing — they still overwrite via `with_clause_duration`,
-    // whose `Some(Permanent)` sentinel treatment is documented in `ast.rs` —
-    // and the flag preserves the emblem/perpetual-fallback shapes
-    // byte-identically until their follow-up lands.
-    let duration = if duration.is_none()
-        && ctx.stated_clause_duration.is_none()
-        && !names_deferred
-        && !modifications.is_empty()
-        && modifications
-            .iter()
-            .all(|m| matches!(m, ContinuousModification::GrantTrigger { .. }))
-    {
-        Some(Duration::Permanent)
-    } else {
-        duration
-    };
+    let duration = continuous_grant_duration(
+        &static_affected_for_application(&application),
+        predicate_text,
+        &modifications,
+        duration,
+        ctx.stated_clause_duration.clone(),
+        names_deferred,
+    );
 
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications).filter(|_| {
         matches!(
@@ -5684,21 +5697,6 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
         ctx,
         clause_names_deferred_parser(text),
     )
-}
-
-/// Strip "for each [clause]" suffix from text so that duration extraction can find
-/// "until end of turn" that precedes it. Returns the text up to "for each" (or the
-/// original text if "for each" is not present). Only used for duration extraction —
-/// the full text is still passed to `parse_continuous_modifications` which handles
-/// "for each" clauses internally.
-fn strip_for_each_for_duration(text: &str) -> &str {
-    let lower = text.to_lowercase();
-    // Find " for each " — must have space before to avoid matching "before each"
-    if let Some(pos) = lower.find(" for each ") {
-        text[..pos].trim()
-    } else {
-        text
-    }
 }
 
 /// CR 611.2b + CR 707.9: Strip a duration phrase that appears immediately
@@ -7542,8 +7540,8 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // granted evasion restriction (Fast // Furious: "It can't be blocked this turn
     // except by Vehicles or by creatures with haste."). The duration phrase can
     // sit mid-predicate ("blocked this turn except by …"), so it is not removed by
-    // the trailing-duration strip; absorb the optional " this turn" here between
-    // "blocked" and "except by". The filter is classified by the same
+    // the trailing-duration strip; consume the optional shared duration grammar
+    // here between "blocked" and "except by". The filter is classified by the same
     // `classify_block_exception` authority the printed/static evasion path uses, so
     // "Vehicles or by creatures with haste" lowers to the full quality `Or`.
     if let Ok((except_text, _)) = (
@@ -7551,7 +7549,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             tag::<_, _, OracleError<'_>>("can't be blocked"),
             tag("cannot be blocked"),
         )),
-        opt(tag::<_, _, OracleError<'_>>(" this turn")),
+        opt(preceded(tag::<_, _, OracleError<'_>>(" "), parse_duration)),
         tag(" except by "),
     )
         .parse(lower)

@@ -7346,6 +7346,15 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     None
 }
 
+/// CR 611.2a: recover only the base instruction's lifetime. The quantity tail remains
+/// untouched and still has to pass its own complete quantity parser.
+pub(super) fn duration_before_for_each(text: &str) -> Option<Duration> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (base, _) = tp.split_around_outside_quotes(" for each ")?;
+    strip_trailing_duration(base.original).1
+}
+
 pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     // Oracle sentences often end with a period before duration stripping runs
     // (e.g. Shifting Woodland: "... until end of turn. Activate only if ...").

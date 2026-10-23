@@ -93751,3 +93751,275 @@ fn an_unmodelled_player_relative_clause_is_an_unbound_subject() {
         each_of.effect
     );
 }
+
+// SHAPE: local lifetime belongs to the complete member, including a suffix gate.
+#[test]
+fn duration_repair_conditional_members_keep_local_windows_in_both_chain_modes() {
+    let source = "Target creature gets +2/+0 until your next turn and gains flying until end of turn if you control a creature with flying.";
+    for chain in [
+        parse_effect_chain(source, AbilityKind::Spell),
+        parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default()),
+    ] {
+        let nodes = std::iter::successors(Some(&chain), |node| node.sub_ability.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(nodes.len(), 2, "{chain:#?}");
+        assert_eq!(
+            nodes[0].duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        );
+        assert_eq!(nodes[1].duration, Some(Duration::UntilEndOfTurn));
+        assert!(nodes[0].condition.is_none());
+        assert!(nodes[1].condition.is_some());
+        for node in nodes {
+            let Effect::GenericEffect {
+                duration,
+                static_abilities,
+                ..
+            } = node.effect.as_ref()
+            else {
+                panic!("{node:#?}")
+            };
+            assert_eq!(*duration, node.duration);
+            assert_eq!(static_abilities.len(), 1);
+        }
+    }
+    let positive = crate::parser::oracle_static::parse_complete_continuous_members(
+        "gain flying until end of turn if you control a creature with flying",
+    )
+    .unwrap();
+    assert_eq!(positive.len(), 1);
+    assert_eq!(positive[0].3, Some(Duration::UntilEndOfTurn));
+    assert!(positive[0].1.is_some());
+    for source in [
+        "gain flying until end of turn if you blorple",
+        "gain flying until end of turn if you control a creature with flying and gain blorple",
+        "gain flying until end of turn and",
+    ] {
+        assert!(
+            crate::parser::oracle_static::parse_complete_continuous_members(source).is_none(),
+            "{source}"
+        );
+    }
+}
+
+// SHAPE: unsupported quantity admission stays strict; only independent metadata
+// and the already-known subject survive the numeric fallback.
+#[test]
+fn duration_repair_numeric_fallback_keeps_population_and_refuses_unknown_subjects() {
+    for (source, controller) in [
+        ("Creatures you control get +1/+0 until end of turn for each lore counter among Sagas you control.", ControllerRef::You),
+        ("Each creature your opponents control gets -1/-1 until end of turn for each poison counter its controller has.", ControllerRef::Opponent),
+    ] {
+        for chain in [parse_effect_chain(source, AbilityKind::Spell), parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default())] {
+            let Effect::PumpAll { target: TargetFilter::Typed(filter), .. } = chain.effect.as_ref() else { panic!("{source}: {chain:#?}") };
+            assert_eq!(filter.controller, Some(controller.clone()));
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(chain.duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(chain.multi_target, None);
+        }
+    }
+    let positive = parse_effect_chain("Target creature gets +1/+1 until end of turn for each lore counter among Sagas you control.", AbilityKind::Spell);
+    assert!(matches!(
+        *positive.effect,
+        Effect::Pump {
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+    assert_eq!(positive.duration, Some(Duration::UntilEndOfTurn));
+    let unknown = parse_effect_chain("Creatures your uncle controls get +1/+1 until end of turn for each lore counter among Sagas you control.", AbilityKind::Spell);
+    assert!(
+        matches!(*unknown.effect, Effect::Unimplemented { .. }),
+        "{unknown:#?}"
+    );
+    let supported = parse_effect_chain(
+        "Creatures you control get +1/+1 until end of turn for each creature you control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            *supported.effect,
+            Effect::PumpAll {
+                power: PtValue::Quantity(_),
+                ..
+            }
+        ),
+        "{supported:#?}"
+    );
+    assert_eq!(supported.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(
+        super::lower::duration_before_for_each("get +1/+1 for each creature that died this turn"),
+        None
+    );
+    assert_eq!(
+        super::lower::duration_before_for_each(
+            "gain \"{T}: Draw a card until end of turn for each creature you control.\""
+        ),
+        None
+    );
+}
+
+// SHAPE: duration-axis fixture, not purported printed Oracle text.
+#[test]
+fn duration_repair_restriction_owner_keeps_interior_next_turn_window() {
+    for source in [
+        "Target creature can't be blocked until your next turn except by Walls.",
+        "Target creature can't be blocked this turn except by Walls.",
+    ] {
+        for chain in [
+            parse_effect_chain(source, AbilityKind::Spell),
+            parse_effect_chain_with_context(
+                source,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            ),
+        ] {
+            let expected =
+                if source == "Target creature can't be blocked this turn except by Walls." {
+                    Duration::UntilEndOfTurn
+                } else {
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }
+                };
+            assert_eq!(chain.duration, Some(expected.clone()), "{chain:#?}");
+            let Effect::GenericEffect {
+                duration,
+                static_abilities,
+                ..
+            } = chain.effect.as_ref()
+            else {
+                panic!("{chain:#?}")
+            };
+            assert_eq!(*duration, Some(expected));
+            assert_eq!(static_abilities.len(), 1);
+            assert!(matches!(
+                static_abilities[0].mode,
+                StaticMode::CantBeBlockedExceptBy { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn duration_repair_typed_defaults_respect_outer_and_quoted_body_windows() {
+    for (source, expected) in [
+        ("It gains suspend.", Duration::Permanent),
+        ("Until end of turn, it gains suspend.", Duration::UntilEndOfTurn),
+        ("It gains bushido 1 and becomes a Samurai in addition to its other creature types.", Duration::Permanent),
+        ("It gains bushido 1 and becomes a Samurai in addition to its other creature types until your next turn.", Duration::UntilNextTurnOf { player: PlayerScope::Controller }),
+        ("It gains \"{T}: Target creature gets +1/+1 until end of turn.\"", Duration::Permanent),
+        ("It gains \"{T}: Target creature gets +1/+1 until end of turn.\" until your next turn.", Duration::UntilNextTurnOf { player: PlayerScope::Controller }),
+        ("It gains \"When this creature dies, draw a card.\"", Duration::Permanent),
+    ] {
+        for chain in [parse_effect_chain(source, AbilityKind::Spell), parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default())] {
+            assert_eq!(chain.duration, Some(expected.clone()), "{source}: {chain:#?}");
+            let Effect::GenericEffect { duration, static_abilities, .. } = chain.effect.as_ref() else { panic!("{source}: {chain:#?}") };
+            assert_eq!(*duration, Some(expected.clone()));
+            assert!(!static_abilities.is_empty());
+            for modification in &static_abilities[0].modifications {
+                if let ContinuousModification::GrantAbility { definition } = modification {
+                    assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn duration_repair_fallback_defaults_keep_source_self_and_deferred_guards() {
+    let modifications = vec![ContinuousModification::AddSubtype {
+        subtype: "Aura".into(),
+    }];
+    for (affected, source, expected) in [
+        (
+            TargetFilter::SelfRef,
+            "loses this ability and becomes an Aura enchantment with enchant creature",
+            Some(Duration::Permanent),
+        ),
+        (
+            TargetFilter::ParentTarget,
+            "loses this ability and becomes an Aura enchantment with enchant creature",
+            None,
+        ),
+    ] {
+        let mut clause = parsed_clause(Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications.clone())],
+            duration: None,
+            target: None,
+            end_cost: None,
+        });
+        subject::retain_fallback_grant_duration(
+            &mut clause,
+            source,
+            Some(&affected),
+            &ParseContext::default(),
+        );
+        assert_eq!(clause.duration, expected);
+    }
+    let positive = parse_effect_chain(
+        "It gains \"When this creature dies, draw a card.\"",
+        AbilityKind::Spell,
+    );
+    assert_eq!(positive.duration, Some(Duration::Permanent));
+    let mut clause = parsed_clause((*positive.effect).clone());
+    if let Effect::GenericEffect { duration, .. } = &mut clause.effect {
+        *duration = None;
+    }
+    subject::retain_fallback_grant_duration(
+        &mut clause,
+        "It perpetually gains \"When this creature dies, draw a card.\"",
+        Some(&TargetFilter::ParentTarget),
+        &ParseContext::default(),
+    );
+    assert_eq!(
+        clause.duration, None,
+        "deferred source owner stays separate from the ordinary default"
+    );
+}
+
+#[test]
+fn duration_repair_local_metadata_does_not_escape_into_an_independent_instruction() {
+    let source="Creatures you control get +1/+0 until end of turn for each lore counter among Sagas you control. Draw a card.";
+    for chain in [
+        parse_effect_chain(source, AbilityKind::Spell),
+        parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default()),
+    ] {
+        assert!(matches!(*chain.effect, Effect::PumpAll { .. }));
+        assert_eq!(chain.duration, Some(Duration::UntilEndOfTurn));
+        let next = chain.sub_ability.as_deref().unwrap();
+        assert!(matches!(*next.effect, Effect::Draw { .. }));
+        assert_eq!(next.duration, None);
+    }
+    let quoted="Target creature gains \"{T}: This creature can't be blocked this turn except by Walls.\" until your next turn.";
+    for chain in [
+        parse_effect_chain(quoted, AbilityKind::Spell),
+        parse_effect_chain_with_context(quoted, AbilityKind::Spell, &mut ParseContext::default()),
+    ] {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = chain.effect.as_ref()
+        else {
+            panic!("quoted restriction must remain a grant: {chain:#?}")
+        };
+        assert_eq!(
+            *duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        );
+        let [ContinuousModification::GrantAbility { definition }] =
+            static_abilities[0].modifications.as_slice()
+        else {
+            panic!("{chain:#?}")
+        };
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(*definition.effect, Effect::GenericEffect { .. }));
+    }
+}

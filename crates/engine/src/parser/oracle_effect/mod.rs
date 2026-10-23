@@ -19518,11 +19518,9 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
-    // Find "for each" in the text
-    let for_each_idx = tp.find("for each ")?;
-    let (base_tp, _) = tp.split_at(for_each_idx);
+    let (base_tp, for_each_tp) = tp.split_around_outside_quotes(" for each ")?;
     let base_tp = base_tp.trim_end();
-    let for_each_clause = &tp.lower[for_each_idx + "for each ".len()..];
+    let for_each_clause = for_each_tp.lower;
     let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
     let quantity_ctx = for_each_quantity_context(base_no_duration, ctx);
 
@@ -28827,7 +28825,36 @@ fn lower_subject_predicate_ast_body(
                     ctx.pending_repeat_for = Some(qty);
                 }
             }
+            if let Effect::Pump {
+                power, toughness, ..
+            } = &clause.effect
+            {
+                // CR 611.2c: a carried class subject denotes all its members;
+                // announced and inherited references keep their singular route.
+                clause.effect = subject::build_pump_effect(
+                    &SubjectApplication {
+                        affected: affected.clone(),
+                        target: subject.target.clone(),
+                        multi_target: subject.multi_target.clone(),
+                        inherits_parent: subject.inherits_parent,
+                        is_optional: subject.is_optional,
+                    },
+                    power.clone(),
+                    toughness.clone(),
+                );
+            }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
+            let grant_affected = if subject.target.is_some() || subject.inherits_parent {
+                TargetFilter::ParentTarget
+            } else {
+                affected.clone()
+            };
+            subject::retain_fallback_grant_duration(
+                &mut clause,
+                original_clause,
+                Some(&grant_affected),
+                ctx,
+            );
             inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
@@ -34870,7 +34897,30 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     }
 
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
-        return lower_imperative_family_ast(ast);
+        let mut clause = lower_imperative_family_ast(ast);
+        let application = for_each_subject_application(tp.original, &mut ctx.clone_throwaway());
+        if matches!(clause.effect, Effect::Pump { .. }) {
+            if application.is_none()
+                && subject::find_predicate_start(tp.original).is_some_and(|start| start > 0)
+            {
+                return parsed_clause(Effect::unimplemented(
+                    subject::UNBOUND_SUBJECT_GAP,
+                    tp.original,
+                ));
+            }
+            // Recover only metadata of this already-selected numeric fallback;
+            // an unmodeled for-each operand still declines its quantity owner.
+            if let Some(duration) = lower::duration_before_for_each(tp.original) {
+                clause = with_clause_duration(clause, duration);
+            }
+            clause.effect = thread_for_each_subject(clause.effect, tp.original, ctx);
+            apply_optional_target_fixup(&mut clause, tp.original);
+        }
+        let affected = application
+            .as_ref()
+            .map(subject::static_affected_for_application);
+        subject::retain_fallback_grant_duration(&mut clause, tp.original, affected.as_ref(), ctx);
+        return clause;
     }
 
     // Duration-scoped "play the exiled card" grants permission to the object

@@ -2168,9 +2168,14 @@ fn complete_continuous_members(
     // tries the next outside-quote boundary without publishing a prefix.
     for (marker, negative) in [(" if ", false), (" as long as ", false), (" unless ", true)] {
         if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
-            if let Some((mods, verb)) =
-                complete_modification_clause(body.original, where_x, inherited_verb)
+            if let Some((members, verb)) =
+                complete_continuous_members(body.original, where_x, inherited_verb)
             {
+                // A condition belongs to one complete, previously ungated leaf.
+                // Its own duration must survive the same transaction as its mods.
+                let [(mods, None, None, duration)] = members.as_slice() else {
+                    continue;
+                };
                 // A suffix "if" on a later explicit member cannot gate the
                 // preceding members. Bare keyword lists stay atomic.
                 if marker == " if "
@@ -2216,7 +2221,10 @@ fn complete_continuous_members(
                     condition
                 };
                 if let Some((condition, recipient)) = partition_continuous_member_gate(condition) {
-                    return Some((vec![(mods, condition, recipient, None)], verb));
+                    return Some((
+                        vec![(mods.clone(), condition, recipient, duration.clone())],
+                        verb,
+                    ));
                 }
             }
         }

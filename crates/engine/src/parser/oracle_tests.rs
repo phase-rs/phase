@@ -41199,3 +41199,444 @@ fn complete_publication_actual_modal_dfc_faces_keep_full_values_in_both_loaders(
         }
     }
 }
+
+// SHAPE: complete pinned English sources and printed metadata, MTGJSON 2026-10-04.
+// Expected lifetimes derive from each owning instruction; the paths locate that
+// instruction, not an equality-to-BASE or a whole-card support claim.
+fn duration_repair_printed_cases() -> Vec<(&'static str, &'static [&'static str], &'static str)> {
+    vec![
+        (r###"{"name":"_____ _____ _____ Trespasser","text":"When this creature enters, you may put a name sticker on it.\n{3}{U}: This creature gets +1/+0 until end of turn for each name sticker on it. It can't be blocked this turn.","manaCost":"{1}{U}","manaValue":2.0,"types":["Creature"],"type":"Creature — Human Rogue Guest","subtypes":["Human","Rogue","Guest"],"supertypes":[],"power":"2","toughness":"1","colors":["U"],"colorIdentity":["U"],"layout":"normal","identifiers":{"scryfallOracleId":"75854e14-5f15-443d-b342-b27fc3ab4b6e"}}"###, &["/abilities/0/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"_____ _____ Rocketship","text":"Flying\nWhen this Vehicle enters, you may put up to two name stickers on it.\nWhenever this Vehicle attacks, choose a letter. This Vehicle gets +1/+1 until end of turn for each name sticker on it that begins with the chosen letter.\nCrew 2","manaCost":"{4}","manaValue":4.0,"types":["Artifact"],"type":"Artifact — Vehicle","subtypes":["Vehicle"],"supertypes":[],"power":"2","toughness":"3","colors":[],"colorIdentity":[],"keywords":["Crew","Flying"],"layout":"normal","identifiers":{"scryfallOracleId":"1009f979-b1fa-4427-bf9e-2a533a4ca19b"}}"###, &["/triggers/1/execute/sub_ability/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Bleeding Effect","text":"At the beginning of combat on your turn, creatures you control gain flying until end of turn if a creature card in your graveyard has flying. The same is true for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.","manaCost":"{2}{W}{B}","manaValue":4.0,"types":["Enchantment"],"type":"Enchantment","subtypes":[],"supertypes":[],"colors":["B","W"],"colorIdentity":["B","W"],"layout":"normal","identifiers":{"scryfallOracleId":"689c9a49-d0f5-494a-9fa2-948cd5517e74"}}"###, &["/triggers/0/execute/duration", "/triggers/0/execute/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Cantankerous Captain","text":"At the beginning of combat on your turn, target creature you control gets +1/+0 until end of turn. Then that creature gains menace until end of turn if creatures you control have total power 8 or greater. (It can't be blocked except by two or more creatures.)","manaCost":"{2}{R}","manaValue":3.0,"types":["Creature"],"type":"Creature — Tellarite Officer","subtypes":["Tellarite","Officer"],"supertypes":[],"power":"2","toughness":"3","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"2375e6e4-bea2-4fa2-b0d5-467e3076962c"}}"###, &["/triggers/0/execute/sub_ability/duration", "/triggers/0/execute/sub_ability/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Chatzuk, Mighty Guitarist","text":"Banding (Just ask around until you find someone who knows.)\nCreature spells you cast with banding cost {2} less to cast.\nWhenever two or more creatures you control attack in a band, each creature in that band gets +1/+1 until end of turn for each creature in that band.","manaCost":"{1}{G}{W}","manaValue":3.0,"types":["Creature"],"type":"Legendary Creature — Human Bard","subtypes":["Human","Bard"],"supertypes":["Legendary"],"power":"2","toughness":"2","colors":["G","W"],"colorIdentity":["G","W"],"keywords":["Banding"],"layout":"normal","identifiers":{"scryfallOracleId":"593f3e97-9756-4cd8-895e-aff6b6d25072"}}"###, &["/triggers/0/execute/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Chong and Lily, Nomads","text":"Whenever one or more Bards you control attack, choose one —\n• Put a lore counter on each of any number of target Sagas you control.\n• Creatures you control get +1/+0 until end of turn for each lore counter among Sagas you control.","manaCost":"{3}{R}","manaValue":4.0,"types":["Creature"],"type":"Legendary Creature — Human Bard Ally","subtypes":["Human","Bard","Ally"],"supertypes":["Legendary"],"power":"3","toughness":"3","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"faffc9fb-32b3-4015-8c3f-e6b45002c050"}}"###, &["/triggers/0/execute/mode_abilities/1/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Concerted Effort","text":"At the beginning of each upkeep, creatures you control gain flying until end of turn if a creature you control has flying. The same is true for fear, first strike, double strike, landwalk, protection, trample, and vigilance.","manaCost":"{2}{W}{W}","manaValue":4.0,"types":["Enchantment"],"type":"Enchantment","subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","identifiers":{"scryfallOracleId":"fd4236e5-6a2c-45ec-afb3-cd4fc516fbf1"}}"###, &["/triggers/0/execute/duration", "/triggers/0/execute/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Departed Deckhand","text":"When this creature becomes the target of a spell, sacrifice it.\nThis creature can't be blocked except by Spirits.\n{3}{U}: Another target creature you control can't be blocked this turn except by Spirits.","manaCost":"{1}{U}","manaValue":2.0,"types":["Creature"],"type":"Creature — Spirit Pirate","subtypes":["Spirit","Pirate"],"supertypes":[],"power":"2","toughness":"2","colors":["U"],"colorIdentity":["U"],"layout":"normal","identifiers":{"scryfallOracleId":"a620a765-97ba-4687-acfd-4dec7da75d9f"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Dread Charge","text":"Black creatures you control can't be blocked this turn except by black creatures.","manaCost":"{3}{B}","manaValue":4.0,"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","identifiers":{"scryfallOracleId":"6b7933b3-821a-4d64-9a10-af8a69fa008e"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Fast // Furious","faceName":"Fast","side":"a","text":"Target creature gains haste until end of turn. It can't be blocked this turn except by Vehicles or by creatures with haste.\nFuse (You may cast one or both halves of this card from your hand.)","manaCost":"{1}{R}","manaValue":5.0,"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"keywords":["Fuse"],"layout":"split","identifiers":{"scryfallOracleId":"298a6369-1c1f-4d75-aa97-69c56323c122"}}"###, &["/abilities/0/sub_ability/duration", "/abilities/0/sub_ability/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Firefright Mage","text":"{1}{R}, {T}, Discard a card: Target creature can't be blocked this turn except by artifact creatures and/or red creatures.","manaCost":"{R}","manaValue":1.0,"types":["Creature"],"type":"Creature — Goblin Spellshaper","subtypes":["Goblin","Spellshaper"],"supertypes":[],"power":"1","toughness":"1","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"9a0bb238-f832-4b37-97ae-520899798e7a"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Gingerbrute","text":"Haste (This creature can attack and {T} as soon as it comes under your control.)\n{1}: This creature can't be blocked this turn except by creatures with haste.\n{2}, {T}, Sacrifice this creature: You gain 3 life.","manaCost":"{1}","manaValue":1.0,"types":["Artifact","Creature"],"type":"Artifact Creature — Food Golem","subtypes":["Food","Golem"],"supertypes":[],"power":"1","toughness":"1","colors":[],"colorIdentity":[],"keywords":["Haste"],"layout":"normal","identifiers":{"scryfallOracleId":"10b8d4c7-7553-4d76-b643-d98b80701e13"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Goblin Cruciverbalist","text":"Haste\nWhen this creature enters, create a colorless artifact token named your choice of A, E, I, O, or U.\nWhenever this creature attacks, using the first letters of the names of permanents you control, spell a word you haven't spelled this game. It gets +1/+0 until end of turn for each letter in that word.","manaCost":"{2}{R}","manaValue":3.0,"types":["Creature"],"type":"Creature — Goblin Wizard Guest","subtypes":["Goblin","Wizard","Guest"],"supertypes":[],"power":"1","toughness":"4","colors":["R"],"colorIdentity":["R"],"keywords":["Haste"],"layout":"normal","identifiers":{"scryfallOracleId":"02f21750-48a0-46c3-bbdc-01d8aa7bf48f"}}"###, &["/triggers/1/execute/sub_ability/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Guardian of the Gateless","text":"Flying\nThis creature can block any number of creatures.\nWhenever this creature blocks, it gets +1/+1 until end of turn for each creature it's blocking.","manaCost":"{4}{W}","manaValue":5.0,"types":["Creature"],"type":"Creature — Angel","subtypes":["Angel"],"supertypes":[],"power":"3","toughness":"3","colors":["W"],"colorIdentity":["W"],"keywords":["Flying"],"layout":"normal","identifiers":{"scryfallOracleId":"e133605f-9227-42c4-afe9-6613ab095433"}}"###, &["/triggers/0/execute/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Joven's Tools","text":"{4}, {T}: Target creature can't be blocked this turn except by Walls.","manaCost":"{6}","manaValue":6.0,"types":["Artifact"],"type":"Artifact","subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","identifiers":{"scryfallOracleId":"b1935140-b038-4a81-98f7-28d2c137124a"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Majestic Myriarch","text":"Majestic Myriarch's power and toughness are each equal to twice the number of creatures you control.\nAt the beginning of each combat, this creature gains flying until end of turn if you control a creature with flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.","manaCost":"{4}{G}","manaValue":5.0,"types":["Creature"],"type":"Creature — Chimera","subtypes":["Chimera"],"supertypes":[],"power":"*","toughness":"*","colors":["G"],"colorIdentity":["G"],"layout":"normal","identifiers":{"scryfallOracleId":"c39dca94-3849-4edb-bba9-e7a2eefa5021"}}"###, &["/triggers/0/execute/duration", "/triggers/0/execute/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Meet and Greet \"Sisay\"","text":"Whenever you cast a spell, choose one —\n• Flavor — Meet and Greet \"Sisay\" gets +1/+1 until end of turn for each line of flavor text that spell has.\n• History — Create a Treasure token if that spell doesn't share an expansion symbol with a permanent you control or a card in your graveyard.","manaCost":"{R}{G}","manaValue":2.0,"types":["Creature"],"type":"Legendary Creature — Elf Performer","subtypes":["Elf","Performer"],"supertypes":["Legendary"],"power":"1","toughness":"1","colors":["G","R"],"colorIdentity":["G","R"],"keywords":["Flavor","History","Treasure"],"layout":"normal","identifiers":{"scryfallOracleId":"8b10de03-d7ae-49da-8562-2a51347c2da7"}}"###, &["/triggers/0/execute/mode_abilities/0/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Odric, Lunarch Marshal","text":"At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.","manaCost":"{3}{W}","manaValue":4.0,"types":["Creature"],"type":"Legendary Creature — Human Soldier","subtypes":["Human","Soldier"],"supertypes":["Legendary"],"power":"3","toughness":"3","colors":["W"],"colorIdentity":["W"],"layout":"normal","identifiers":{"scryfallOracleId":"bad76170-c773-4be5-9457-20dc9f745cb4"}}"###, &["/triggers/0/execute/duration", "/triggers/0/execute/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Phyresis Outbreak","text":"Each opponent gets a poison counter. Then each creature your opponents control gets -1/-1 until end of turn for each poison counter its controller has.","manaCost":"{2}{B}","manaValue":3.0,"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","identifiers":{"scryfallOracleId":"47148b5d-3850-4614-822e-6ef2755996f8"}}"###, &["/abilities/0/sub_ability/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Resilient Roadrunner","text":"Haste, protection from Coyotes\n{3}: This creature can't be blocked this turn except by creatures with haste.","manaCost":"{1}{R}","manaValue":2.0,"types":["Creature"],"type":"Creature — Bird","subtypes":["Bird"],"supertypes":[],"power":"2","toughness":"2","colors":["R"],"colorIdentity":["R"],"keywords":["Haste","Protection"],"layout":"normal","identifiers":{"scryfallOracleId":"78c7c73f-847d-43bf-9e02-cf85357453f4"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Rime Transfusion","text":"Enchant creature\nEnchanted creature gets +2/+1 and has \"{S}: This creature can't be blocked this turn except by snow creatures.\" ({S} can be paid with one mana from a snow source.)","manaCost":"{1}{B}","manaValue":2.0,"types":["Enchantment"],"type":"Snow Enchantment — Aura","subtypes":["Aura"],"supertypes":["Snow"],"colors":["B"],"colorIdentity":["B"],"keywords":["Enchant"],"layout":"normal","identifiers":{"scryfallOracleId":"d7ff0525-8617-4e0f-92db-660f67d706ca"}}"###, &["/static_abilities/0/modifications/2/definition/duration", "/static_abilities/0/modifications/2/definition/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Roar of Challenge","text":"All creatures able to block target creature this turn do so.\nFerocious — That creature gains indestructible until end of turn if you control a creature with power 4 or greater.","manaCost":"{2}{G}","manaValue":3.0,"types":["Sorcery"],"type":"Sorcery","subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"keywords":["Ferocious"],"layout":"normal","identifiers":{"scryfallOracleId":"9d83a1d3-ef0f-4134-a38b-c992d396592b"}}"###, &["/abilities/1/duration", "/abilities/1/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Run for Your Life","text":"One or two target creatures each gain haste until end of turn. They can't be blocked this turn except by creatures with haste.\nEscape—{2}{U}{R}, Exile four other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)","manaCost":"{U}{R}","manaValue":2.0,"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[],"colors":["R","U"],"colorIdentity":["R","U"],"keywords":["Escape"],"layout":"normal","identifiers":{"scryfallOracleId":"c95bedcc-911f-4c0f-a148-1cf5787e82bd"}}"###, &["/abilities/0/sub_ability/duration", "/abilities/0/sub_ability/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Spara's Bodyguard","text":"When Spara's Bodyguard enters the battlefield, you may choose a creature card in your hand. If you do, it perpetually gains \"This creature enters the battlefield with an additional shield counter on it.\" Otherwise, put a shield counter on Spara's Bodyguard. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)\nAt the beginning of each combat, Spara's Bodyguard gets +1/+1 until end of turn for each shield counter among other creatures you control.","manaCost":"{G}{W}{U}","manaValue":3.0,"types":["Creature"],"type":"Creature — Rhino Warrior","subtypes":["Rhino","Warrior"],"supertypes":[],"power":"3","toughness":"3","colors":["G","U","W"],"colorIdentity":["G","U","W"],"layout":"normal","identifiers":{"scryfallOracleId":"c3ea054e-018a-4870-bb87-d8dd08834bfd"}}"###, &["/triggers/1/execute/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Speed, Young Avenger","text":"Haste\nWhenever you cast a noncreature spell, you may pay {1}. When you do, target creature with haste can't be blocked this turn except by creatures with haste.","manaCost":"{1}{R}","manaValue":2.0,"types":["Creature"],"type":"Legendary Creature — Mutant Hero","subtypes":["Mutant","Hero"],"supertypes":["Legendary"],"power":"2","toughness":"2","colors":["R"],"colorIdentity":["R"],"keywords":["Haste"],"layout":"normal","identifiers":{"scryfallOracleId":"2fb0f2d2-ed1f-4181-91f2-684a71c34998"}}"###, &["/triggers/0/execute/sub_ability/duration", "/triggers/0/execute/sub_ability/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Starlight Spectacular","text":"Parade! — At the beginning of combat on your turn, choose creatures you control one at a time until each creature you control has been chosen. Each of those creatures gets +1/+1 until end of turn for each creature chosen before it. (Places everyone! The first creature in line gets +0/+0.)","manaCost":"{2}{W}{W}","manaValue":4.0,"types":["Enchantment"],"type":"Enchantment","subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"keywords":["Parade!"],"layout":"normal","identifiers":{"scryfallOracleId":"5c4e9401-537c-4bf6-bd07-d2abc43612c9"}}"###, &["/triggers/0/execute/sub_ability/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Temur Battle Rage","text":"Target creature gains double strike until end of turn.\nFerocious — That creature also gains trample until end of turn if you control a creature with power 4 or greater.","manaCost":"{1}{R}","manaValue":2.0,"types":["Instant"],"type":"Instant","subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"keywords":["Ferocious"],"layout":"normal","identifiers":{"scryfallOracleId":"2fdc0d17-b683-4263-949e-4f74ec76badf"}}"###, &["/abilities/1/duration", "/abilities/1/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Thunderous Orator","text":"Vigilance\nWhenever this creature attacks, it gains flying until end of turn if you control a creature with flying. The same is true for first strike, double strike, deathtouch, indestructible, lifelink, menace, and trample.","manaCost":"{1}{W}","manaValue":2.0,"types":["Creature"],"type":"Creature — Kor Wizard","subtypes":["Kor","Wizard"],"supertypes":[],"power":"2","toughness":"2","colors":["W"],"colorIdentity":["W"],"keywords":["Vigilance"],"layout":"normal","identifiers":{"scryfallOracleId":"7716ad72-9e96-4915-bc1e-e12b4d0f6f9c"}}"###, &["/triggers/0/execute/duration", "/triggers/0/execute/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Tin Street Dodger","text":"Haste\n{R}: This creature can't be blocked this turn except by creatures with defender.","manaCost":"{R}","manaValue":1.0,"types":["Creature"],"type":"Creature — Goblin Rogue","subtypes":["Goblin","Rogue"],"supertypes":[],"power":"1","toughness":"1","colors":["R"],"colorIdentity":["R"],"keywords":["Haste"],"layout":"normal","identifiers":{"scryfallOracleId":"fde3c8df-cc57-4e64-b78b-301e103d8487"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Varchild's Crusader","text":"{0}: This creature can't be blocked this turn except by Walls. Sacrifice this creature at the beginning of the next end step.","manaCost":"{3}{R}","manaValue":4.0,"types":["Creature"],"type":"Creature — Human Knight","subtypes":["Human","Knight"],"supertypes":[],"power":"3","toughness":"2","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"45351d9d-453f-4245-84c0-053eb8aca345"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "UntilEndOfTurn"),
+        (r###"{"name":"Calming Licid","text":"{W}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {W} to end this effect.\nEnchanted creature can't attack.","manaCost":"{2}{W}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":["W"],"colorIdentity":["W"],"layout":"normal","identifiers":{"scryfallOracleId":"93d20859-249f-47ae-8f6d-095228e7b6e9"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Convulsing Licid","text":"{R}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {R} to end this effect.\nEnchanted creature can't block.","manaCost":"{2}{R}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"893c88cb-72ba-4f54-809c-bfac4d6efb74"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Corrupting Licid","text":"{B}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {B} to end this effect.\nEnchanted creature has fear. (It can't be blocked except by artifact creatures and/or black creatures.)","manaCost":"{2}{B}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":["B"],"colorIdentity":["B"],"layout":"normal","identifiers":{"scryfallOracleId":"503ddd47-4b0c-4a2a-b77a-fb321044b438"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Dominating Licid","text":"{1}{U}{U}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.\nYou control enchanted creature.","manaCost":"{1}{U}{U}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["U"],"colorIdentity":["U"],"layout":"normal","identifiers":{"scryfallOracleId":"ae2804c6-fb38-4845-ae21-7f41a766cbba"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Enraging Licid","text":"{R}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {R} to end this effect.\nEnchanted creature has haste.","manaCost":"{1}{R}","manaValue":2.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"5ec9f317-887a-4e08-a165-e7cf15eb071d"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Gliding Licid","text":"{U}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.\nEnchanted creature has flying.","manaCost":"{2}{U}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":["U"],"colorIdentity":["U"],"layout":"normal","identifiers":{"scryfallOracleId":"a07b8619-224d-46d0-a17a-38d04aba574e"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Halana and Alena and Gisa and Geralf","text":"First strike, reach\nAt the beginning of combat on your turn, mill four cards. You may choose a creature card from among them and cast it. When you do, it gains haste, becomes a Zombie in addition to its other types, and enters the battlefield with X +1/+1 counters on it, where X is Halana and Alena and Gisa and Geralf's power.","manaCost":"{R}{G}{U}{B}","manaValue":4.0,"types":["Creature"],"type":"Legendary Creature — Human Ranger Wizard","subtypes":["Human","Ranger","Wizard"],"supertypes":["Legendary"],"power":"3","toughness":"5","colors":["B","G","R","U"],"colorIdentity":["B","G","R","U"],"keywords":["First strike","Mill","Reach"],"layout":"normal","identifiers":{"scryfallOracleId":"65b9b9f2-f356-4ede-88dc-b191af2dc1e3"}}"###, &["/triggers/0/execute/sub_ability/sub_ability/duration", "/triggers/0/execute/sub_ability/sub_ability/effect/duration"], "Permanent"),
+        (r###"{"name":"Leeching Licid","text":"{B}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {B} to end this effect.\nAt the beginning of the upkeep of enchanted creature's controller, this creature deals 1 damage to that player.","manaCost":"{1}{B}","manaValue":2.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["B"],"colorIdentity":["B"],"layout":"normal","identifiers":{"scryfallOracleId":"bcb5af89-a304-4de0-86af-b3f4cfabafc4"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Nurturing Licid","text":"{G}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {G} to end this effect.\n{G}: Regenerate enchanted creature.","manaCost":"{1}{G}","manaValue":2.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["G"],"colorIdentity":["G"],"keywords":["Regenerate"],"layout":"normal","identifiers":{"scryfallOracleId":"537a7af1-2b7e-4828-b645-7e34e86058d5"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Quickening Licid","text":"{1}{W}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {W} to end this effect.\nEnchanted creature has first strike.","manaCost":"{1}{W}","manaValue":2.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["W"],"colorIdentity":["W"],"layout":"normal","identifiers":{"scryfallOracleId":"2bdd9ca3-542a-43c0-9831-c6add23890d6"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Stinging Licid","text":"{1}{U}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.\nWhenever enchanted creature becomes tapped, this creature deals 2 damage to that creature's controller.","manaCost":"{1}{U}","manaValue":2.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"1","toughness":"1","colors":["U"],"colorIdentity":["U"],"layout":"normal","identifiers":{"scryfallOracleId":"c6e48eaf-02f8-43b3-90bf-970d4e412fa6"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"Tempting Licid","text":"{G}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {G} to end this effect.\nAll creatures able to block enchanted creature do so.","manaCost":"{2}{G}","manaValue":3.0,"types":["Creature"],"type":"Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":["G"],"colorIdentity":["G"],"layout":"normal","identifiers":{"scryfallOracleId":"3b2206ed-55e9-4735-b969-59d9e089bb10"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+        (r###"{"name":"The Good Time Sleuth","text":"When The Good Time Sleuth enters, exile the top card of your library and each nontoken creature you control in a face-down pile, shuffle that pile, then manifest those cards. Then create a Blood token for each face-down creature you control. Those creature gain \"Sacrifice a Blood: Turn this creature face up.\" Secretly choose one of them. As that creature is turned face up, reveal the choice and it becomes a 5/5 black Demon.","manaCost":"{3}{W}{B}","manaValue":5.0,"types":["Creature"],"type":"Legendary Creature — Human?","subtypes":["Human?"],"supertypes":["Legendary"],"power":"3","toughness":"3","colors":["B","W"],"colorIdentity":["B","W"],"keywords":["Manifest"],"layout":"normal","identifiers":{"scryfallOracleId":"3ee92331-5c48-4941-997b-11229298fca7"}}"###, &["/triggers/0/execute/sub_ability/sub_ability/sub_ability/sub_ability/sub_ability/effect/duration"], "Permanent"),
+        (r###"{"name":"Transmogrifying Licid","text":"{1}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {1} to end this effect.\nEnchanted creature gets +1/+1 and is an artifact in addition to its other types.","manaCost":"{3}","manaValue":3.0,"types":["Artifact","Creature"],"type":"Artifact Creature — Licid","subtypes":["Licid"],"supertypes":[],"power":"2","toughness":"2","colors":[],"colorIdentity":[],"layout":"normal","identifiers":{"scryfallOracleId":"4f484927-0e8e-493d-93bc-ed190965dad9"}}"###, &["/abilities/0/duration", "/abilities/0/effect/duration"], "Permanent"),
+    ]
+}
+
+#[test]
+fn duration_repair_full_printed_cohort_keeps_windows_and_whole_loader_values() {
+    use crate::database::{mtgjson::AtomicCard, synthesis::build_oracle_face, CardDatabase};
+    let mut exports = serde_json::Map::new();
+    let mut faces = Vec::new();
+    for (record, paths, expected) in duration_repair_printed_cases() {
+        let card: AtomicCard = serde_json::from_str(record).unwrap();
+        let face = build_oracle_face(&card, card.identifiers.scryfall_oracle_id.clone());
+        assert_eq!(face.oracle_text, card.text);
+        assert_eq!(face.card_type.subtypes, card.subtypes);
+        assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+        let input = crate::database::synthesis::prepare_oracle_parser_input(&card, true);
+        let mut doc = parse_oracle_ir(
+            &input.oracle_text,
+            &input.card_name,
+            &input.keyword_names,
+            &card.types,
+            &card.subtypes,
+        );
+        assert_eq!(doc.source_text, input.oracle_text);
+        assert!(!doc.items.is_empty(), "{}", face.name);
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed.abilities.len() + parsed.triggers.len() + parsed.statics.len() > 0);
+        let value = serde_json::to_value(&face).unwrap();
+        for path in paths {
+            assert_eq!(
+                value.pointer(path).and_then(serde_json::Value::as_str),
+                Some(expected),
+                "{} {path}: {value:#}",
+                face.name
+            );
+            let owner = path.strip_suffix("/duration").unwrap();
+            let node = value.pointer(owner).unwrap();
+            // Every carrier assertion has an executable positive reach guard.
+            let effect = node.get("effect").unwrap_or(node);
+            assert!(
+                matches!(
+                    effect["type"].as_str(),
+                    Some("GenericEffect" | "Pump" | "PumpAll")
+                ),
+                "{} {path}: {node:#}",
+                face.name
+            );
+        }
+        for (name, operand, path) in [
+            (
+                "Chong and Lily, Nomads",
+                "lore counter among sagas you control",
+                "/triggers/0/execute/mode_abilities/1",
+            ),
+            (
+                "Phyresis Outbreak",
+                "poison counter its controller has",
+                "/abilities/0/sub_ability",
+            ),
+            (
+                "Guardian of the Gateless",
+                "creature it's blocking",
+                "/triggers/0/execute",
+            ),
+            (
+                "Starlight Spectacular",
+                "creature chosen before it",
+                "/triggers/0/execute/sub_ability",
+            ),
+        ] {
+            if face.name == name {
+                let node = value.pointer(path).unwrap();
+                assert!(matches!(
+                    node["effect"]["type"].as_str(),
+                    Some("Pump" | "PumpAll")
+                ));
+                assert_eq!(node["duration"], "UntilEndOfTurn");
+                let warnings = serde_json::to_value(&face.parse_warnings).unwrap();
+                let warning = warnings
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|w| w["type"] == "SwallowedClause" && w["detector"] == "DynamicQty")
+                    .unwrap();
+                assert_eq!(
+                    warning["gap"],
+                    serde_json::json!({"kind":"unparsed_quantity","operand":operand})
+                );
+                assert!(
+                    warning["unit_span"]["end_byte"].as_u64().unwrap()
+                        > warning["unit_span"]["start_byte"].as_u64().unwrap()
+                );
+                assert!(!warning["items"].as_array().unwrap().is_empty());
+            }
+        }
+        if face.card_type.subtypes == ["Licid"] {
+            let root = &face.abilities[0];
+            assert_eq!(root.duration, Some(Duration::Permanent));
+            assert!(root.cost.is_some());
+            let Effect::GenericEffect {
+                static_abilities,
+                end_cost,
+                duration,
+                ..
+            } = root.effect.as_ref()
+            else {
+                panic!("{}", face.name)
+            };
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert!(end_cost.is_some());
+            assert!(static_abilities[0].modifications.iter().any(
+                |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Aura")
+            ));
+            assert!(matches!(
+                *root.sub_ability.as_ref().unwrap().effect,
+                Effect::Attach { .. }
+            ));
+            assert!(
+                face.static_abilities.len() + face.abilities.len() + face.triggers.len() >= 2,
+                "{} independent printed body",
+                face.name
+            );
+        }
+        if face.name == "Varchild's Crusader" {
+            let delayed = face.abilities[0].sub_ability.as_ref().unwrap();
+            assert!(matches!(
+                *delayed.effect,
+                Effect::CreateDelayedTrigger { .. }
+            ));
+            assert_eq!(delayed.duration, None);
+        }
+        let exception = match face.name.as_str() {
+            "Departed Deckhand" => Some((
+                TypedFilter::new(TypeFilter::Subtype("Spirit".into())),
+                TargetFilter::ParentTarget,
+            )),
+            "Varchild's Crusader" => Some((
+                TypedFilter::new(TypeFilter::Subtype("Wall".into())),
+                TargetFilter::SelfRef,
+            )),
+            "Tin Street Dodger" => Some((
+                TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+                    value: Keyword::Defender,
+                }]),
+                TargetFilter::SelfRef,
+            )),
+            "Dread Charge" => Some((
+                TypedFilter::creature().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Black,
+                }]),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::HasColor {
+                            color: ManaColor::Black,
+                        }]),
+                ),
+            )),
+            _ => None,
+        };
+        if let Some((filter, affected)) = exception {
+            let root = &face.abilities[0];
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = root.effect.as_ref()
+            else {
+                panic!("{} restriction owner", face.name)
+            };
+            assert_eq!(root.duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(*duration, root.duration);
+            let mode = crate::types::statics::StaticMode::CantBeBlockedExceptBy {
+                kind: crate::types::statics::BlockExceptionKind::Quality(TargetFilter::Typed(
+                    filter,
+                )),
+            };
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(static_abilities[0].mode, mode);
+            assert_eq!(static_abilities[0].affected, Some(affected));
+            assert_eq!(
+                static_abilities[0].modifications,
+                vec![ContinuousModification::AddStaticMode { mode }]
+            );
+            assert_eq!(static_abilities[0].condition, None);
+        }
+        if face.name == "Chong and Lily, Nomads" {
+            let execute = face.triggers[0].execute.as_deref().unwrap();
+            assert_eq!(execute.mode_abilities.len(), 2);
+            assert!(matches!(
+                *execute.mode_abilities[0].effect,
+                Effect::PutCounter { .. }
+            ));
+            let Effect::PumpAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } = execute.mode_abilities[1].effect.as_ref()
+            else {
+                panic!("{execute:#?}")
+            };
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+        }
+        if face.name == "Phyresis Outbreak" {
+            assert!(matches!(
+                *face.abilities[0].effect,
+                Effect::GivePlayerCounter { .. }
+            ));
+            let pump = face.abilities[0].sub_ability.as_ref().unwrap();
+            assert_eq!(
+                pump.sub_link,
+                crate::types::ability::SubAbilityLink::SequentialSibling
+            );
+            let Effect::PumpAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } = pump.effect.as_ref()
+            else {
+                panic!("{pump:#?}")
+            };
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+        }
+        exports.insert(face.name.to_lowercase(), value);
+        faces.push(face);
+    }
+    let whole = serde_json::to_string(&exports).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        CardDatabase::from_json_str(&whole).unwrap(),
+        CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        for face in &faces {
+            assert_eq!(database.get_face_by_name(&face.name), Some(face));
+        }
+    }
+}
+
+// SHAPE: the complete same-is-true continuation keeps each modeled keyword's
+// own predicate and recipient. Unknown keyword variants remain a support limit.
+#[test]
+fn duration_repair_same_is_true_keeps_each_keyword_condition_and_recipient() {
+    for (record, _, _) in duration_repair_printed_cases() {
+        let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(record).unwrap();
+        let (keywords, recipient, board_zone) = match card.name.as_str() {
+            "Bleeding Effect" => (
+                vec![
+                    Keyword::Flying,
+                    Keyword::FirstStrike,
+                    Keyword::DoubleStrike,
+                    Keyword::Deathtouch,
+                    Keyword::Hexproof,
+                    Keyword::Indestructible,
+                    Keyword::Lifelink,
+                    Keyword::Menace,
+                    Keyword::Reach,
+                    Keyword::Trample,
+                    Keyword::Vigilance,
+                ],
+                false,
+                Some(Zone::Graveyard),
+            ),
+            "Concerted Effort" => (
+                vec![
+                    Keyword::Flying,
+                    Keyword::Fear,
+                    Keyword::FirstStrike,
+                    Keyword::DoubleStrike,
+                    Keyword::Unknown("landwalk".into()),
+                    Keyword::Unknown("protection".into()),
+                    Keyword::Trample,
+                    Keyword::Vigilance,
+                ],
+                false,
+                None,
+            ),
+            "Majestic Myriarch" => (
+                vec![
+                    Keyword::Flying,
+                    Keyword::FirstStrike,
+                    Keyword::DoubleStrike,
+                    Keyword::Deathtouch,
+                    Keyword::Haste,
+                    Keyword::Hexproof,
+                    Keyword::Indestructible,
+                    Keyword::Lifelink,
+                    Keyword::Menace,
+                    Keyword::Reach,
+                    Keyword::Trample,
+                    Keyword::Vigilance,
+                ],
+                true,
+                Some(Zone::Battlefield),
+            ),
+            "Odric, Lunarch Marshal" => (
+                vec![
+                    Keyword::FirstStrike,
+                    Keyword::Flying,
+                    Keyword::Deathtouch,
+                    Keyword::DoubleStrike,
+                    Keyword::Haste,
+                    Keyword::Hexproof,
+                    Keyword::Indestructible,
+                    Keyword::Lifelink,
+                    Keyword::Menace,
+                    Keyword::Reach,
+                    Keyword::Skulk,
+                    Keyword::Trample,
+                    Keyword::Vigilance,
+                ],
+                false,
+                None,
+            ),
+            "Thunderous Orator" => (
+                vec![
+                    Keyword::Flying,
+                    Keyword::FirstStrike,
+                    Keyword::DoubleStrike,
+                    Keyword::Deathtouch,
+                    Keyword::Indestructible,
+                    Keyword::Lifelink,
+                    Keyword::Menace,
+                    Keyword::Trample,
+                ],
+                true,
+                Some(Zone::Battlefield),
+            ),
+            _ => continue,
+        };
+        let face = crate::database::synthesis::build_oracle_face(&card, None);
+        let execute = face.triggers[0].execute.as_deref().unwrap();
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(execute.condition, None);
+        for member in std::iter::successors(Some(execute), |node| node.sub_ability.as_deref()) {
+            let Effect::GenericEffect {
+                duration, target, ..
+            } = member.effect.as_ref()
+            else {
+                panic!("{} complete continuation", card.name)
+            };
+            assert_eq!(member.duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(*duration, member.duration);
+            assert_eq!(*target, None);
+        }
+        let mut definitions = Vec::new();
+        complete_publication_static_nodes(
+            &serde_json::to_value(execute).unwrap(),
+            &mut definitions,
+        );
+        assert_eq!(definitions.len(), keywords.len());
+        for keyword in keywords {
+            let matching = definitions
+                .iter()
+                .filter(|d| {
+                    d.modifications
+                        == vec![ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        }]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{} {keyword:?}", card.name);
+            let definition = matching[0];
+            assert_eq!(
+                definition.affected,
+                Some(if recipient {
+                    TargetFilter::SelfRef
+                } else {
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+                })
+            );
+            let Some(StaticCondition::IsPresent {
+                filter: TargetFilter::Typed(filter),
+            }) = &definition.condition
+            else {
+                panic!("{definition:#?}")
+            };
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(
+                filter.properties.len(),
+                1 + usize::from(board_zone.is_some())
+            );
+            assert!(filter
+                .properties
+                .contains(&FilterProp::WithKeyword { value: keyword }));
+            if let Some(zone) = board_zone {
+                assert!(filter.properties.contains(&FilterProp::InZone { zone }));
+            }
+        }
+    }
+}
