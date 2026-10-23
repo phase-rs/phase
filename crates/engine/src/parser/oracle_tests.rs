@@ -161,10 +161,21 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
             Some(&faces[0])
         );
         assert_eq!(database.get_face_by_name("Stoke Genius"), Some(&faces[1]));
+        let oracle_id = faces[0].scryfall_oracle_id.as_ref().unwrap();
         assert_eq!(
-            database.get_by_name("Hearth Elemental").unwrap().layout,
-            crate::types::card::CardLayout::Adventure(faces[0].clone(), faces[1].clone())
+            database.get_layout_kind(oracle_id),
+            Some(crate::types::card::LayoutKind::Adventure)
         );
+        for (face, other_face) in [(&faces[0], &faces[1]), (&faces[1], &faces[0])] {
+            let printed_ref = crate::types::card::PrintedCardRef {
+                oracle_id: oracle_id.clone(),
+                face_name: face.name.clone(),
+            };
+            assert_eq!(
+                database.get_other_face_by_printed_ref(&printed_ref),
+                Some(other_face)
+            );
+        }
         let linked: serde_json::Value = serde_json::from_str(
             &database.export_subset_json(
                 &["Hearth Elemental".to_owned(), "Stoke Genius".to_owned()]
