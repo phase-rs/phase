@@ -46,3 +46,5 @@ ngrok = ["dep:ngrok"]
 [dev-dependencies]
 tokio-tungstenite = "0.29"
 tokio = { version = "1", features = ["test-util"] }
+# GameScenario/GameRunner (bandwidth_budget_tests) sit behind the engine's `test-support` feature.
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
