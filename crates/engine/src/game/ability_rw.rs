@@ -3741,6 +3741,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Learn
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
@@ -5111,6 +5112,16 @@ fn rw_effect(
             p.writes_external_counter_census.merge(Census::Any);
             p.merge(rw_quantity_expr(amount));
             (p, Some(WriteScope::External))
+        }
+        // CR 107.3 + CR 603.3b: rewrites the event spell's X. The read of the
+        // current X is this write's own modify-input (read-modify-write), so it is
+        // not profiled as an event-live read, and identical doublings commute
+        // (x·2·2). No StateKind models a stack object's X, so the fail-closed
+        // `Other` kind.
+        Effect::ModifyAnnouncedX { modification: _ } => {
+            let mut p = RwProfile::empty();
+            place_object_write(&mut p, StateKind::Other, WriteScope::EventObject);
+            (p, Some(WriteScope::EventObject))
         }
         Effect::Double {
             target,
@@ -7786,6 +7797,7 @@ mod tests {
             QuantityRef::DistinctSubtypes {
                 source: journal.clone(),
                 exclude: crate::types::ability::SubtypeExclusion::None,
+                restrict: None,
             },
             QuantityRef::DistinctColorsAmong {
                 source: journal.clone(),

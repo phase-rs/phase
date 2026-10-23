@@ -9,7 +9,7 @@ use nom::Parser;
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
     DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, XModification,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -1611,8 +1611,24 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 }
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
-/// mana-doubling, or P/T-doubling.
+/// mana-doubling, or P/T-doubling; CR 107.3e: "double the value of X" to the
+/// triggering spell's X.
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    // CR 107.3e: in a spell-cast trigger body, "the value of X" is the X of the
+    // spell that caused the trigger (the body's object anaphor is pinned to
+    // `TriggeringSource` only by a spell-cast head). Anywhere else nothing names
+    // whose X it is, so the clause stays an honest gap.
+    if all_consuming(tag::<_, _, OracleError<'_>>("double the value of x"))
+        .parse(lower)
+        .is_ok()
+    {
+        return Some(match ctx.object_pronoun_ref {
+            Some(TargetFilter::TriggeringSource) => Effect::ModifyAnnouncedX {
+                modification: XModification::DOUBLE,
+            },
+            _ => Effect::unimplemented("double_value_of_x_without_triggering_spell", lower),
+        });
+    }
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter
     // kinds. The doubled amount is intrinsic to the resolver ("give as many of
     // those counters as already present"), never a `QuantityExpr` carrier.

@@ -21,7 +21,7 @@ use super::counter::{
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
     parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
-    strip_leading_quantifier, strip_trailing_where_x,
+    strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -80,10 +80,10 @@ use super::super::oracle_target::{
     starts_with_type_word, TargetSyntax,
 };
 use super::super::oracle_util::{
-    contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
-    parse_count_head, parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only,
-    rewrite_quantity_expr_rounding, split_around, starts_with_possessive, strip_possessive,
-    CountHead, CountWord, TextPair,
+    contains_possessive, contains_self_or_object_pronoun, merge_or_filters,
+    parse_comparator_prefix, parse_count_expr, parse_count_head, parse_mana_symbols, parse_ordinal,
+    parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
+    starts_with_possessive, strip_possessive, CountHead, CountWord, TextPair,
 };
 
 fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -12742,15 +12742,58 @@ fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<Target
 /// Anchored on `tag("empower jace ")` — the trailing space is the word
 /// boundary, and the walker word is part of the tag because CR 701.71a fixes
 /// the walker: a clause naming any other walker is not this keyword action.
-/// N goes through `parse_count_expr`: a number, or `X` together with its
-/// adjacent "where X is …" binder, which `parse_count_expr` binds in place when
-/// the description is a representable quantity. Any residue after N — including
-/// an unrepresentable binder — fails closed (`None`), so the clause stays an
-/// honest gap rather than an EmpowerJace carrying an unbound `X`.
-fn parse_empower_jace(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("empower jace ")
-        .parse(lower.trim())
-        .ok()?;
+///
+/// N is parsed in two passes:
+///   1. `parse_count_expr` — a number, or `X` together with an adjacent
+///      "where X is …" binder it can bind in place (a context-free definition
+///      such as "the number of creatures exiled this way"). Unchanged route.
+///   2. CR 107.3c + CR 608.2c: a definition the clause-level grammar declines
+///      (a context-dependent demonstrative like "that excess damage") is peeled
+///      with `strip_terminal_where_x` so the keyword-action phrase parses to its
+///      end, and N is left as a bare `Variable("X")`. Binding is deferred to
+///      `apply_where_x_ability_expression`, the single authority that can see
+///      the clause condition licensing a resolution-local demonstrative
+///      (CR 120.10). This mirrors `Effect::Discover` (`mod.rs`).
+///
+/// Pass 2 accepts only a definition that ends the sentence, because this
+/// production lowers only the text before it and has nowhere to put anything
+/// written after it.
+///
+/// A residue that is not a trailing where-X definition still fails closed
+/// (`None`): the deferral is licensed by the definition, never by "something was
+/// left over". A deferred `X` is never silently lost either: the def-level
+/// totality guard rewrites an unbound X under a where-X clause into
+/// `Effect::unimplemented("where_x_binding", …)`.
+fn parse_empower_jace(text: &str, lower: &str) -> Option<Effect> {
+    // Existing route: a context-free binder binds inside the count grammar.
+    if let Some(effect) = parse_empower_jace_phrase(text, lower) {
+        return Some(effect);
+    }
+    // CR 107.3c + CR 608.2c: the clause defines X in a trailing where-X tail,
+    // but the context-free count grammar declined the definition. Strip the
+    // tail so the keyword-action phrase parses to its end and leave N as
+    // `Variable("X")`; the def-level pass binds it or reports the gap. The
+    // clause IR records the same tail for that pass (`mod.rs`), so no
+    // definition is dropped here.
+    let (stripped, where_x) = strip_terminal_where_x(TextPair::new(text, lower))?;
+    // CR 107.3f: an X the text does not define is chosen by the spell's or the
+    // ability's controller. A comparator ("where X is less than or equal to 3")
+    // constrains that choice instead of defining it, and this keyword action has
+    // no announcement step where such a choice could be made — the shared grammar
+    // would leave a bare `Variable("X")` that resolves to 0. Keep the clause
+    // fail-closed rather than lowering a quantity this production cannot honour.
+    if parse_comparator_prefix(&where_x.to_lowercase()).is_some() {
+        return None;
+    }
+    parse_empower_jace_phrase(stripped.original, stripped.lower)
+}
+
+/// The `empower Jace N` phrase itself, with `N` parsed by `parse_count_expr`
+/// and only an optional period allowed after it.
+fn parse_empower_jace_phrase(text: &str, lower: &str) -> Option<Effect> {
+    let (_, rest) = nom_on_lower(text, lower, |input| {
+        value((), tag("empower jace ")).parse(input)
+    })?;
     let (count, remainder) = parse_count_expr(rest)?;
     all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
         .parse(remainder.trim())
@@ -12843,7 +12886,7 @@ pub(super) fn parse_imperative_family_ast(
     // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
     // production beside `recruit` / `assimilate` for the same family (B)
     // reason: no new string-literal `match first_word` arm.
-    if let Some(effect) = parse_empower_jace(lower) {
+    if let Some(effect) = parse_empower_jace(text, lower) {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
     }
 
@@ -28882,13 +28925,13 @@ mod tests {
     #[test]
     fn parse_empower_jace_reads_n() {
         assert_eq!(
-            parse_empower_jace("empower jace 2"),
+            parse_empower_jace("empower jace 2", "empower jace 2"),
             Some(Effect::EmpowerJace {
                 count: QuantityExpr::Fixed { value: 2 }
             })
         );
         assert_eq!(
-            parse_empower_jace("empower jace x"),
+            parse_empower_jace("empower jace x", "empower jace x"),
             Some(Effect::EmpowerJace {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -28898,26 +28941,104 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_empower_jace("empower jace 6."),
+            parse_empower_jace("empower jace 6.", "empower jace 6."),
             Some(Effect::EmpowerJace {
                 count: QuantityExpr::Fixed { value: 6 }
             })
         );
     }
 
+    /// CR 107.3c + CR 120.10: a where-X definition the clause-level count grammar
+    /// declines (the context-dependent demonstrative) is stripped so the keyword
+    /// action parses; binding is deferred to the definition-level pass.
+    #[test]
+    fn parse_empower_jace_defers_a_context_dependent_where_x() {
+        let text = "Empower Jace X, where X is that excess damage";
+        let lower = text.to_lowercase();
+        assert_eq!(
+            parse_empower_jace(text, &lower),
+            Some(Effect::EmpowerJace {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            })
+        );
+    }
+
+    /// A literal N with a terminal where-X definition is still accepted: the
+    /// definition may be inherited by another clause of the same sentence through
+    /// `compute_sentence_where_x`, and an unused definition is inert (CR 107.3c:
+    /// only the text's X occurrences take that value).
+    #[test]
+    fn parse_empower_jace_accepts_a_literal_n_beside_a_where_x_tail() {
+        let text = "Empower Jace 2, where X is that excess damage";
+        let lower = text.to_lowercase();
+        assert_eq!(
+            parse_empower_jace(text, &lower),
+            Some(Effect::EmpowerJace {
+                count: QuantityExpr::Fixed { value: 2 }
+            })
+        );
+    }
+
+    /// The deferral is licensed only by a definition that ENDS the sentence: this
+    /// production lowers only the text before it, so accepting a definition with
+    /// instructions after it would silently drop them. Paired positive: the
+    /// declarative test above.
+    #[test]
+    fn parse_empower_jace_rejects_a_definition_with_text_after_it() {
+        let text = "Empower Jace 2, where X is the number of creatures you control, draw a card";
+        let lower = text.to_lowercase();
+        assert_eq!(parse_empower_jace(text, &lower), None);
+    }
+
+    /// CR 107.3f: a comparator constrains the controller's choice of an undefined
+    /// X instead of defining it, and a keyword action has no announcement step
+    /// for that choice; the shared grammar's `Variable("X")` would resolve to 0.
+    /// Keep the clause fail-closed instead. The mixed-case input pins the guard's
+    /// lowercasing, since the definition is extracted original-cased.
+    #[test]
+    fn parse_empower_jace_rejects_a_comparator_definition() {
+        for text in [
+            "Empower Jace X, where X is less than or equal to 3",
+            "Empower Jace X, where X is Less Than Or Equal To 3",
+        ] {
+            let lower = text.to_lowercase();
+            assert_eq!(parse_empower_jace(text, &lower), None, "{text:?}");
+        }
+    }
+
     /// CR 701.71a: the anchored grammar rejects a longer verb, another walker,
-    /// and any residue after N. The positive reach-guard is
-    /// `parse_empower_jace_reads_n` plus the `empower jace 2` line below.
+    /// and any residue that is not a trailing where-X definition. The positive
+    /// reach-guard is `parse_empower_jace_reads_n` plus the `empower jace 2`
+    /// line below.
     #[test]
     fn parse_empower_jace_rejects_adjacent_grammar() {
-        assert!(parse_empower_jace("empower jace 2").is_some());
+        assert!(parse_empower_jace("empower jace 2", "empower jace 2").is_some());
         for text in [
             "empowered jace 2",
             "empower bolas 2",
             "empower jace 2 and draw",
         ] {
-            assert_eq!(parse_empower_jace(text), None, "{text:?} must not parse");
+            let lower = text.to_lowercase();
+            assert_eq!(
+                parse_empower_jace(text, &lower),
+                None,
+                "{text:?} must not parse"
+            );
         }
+    }
+
+    /// The strip is licensed only by a real trailing where-X tail; any other
+    /// residue still fails closed. Paired positive: the first line below.
+    #[test]
+    fn parse_empower_jace_still_rejects_residue_without_a_where_x() {
+        assert!(parse_empower_jace("empower jace 2", "empower jace 2").is_some());
+        let text = "empower jace 2 and draw a card";
+        let lower = text.to_lowercase();
+        assert_eq!(parse_empower_jace(text, &lower), None);
     }
 
     /// SHAPE — CR 115.1d + CR 122.1: A fixed "each of two creatures" counter
