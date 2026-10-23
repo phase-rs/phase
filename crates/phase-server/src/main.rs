@@ -14340,7 +14340,7 @@ mod draft_socket_authority_tests {
                 },
                 picked_card_instance_ids: vec!["TST-0-0-0".into()],
                 burned_card_instance_ids: Vec::new(),
-                effect_card_instance_id: None,
+                effect_card_instance_ids: Vec::new(),
             };
             let mut cases = vec![
                 (select.clone(), "FIFO drafting is not supported by this runtime"),

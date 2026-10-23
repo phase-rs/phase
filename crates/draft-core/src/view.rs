@@ -32,10 +32,15 @@ pub struct FifoHeadView {
     pub original_size: u8,
 }
 
+/// The draft-effect cards a seat may use on its head pack, and the exact
+/// requirements for each number of them it may use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FifoEffectRequirements {
-    pub card_instance_id: String,
-    pub requirements: DraftSelectionRequirements,
+pub struct FifoEffectOptions {
+    /// The seat's eligible `AdditionalPick` pool cards, in pool order.
+    pub card_instance_ids: Vec<String>,
+    /// Entry `i` is the exact picks and burns when `i + 1` of those cards are
+    /// used. It ends at the most cards one step on this head can use.
+    pub requirements: Vec<DraftSelectionRequirements>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +51,9 @@ pub struct FifoPlayerView {
     pub head: Option<FifoHeadView>,
     pub prompt_id: Option<DraftPromptId>,
     pub requirements: DraftSelectionRequirements,
-    pub effects: Vec<FifoEffectRequirements>,
+    /// `None` when the seat is not drafting, holds no eligible card, or has a
+    /// head that cannot supply one additional card.
+    pub effects: Option<FifoEffectOptions>,
     pub clock: Option<DraftClock>,
 }
 
@@ -68,33 +75,53 @@ fn fifo_progress_view(session: &DraftSession, seat: usize) -> Option<FifoProgres
     })
 }
 
+/// The draft-effect cards `seat` may use on its head pack. Every requirement
+/// is `pick_pass::selection_requirements`'s for that many cards, so no reader
+/// derives a count.
+fn fifo_effect_options(session: &DraftSession, seat: u8) -> Option<FifoEffectOptions> {
+    let card_instance_ids: Vec<String> = session
+        .pools
+        .get(usize::from(seat))?
+        .iter()
+        .filter(|card| {
+            crate::pick_pass::selection_requirements(
+                session,
+                seat,
+                std::slice::from_ref(&card.instance_id),
+            )
+            .is_ok()
+        })
+        .map(|card| card.instance_id.clone())
+        .collect();
+    // Each prefix of the eligible cards in turn, until the head cannot
+    // supply the step.
+    let requirements: Vec<DraftSelectionRequirements> = card_instance_ids
+        .iter()
+        .enumerate()
+        .map_while(|(last, _)| {
+            crate::pick_pass::selection_requirements(session, seat, &card_instance_ids[..=last])
+                .ok()
+        })
+        .collect();
+    (!requirements.is_empty()).then_some(FifoEffectOptions {
+        card_instance_ids,
+        requirements,
+    })
+}
+
 fn fifo_player_view(session: &DraftSession, seat_index: u8) -> Option<FifoPlayerView> {
     let seat = session.fifo.as_ref()?.seats.get(usize::from(seat_index))?;
     let active = session.status == DraftStatus::Drafting;
     let prompt = seat.prompt.as_ref();
     let requirements = if active {
-        crate::pick_pass::selection_requirements(session, seat_index, None).unwrap_or_default()
+        crate::pick_pass::selection_requirements(session, seat_index, &[]).unwrap_or_default()
     } else {
         DraftSelectionRequirements::default()
     };
     let effects = if active {
-        session.pools[usize::from(seat_index)]
-            .iter()
-            .filter_map(|card| {
-                crate::pick_pass::selection_requirements(
-                    session,
-                    seat_index,
-                    Some(&card.instance_id),
-                )
-                .ok()
-                .map(|requirements| FifoEffectRequirements {
-                    card_instance_id: card.instance_id.clone(),
-                    requirements,
-                })
-            })
-            .collect()
+        fifo_effect_options(session, seat_index)
     } else {
-        Vec::new()
+        None
     };
     Some(FifoPlayerView {
         state: fifo_public_view(session)?,

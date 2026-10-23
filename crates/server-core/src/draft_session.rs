@@ -1012,14 +1012,14 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
             ..
         } => Ok(DraftAction::Select {
             seat: u8::try_from(seat).map_err(|_| "Invalid authenticated seat".to_string())?,
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
         }),
         DraftAction::AdvanceClock => Err("AdvanceClock is server-internal".to_string()),
         // Seat-scoped: overwrite the client-supplied seat with the authenticated
@@ -1378,7 +1378,7 @@ mod tests {
             },
             picked_card_instance_ids: vec!["z".into(), "a".into()],
             burned_card_instance_ids: vec!["b".into(), "y".into()],
-            effect_card_instance_id: Some("effect".into()),
+            effect_card_instance_ids: vec!["effect-b".into(), "effect-a".into()],
         };
         let mut expected = action.clone();
         if let DraftAction::Select { seat, .. } = &mut expected {

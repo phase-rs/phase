@@ -7,8 +7,7 @@
 use std::collections::HashSet;
 
 use draft_core::types::{
-    DraftAction, MAX_CARDS_PER_PICK, MAX_COMMANDER_DESIGNATIONS, MAX_DRAFT_EFFECT_PICKS,
-    MAX_SHARED_STACK_PILES, MIN_DRAFT_EFFECT_PICKS,
+    DraftAction, MAX_CARDS_PER_PICK, MAX_COMMANDER_DESIGNATIONS, MAX_SHARED_STACK_PILES,
 };
 use lobby_broker::inbound_guard::{validate_deck_list, MAX_MAIN_DECK_ENTRIES};
 use lobby_broker::validation::{
@@ -22,22 +21,19 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
             ..
         } => {
-            use draft_core::types::{valid_draft_id, MAX_DRAFT_JSON_INTEGER};
+            use draft_core::types::{
+                select_pick_count_is_admitted, valid_draft_id, MAX_DRAFT_JSON_INTEGER,
+            };
             // An action alone can state only a range of pick counts. The exact
             // count for the session's kind and head pack is
             // `draft_core::pick_pass::selection_requirements`'s.
-            let pick_count_is_admitted = match effect_card_instance_id {
-                None => {
-                    !picked_card_instance_ids.is_empty()
-                        && picked_card_instance_ids.len() <= MAX_CARDS_PER_PICK
-                }
-                Some(_) => (MIN_DRAFT_EFFECT_PICKS..=MAX_DRAFT_EFFECT_PICKS)
-                    .contains(&picked_card_instance_ids.len()),
-            };
-            if !pick_count_is_admitted {
+            if !select_pick_count_is_admitted(
+                picked_card_instance_ids.len(),
+                effect_card_instance_ids.len(),
+            ) {
                 return Err("Select has invalid pick count".to_string());
             }
             if burned_card_instance_ids.len() > usize::from(u8::MAX) {
@@ -53,7 +49,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
             for id in picked_card_instance_ids
                 .iter()
                 .chain(burned_card_instance_ids)
-                .chain(effect_card_instance_id)
+                .chain(effect_card_instance_ids)
             {
                 if !valid_draft_id(id) {
                     return Err("Select has invalid card ID".to_string());
@@ -220,7 +216,7 @@ mod tests {
             },
             picked_card_instance_ids: vec!["pick".into()],
             burned_card_instance_ids: (0..255).map(|n| format!("burn-{n}")).collect(),
-            effect_card_instance_id: None,
+            effect_card_instance_ids: Vec::new(),
         };
         assert_eq!(guard_draft_action_payload(&valid), Ok(()));
         let mut cases = Vec::new();
@@ -287,14 +283,67 @@ mod tests {
         let mut effect = valid.clone();
         if let DraftAction::Select {
             picked_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
             ..
         } = &mut effect
         {
             picked_card_instance_ids.push("pick-two".into());
-            *effect_card_instance_id = Some("effect".into());
+            *effect_card_instance_ids = vec!["effect".into()];
         }
         assert_eq!(guard_draft_action_payload(&effect), Ok(()));
+        // A selection that names draft-effect cards takes a pick step plus one
+        // card for each of them, whatever their number and the kind's step.
+        let with_effects = |effects: usize, picks: usize| {
+            let mut action = valid.clone();
+            if let DraftAction::Select {
+                picked_card_instance_ids,
+                effect_card_instance_ids,
+                ..
+            } = &mut action
+            {
+                *picked_card_instance_ids = (0..picks).map(|n| format!("pick-{n}")).collect();
+                *effect_card_instance_ids = (0..effects).map(|n| format!("effect-{n}")).collect();
+            }
+            action
+        };
+        for effects in [1, 2, 9] {
+            for pick_step in [1, MAX_CARDS_PER_PICK] {
+                let picks = pick_step + effects;
+                assert_eq!(
+                    guard_draft_action_payload(&with_effects(effects, picks)),
+                    Ok(()),
+                    "{effects} draft-effect ids with {picks} picks"
+                );
+            }
+            for picks in [effects, effects + MAX_CARDS_PER_PICK + 1] {
+                cases.push((
+                    with_effects(effects, picks),
+                    "Select has invalid pick count",
+                ));
+            }
+        }
+        // The largest pack a session can hold bounds the picks.
+        let largest_pack = usize::from(u8::MAX);
+        assert_eq!(
+            guard_draft_action_payload(&with_effects(largest_pack - 1, largest_pack)),
+            Ok(())
+        );
+        cases.push((
+            with_effects(largest_pack - 1, largest_pack + 1),
+            "Select has invalid pick count",
+        ));
+        // Draft-effect ids are distinct, and disjoint from the picks and burns.
+        for repeated in ["effect-0", "pick-0", "burn-0"] {
+            let mut bad = with_effects(2, 3);
+            if let DraftAction::Select {
+                effect_card_instance_ids,
+                ..
+            } = &mut bad
+            {
+                effect_card_instance_ids[1] = repeated.into();
+            }
+            cases.push((bad, "Select requires distinct disjoint IDs"));
+        }
         // A draft-effect selection takes the kind's pick step plus one card,
         // so Commander Draft's takes three.
         let mut three = effect.clone();
@@ -318,23 +367,24 @@ mod tests {
             }
             action
         };
-        for count in [MIN_DRAFT_EFFECT_PICKS, MAX_DRAFT_EFFECT_PICKS] {
+        // One draft-effect card: a pick step of one or two cards plus one.
+        for count in [2, 3] {
             assert_eq!(
                 guard_draft_action_payload(&with_picks(count)),
                 Ok(()),
                 "{count} picks with a draft effect"
             );
         }
-        for count in [MIN_DRAFT_EFFECT_PICKS - 1, MAX_DRAFT_EFFECT_PICKS + 1] {
+        for count in [1, 4] {
             cases.push((with_picks(count), "Select has invalid pick count"));
         }
         let mut plain_two = effect.clone();
         if let DraftAction::Select {
-            effect_card_instance_id,
+            effect_card_instance_ids,
             ..
         } = &mut plain_two
         {
-            *effect_card_instance_id = None;
+            effect_card_instance_ids.clear();
         }
         assert_eq!(guard_draft_action_payload(&plain_two), Ok(()));
         let mut bad = effect.clone();
@@ -348,11 +398,11 @@ mod tests {
         cases.push((bad, "Select has invalid pick count"));
         let mut bad = effect;
         if let DraftAction::Select {
-            effect_card_instance_id,
+            effect_card_instance_ids,
             ..
         } = &mut bad
         {
-            *effect_card_instance_id = Some("pick".into());
+            *effect_card_instance_ids = vec!["pick".into()];
         }
         cases.push((bad, "Select requires distinct disjoint IDs"));
         for (action, reason) in cases {

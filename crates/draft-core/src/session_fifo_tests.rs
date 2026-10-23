@@ -279,14 +279,14 @@ fn select(
     seat: u8,
     picked: Vec<String>,
     burned: Vec<String>,
-    effect: Option<String>,
+    effects: Vec<String>,
 ) -> DraftAction {
     DraftAction::Select {
         seat,
         prompt_id: prompt(session, seat),
         picked_card_instance_ids: picked,
         burned_card_instance_ids: burned,
-        effect_card_instance_id: effect,
+        effect_card_instance_ids: effects,
     }
 }
 fn choose(session: &mut DraftSession, seat: u8, now: u64) -> Vec<DraftDelta> {
@@ -304,7 +304,7 @@ fn expected(
     prompt_id: DraftPromptId,
     picks: Vec<String>,
     burns: Vec<String>,
-    returned: Option<String>,
+    returned: Vec<String>,
     discarded: Vec<String>,
 ) -> DraftDelta {
     DraftDelta::SelectionAccepted {
@@ -312,7 +312,7 @@ fn expected(
         prompt_id,
         picked_card_instance_ids: picks,
         burned_card_instance_ids: burns,
-        returned_card_instance_id: returned,
+        returned_card_instance_ids: returned,
         discarded_card_instance_ids: discarded,
     }
 }
@@ -386,11 +386,11 @@ fn fifo_circulated_pack_rejects_old_prompt() {
     .unwrap();
     assert_eq!(first.head_pack(0), second.head_pack(0));
     assert_eq!(prompt(&first, 0).generation, prompt(&second, 0).generation);
-    let foreign = select(&second, 0, ids(0, &["z"]), vec![], None);
+    let foreign = select(&second, 0, ids(0, &["z"]), vec![], vec![]);
     assert_refusal(&first, foreign, 1100, DraftError::StalePrompt);
     choose(&mut second, 0, 1100);
     let mut session = fixture(DraftKind::Premier, 6, 0, 0, 0, None);
-    let old = select(&session, 0, ids(0, &["c"]), vec![], None);
+    let old = select(&session, 0, ids(0, &["c"]), vec![], vec![]);
     for _ in 0..4 {
         for seat in 0..4 {
             choose(&mut session, seat, 1100);
@@ -403,7 +403,7 @@ fn fifo_circulated_pack_rejects_old_prompt() {
         .iter()
         .any(|card| card.instance_id == "s0-r0-c"));
     assert_refusal(&session, old, 1100, DraftError::StalePrompt);
-    let good = select(&session, 0, ids(0, &["c"]), vec![], None);
+    let good = select(&session, 0, ids(0, &["c"]), vec![], vec![]);
     let mut foreign = good.clone();
     if let DraftAction::Select { prompt_id, .. } = &mut foreign {
         prompt_id.session_id = DraftSessionId("incarnation-two".into());
@@ -421,7 +421,13 @@ fn fifo_selection_accepted_reports_consumed_authority() {
     choose(&mut session, 0, 1100);
     let old = prompt(&session, 1);
     assert_eq!(session.fifo.as_ref().unwrap().seats[1].queue.len(), 2);
-    let action = select(&session, 1, ids(1, &["x", "a"]), ids(1, &["b", "z"]), None);
+    let action = select(
+        &session,
+        1,
+        ids(1, &["x", "a"]),
+        ids(1, &["b", "z"]),
+        vec![],
+    );
     let mut bad = action.clone();
     if let DraftAction::Select { prompt_id, .. } = &mut bad {
         prompt_id.generation += 1;
@@ -470,7 +476,7 @@ fn fifo_selection_accepted_reports_consumed_authority() {
             old.clone(),
             ids(1, &["x", "a"]),
             ids(1, &["b", "z"]),
-            None,
+            vec![],
             vec![]
         )]
     );
@@ -508,23 +514,27 @@ fn fifo_selection_accepted_reports_returned_and_discarded_ids() {
     choose(&mut session, 0, 1100);
     let old = prompt(&session, 1);
     assert_eq!(
-        filter_for_player(&session, 1).fifo.unwrap().effects.len(),
-        1
+        filter_for_player(&session, 1)
+            .fifo
+            .unwrap()
+            .effects
+            .map(|options| options.card_instance_ids),
+        Some(vec!["s1-r0-z".to_string()])
     );
     let action = select(
         &session,
         1,
         ids(0, &["b", "a"]),
         vec![],
-        Some("s1-r0-z".into()),
+        vec!["s1-r0-z".into()],
     );
     let mut bad = action.clone();
     if let DraftAction::Select {
-        effect_card_instance_id,
+        effect_card_instance_ids,
         ..
     } = &mut bad
     {
-        *effect_card_instance_id = Some("s0-r0-z".into());
+        *effect_card_instance_ids = vec!["s0-r0-z".into()];
     }
     assert_refusal(
         &session,
@@ -560,7 +570,7 @@ fn fifo_selection_accepted_reports_returned_and_discarded_ids() {
             old,
             ids(0, &["b", "a"]),
             vec![],
-            Some("s1-r0-z".into()),
+            vec!["s1-r0-z".into()],
             discarded.clone()
         )]
     );
@@ -724,7 +734,7 @@ fn fifo_selection_is_atomic_and_exact() {
         }
     }
     let mut siblings = fixture(DraftKind::Premier, 6, 0, 0, 1000, None);
-    let old = select(&siblings, 0, ids(0, &["z"]), vec![], None);
+    let old = select(&siblings, 0, ids(0, &["z"]), vec![], vec![]);
     choose(&mut siblings, 0, 1100);
     assert_refusal(
         &siblings,
@@ -732,7 +742,7 @@ fn fifo_selection_is_atomic_and_exact() {
         1100,
         DraftError::NoPendingPack { seat: 0 },
     );
-    let tail = select(&siblings, 1, ids(0, &["a"]), vec![], None);
+    let tail = select(&siblings, 1, ids(0, &["a"]), vec![], vec![]);
     assert_refusal(
         &siblings,
         tail,
@@ -741,7 +751,7 @@ fn fifo_selection_is_atomic_and_exact() {
             card_instance_id: "s0-r0-a".into(),
         },
     );
-    let mut wrong = select(&siblings, 1, ids(1, &["z"]), vec![], None);
+    let mut wrong = select(&siblings, 1, ids(1, &["z"]), vec![], vec![]);
     if let DraftAction::Select { seat, .. } = &mut wrong {
         *seat = 9;
     }
@@ -756,7 +766,7 @@ fn fifo_selection_is_atomic_and_exact() {
     );
     choose(&mut siblings, 1, 1100);
     choose(&mut siblings, 3, 1100);
-    let own_pool = select(&siblings, 0, ids(0, &["z"]), vec![], None);
+    let own_pool = select(&siblings, 0, ids(0, &["z"]), vec![], vec![]);
     assert_refusal(
         &siblings,
         own_pool,
@@ -785,15 +795,15 @@ fn fifo_selection_is_atomic_and_exact() {
         1,
         ids(0, &["y", "b"]),
         ids(0, &["x"]),
-        Some("s1-r0-z".into()),
+        vec!["s1-r0-z".into()],
     );
     let mut bad = good.clone();
     if let DraftAction::Select {
-        effect_card_instance_id,
+        effect_card_instance_ids,
         ..
     } = &mut bad
     {
-        *effect_card_instance_id = Some("foreign-effect".into());
+        *effect_card_instance_ids = vec!["foreign-effect".into()];
     }
     assert_refusal(
         &session,
@@ -891,7 +901,7 @@ fn fifo_expiry_selection_is_exact() {
                     prompts[usize::from(seat)].clone(),
                     ids(seat, &picks),
                     ids(seat, &burned),
-                    None,
+                    vec![],
                     vec![]
                 ))
                 .collect::<Vec<_>>()
@@ -962,7 +972,7 @@ fn fifo_expiry_commander_final_singleton() {
                 prompt(&session, seat),
                 ids((seat + 3) % 4, &["y"]),
                 vec![],
-                None,
+                vec![],
                 vec![],
             )
         })
@@ -979,14 +989,19 @@ fn fifo_expiry_leaves_eligible_effect_unspent() {
     choose(&mut session, 0, 1100);
     choose(&mut session, 3, 1100);
     assert_eq!(
-        filter_for_player(&session, 0).fifo.unwrap().effects[0].card_instance_id,
-        "s0-r0-z"
+        filter_for_player(&session, 0)
+            .fifo
+            .unwrap()
+            .effects
+            .unwrap()
+            .card_instance_ids,
+        vec!["s0-r0-z".to_string()]
     );
     let old = prompt(&session, 0);
     let events = apply_at(&mut session, DraftAction::AdvanceClock, None, 2100).unwrap();
     assert_eq!(
         accepted(&events)[0],
-        expected(old, ids(3, &["y"]), ids(3, &["b"]), None, vec![])
+        expected(old, ids(3, &["y"]), ids(3, &["b"]), vec![], vec![])
     );
     assert_eq!(card_ids(&session.pools[0]), vec!["s0-r0-z", "s3-r0-y"]);
     assert_eq!(
@@ -1191,11 +1206,11 @@ fn fifo_selection_threshold_is_after_effect_return() {
         1,
         ids(0, &["b", "a"]),
         vec![],
-        Some("s1-r0-z".into()),
+        vec!["s1-r0-z".into()],
     );
     let events = apply_at(&mut session, action, None, 1100).unwrap();
     assert!(
-        matches!(&accepted(&events)[0], DraftDelta::SelectionAccepted { returned_card_instance_id: Some(id), discarded_card_instance_ids, .. } if id == "s1-r0-z" && discarded_card_instance_ids.is_empty())
+        matches!(&accepted(&events)[0], DraftDelta::SelectionAccepted { returned_card_instance_ids, discarded_card_instance_ids, .. } if *returned_card_instance_ids == ["s1-r0-z"] && discarded_card_instance_ids.is_empty())
     );
     let remainder = session.fifo.as_ref().unwrap().seats[2]
         .queue
@@ -1485,7 +1500,7 @@ fn fifo_clock_policy_boundaries() {
         1000,
     )
     .unwrap();
-    let action = select(&off, 0, ids(0, &["z"]), vec![], None);
+    let action = select(&off, 0, ids(0, &["z"]), vec![], vec![]);
     assert_refusal(
         &off,
         DraftAction::Control {
@@ -2308,12 +2323,12 @@ fn legacy_upgrade_custom_ids_requires_matching_provenance() {
     );
     assert_eq!(legacy, before);
 
-    let action = select(&upgraded, 1, ids(1, &["z"]), vec![], None);
+    let action = select(&upgraded, 1, ids(1, &["z"]), vec![], vec![]);
     let consumed = prompt(&upgraded, 1);
     let deltas = apply_at(&mut upgraded, action, None, 1100).unwrap();
     assert_eq!(
         accepted(&deltas),
-        vec![expected(consumed, ids(1, &["z"]), vec![], None, vec![])]
+        vec![expected(consumed, ids(1, &["z"]), vec![], vec![], vec![])]
     );
     assert_eq!(upgraded.head_metadata(1).unwrap().opening_seat, 0);
     assert_eq!(card_ids(&upgraded.pools[1]), ids(1, &["z"]));
@@ -2429,7 +2444,7 @@ fn legacy_upgrade_unequal_chaos_requires_retained_sparse_progress() {
     );
     assert_eq!(legacy, before);
 
-    let action = select(&upgraded, 1, vec!["BBB-3-0-2".into()], vec![], None);
+    let action = select(&upgraded, 1, vec!["BBB-3-0-2".into()], vec![], vec![]);
     let consumed = prompt(&upgraded, 1);
     assert_eq!(
         accepted(&apply_at(&mut upgraded, action, None, 1100).unwrap()),
@@ -2437,7 +2452,7 @@ fn legacy_upgrade_unequal_chaos_requires_retained_sparse_progress() {
             consumed,
             vec!["BBB-3-0-2".into()],
             vec![],
-            None,
+            vec![],
             vec![]
         )]
     );
@@ -2543,14 +2558,14 @@ fn legacy_upgrade_returned_effect_requires_retained_progress() {
     );
     assert_eq!(legacy, before);
 
-    let action = select(&upgraded, 1, vec!["TST-0-0-1".into()], vec![], None);
+    let action = select(&upgraded, 1, vec!["TST-0-0-1".into()], vec![], vec![]);
     apply_at(&mut upgraded, action, None, 1100).unwrap();
     assert_eq!(upgraded.head_metadata(1).unwrap().opening_seat, 3);
     assert_eq!(
         card_ids(&upgraded.head_pack(1).unwrap().0),
         vec!["TST-3-0-3", "TST-3-0-4", "TST-3-0-5", "TST-0-0-0"]
     );
-    let action = select(&upgraded, 1, vec!["TST-0-0-0".into()], vec![], None);
+    let action = select(&upgraded, 1, vec!["TST-0-0-0".into()], vec![], vec![]);
     let consumed = prompt(&upgraded, 1);
     assert_eq!(
         accepted(&apply_at(&mut upgraded, action, None, 1200).unwrap()),
@@ -2558,7 +2573,7 @@ fn legacy_upgrade_returned_effect_requires_retained_progress() {
             consumed,
             vec!["TST-0-0-0".into()],
             vec![],
-            None,
+            vec![],
             vec![]
         )]
     );
@@ -3312,7 +3327,7 @@ fn fifo_chaos_head_provenance_is_latched() {
         1,
         ids(0, &["a", "y"]),
         vec![],
-        Some("s1-r0-z".into()),
+        vec!["s1-r0-z".into()],
     );
     apply_at(&mut session, action, None, 1100).unwrap();
     choose(&mut session, 2, 1100);
@@ -4151,7 +4166,7 @@ fn fifo_only_actions_are_classified_once() {
                 prompt_id,
                 picked_card_instance_ids: vec!["s0-r0-z".into()],
                 burned_card_instance_ids: vec![],
-                effect_card_instance_id: None,
+                effect_card_instance_ids: vec![],
             },
             true,
         ),
@@ -4328,7 +4343,98 @@ fn effect_ready(kind: DraftKind, size: u8, burns: u8) -> DraftSession {
 }
 
 fn effect_selection(session: &DraftSession, picks: Vec<String>, burns: Vec<String>) -> DraftAction {
-    select(session, 1, picks, burns, Some("s1-r0-z".into()))
+    select(session, 1, picks, burns, vec!["s1-r0-z".into()])
+}
+
+/// The additional-pick cards in `seat`'s pool, in pool order.
+fn effect_cards(session: &DraftSession, seat: u8) -> Vec<String> {
+    session.pools[usize::from(seat)]
+        .iter()
+        .filter(|card| card.draft_effect == Some(DraftEffect::AdditionalPick))
+        .map(|card| card.instance_id.clone())
+        .collect()
+}
+
+/// Every physical card the session holds: unopened packs, queued heads,
+/// pools and removed cards.
+fn physical_cards(session: &DraftSession) -> usize {
+    let fifo = session.fifo.as_ref().unwrap();
+    let unopened: usize = session
+        .packs_by_seat
+        .iter()
+        .flatten()
+        .map(|pack| pack.0.len())
+        .sum();
+    let queued: usize = fifo
+        .seats
+        .iter()
+        .flat_map(|seat| &seat.queue)
+        .map(|head| head.pack.0.len())
+        .sum();
+    let pooled: usize = session.pools.iter().map(Vec::len).sum();
+    unopened + queued + pooled + fifo.removed.len()
+}
+
+/// `Source`, with the effect seat's second card in every pack also an
+/// additional-pick card.
+struct SecondEffectSource(Source);
+
+impl PackSource for SecondEffectSource {
+    fn generate_pack(&self, rng: &mut dyn rand::RngCore, seat: u8, round: u8) -> DraftPack {
+        let mut pack = self.0.generate_pack(rng, seat, round);
+        if self.0.effect_seat == Some(seat) {
+            pack.0[1].draft_effect = Some(DraftEffect::AdditionalPick);
+        }
+        pack
+    }
+}
+
+/// Seat 1 drafts the first cards of its own pack in each of the two rounds
+/// through ordinary accepted selections, and then holds seat 2's second-round
+/// remainder as its head, with a fresh prompt.
+fn second_round_ready(cfg: DraftConfig, source: &dyn PackSource) -> DraftSession {
+    let mut session = lobby(cfg);
+    apply_at(&mut session, DraftAction::StartDraft, Some(source), 1000).unwrap();
+    for round in 0..2 {
+        assert_eq!(session.current_pack_number, round);
+        let drafted = effect_cards(&session, 1).len();
+        let events = choose(&mut session, 1, 1100);
+        let accepted_events = accepted(&events);
+        let [DraftDelta::SelectionAccepted {
+            picked_card_instance_ids,
+            ..
+        }] = accepted_events.as_slice()
+        else {
+            panic!("one accepted selection in round {round}");
+        };
+        // The step's picks include the additional-pick card it drafted.
+        let pool_effects = effect_cards(&session, 1);
+        let new_effects = &pool_effects[drafted..];
+        assert!(
+            !new_effects.is_empty()
+                && new_effects
+                    .iter()
+                    .all(|id| picked_card_instance_ids.contains(id)),
+            "round {round}: {new_effects:?} from {picked_card_instance_ids:?}"
+        );
+        if round == 0 {
+            drain_round(&mut session, 1100);
+        }
+    }
+    choose(&mut session, 2, 1100);
+    session
+}
+
+/// `second_round_ready` with one additional-pick card at the front of each
+/// pack seat 1 opens: seat 1 drafts two of them.
+fn two_effects_ready(kind: DraftKind, size: u8, burns: u8) -> DraftSession {
+    second_round_ready(
+        config(kind, size, burns, 0, 0),
+        &Source {
+            size,
+            effect_seat: Some(1),
+        },
+    )
 }
 
 #[test]
@@ -4342,14 +4448,14 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
         card_ids(&session.head_pack(1).unwrap().0),
         ids(0, &["y", "b", "x", "c"])
     );
-    let view = filter_for_player(&session, 1).fifo.unwrap();
-    let entry = view
+    let effects = filter_for_player(&session, 1)
+        .fifo
+        .unwrap()
         .effects
-        .iter()
-        .find(|entry| entry.card_instance_id == "s1-r0-z")
         .expect("the view offers the effect card");
-    assert_eq!(entry.requirements.picks, 3);
-    assert_eq!(entry.requirements.burns, 0);
+    assert_eq!(effects.card_instance_ids, vec!["s1-r0-z".to_string()]);
+    assert_eq!(effects.requirements[0].picks, 3);
+    assert_eq!(effects.requirements[0].burns, 0);
     assert_eq!(card_ids(&session.pools[1]), ids(1, &["z", "a"]));
     let head_pack_id = session.head_metadata(1).unwrap().pack_id;
     let old = prompt(&session, 1);
@@ -4367,11 +4473,11 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
     );
     // Without the effect the step is still two cards.
     assert_eq!(
-        pick_pass::selection_requirements(&session, 1, None),
+        pick_pass::selection_requirements(&session, 1, &[]),
         Ok(DraftSelectionRequirements { picks: 2, burns: 0 })
     );
     let mut plain = session.clone();
-    let action = select(&session, 1, ids(0, &["y", "b"]), vec![], None);
+    let action = select(&session, 1, ids(0, &["y", "b"]), vec![], vec![]);
     assert_eq!(
         accepted(&apply_at(&mut plain, action, None, 1100).unwrap()).len(),
         1
@@ -4385,7 +4491,7 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
             old,
             ids(0, &["y", "b", "x"]),
             vec![],
-            Some("s1-r0-z".into()),
+            vec!["s1-r0-z".into()],
             vec![],
         )]
     );
@@ -4409,7 +4515,7 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
         ids(0, &["b", "x", "c"])
     );
     assert_eq!(
-        pick_pass::selection_requirements(&session, 1, Some("s1-r0-z")),
+        pick_pass::selection_requirements(&session, 1, &["s1-r0-z".to_string()]),
         Ok(DraftSelectionRequirements { picks: 3, burns: 0 })
     );
     let action = effect_selection(&session, ids(0, &["b", "x", "c"]), vec![]);
@@ -4454,7 +4560,7 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
     let head: Vec<String> = (3..8).map(|index| format!("s0-r0-{index}")).collect();
     assert_eq!(card_ids(&session.head_pack(1).unwrap().0), head);
     assert_eq!(
-        pick_pass::selection_requirements(&session, 1, Some("s1-r0-0")),
+        pick_pass::selection_requirements(&session, 1, &["s1-r0-0".to_string()]),
         Ok(DraftSelectionRequirements { picks: 3, burns: 1 })
     );
     let old = prompt(&session, 1);
@@ -4463,7 +4569,7 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
         1,
         head[..3].to_vec(),
         head[3..4].to_vec(),
-        Some("s1-r0-0".into()),
+        vec!["s1-r0-0".into()],
     );
     let events = apply_at(&mut session, action, None, 1100).unwrap();
     assert_eq!(
@@ -4472,7 +4578,7 @@ fn fifo_commander_draft_effect_takes_the_step_plus_one_card() {
             old,
             head[..3].to_vec(),
             head[3..4].to_vec(),
-            Some("s1-r0-0".into()),
+            vec!["s1-r0-0".into()],
             vec![],
         )]
     );
@@ -4526,17 +4632,21 @@ fn fifo_effect_requirement_is_the_pick_step_plus_one_for_every_kind() {
             burns: 0,
         };
         assert_eq!(
-            pick_pass::selection_requirements(&session, 1, Some("s1-r0-z")),
+            pick_pass::selection_requirements(&session, 1, &["s1-r0-z".to_string()]),
             Ok(expected),
             "{kind:?}"
         );
-        let view = filter_for_player(&session, 1).fifo.unwrap();
-        let entry = view
+        let effects = filter_for_player(&session, 1)
+            .fifo
+            .unwrap()
             .effects
-            .iter()
-            .find(|entry| entry.card_instance_id == "s1-r0-z")
             .expect("the view offers the effect card");
-        assert_eq!(entry.requirements, expected, "{kind:?}");
+        assert_eq!(
+            effects.card_instance_ids,
+            vec!["s1-r0-z".to_string()],
+            "{kind:?}"
+        );
+        assert_eq!(effects.requirements, vec![expected], "{kind:?}");
         if cards_per_pick == 1 {
             one_card_kinds += 1;
         } else {
@@ -4559,18 +4669,21 @@ fn fifo_effect_requirement_is_the_pick_step_plus_one_for_every_kind() {
         .fifo
         .unwrap()
         .effects
-        .is_empty());
+        .is_none());
     let session = effect_ready(DraftKind::CommanderDraft, 5, 0);
     assert_eq!(
         card_ids(&session.head_pack(1).unwrap().0),
         ids(0, &["y", "b", "x"])
     );
-    let view = filter_for_player(&session, 1).fifo.unwrap();
-    assert_eq!(view.effects.len(), 1);
-    assert_eq!(view.effects[0].card_instance_id, "s1-r0-z");
+    let effects = filter_for_player(&session, 1)
+        .fifo
+        .unwrap()
+        .effects
+        .expect("the view offers the effect card");
+    assert_eq!(effects.card_instance_ids, vec!["s1-r0-z".to_string()]);
     assert_eq!(
-        view.effects[0].requirements,
-        DraftSelectionRequirements { picks: 3, burns: 0 }
+        effects.requirements,
+        vec![DraftSelectionRequirements { picks: 3, burns: 0 }]
     );
 }
 
@@ -4579,7 +4692,7 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
     // Reach: the same seat and card on a large head are available.
     let session = effect_ready(DraftKind::Premier, 6, 0);
     assert_eq!(
-        pick_pass::selection_requirements(&session, 1, Some("s1-r0-z")),
+        pick_pass::selection_requirements(&session, 1, &["s1-r0-z".to_string()]),
         Ok(DraftSelectionRequirements { picks: 2, burns: 0 })
     );
 
@@ -4592,7 +4705,7 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
         actual_cards: 1,
     };
     assert_eq!(
-        pick_pass::selection_requirements(&premier, 1, Some("s1-r0-z")),
+        pick_pass::selection_requirements(&premier, 1, &["s1-r0-z".to_string()]),
         Err(too_small.clone())
     );
     assert_refusal(
@@ -4605,7 +4718,7 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
         .fifo
         .unwrap()
         .effects
-        .is_empty());
+        .is_none());
 
     // Commander Draft heads of one and two cards are short of three.
     for (size, head) in [(3, &["y"][..]), (4, &["y", "b"][..])] {
@@ -4616,7 +4729,7 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
             actual_cards: head.len(),
         };
         assert_eq!(
-            pick_pass::selection_requirements(&session, 1, Some("s1-r0-z")),
+            pick_pass::selection_requirements(&session, 1, &["s1-r0-z".to_string()]),
             Err(too_small.clone()),
             "{size}"
         );
@@ -4630,7 +4743,7 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
             .fifo
             .unwrap()
             .effects
-            .is_empty());
+            .is_none());
     }
 
     // Membership is checked before the head's size: a card that is not an
@@ -4641,14 +4754,14 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
             card_instance_id: id.into(),
         };
         assert_eq!(
-            pick_pass::selection_requirements(session, 1, Some(id)),
+            pick_pass::selection_requirements(session, 1, &[id.to_string()]),
             Err(not_in_pool.clone()),
             "{id}"
         );
         let head = card_ids(&session.head_pack(1).unwrap().0);
         assert_refusal(
             session,
-            select(session, 1, head, vec![], Some(id.into())),
+            select(session, 1, head, vec![], vec![id.into()]),
             1100,
             not_in_pool,
         );
@@ -4657,9 +4770,461 @@ fn fifo_effect_on_a_too_small_head_is_an_invalid_effect_selection() {
     // A seat with no head has no pending pack.
     assert!(premier.head_pack(0).is_none());
     assert_eq!(
-        pick_pass::selection_requirements(&premier, 0, Some("s1-r0-z")),
+        pick_pass::selection_requirements(&premier, 0, &["s1-r0-z".to_string()]),
         Err(DraftError::NoPendingPack { seat: 0 })
     );
+}
+
+#[test]
+fn fifo_two_effect_cards_drafted_through_picks_return_on_one_head() {
+    // Seat 1 drafts two additional-pick cards through ordinary selections and
+    // uses both on one head, so a one-card kind's step takes three cards.
+    let mut session = two_effects_ready(DraftKind::Premier, 6, 0);
+    let effects = effect_cards(&session, 1);
+    let head = card_ids(&session.head_pack(1).unwrap().0);
+    // Reach, read without the effect count: the pool holds both cards, the
+    // head holds at least three, and the view lists both.
+    assert_eq!(effects, vec!["s1-r0-z".to_string(), "s1-r1-z".to_string()]);
+    assert!(head.len() >= 3, "{head:?}");
+    let options = filter_for_player(&session, 1)
+        .fifo
+        .unwrap()
+        .effects
+        .expect("the view offers the effect cards");
+    assert_eq!(options.card_instance_ids, effects);
+    assert_eq!(options.requirements[1].picks, 3);
+
+    let head_pack_id = session.head_metadata(1).unwrap().pack_id;
+    let old = prompt(&session, 1);
+    let pool = card_ids(&session.pools[1]);
+    let cards = physical_cards(&session);
+    // Without an effect card the step is one card; with one it is two, and
+    // that card returns to the pack.
+    assert_eq!(
+        pick_pass::selection_requirements(&session, 1, &[]),
+        Ok(DraftSelectionRequirements { picks: 1, burns: 0 })
+    );
+    let mut plain = session.clone();
+    let action = select(&session, 1, head[..1].to_vec(), vec![], vec![]);
+    assert_eq!(
+        accepted(&apply_at(&mut plain, action, None, 1100).unwrap()),
+        vec![expected(
+            old.clone(),
+            head[..1].to_vec(),
+            vec![],
+            vec![],
+            vec![]
+        )]
+    );
+    let mut one = session.clone();
+    let action = select(
+        &session,
+        1,
+        head[..2].to_vec(),
+        vec![],
+        effects[..1].to_vec(),
+    );
+    assert_eq!(
+        accepted(&apply_at(&mut one, action, None, 1100).unwrap()),
+        vec![expected(
+            old.clone(),
+            head[..2].to_vec(),
+            vec![],
+            effects[..1].to_vec(),
+            vec![]
+        )]
+    );
+    // Two effect cards with two picks are one card short.
+    assert_refusal(
+        &session,
+        select(&session, 1, head[..2].to_vec(), vec![], effects.clone()),
+        1100,
+        DraftError::InvalidSelectionCount {
+            role: DraftSelectionRole::Pick,
+            expected: 3,
+            actual: 2,
+        },
+    );
+
+    let action = select(&session, 1, head[..3].to_vec(), vec![], effects.clone());
+    let events = apply_at(&mut session, action.clone(), None, 1100)
+        .expect("two effect cards with three picks are accepted");
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            old,
+            head[..3].to_vec(),
+            vec![],
+            effects.clone(),
+            vec![]
+        )]
+    );
+    // The three picks enter the pool and both effect cards leave it.
+    let mut drafted = pool;
+    drafted.retain(|id| !effects.contains(id));
+    drafted.extend(head[..3].iter().cloned());
+    assert_eq!(card_ids(&session.pools[1]), drafted);
+    // The remainder reaches seat 0 with both cards at its end, in list order,
+    // each recorded against the head's pack.
+    let fifo = session.fifo.as_ref().unwrap();
+    let passed = fifo.seats[0].queue.back().unwrap();
+    assert_eq!(passed.pack_id, head_pack_id);
+    let mut remainder = head[3..].to_vec();
+    remainder.extend(effects.iter().cloned());
+    assert_eq!(card_ids(&passed.pack.0), remainder);
+    for id in &effects {
+        assert_eq!(fifo.returned_effects.get(id), Some(&head_pack_id), "{id}");
+    }
+    // The prompt for that head is consumed. Seat 1 now holds no head, so the
+    // same action is refused and changes nothing.
+    assert!(fifo.seats[1].prompt.is_none());
+    assert_refusal(
+        &session,
+        action,
+        1100,
+        DraftError::NoPendingPack { seat: 1 },
+    );
+    // Every physical card is still accounted for.
+    assert_eq!(session.validate_persisted_snapshot(), Ok(()));
+    assert_eq!(physical_cards(&session), cards);
+
+    // Commander Draft: two effect cards take four picks, and a head of four
+    // cannot supply a third.
+    let commander = second_round_ready(
+        config(DraftKind::CommanderDraft, 6, 0, 0, 0),
+        &SecondEffectSource(Source {
+            size: 6,
+            effect_seat: Some(1),
+        }),
+    );
+    let effects = effect_cards(&commander, 1);
+    let head = card_ids(&commander.head_pack(1).unwrap().0);
+    assert_eq!(effects.len(), 4);
+    assert_eq!(head.len(), 4);
+    let mut two = commander.clone();
+    let action = select(&commander, 1, head.clone(), vec![], effects[..2].to_vec());
+    assert_eq!(
+        accepted(&apply_at(&mut two, action, None, 1100).unwrap()),
+        vec![expected(
+            prompt(&commander, 1),
+            head.clone(),
+            vec![],
+            effects[..2].to_vec(),
+            vec![]
+        )]
+    );
+    assert_eq!(two.validate_persisted_snapshot(), Ok(()));
+    assert_refusal(
+        &commander,
+        select(&commander, 1, head, vec![], effects[..3].to_vec()),
+        1100,
+        DraftError::InvalidDraftEffectSelection {
+            expected_cards: 5,
+            actual_cards: 4,
+        },
+    );
+
+    // The discard threshold applies after both returns: a remainder at the
+    // threshold, returned cards included, is discarded with them.
+    let mut session = second_round_ready(
+        config(DraftKind::Premier, 6, 0, 4, 0),
+        &Source {
+            size: 6,
+            effect_seat: Some(1),
+        },
+    );
+    let effects = effect_cards(&session, 1);
+    let head = card_ids(&session.head_pack(1).unwrap().0);
+    let old = prompt(&session, 1);
+    let action = select(&session, 1, head[..3].to_vec(), vec![], effects.clone());
+    let events = apply_at(&mut session, action, None, 1100).unwrap();
+    let mut discarded = head[3..].to_vec();
+    discarded.extend(effects.iter().cloned());
+    assert_eq!(
+        accepted(&events),
+        vec![expected(
+            old,
+            head[..3].to_vec(),
+            vec![],
+            effects,
+            discarded
+        )]
+    );
+    assert!(session.fifo.as_ref().unwrap().returned_effects.is_empty());
+    assert_eq!(session.validate_persisted_snapshot(), Ok(()));
+}
+
+#[test]
+fn fifo_effect_cards_are_distinct_cards_in_the_seats_pool() {
+    let session = second_round_ready(
+        config(DraftKind::Premier, 6, 0, 0, 0),
+        &SecondEffectSource(Source {
+            size: 6,
+            effect_seat: Some(1),
+        }),
+    );
+    let effects = effect_cards(&session, 1);
+    let head = card_ids(&session.head_pack(1).unwrap().0);
+    // Reach: two distinct cards in the seat's pool are a three-pick step.
+    assert_eq!(effects.len(), 2);
+    let (a, b) = (effects[0].clone(), effects[1].clone());
+    assert_eq!(
+        pick_pass::selection_requirements(&session, 1, &[a.clone(), b.clone()]),
+        Ok(DraftSelectionRequirements { picks: 3, burns: 0 })
+    );
+    // A card listed twice is one physical card: refused, without a panic, and
+    // nothing changes.
+    let repeated = DraftError::InvalidSelection {
+        role: DraftSelectionRole::Effect,
+        reason: "duplicate or overlapping physical id".into(),
+    };
+    assert_eq!(
+        pick_pass::selection_requirements(&session, 1, &[a.clone(), a.clone()]),
+        Err(repeated.clone())
+    );
+    assert_refusal(
+        &session,
+        select(
+            &session,
+            1,
+            head[..3].to_vec(),
+            vec![],
+            vec![a.clone(), a.clone()],
+        ),
+        1100,
+        repeated,
+    );
+    // Another seat's additional-pick card, and the seat's own card without the
+    // effect, are not draft-effect cards in its pool, in either list position.
+    let foreign = effect_cards(&session, 2);
+    assert!(
+        !foreign.is_empty(),
+        "seat 2 drafted an additional-pick card"
+    );
+    let plain = session.pools[1]
+        .iter()
+        .find(|card| card.draft_effect.is_none())
+        .unwrap()
+        .instance_id
+        .clone();
+    for id in [foreign[0].clone(), plain] {
+        let not_in_pool = DraftError::DraftEffectCardNotInPool {
+            card_instance_id: id.clone(),
+        };
+        for list in [vec![id.clone(), a.clone()], vec![a.clone(), id.clone()]] {
+            assert_eq!(
+                pick_pass::selection_requirements(&session, 1, &list),
+                Err(not_in_pool.clone()),
+                "{list:?}"
+            );
+            assert_refusal(
+                &session,
+                select(&session, 1, head[..3].to_vec(), vec![], list),
+                1100,
+                not_in_pool.clone(),
+            );
+        }
+    }
+    // An effect card also named as a pick keeps today's refusal.
+    let mut picks = head[..2].to_vec();
+    picks.insert(0, a.clone());
+    assert_refusal(
+        &session,
+        select(&session, 1, picks, vec![], vec![a.clone(), b.clone()]),
+        1100,
+        DraftError::CardNotInPack {
+            card_instance_id: a.clone(),
+        },
+    );
+    // An empty list is the selection without an effect card.
+    assert_eq!(
+        pick_pass::selection_requirements(&session, 1, &[]),
+        Ok(DraftSelectionRequirements { picks: 1, burns: 0 })
+    );
+    let mut plain = session.clone();
+    let old = prompt(&session, 1);
+    let action = select(&session, 1, head[..1].to_vec(), vec![], vec![]);
+    assert_eq!(
+        accepted(&apply_at(&mut plain, action, None, 1100).unwrap()),
+        vec![expected(old, head[..1].to_vec(), vec![], vec![], vec![])]
+    );
+
+    // An effect card also named as a burn keeps today's refusal.
+    let burning = two_effects_ready(DraftKind::Premier, 6, 1);
+    let effects = effect_cards(&burning, 1);
+    let head = card_ids(&burning.head_pack(1).unwrap().0);
+    assert_eq!(
+        pick_pass::selection_requirements(&burning, 1, &effects),
+        Ok(DraftSelectionRequirements { picks: 3, burns: 1 })
+    );
+    assert_refusal(
+        &burning,
+        select(
+            &burning,
+            1,
+            head[..3].to_vec(),
+            vec![effects[0].clone()],
+            effects.clone(),
+        ),
+        1100,
+        DraftError::CardNotInPack {
+            card_instance_id: effects[0].clone(),
+        },
+    );
+}
+
+#[test]
+fn fifo_view_publishes_the_requirement_for_each_usable_effect_count() {
+    let mut one_card_kinds = 0usize;
+    let mut multi_card_kinds = 0usize;
+    for kind in DraftKind::ALL {
+        match kind.procedure().distribution {
+            PackDistribution::PickAndPass => {}
+            PackDistribution::AllAtOnce | PackDistribution::SharedStackPiles { .. } => continue,
+        }
+        let cards_per_pick = usize::from(kind.procedure().cards_per_pick);
+        for burns in [0, 1] {
+            let session = two_effects_ready(kind, 6, burns);
+            let effects = effect_cards(&session, 1);
+            let head = session.head_pack(1).unwrap().0.len();
+            // Reach: two eligible cards and a head that can supply at least one
+            // additional card.
+            assert_eq!(effects.len(), 2, "{kind:?}");
+            assert!(head > cards_per_pick, "{kind:?}");
+            // The test's own oracle: k cards take the step plus k, and burn
+            // from what the picks leave.
+            let usable = effects.len().min(head - cards_per_pick);
+            let expected: Vec<_> = (1..=usable)
+                .map(|used| {
+                    let picks = cards_per_pick + used;
+                    DraftSelectionRequirements {
+                        picks,
+                        burns: usize::from(burns).min(head - picks),
+                    }
+                })
+                .collect();
+            let options = filter_for_player(&session, 1)
+                .fifo
+                .unwrap()
+                .effects
+                .expect("the view offers the effect cards");
+            assert_eq!(options.card_instance_ids, effects, "{kind:?}");
+            assert_eq!(options.requirements, expected, "{kind:?}, {burns} burns");
+            for (index, requirement) in expected.iter().enumerate() {
+                assert_eq!(
+                    pick_pass::selection_requirements(&session, 1, &effects[..=index]),
+                    Ok(*requirement),
+                    "{kind:?}, {burns} burns"
+                );
+            }
+            // The view never offers more cards than the head can supply.
+            if usable < effects.len() {
+                assert_eq!(
+                    pick_pass::selection_requirements(&session, 1, &effects[..=usable]),
+                    Err(DraftError::InvalidDraftEffectSelection {
+                        expected_cards: cards_per_pick + usable + 1,
+                        actual_cards: head,
+                    }),
+                    "{kind:?}, {burns} burns"
+                );
+            }
+        }
+        if cards_per_pick == 1 {
+            one_card_kinds += 1;
+        } else {
+            multi_card_kinds += 1;
+        }
+    }
+    assert!(one_card_kinds >= 1, "the loop must reach a one-card kind");
+    assert!(
+        multi_card_kinds >= 1,
+        "the loop must reach a multi-card kind"
+    );
+
+    // A Commander Draft head of three with two eligible cards offers one
+    // count, three picks.
+    let session = two_effects_ready(DraftKind::CommanderDraft, 5, 0);
+    assert_eq!(session.head_pack(1).unwrap().0.len(), 3);
+    let options = filter_for_player(&session, 1)
+        .fifo
+        .unwrap()
+        .effects
+        .expect("the view offers the effect cards");
+    assert_eq!(options.card_instance_ids.len(), 2);
+    assert_eq!(
+        options.requirements,
+        vec![DraftSelectionRequirements { picks: 3, burns: 0 }]
+    );
+    // The spectator projection publishes no requirement.
+    assert!(serde_json::to_string(&filter_for_player(&session, 1))
+        .unwrap()
+        .contains("\"requirements\""));
+    for visibility in [SpectatorVisibility::Public, SpectatorVisibility::Omniscient] {
+        assert!(
+            !serde_json::to_string(&filter_for_spectator(&session, visibility))
+                .unwrap()
+                .contains("\"requirements\""),
+            "{visibility:?}"
+        );
+    }
+}
+
+#[test]
+fn fifo_effects_on_a_too_small_head_are_an_invalid_effect_selection() {
+    // Reach: the same seat and cards on a large head are available.
+    let large = two_effects_ready(DraftKind::Premier, 6, 0);
+    let effects = effect_cards(&large, 1);
+    assert_eq!(
+        pick_pass::selection_requirements(&large, 1, &effects),
+        Ok(DraftSelectionRequirements { picks: 3, burns: 0 })
+    );
+    // Two cards on a two-card Premier head, and on a three-card Commander
+    // Draft head, are short of the step plus two.
+    for (kind, size, expected_cards) in [
+        (DraftKind::Premier, 3, 3),
+        (DraftKind::CommanderDraft, 5, 4),
+    ] {
+        let session = two_effects_ready(kind, size, 0);
+        let effects = effect_cards(&session, 1);
+        let head = card_ids(&session.head_pack(1).unwrap().0);
+        assert_eq!(effects.len(), 2, "{kind:?}");
+        assert_eq!(head.len(), expected_cards - 1, "{kind:?}");
+        let too_small = DraftError::InvalidDraftEffectSelection {
+            expected_cards,
+            actual_cards: head.len(),
+        };
+        assert_eq!(
+            pick_pass::selection_requirements(&session, 1, &effects),
+            Err(too_small.clone()),
+            "{kind:?}"
+        );
+        assert_refusal(
+            &session,
+            select(&session, 1, head.clone(), vec![], effects.clone()),
+            1100,
+            too_small,
+        );
+        // Distinctness and membership are checked before the head's size.
+        assert_eq!(
+            pick_pass::selection_requirements(
+                &session,
+                1,
+                &[effects[0].clone(), effects[0].clone()]
+            ),
+            Err(DraftError::InvalidSelection {
+                role: DraftSelectionRole::Effect,
+                reason: "duplicate or overlapping physical id".into(),
+            }),
+            "{kind:?}"
+        );
+        assert_eq!(
+            pick_pass::selection_requirements(&session, 1, &[effects[0].clone(), head[0].clone()]),
+            Err(DraftError::DraftEffectCardNotInPool {
+                card_instance_id: head[0].clone(),
+            }),
+            "{kind:?}"
+        );
+    }
 }
 
 fn sealed_fifo_config() -> DraftConfig {
@@ -4786,7 +5351,10 @@ fn fifo_snapshot_pod_refusals_use_snapshot_errors() {
     assert_eq!(started.status, Drafting);
 
     session.config.tournament_format = TournamentFormat::SingleElimination;
-    let pod = DraftError::InvalidSealedSnapshot {
+    // The refused snapshot passes FIFO's own seat-count check; only the
+    // procedure's pod admission refuses it.
+    assert_eq!(session.seats.len(), usize::from(session.config.pod_size));
+    let pod = DraftError::InvalidSnapshot {
         reason: "pod size does not satisfy the draft procedure".to_string(),
     };
     assert_eq!(session.validate_persisted_snapshot(), Err(pod.clone()));
@@ -4812,7 +5380,7 @@ fn fifo_snapshot_sealed_refusals_use_snapshot_errors() {
     apply_at(&mut started, DraftAction::StartDraft, Some(&source), 1000).unwrap();
     assert_eq!(started.status, Deckbuilding);
 
-    let dimensions = DraftError::InvalidSealedSnapshot {
+    let dimensions = DraftError::InvalidSnapshot {
         reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
     };
     let mut deck_size = session.clone();
@@ -4836,7 +5404,8 @@ fn fifo_snapshot_sealed_refusals_use_snapshot_errors() {
     // StartDraft revalidates the stored session first, so it reports the
     // snapshot error and changes nothing.
     for (stored, error) in [
-        (deck_size, dimensions),
+        (deck_size, dimensions.clone()),
+        (packs, dimensions),
         (cube, DraftError::SealedRequiresSetSource),
     ] {
         let mut refused = stored.clone();
@@ -4846,6 +5415,34 @@ fn fifo_snapshot_sealed_refusals_use_snapshot_errors() {
         );
         assert_eq!(refused, stored);
     }
+}
+
+#[test]
+fn fifo_sealed_snapshot_source_label_keeps_its_configuration_error() {
+    let source = Source {
+        size: 6,
+        effect_seat: None,
+    };
+    let session = lobby(sealed_fifo_config());
+    // Reach: the same snapshot with matching labels validates.
+    assert_eq!(session.validate_persisted_snapshot(), Ok(()));
+    // FIFO's own source-label check runs before the Sealed admission in the
+    // snapshot context too, so a source naming another set keeps its error.
+    let mut relabelled = session.clone();
+    relabelled.config.source = DraftSource::single_set("OTHER");
+    let mismatch = DraftError::InvalidConfiguration {
+        reason: "source code mismatch".to_string(),
+    };
+    assert_eq!(
+        relabelled.validate_persisted_snapshot(),
+        Err(mismatch.clone())
+    );
+    let mut refused = relabelled.clone();
+    assert_eq!(
+        apply_at(&mut refused, DraftAction::StartDraft, Some(&source), 1000),
+        Err(mismatch)
+    );
+    assert_eq!(refused, relabelled);
 }
 
 #[test]

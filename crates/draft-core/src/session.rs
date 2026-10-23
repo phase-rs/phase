@@ -187,7 +187,9 @@ impl DraftSession {
             &self.config.source,
             self.config.tournament_format,
             pod_size,
-            AdmissionContext::Snapshot,
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::LegacyBarrier,
+            },
         )?;
         match procedure.distribution {
             PackDistribution::PickAndPass => return Ok(()),
@@ -357,7 +359,9 @@ impl DraftSession {
         self.kind.admit_all_at_once(
             &self.config,
             Some(&self.set_code),
-            AdmissionContext::Snapshot,
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::LegacyBarrier,
+            },
         )?;
         if self.status == DraftStatus::Drafting {
             return Err(DraftError::InvalidSealedSnapshot {
@@ -488,14 +492,14 @@ pub fn apply_at(
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
         } => pick_pass::select_fifo(
             &mut candidate,
             seat,
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
             pick_pass::SelectionTiming::Human,
         ),
         DraftAction::Control { control } => crate::clock::control(&mut candidate, control, now_ms),
@@ -604,7 +608,13 @@ impl DraftSession {
     }
 
     fn validate_fifo_snapshot(&self) -> Result<(), DraftError> {
-        validate_fifo_config(&self.config, self.seats.len(), AdmissionContext::Snapshot)?;
+        validate_fifo_config(
+            &self.config,
+            self.seats.len(),
+            AdmissionContext::Snapshot {
+                flow: DraftFlow::FifoAsync,
+            },
+        )?;
         if self.kind != self.config.kind || self.set_code != self.config.set_code {
             return Err(snapshot_error("session/config mismatch"));
         }
@@ -932,8 +942,8 @@ impl DraftSession {
                 PackDistribution::PickAndPass => {
                     // Each successful step grows the pool by at least one and
                     // by at most the kind's pick step: an AdditionalPick step
-                    // drafts one card beyond it and returns the effect card,
-                    // so it cannot create an unrecorded extra step.
+                    // drafts one card beyond it for each draft-effect card it
+                    // returns, so it cannot create an unrecorded extra step.
                     let size = pool.len() as u64;
                     let maximum =
                         seat.completed_steps * u64::from(self.kind.procedure().cards_per_pick);
@@ -1309,7 +1319,9 @@ pub fn upgrade_legacy_snapshot(
     validate_fifo_config(
         &source.config,
         source.seats.len(),
-        AdmissionContext::Snapshot,
+        AdmissionContext::Snapshot {
+            flow: DraftFlow::FifoAsync,
+        },
     )?;
     context.clock_policy.validate()?;
     // `new_fifo` below checks the session id and refuses an invalid one as a

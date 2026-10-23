@@ -340,35 +340,51 @@ fn finish_pick(
     Ok(deltas)
 }
 
-/// Exact requirements over the physical head. Eligibility is checked against
-/// the selected pool instance, not against a global scan for any draft effect.
+/// The refusal for one physical card named twice in one selection.
+const DUPLICATE_PHYSICAL_ID: &str = "duplicate or overlapping physical id";
+
+/// Exact requirements over the physical head for a selection that uses the
+/// draft-effect cards `effects`. Eligibility is checked against each selected
+/// pool instance, not against a global scan for any draft effect.
 pub fn selection_requirements(
     session: &DraftSession,
     seat: u8,
-    effect: Option<&str>,
+    effects: &[String],
 ) -> Result<DraftSelectionRequirements, DraftError> {
     let head = session
         .head_pack(seat)
         .ok_or(DraftError::NoPendingPack { seat })?;
-    let picks = match effect {
-        None => required_pick_count(session, seat),
-        Some(id) => {
-            // CR 905.2 + CR 905.2c: the selected face-up draft card is an
-            // AdditionalPick card in this seat's own pool, whatever the head holds.
-            if !session.pools.get(usize::from(seat)).is_some_and(|pool| {
-                pool.iter().any(|card| {
-                    card.instance_id == id
-                        && card.draft_effect
-                            == Some(engine::types::card::DraftEffect::AdditionalPick)
-                })
-            }) {
-                return Err(DraftError::DraftEffectCardNotInPool {
-                    card_instance_id: id.into(),
-                });
-            }
-            // The step drafts the kind's pick step plus the additional card, so
-            // the head must hold that many before the card returns to the pack.
-            let required = session.kind.procedure().additional_pick_step_size();
+    for (index, id) in effects.iter().enumerate() {
+        // Each draft-effect card is one physical card, so it can be listed once.
+        if effects[..index].contains(id) {
+            return Err(DraftError::InvalidSelection {
+                role: DraftSelectionRole::Effect,
+                reason: DUPLICATE_PHYSICAL_ID.into(),
+            });
+        }
+        // CR 905.2 + CR 905.2c: each selected face-up draft card is an
+        // AdditionalPick card in this seat's own pool, whatever the head holds.
+        if !session.pools.get(usize::from(seat)).is_some_and(|pool| {
+            pool.iter().any(|card| {
+                card.instance_id == *id
+                    && card.draft_effect == Some(engine::types::card::DraftEffect::AdditionalPick)
+            })
+        }) {
+            return Err(DraftError::DraftEffectCardNotInPool {
+                card_instance_id: id.clone(),
+            });
+        }
+    }
+    let picks = match effects {
+        [] => required_pick_count(session, seat),
+        [_, ..] => {
+            // The step drafts the kind's pick step plus one additional card
+            // for each draft-effect card, so the head must hold that many
+            // before the cards return to the pack.
+            let required = session
+                .kind
+                .procedure()
+                .draft_effect_step_size(effects.len());
             if head.0.len() < required {
                 return Err(DraftError::InvalidDraftEffectSelection {
                     expected_cards: required,
@@ -399,7 +415,7 @@ pub fn legal_auto_selection(session: &DraftSession, seat: u8) -> Option<DraftAct
         .as_ref()?
         .id
         .clone();
-    let requirements = selection_requirements(session, seat, None).ok()?;
+    let requirements = selection_requirements(session, seat, &[]).ok()?;
     let pack = session.head_pack(seat)?;
     if requirements.picks == 0 {
         return None;
@@ -420,7 +436,7 @@ pub fn legal_auto_selection(session: &DraftSession, seat: u8) -> Option<DraftAct
             .take(requirements.burns)
             .map(|card| card.instance_id.clone())
             .collect(),
-        effect_card_instance_id: None,
+        effect_card_instance_ids: Vec::new(),
     })
 }
 
@@ -441,7 +457,7 @@ pub(crate) fn select_fifo(
     prompt_id: DraftPromptId,
     picked: Vec<String>,
     burned: Vec<String>,
-    effect: Option<String>,
+    effects: Vec<String>,
     timing: SelectionTiming,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Drafting {
@@ -492,7 +508,7 @@ pub(crate) fn select_fifo(
             }
         }
     }
-    let requirements = selection_requirements(session, seat, effect.as_deref())?;
+    let requirements = selection_requirements(session, seat, &effects)?;
     let mut selected = std::collections::HashSet::new();
     for (role, ids, expected) in [
         (DraftSelectionRole::Pick, &picked, requirements.picks),
@@ -509,12 +525,10 @@ pub(crate) fn select_fifo(
             if !selected.insert(id.as_str()) {
                 return Err(DraftError::InvalidSelection {
                     role,
-                    reason: "duplicate or overlapping physical id".into(),
+                    reason: DUPLICATE_PHYSICAL_ID.into(),
                 });
             }
-            if effect.as_ref() == Some(id)
-                || !head.pack.0.iter().any(|card| &card.instance_id == id)
-            {
+            if effects.contains(id) || !head.pack.0.iter().any(|card| &card.instance_id == id) {
                 return Err(DraftError::CardNotInPack {
                     card_instance_id: id.clone(),
                 });
@@ -553,7 +567,9 @@ pub(crate) fn select_fifo(
     for id in picked.iter().chain(&burned) {
         session.fifo_mut()?.returned_effects.remove(id);
     }
-    if let Some(id) = &effect {
+    // After the picks and burns leave the head, each draft-effect card leaves
+    // the pool and joins the end of the remainder, in the action's order.
+    for id in &effects {
         let index = session.pools[usize::from(seat)]
             .iter()
             .position(|card| &card.instance_id == id)
@@ -600,7 +616,7 @@ pub(crate) fn select_fifo(
         seat,
         picked_card_instance_ids: picked.clone(),
         burned_card_instance_ids: burned,
-        returned_card_instance_id: effect,
+        returned_card_instance_ids: effects,
         discarded_card_instance_ids: discarded,
     };
     let mut deltas = finish_pick(session, seat, picked)?;

@@ -336,16 +336,22 @@ impl DraftProcedure {
         cards_per_pack.div_ceil(self.cards_per_pick)
     }
 
-    /// CR 905.2 + CR 903.13b: the cards one pick step takes when the drafter
-    /// uses an `AdditionalPick` draft card ("you may draft an additional card
-    /// from that booster pack"): this procedure's pick step, `cards_per_pick`
-    /// (two cards in Commander Draft), plus that one additional card.
+    /// CR 905.2 + CR 903.13b: the cards one FIFO pick step takes when the
+    /// drafter uses `draft_effect_cards` `AdditionalPick` draft cards, each of
+    /// which lets them "draft an additional card from that booster pack": this
+    /// procedure's pick step, `cards_per_pick` (two cards in Commander Draft),
+    /// plus one additional card for each draft-effect card used. Cogwork
+    /// Librarian's rulings allow several of them on one booster pack.
     ///
-    /// The single definition of that count. `pick_pass::selection_requirements`
-    /// enforces and publishes it, and [`MIN_DRAFT_EFFECT_PICKS`] and
-    /// [`MAX_DRAFT_EFFECT_PICKS`] are derived from it.
-    pub fn additional_pick_step_size(self) -> usize {
-        usize::from(self.cards_per_pick) + 1
+    /// The FIFO flow's single definition of that count.
+    /// `pick_pass::selection_requirements` enforces and publishes it, and
+    /// `draft_effect_pick_bounds_match_procedure_table` ties
+    /// [`select_pick_count_is_admitted`] to it. The legacy `PickWithDraftEffect`
+    /// path still takes exactly two cards in every kind for its one
+    /// draft-effect card (`pick_pass::apply_pick_with_draft_effect`), which
+    /// differs from this count in Commander Draft.
+    pub fn draft_effect_step_size(self, draft_effect_cards: usize) -> usize {
+        usize::from(self.cards_per_pick) + draft_effect_cards
     }
 
     /// Can this distribution express a per-`(seat, round)` set assignment?
@@ -440,23 +446,26 @@ pub const CHAOS_LAYOUT_REFUSAL: &str =
 /// [`DraftKind::ALL`] and fails if this drifts.
 pub const MAX_CARDS_PER_PICK: usize = 2; // CR 903.13b, the CommanderDraft row
 
-/// The fewest picks a FIFO draft-effect selection takes in any kind with a
-/// pick step: [`DraftProcedure::additional_pick_step_size`] over the procedure
-/// table's `PickAndPass` rows.
+/// Whether a `DraftAction::Select` that names `draft_effect_cards`
+/// draft-effect cards may carry `picks` picked ids, judged from the action
+/// alone.
 ///
-/// With [`MAX_DRAFT_EFFECT_PICKS`], the session-independent bound on a
-/// `DraftAction::Select` that names a draft-effect card in `server-core`'s
-/// `guard_draft_action_payload`, which receives only the action and can never
-/// consult the session (the exact count for the session's kind and head pack
-/// is `pick_pass::selection_requirements`'s). Derived from the procedure table,
-/// not chosen: `draft_effect_pick_bounds_match_procedure_table` fails if either
-/// bound drifts.
-pub const MIN_DRAFT_EFFECT_PICKS: usize = 2;
-
-/// The most picks a FIFO draft-effect selection takes in any kind with a pick
-/// step: Commander Draft's two-card step plus the additional card. See
-/// [`MIN_DRAFT_EFFECT_PICKS`].
-pub const MAX_DRAFT_EFFECT_PICKS: usize = 3;
+/// The session-independent half of the `Select` payload bound in
+/// `server-core`'s `guard_draft_action_payload`, which receives only the
+/// action and can never consult the session: the picks less the draft-effect
+/// cards must be a pick step some kind can take (one card up to
+/// [`MAX_CARDS_PER_PICK`]), and the picks must fit the largest pack a session
+/// can hold (`u8::MAX` cards). The exact count for the session's kind and head
+/// pack is `pick_pass::selection_requirements`'s, from
+/// [`DraftProcedure::draft_effect_step_size`];
+/// `draft_effect_pick_bounds_match_procedure_table` fails if this
+/// relation drifts from that definition or from the procedure table.
+pub fn select_pick_count_is_admitted(picks: usize, draft_effect_cards: usize) -> bool {
+    picks <= usize::from(u8::MAX)
+        && picks
+            .checked_sub(draft_effect_cards)
+            .is_some_and(|pick_step| (1..=MAX_CARDS_PER_PICK).contains(&pick_step))
+}
 
 /// CR 702.124g: "no partner ability or combination of partner abilities can
 /// ever let a player have more than two commanders."
@@ -783,9 +792,11 @@ impl DraftKind {
 pub(crate) enum AdmissionContext {
     /// Creating or starting a session: a refusal reads as `StartDraft`'s.
     Configuration,
-    /// Validating a persisted or imported session: a refusal reads as a
-    /// snapshot error.
-    Snapshot,
+    /// Validating a persisted or imported session for `flow`: a refusal reads
+    /// as that flow's snapshot error. `flow` is the flow the caller validates
+    /// the snapshot for, which is not always the stored session's: an upgrade
+    /// validates a legacy session for FIFO.
+    Snapshot { flow: DraftFlow },
 }
 
 impl AdmissionContext {
@@ -794,9 +805,17 @@ impl AdmissionContext {
             AdmissionContext::Configuration => DraftError::InvalidSealedConfiguration {
                 reason: reason.to_string(),
             },
-            AdmissionContext::Snapshot => DraftError::InvalidSealedSnapshot {
-                reason: reason.to_string(),
-            },
+            AdmissionContext::Snapshot { flow } => Self::snapshot_refusal(flow, reason),
+        }
+    }
+
+    /// Legacy snapshot validation keeps its Sealed-named error. A FIFO
+    /// snapshot reports the flow-neutral snapshot error its other refusals use.
+    fn snapshot_refusal(flow: DraftFlow, reason: &str) -> DraftError {
+        let reason = reason.to_string();
+        match flow {
+            DraftFlow::LegacyBarrier => DraftError::InvalidSealedSnapshot { reason },
+            DraftFlow::FifoAsync => DraftError::InvalidSnapshot { reason },
         }
     }
 }
@@ -835,9 +854,10 @@ impl DraftKind {
                 required: *procedure.allowed_pod_size_range(tournament_format).start(),
                 actual: pod_size,
             }),
-            AdmissionContext::Snapshot => Err(DraftError::InvalidSealedSnapshot {
-                reason: "pod size does not satisfy the draft procedure".to_string(),
-            }),
+            AdmissionContext::Snapshot { flow } => Err(AdmissionContext::snapshot_refusal(
+                flow,
+                "pod size does not satisfy the draft procedure",
+            )),
         }
     }
 
@@ -1610,7 +1630,9 @@ pub enum DraftAction {
         prompt_id: DraftPromptId,
         picked_card_instance_ids: Vec<String>,
         burned_card_instance_ids: Vec<String>,
-        effect_card_instance_id: Option<String>,
+        /// The draft-effect cards this selection uses, empty for none, in the
+        /// order they go back into the pack.
+        effect_card_instance_ids: Vec<String>,
     },
     Control {
         control: DraftControl,
@@ -1733,7 +1755,8 @@ pub enum DraftDelta {
         seat: u8,
         picked_card_instance_ids: Vec<String>,
         burned_card_instance_ids: Vec<String>,
-        returned_card_instance_id: Option<String>,
+        /// The draft-effect cards returned to the pack, in the action's order.
+        returned_card_instance_ids: Vec<String>,
         discarded_card_instance_ids: Vec<String>,
     },
     CardPicked {
@@ -1815,8 +1838,8 @@ pub enum DraftError {
     DraftEffectCardNotInPool { card_instance_id: String },
     /// For a legacy `PickWithDraftEffect`, `actual_cards` counts the ids the
     /// action supplied (1 when both ids name the same card). For a FIFO
-    /// selection whose head pack is too small for the effect's step, it counts
-    /// the cards the head holds.
+    /// selection whose head pack is too small for the step its draft-effect
+    /// cards take, it counts the cards the head holds.
     #[error("draft effect requires {expected_cards} cards, got {actual_cards}")]
     InvalidDraftEffectSelection {
         expected_cards: usize,
@@ -2786,38 +2809,70 @@ mod tests {
         );
     }
 
-    /// [`MIN_DRAFT_EFFECT_PICKS`] and [`MAX_DRAFT_EFFECT_PICKS`] are derived
-    /// from the procedure table, not chosen.
+    /// [`select_pick_count_is_admitted`] is tied to
+    /// [`DraftProcedure::draft_effect_step_size`] and to the procedure table,
+    /// not chosen.
     ///
-    /// `server-core`'s payload guard cannot consult a session, so it bounds a
-    /// `Select` that names a draft-effect card by these two constants. If a
-    /// kind's pick step changed without them, the wire would refuse that kind's
+    /// `server-core`'s payload guard cannot consult a session, so it admits a
+    /// `Select`'s pick count by that relation. If a kind's pick step or the
+    /// draft-effect count changed without it, the wire would refuse that kind's
     /// legitimate effect selections or admit impossible ones.
     #[test]
     fn draft_effect_pick_bounds_match_procedure_table() {
         let mut observed_pick_steps = 0usize;
-        let mut fewest = usize::MAX;
-        let mut most = 0usize;
         for kind in DraftKind::ALL {
             let procedure = kind.procedure();
             match procedure.distribution {
-                PackDistribution::PickAndPass => {
-                    observed_pick_steps += 1;
-                    let step = procedure.additional_pick_step_size();
-                    fewest = fewest.min(step);
-                    most = most.max(step);
-                }
-                PackDistribution::AllAtOnce | PackDistribution::SharedStackPiles { .. } => {}
+                PackDistribution::PickAndPass => observed_pick_steps += 1,
+                PackDistribution::AllAtOnce | PackDistribution::SharedStackPiles { .. } => continue,
+            }
+            // Every number of draft-effect cards a pack the session can hold
+            // could supply: the relation admits the count the definition gives.
+            let supplied: Vec<(usize, usize)> = (1..)
+                .map(|cards| (cards, procedure.draft_effect_step_size(cards)))
+                .take_while(|&(_, picks)| picks <= usize::from(u8::MAX))
+                .collect();
+            assert!(!supplied.is_empty(), "{kind:?}");
+            for (draft_effect_cards, picks) in supplied {
+                assert!(
+                    select_pick_count_is_admitted(picks, draft_effect_cards),
+                    "{kind:?}: {draft_effect_cards} draft-effect cards take {picks} picks"
+                );
             }
         }
-        // Reach guard: a fold that observed no kind with a pick step would
-        // compare the constants against its own starting values.
+        // Reach guard: a loop that observed no kind with a pick step would
+        // check nothing.
         assert!(
             observed_pick_steps >= 1,
-            "the fold must observe at least one kind with a pick step"
+            "the loop must observe at least one kind with a pick step"
         );
-        assert_eq!(fewest, MIN_DRAFT_EFFECT_PICKS);
-        assert_eq!(most, MAX_DRAFT_EFFECT_PICKS);
+        // The pick steps the relation admits are the table's, one card up to
+        // its largest step, whatever the number of draft-effect cards.
+        for draft_effect_cards in [0, 1, 2, 9] {
+            let admitted: Vec<usize> = (0..=MAX_CARDS_PER_PICK + 1)
+                .filter(|pick_step| {
+                    select_pick_count_is_admitted(
+                        pick_step + draft_effect_cards,
+                        draft_effect_cards,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                admitted,
+                (1..=MAX_CARDS_PER_PICK).collect::<Vec<_>>(),
+                "{draft_effect_cards} draft-effect cards"
+            );
+        }
+        // No pick count beyond the largest pack is admitted.
+        let largest_pack = usize::from(u8::MAX);
+        assert!(select_pick_count_is_admitted(
+            largest_pack,
+            largest_pack - 1
+        ));
+        assert!(!select_pick_count_is_admitted(
+            largest_pack + 1,
+            largest_pack
+        ));
     }
 
     /// `DraftKind::ALL` must list every variant exactly once.
@@ -3291,10 +3346,64 @@ mod tests {
             seat: 3,
             picked_card_instance_ids: vec!["pick-b".into(), "pick-a".into()],
             burned_card_instance_ids: vec!["burn-b".into(), "burn-a".into()],
-            returned_card_instance_id: Some("effect".into()),
+            returned_card_instance_ids: vec!["effect".into()],
             discarded_card_instance_ids: vec!["remainder".into(), "effect".into()],
         };
         let json = serde_json::to_value(&delta).unwrap();
+        assert_eq!(serde_json::from_value::<DraftDelta>(json).unwrap(), delta);
+    }
+
+    #[test]
+    fn fifo_selection_lists_round_trip_in_order_and_refuse_the_singular_field() {
+        let prompt_id = DraftPromptId {
+            session_id: DraftSessionId("incarnation".into()),
+            seat: 1,
+            generation: 4,
+        };
+        let select = DraftAction::Select {
+            seat: 1,
+            prompt_id: prompt_id.clone(),
+            picked_card_instance_ids: vec!["pick-c".into(), "pick-a".into(), "pick-b".into()],
+            burned_card_instance_ids: Vec::new(),
+            effect_card_instance_ids: vec!["effect-b".into(), "effect-a".into()],
+        };
+        let json = serde_json::to_value(&select).unwrap();
+        assert_eq!(
+            json["data"]["effect_card_instance_ids"],
+            serde_json::json!(["effect-b", "effect-a"])
+        );
+        assert_eq!(
+            serde_json::from_value::<DraftAction>(json.clone()).unwrap(),
+            select
+        );
+        // A payload in the one-card shape names only the singular field. The
+        // list is required, so the payload is refused before any session code.
+        let mut singular = json;
+        let data = singular["data"].as_object_mut().unwrap();
+        data.remove("effect_card_instance_ids");
+        data.insert(
+            "effect_card_instance_id".into(),
+            serde_json::json!("effect-b"),
+        );
+        let error = serde_json::from_value::<DraftAction>(singular).unwrap_err();
+        assert!(
+            error.to_string().contains("effect_card_instance_ids"),
+            "{error}"
+        );
+
+        let delta = DraftDelta::SelectionAccepted {
+            prompt_id,
+            seat: 1,
+            picked_card_instance_ids: vec!["pick-c".into(), "pick-a".into(), "pick-b".into()],
+            burned_card_instance_ids: Vec::new(),
+            returned_card_instance_ids: vec!["effect-b".into(), "effect-a".into()],
+            discarded_card_instance_ids: Vec::new(),
+        };
+        let json = serde_json::to_value(&delta).unwrap();
+        assert_eq!(
+            json["data"]["returned_card_instance_ids"],
+            serde_json::json!(["effect-b", "effect-a"])
+        );
         assert_eq!(serde_json::from_value::<DraftDelta>(json).unwrap(), delta);
     }
 }

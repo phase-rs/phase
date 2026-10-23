@@ -245,7 +245,7 @@ pub(crate) fn advance(session: &mut DraftSession, now: u64) -> Result<Vec<DraftD
             prompt_id,
             picked_card_instance_ids,
             burned_card_instance_ids,
-            effect_card_instance_id,
+            effect_card_instance_ids,
         }) = pick_pass::legal_auto_selection(session, prompt_id.seat)
         {
             deltas.extend(pick_pass::select_fifo(
@@ -254,7 +254,7 @@ pub(crate) fn advance(session: &mut DraftSession, now: u64) -> Result<Vec<DraftD
                 prompt_id,
                 picked_card_instance_ids,
                 burned_card_instance_ids,
-                effect_card_instance_id,
+                effect_card_instance_ids,
                 SelectionTiming::Expiry {
                     pack_id,
                     deadline_ms,
