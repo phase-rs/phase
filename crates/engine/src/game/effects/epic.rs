@@ -134,6 +134,8 @@ pub(crate) fn resolve(
     // Epic ("except for its epic ability") so the copy's own resolution does
     // not arm a second Epic effect. The copy is a token spell on the stack.
     let mut copy_obj = source_obj.clone();
+    // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
+    crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
     copy_obj.id = copy_id;
     copy_obj.controller = controller;
     // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).

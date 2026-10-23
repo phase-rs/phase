@@ -9,8 +9,8 @@ use crate::types::ability::{
     Effect, QuantityExpr, ResolvedAbility, StickerTicketCostPayment, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::identifiers::{CardId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaType, ManaUnit};
 use crate::types::phase::Phase;
@@ -109,6 +109,7 @@ fn stickers_modify_battlefield_object_and_public_zone_retention() {
     assert_eq!(creature.stickers.len(), 3);
 
     move_to_zone(state, creature_id, Zone::Graveyard, &mut events);
+    crate::game::layers::flush_layers(state);
     let graveyard_creature = state.objects.get(&creature_id).unwrap();
     assert_eq!(graveyard_creature.zone, Zone::Graveyard);
     assert_eq!(graveyard_creature.name, "Bear Hot Dog");
@@ -118,6 +119,7 @@ fn stickers_modify_battlefield_object_and_public_zone_retention() {
     assert_eq!(graveyard_creature.stickers.len(), 3);
 
     move_to_zone(state, creature_id, Zone::Battlefield, &mut events);
+    crate::game::layers::flush_layers(state);
     let returned_creature = state.objects.get(&creature_id).unwrap();
     assert_eq!(returned_creature.zone, Zone::Battlefield);
     assert_eq!(returned_creature.name, "Bear Hot Dog");
@@ -701,4 +703,312 @@ fn applied_sticker_name_text_projects_only_name_stickers() {
     ] {
         assert_eq!(other.name_text(), None, "{other:?}");
     }
+}
+
+fn spell_entry(id: ObjectId, controller: PlayerId) -> StackEntry {
+    StackEntry {
+        id,
+        source_id: id,
+        controller,
+        kind: StackEntryKind::Spell {
+            card_id: CardId(0),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    }
+}
+
+/// T2 + T4 - CR 613.7d + CR 613.7k + CR 123.5: every real public move draws
+/// the object's timestamp and then renews every retained sticker (all four
+/// kinds) in prior relative order, whatever the vector order. Unrelated carriers,
+/// non-transitions and unstickered moves draw nothing.
+#[test]
+fn retained_sticker_timestamps_follow_each_real_public_move_and_skip_nontransitions() {
+    let mut scenario = GameScenario::new();
+    let first = scenario.add_creature(P0, "First", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second", 2, 2).id();
+    let deck_only = scenario.add_creature(P1, "Command deck only", 2, 2).id();
+    let plain = scenario.add_creature(P0, "Unstickered", 2, 2).id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    set_player_sticker_sheets(state, P0, &["Playable Delusionary Hydra".into()]);
+    state.players[0].add_player_counters(&PlayerCounterKind::Ticket, 20);
+    let candidates = available_sticker_candidates(state, P0, None, None, false);
+    for (kind, index) in [
+        (StickerKind::Name, 0),
+        (StickerKind::Ability, 6),
+        (StickerKind::PowerToughness, 8),
+        (StickerKind::Art, 3),
+        (StickerKind::PowerToughness, 9),
+    ] {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| {
+                candidate.sticker.kind() == kind && candidate.sticker.locator().index == index
+            })
+            .expect("the registry supplies every discrete sticker")
+            .clone();
+        apply_selected_sticker(
+            state,
+            P0,
+            first,
+            candidate.sticker,
+            candidate.pay_ticket,
+            &mut Vec::new(),
+        );
+        // An interleaved, unrelated carrier must never contribute operands.
+        if state.objects[&second].stickers.is_empty() {
+            let mut other = candidates
+                .iter()
+                .find(|c| c.sticker.kind() == StickerKind::Art)
+                .unwrap()
+                .sticker
+                .clone();
+            other.set_timestamp(state.next_timestamp());
+            state.objects.get_mut(&second).unwrap().stickers.push(other);
+        }
+    }
+    // Storage order is the reverse of timestamp order.
+    state.objects.get_mut(&first).unwrap().stickers.reverse();
+    let mut events = Vec::new();
+    move_to_zone(state, second, Zone::Stack, &mut events);
+    let unrelated_entry = spell_entry(second, P1);
+    state.stack.push_back(unrelated_entry.clone());
+    move_to_zone(state, deck_only, Zone::Command, &mut events);
+    state.command_zone.retain(|id| *id != deck_only);
+    state
+        .objects
+        .get_mut(&deck_only)
+        .unwrap()
+        .in_attraction_deck = true;
+    let deck_before = state.objects[&deck_only].clone();
+
+    // A battlefield-to-battlefield no-op is not a zone change.
+    let unchanged = state.next_timestamp;
+    let stickers = state.objects[&first].stickers.clone();
+    let first_stamp = state.objects[&first].timestamp;
+    move_to_zone(state, first, Zone::Battlefield, &mut events);
+    assert_eq!(state.next_timestamp, unchanged);
+    assert_eq!(state.objects[&first].stickers, stickers);
+    assert_eq!(state.objects[&first].timestamp, first_stamp);
+
+    // An unstickered nonbattlefield move draws and adopts nothing.
+    let plain_stamp = state.objects[&plain].timestamp;
+    move_to_zone(state, plain, Zone::Graveyard, &mut events);
+    assert_eq!(state.objects[&plain].zone, Zone::Graveyard);
+    assert_eq!(state.next_timestamp, unchanged);
+    assert_eq!(state.objects[&plain].timestamp, plain_stamp);
+
+    for zone in [
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Graveyard,
+        Zone::Battlefield,
+        Zone::Exile,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Command,
+        Zone::Stack,
+        Zone::Command,
+        Zone::Exile,
+        Zone::Stack,
+        Zone::Battlefield,
+    ] {
+        let from = state.objects[&first].zone;
+        if from == Zone::Stack {
+            assert!(state.stack.iter().any(|entry| entry.source_id == first));
+            // The resolution caller owns removing its StackEntry.
+            state.stack.retain(|entry| entry.source_id != first);
+        }
+        if from == Zone::Command {
+            assert!(state.command_zone.contains(&first));
+        }
+        let next = state.next_timestamp;
+        let second_stickers = state.objects[&second].stickers.clone();
+        let second_stamp = state.objects[&second].timestamp;
+        let incarnation = state.objects[&first].incarnation;
+        let mut previous = state.objects[&first].stickers.clone();
+        previous.sort_by_key(AppliedSticker::timestamp);
+        assert_eq!(previous.len(), 5);
+        move_to_zone(state, first, zone, &mut events);
+        if zone == Zone::Stack {
+            // The casting caller owns inserting its actual spell entry.
+            state.stack.push_back(spell_entry(first, P0));
+        }
+        let object = &state.objects[&first];
+        assert_eq!(object.zone, zone);
+        assert!(object.incarnation > incarnation, "{from:?} -> {zone:?}");
+        assert_eq!(object.timestamp, next, "{from:?} -> {zone:?}");
+        assert_eq!(object.stickers.len(), previous.len());
+        for (offset, old) in previous.iter().enumerate() {
+            let current = object
+                .stickers
+                .iter()
+                .find(|s| s.locator() == old.locator())
+                .unwrap();
+            let mut expected = old.clone();
+            expected.set_timestamp(next + offset as u64 + 1);
+            assert_eq!(
+                current, &expected,
+                "every kind keeps its payload and prior relative order: {from:?} -> {zone:?}"
+            );
+        }
+        assert_eq!(state.next_timestamp, next + previous.len() as u64 + 1);
+        // CR 613.7k: the latest P/T sticker (the 4/4 at index 9) still wins.
+        crate::game::layers::flush_layers(state);
+        let object = &state.objects[&first];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(4), Some(4)),
+            "{from:?} -> {zone:?}"
+        );
+        assert_eq!(state.objects[&second].stickers, second_stickers);
+        assert_eq!(state.objects[&second].timestamp, second_stamp);
+        assert_eq!(
+            state.stack.iter().find(|entry| entry.source_id == second),
+            Some(&unrelated_entry)
+        );
+        assert_eq!(state.objects[&deck_only].timestamp, deck_before.timestamp);
+        assert_eq!(
+            state.objects[&deck_only].incarnation,
+            deck_before.incarnation
+        );
+        assert_eq!(state.objects[&deck_only].stickers, deck_before.stickers);
+        assert!(!state.command_zone.contains(&deck_only));
+        match zone {
+            Zone::Battlefield => assert!(state.battlefield.contains(&first)),
+            Zone::Graveyard => assert!(state.players[0].graveyard.contains(&first)),
+            Zone::Exile => assert!(state.exile.contains(&first)),
+            Zone::Command => assert!(state.command_zone.contains(&first)),
+            Zone::Stack => assert!(state.stack.iter().any(|entry| entry.source_id == first)),
+            Zone::Hand | Zone::Library => unreachable!(),
+        }
+    }
+
+    // A same-zone graveyard reorder is not a new object and renews nothing.
+    move_to_zone(state, first, Zone::Graveyard, &mut events);
+    let next = state.next_timestamp;
+    let stickers = state.objects[&first].stickers.clone();
+    let first_stamp = state.objects[&first].timestamp;
+    move_to_zone(state, first, Zone::Graveyard, &mut events);
+    assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+    assert_eq!(state.next_timestamp, next);
+    assert_eq!(state.objects[&first].stickers, stickers);
+    assert_eq!(state.objects[&first].timestamp, first_stamp);
+
+    // CR 123.5: a hidden destination discards every sticker.
+    move_to_zone(state, first, Zone::Hand, &mut events);
+    assert!(state.objects[&first].stickers.is_empty());
+    assert_eq!(state.next_timestamp, next);
+    // Retention depends on the destination alone: a carrier that enters a
+    // public zone from a hidden one is renewed after its object.
+    let mut hidden_sticker = state.objects[&second].stickers[0].clone();
+    hidden_sticker.set_timestamp(state.next_timestamp());
+    state
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .stickers
+        .push(hidden_sticker);
+    let next = state.next_timestamp;
+    move_to_zone(state, first, Zone::Exile, &mut events);
+    assert_eq!(state.objects[&first].timestamp, next);
+    assert_eq!(state.objects[&first].stickers[0].timestamp(), next + 1);
+    assert_eq!(state.next_timestamp, next + 2);
+}
+
+/// CR 123.1 + CR 707.2: the copy-birth authority undoes exactly what each
+/// sticker added, observed on the clone before any layer pass can re-derive it.
+/// A graveyard creature card with printed Flying also gets a Flying sticker, a
+/// non-keyword activated-ability sticker, a name sticker and a P/T sticker; its
+/// copy keeps the printed Flying (only the sticker's instance is revoked) and
+/// none of the rest, while the original keeps all of it.
+#[test]
+fn remove_stickers_from_copy_undoes_only_what_the_stickers_added() {
+    let mut scenario = GameScenario::new();
+    let id = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut game = scenario.build();
+    let state = game.state_mut();
+    {
+        let bear = state.objects.get_mut(&id).unwrap();
+        bear.base_keywords.push(Keyword::Flying);
+        bear.keywords.push(Keyword::Flying);
+    }
+    move_to_zone(state, id, Zone::Graveyard, &mut Vec::new());
+    set_player_sticker_sheets(
+        state,
+        P0,
+        &[
+            "Ancestral Hot Dog Minotaur".to_string(),
+            "Playable Delusionary Hydra".to_string(),
+        ],
+    );
+    state.players[0].add_player_counters(&PlayerCounterKind::Ticket, 20);
+    let candidates = available_sticker_candidates(state, P0, None, None, false);
+    let pick = |wanted: &dyn Fn(&AppliedSticker) -> bool| {
+        candidates
+            .iter()
+            .find(|candidate| wanted(&candidate.sticker))
+            .expect("the registry supplies the sticker")
+            .clone()
+    };
+    for candidate in [
+        pick(
+            &|s| matches!(s, AppliedSticker::Name { text, position: 0, .. } if text == "Ancestral"),
+        ),
+        pick(&|s| matches!(s, AppliedSticker::Ability { text, .. } if text == "Flying")),
+        pick(
+            &|s| matches!(s, AppliedSticker::Ability { text, .. } if text.starts_with("{T}: Draw a card")),
+        ),
+        pick(&|s| {
+            matches!(
+                s,
+                AppliedSticker::PowerToughness {
+                    power: 8,
+                    toughness: 6,
+                    ..
+                }
+            )
+        }),
+    ] {
+        apply_selected_sticker(
+            state,
+            P0,
+            id,
+            candidate.sticker,
+            candidate.pay_ticket,
+            &mut Vec::new(),
+        );
+    }
+    crate::game::layers::flush_layers(state);
+    let flying = |object: &crate::game::game_object::GameObject| {
+        object
+            .keywords
+            .iter()
+            .filter(|keyword| **keyword == Keyword::Flying)
+            .count()
+    };
+    let original = state.objects[&id].clone();
+    assert_eq!(original.stickers.len(), 4);
+    assert_eq!(original.name, "Ancestral Bear");
+    assert_eq!(
+        flying(&original),
+        2,
+        "reach guard: printed + sticker Flying"
+    );
+    assert_eq!(original.abilities.len(), original.base_abilities.len() + 1);
+    assert_eq!((original.power, original.toughness), (Some(8), Some(6)));
+
+    let mut copy = original.clone();
+    crate::game::stickers::remove_stickers_from_copy(&mut copy);
+    assert!(copy.stickers.is_empty());
+    assert_eq!(copy.name, "Bear");
+    assert_eq!(flying(&copy), 1, "the printed Flying survives the revoke");
+    assert_eq!(copy.abilities.len(), copy.base_abilities.len());
+    assert_eq!((copy.power, copy.toughness), (Some(2), Some(2)));
+    let untouched = &state.objects[&id];
+    assert_eq!(untouched.stickers.len(), 4, "the original is untouched");
+    assert_eq!(untouched.name, "Ancestral Bear");
+    assert_eq!(flying(untouched), 2);
 }

@@ -3265,6 +3265,18 @@ pub struct ResolutionCoinFlip {
     pub result: CoinFlipResult,
 }
 
+/// CR 608.2c: a pending "repeat this process" request, written when a looped
+/// chain's `RuntimeHandler::RepeatProcess` directive node resolves and read by
+/// the chain root's `EffectOutcomeSignal::RepeatDirectiveReached` loop
+/// predicate. Carries the `source_id` of the spell or ability whose
+/// instructions reached the directive, so the predicate honours only a request
+/// made by the process it is repeating (the controller follows that object's
+/// instructions, CR 608.2c), mirroring `ResolutionCoinFlip::flipper`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatProcessRequest {
+    pub source_id: ObjectId,
+}
+
 /// One battlefield member announced by a logical zone-change action.
 ///
 /// Membership is captured before the first delivery and is never inferred from
@@ -22643,11 +22655,12 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
     pub attribution: im::HashMap<ObjectId, ObjectAttribution>,
 
-    /// CR 613.1d: Remote recipients whose live card types were derived by a
-    /// Layer-4 continuous effect during the preceding evaluation. The next
-    /// full pass restores only these objects' type baselines before applying
-    /// the new Layer-4 effect set, leaving independent spell/card state (such
-    /// as cast-time ability grants) untouched.
+    /// CR 613.1d + CR 613.1e + CR 613.4: Remote recipients whose live card
+    /// types, colours or power/toughness were derived by a continuous effect
+    /// during the preceding evaluation. The next full pass restores only
+    /// these objects' baselines before applying the new effect set, leaving
+    /// independent spell/card state (such as cast-time ability grants)
+    /// untouched. The name predates the widening past the type layer.
     ///
     /// This is an engine-only derived cache. It is reconstructed from the
     /// serialized attribution side-table on the first post-deserialization
@@ -23921,6 +23934,18 @@ declare_game_state! {
     /// resolution can never satisfy a later gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
+
+    /// CR 608.2c: the "repeat this process" directive
+    /// (`RuntimeHandler::RepeatProcess`) was reached in the current pass of a
+    /// looped chain, by the object named in the request. Set when the
+    /// directive node resolves and read by the root's
+    /// `EffectOutcomeSignal::RepeatDirectiveReached` loop predicate; cleared
+    /// at the head of every pass so a pass whose gate did not hold (or that
+    /// was declined) never reads a previous pass's request.
+    /// Resolution-scoped control flow, not game state proper: it is not part
+    /// of `PartialEq` and serializes only while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_process_requested: Option<RepeatProcessRequest>,
 
     /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
     /// iteration paused by the current player's interactive choice. Drained
@@ -31657,6 +31682,7 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
+            repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
@@ -34722,6 +34748,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
+        repeat_process_requested: _,
         may_trigger_auto_choices: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,

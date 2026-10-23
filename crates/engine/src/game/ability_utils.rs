@@ -8987,7 +8987,10 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
             &sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
         )
-        || sub.target_choice_timing == TargetChoiceTiming::Resolution
+        // CR 608.2c: the sticker's recipient is chosen during resolution,
+        // but its independent following instructions still announce targets.
+        || (sub.target_choice_timing == TargetChoiceTiming::Resolution
+            && !matches!(sub.effect, Effect::PutSticker { .. }))
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
@@ -13834,6 +13837,74 @@ mod tests {
             true,
             std::slice::from_ref(&creature),
         );
+    }
+
+    #[test]
+    fn resolution_sticker_head_preserves_independent_announcement_walks() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let own = scenario
+            .add_creature(PlayerId(0), "Runeclaw Bear", 2, 2)
+            .id();
+        let opponent = scenario
+            .add_creature(PlayerId(1), "Centaur Courser", 3, 3)
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let parsed = crate::parser::parse_oracle_text(
+            "You get {TK}{TK}, then you may put a sticker on a nonland permanent you own. Target creature you control deals damage equal to its power to target creature you don't control.",
+            "Finishing Move", &[], &["Sorcery".into()], &[],
+        );
+        let root = build_resolved_from_def(&parsed.abilities[0], ObjectId(99), PlayerId(0));
+        assert_eq!(build_target_slots(state, &root).unwrap().len(), 2);
+        assert_eq!(target_slot_specs(state, &root).len(), 2);
+        assert_eq!(minimum_targets_in_chain(state, &root), 2);
+        let targets = [TargetRef::Object(own), TargetRef::Object(opponent)];
+        let mut flat = root.clone();
+        assign_targets_in_chain(state, &mut flat, &targets).unwrap();
+        let mut slotted = root;
+        assign_selected_slots_in_chain(
+            state,
+            &mut slotted,
+            &targets.iter().cloned().map(Some).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        for ability in [&flat, &slotted] {
+            let sticker = ability.sub_ability.as_deref().unwrap();
+            assert!(
+                sticker.targets.is_empty(),
+                "a zero-slot Resolution node must not mirror its child"
+            );
+            let damage_source = sticker.sub_ability.as_deref().unwrap();
+            assert_eq!(damage_source.targets, vec![targets[0].clone()]);
+            assert_eq!(
+                damage_source.sub_ability.as_deref().unwrap().targets,
+                vec![targets[1].clone()]
+            );
+            let retargets = chain_retarget_slots(ability);
+            assert_eq!(retargets.len(), 2);
+            assert_eq!(
+                retargets
+                    .iter()
+                    .map(|binding| binding.current.clone())
+                    .collect::<Vec<_>>(),
+                targets
+            );
+            assert!(retargets.iter().all(|binding| !matches!(
+                node_at(ability, &binding.address.path).unwrap().effect,
+                Effect::PutSticker { .. }
+            )));
+        }
+        let targeted = crate::parser::parse_oracle_text(
+            "Put a sticker on target creature.",
+            "Grammar control",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let explicit = build_resolved_from_def(&targeted.abilities[0], ObjectId(99), PlayerId(0));
+        assert!(node_has_stack_target_declaration(&explicit));
+        assert_eq!(build_target_slots(state, &explicit).unwrap().len(), 1);
+        assert_eq!(minimum_targets_in_chain(state, &explicit), 1);
     }
 
     #[test]

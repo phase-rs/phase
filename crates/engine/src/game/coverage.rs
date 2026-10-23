@@ -10496,6 +10496,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             }
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
             EffectOutcomeSignal::RevealUntilMatched => ("EffectOutcomeRevealUntilMatched", Handled),
+            EffectOutcomeSignal::RepeatDirectiveReached => {
+                ("EffectOutcomeRepeatDirectiveReached", Handled)
+            }
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
