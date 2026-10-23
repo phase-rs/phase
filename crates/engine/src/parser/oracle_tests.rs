@@ -1,5 +1,647 @@
 use super::*;
 
+fn retained_spell_printed_cases() -> Vec<crate::database::mtgjson::AtomicCard> {
+    [
+        r###"{"name":"Alicia Masters, Skilled Sculptor","manaCost":"{1}{R}","manaValue":2,"type":"Legendary Creature — Human Artificer","types":["Creature"],"subtypes":["Human","Artificer"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["R"],"power":"0","toughness":"4","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a Treasure token.\nSense the Good — At the beginning of your end step, each player gains control of all creatures they own.","keywords":["Sense the Good","Treasure"],"identifiers":{"scryfallOracleId":"223504ba-174a-46f2-a4a2-5d663a82dfd3"}}"###,
+        r###"{"name":"Council of Reeds","manaCost":"{2}{U}","manaValue":3,"type":"Legendary Creature — Human Scientist Hero","types":["Creature"],"subtypes":["Human","Scientist","Hero"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"2","toughness":"2","layout":"normal","text":"The \"legend rule\" doesn't apply to creatures you control.\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a token that's a copy of Council of Reeds.","identifiers":{"scryfallOracleId":"33fa949c-f29e-4a98-9381-ecfa9e5c3f6d"}}"###,
+        r###"{"name":"Eshki Dragonclaw","manaCost":"{1}{G}{U}{R}","manaValue":4,"type":"Legendary Creature — Human Warrior","types":["Creature"],"subtypes":["Human","Warrior"],"supertypes":["Legendary"],"colors":["G","R","U"],"colorIdentity":["G","R","U"],"power":"4","toughness":"4","layout":"normal","text":"Vigilance, trample, ward {1}\nAt the beginning of combat on your turn, if you've cast both a creature spell and a noncreature spell this turn, draw a card and put two +1/+1 counters on Eshki Dragonclaw.","keywords":["Trample","Vigilance","Ward"],"identifiers":{"scryfallOracleId":"85d87087-48ee-4dc8-a1c0-9c9ccb885adc"}}"###,
+        r###"{"name":"Fae Offering","manaCost":"{2}{G}","manaValue":3,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"At the beginning of each end step, if you've cast both a creature spell and a noncreature spell this turn, create a Clue token, a Food token, and a Treasure token.","keywords":["Food","Treasure"],"identifiers":{"scryfallOracleId":"885d68de-db97-4c9e-bb44-8e561a482dde"}}"###,
+        r###"{"name":"H.E.R.B.I.E., Lovable Robot","manaCost":"{2}","manaValue":2,"type":"Legendary Artifact Creature — Robot Scout","types":["Artifact","Creature"],"subtypes":["Robot","Scout"],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"power":"1","toughness":"1","layout":"normal","text":"Flying\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, surveil 1.\n{T}: Add {C}.\n{1}, {T}: Add one mana of any color.","keywords":["Flying","Surveil"],"identifiers":{"scryfallOracleId":"064a2f4a-ff3f-4622-8727-24b22965416d"}}"###,
+        r###"{"name":"Human Torch","manaCost":"{3}{R}","manaValue":4,"type":"Legendary Creature — Human Hero","types":["Creature"],"subtypes":["Human","Hero"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["G","R","U","W"],"power":"3","toughness":"2","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, Human Torch gains flying, double strike, and haste until end of turn.\nWhenever Human Torch attacks, you may pay {R}{G}{W}{U}. If you do, until end of turn, whenever he deals combat damage to an opponent, he deals that much damage to each other opponent.","identifiers":{"scryfallOracleId":"d55cb52d-b35c-4602-a518-cd51f155a2d1"}}"###,
+        r###"{"name":"Invisible Woman","manaCost":"{2}{W}","manaValue":3,"type":"Legendary Creature — Human Hero","types":["Creature"],"subtypes":["Human","Hero"],"supertypes":["Legendary"],"colors":["W"],"colorIdentity":["G","R","U","W"],"power":"3","toughness":"3","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a 0/3 colorless Wall creature token with defender and reach.\nWhenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.","identifiers":{"scryfallOracleId":"085016ee-4429-453f-b7f3-d61065f1214e"}}"###,
+        r###"{"name":"Lockjaw, Slobbering Teleporter","manaCost":"{1}{U}","manaValue":2,"type":"Legendary Creature — Inhuman Dog Hero","types":["Creature"],"subtypes":["Inhuman","Dog","Hero"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"1","toughness":"1","layout":"normal","text":"Vigilance\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, put a +1/+1 counter on Lockjaw. When you do, Lockjaw and up to one other target creature you control can't be blocked this turn.","keywords":["Vigilance"],"identifiers":{"scryfallOracleId":"5efce07e-24c4-4520-a46f-9954b67c4e6e"}}"###,
+        r###"{"name":"Mister Fantastic","manaCost":"{2}{U}","manaValue":3,"type":"Legendary Creature — Human Scientist Hero","types":["Creature"],"subtypes":["Human","Scientist","Hero"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["G","R","U","W"],"power":"2","toughness":"4","layout":"normal","text":"Reach, vigilance\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, draw a card.\n{R}{G}{W}{U}, {T}: Copy target triggered ability you control twice. You may choose new targets for the copies.","keywords":["Reach","Vigilance"],"identifiers":{"scryfallOracleId":"a8011dce-17fb-46e1-8297-81a4acccbd05"}}"###,
+        r###"{"name":"Seeker of Insight","manaCost":"{1}{U}","manaValue":2,"type":"Creature — Human Wizard","types":["Creature"],"subtypes":["Human","Wizard"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"1","toughness":"3","layout":"normal","text":"{T}: Draw a card, then discard a card. Activate only if you've cast a noncreature spell this turn.","identifiers":{"scryfallOracleId":"a0b2d446-fe90-40f8-8674-7421c425b489"}}"###,
+        r###"{"name":"Tapestry of the Ages","manaCost":"{4}","manaValue":4,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{2}, {T}: Draw a card. Activate only if you've cast a noncreature spell this turn.","identifiers":{"scryfallOracleId":"9248f9b9-ddaa-459c-91e6-9045a65b0f07"}}"###,
+        r###"{"name":"The Thing","manaCost":"{5}{G}","manaValue":6,"type":"Legendary Creature — Human Hero","types":["Creature"],"subtypes":["Human","Hero"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G","R","U","W"],"power":"5","toughness":"5","layout":"normal","text":"Trample\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on The Thing.\nWhenever The Thing attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.","keywords":["Double","Trample"],"identifiers":{"scryfallOracleId":"c8de07d4-9bc1-4bfe-b5a4-0a58e05af022"}}"###,
+        r###"{"name":"Franklin Richards, Ascendant","manaCost":"{5}{R}","manaValue":6,"type":"Legendary Creature — Mutant Hero","types":["Creature"],"subtypes":["Mutant","Hero"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["R"],"power":"6","toughness":"6","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, discover 6. (Exile cards from the top of your library until you exile a nonland card with mana value 6 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)","keywords":["Discover"],"identifiers":{"scryfallOracleId":"af20f452-5cb9-47cc-9a81-71f23204ddd0"}}"###,
+        r###"{"name":"Traxos, Academy Guardian","manaCost":"{3}{U}","manaValue":4,"type":"Legendary Artifact Creature — Dragon Construct","types":["Artifact","Creature"],"subtypes":["Dragon","Construct"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"1","toughness":"5","layout":"normal","text":"This spell costs {2} less to cast if you've cast a noncreature spell this turn.\nFlying, vigilance\nProwess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)","keywords":["Flying","Prowess","Vigilance"],"identifiers":{"scryfallOracleId":"7b9a574f-6d56-421b-8fbd-94da1e6e3ce1"}}"###,
+        r###"{"name":"Lyse Hext","manaCost":"{1}{W}{U}","manaValue":3,"type":"Legendary Creature — Human Rebel Monk","types":["Creature"],"subtypes":["Human","Rebel","Monk"],"supertypes":["Legendary"],"colors":["U","W"],"colorIdentity":["U","W"],"power":"2","toughness":"2","layout":"normal","text":"Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nNoncreature spells you cast cost {1} less to cast.\nAs long as you've cast two or more noncreature spells this turn, Lyse Hext has double strike.","keywords":["Prowess"],"identifiers":{"scryfallOracleId":"47bce63e-8edb-43c1-b273-4b86da5c616b"}}"###,
+        r###"{"name":"Silburlind Snapper","manaCost":"{5}{U}","manaValue":6,"type":"Creature — Turtle","types":["Creature"],"subtypes":["Turtle"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"6","toughness":"6","layout":"normal","text":"This creature can't attack unless you've cast a noncreature spell this turn.","identifiers":{"scryfallOracleId":"eb2fe2f7-60f7-44d3-8d4a-4e102012435d"}}"###,
+        r###"{"name":"Sword Coast Serpent // Capsizing Wave","faceName":"Sword Coast Serpent","side":"a","manaCost":"{5}{U}{U}","manaValue":7,"type":"Creature — Serpent Dragon","types":["Creature"],"subtypes":["Serpent","Dragon"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"6","toughness":"6","layout":"adventure","text":"This creature can't be blocked as long as you've cast a noncreature spell this turn.","identifiers":{"scryfallOracleId":"d60e14b4-f750-40cc-85b5-17c87ae8a584"}}"###,
+        r###"{"name":"Sword Coast Serpent // Capsizing Wave","faceName":"Capsizing Wave","side":"b","manaCost":"{1}{U}","manaValue":7,"type":"Instant — Adventure","types":["Instant"],"subtypes":["Adventure"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"adventure","text":"Return target creature to its owner's hand. (Then exile this card. You may cast the creature later from exile.)","identifiers":{"scryfallOracleId":"d60e14b4-f750-40cc-85b5-17c87ae8a584"}}"###,
+        r###"{"name":"Gaddock Teeg","manaCost":"{G}{W}","manaValue":2,"type":"Legendary Creature — Kithkin Advisor","types":["Creature"],"subtypes":["Kithkin","Advisor"],"supertypes":["Legendary"],"colors":["G","W"],"colorIdentity":["G","W"],"power":"2","toughness":"2","layout":"normal","text":"Noncreature spells with mana value 4 or greater can't be cast.\nNoncreature spells with {X} in their mana costs can't be cast.","identifiers":{"scryfallOracleId":"98dd6d43-cc56-4656-9e0c-240d0679b404"}}"###,
+        r###"{"name":"Ethersworn Canonist","manaCost":"{1}{W}","manaValue":2,"type":"Artifact Creature — Human Cleric","types":["Artifact","Creature"],"subtypes":["Human","Cleric"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"2","toughness":"2","layout":"normal","text":"Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.","identifiers":{"scryfallOracleId":"ec3471ad-b65c-4e35-a7d1-68da9555a9ec"}}"###,
+        r###"{"name":"Heartwood Storyteller Avatar","manaValue":0,"type":"Vanguard","types":["Vanguard"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"vanguard","text":"The first creature spell you cast each turn costs {1} less to cast.\nThe first noncreature spell each opponent casts each turn costs {1} more to cast.","identifiers":{"scryfallOracleId":"96a78b38-114e-4048-943a-a8173d5cb214"}}"###,
+        r###"{"name":"Calamity's Wake","manaCost":"{1}{W}","manaValue":2,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","text":"Exile all graveyards. Players can't cast noncreature spells this turn. Exile Calamity's Wake.","identifiers":{"scryfallOracleId":"a6436330-f35a-4d31-9230-03e0c62f9e7e"}}"###,
+        r###"{"name":"Permission Denied","manaCost":"{W}{U}","manaValue":2,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["U","W"],"colorIdentity":["U","W"],"layout":"normal","text":"Counter target noncreature spell. Your opponents can't cast noncreature spells this turn.","identifiers":{"scryfallOracleId":"95aae5ba-7634-4cad-a0be-496c3398fa3c"}}"###,
+        r###"{"name":"Ranger-Captain of Eos","manaCost":"{1}{W}{W}","manaValue":3,"type":"Creature — Human Soldier Ranger","types":["Creature"],"subtypes":["Human","Soldier","Ranger"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"3","toughness":"3","layout":"normal","text":"When this creature enters, you may search your library for a creature card with mana value 1 or less, reveal it, put it into your hand, then shuffle.\nSacrifice this creature: Your opponents can't cast noncreature spells this turn.","identifiers":{"scryfallOracleId":"cada3481-cc2b-4412-b9b5-0436af53aad2"}}"###,
+        r###"{"name":"Sift Through Sands","manaCost":"{1}{U}{U}","manaValue":3,"type":"Instant — Arcane","types":["Instant"],"subtypes":["Arcane"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Draw two cards, then discard a card.\nIf you've cast a spell named Peer Through Depths and a spell named Reach Through Mists this turn, you may search your library for a card named The Unspeakable, put it onto the battlefield, then shuffle.","identifiers":{"scryfallOracleId":"4f5978a6-40c2-49df-8277-48a6d4f6f23e"}}"###,
+        r###"{"name":"Relic Runner","manaCost":"{1}{U}","manaValue":2,"type":"Creature — Human Rogue","types":["Creature"],"subtypes":["Human","Rogue"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"2","toughness":"1","layout":"normal","text":"This creature can't be blocked if you've cast a historic spell this turn. (Artifacts, legendaries, and Sagas are historic.)","identifiers":{"scryfallOracleId":"69e4e5bf-f0e2-4ed1-8b17-c8c7a9381551"}}"###,
+        r###"{"name":"Nightscape Familiar","manaCost":"{1}{B}","manaValue":2,"type":"Creature — Zombie","types":["Creature"],"subtypes":["Zombie"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"1","toughness":"1","layout":"normal","text":"Blue spells and red spells you cast cost {1} less to cast.\n{1}{B}: Regenerate this creature.","keywords":["Regenerate"],"identifiers":{"scryfallOracleId":"57296ea3-3c0d-49b7-bc08-0d0d8414e9ad"}}"###,
+        r###"{"name":"Jhoira's Familiar","manaCost":"{4}","manaValue":4,"type":"Artifact Creature — Bird","types":["Artifact","Creature"],"subtypes":["Bird"],"supertypes":[],"colors":[],"colorIdentity":[],"power":"2","toughness":"2","layout":"normal","text":"Flying\nHistoric spells you cast cost {1} less to cast. (Artifacts, legendaries, and Sagas are historic.)","keywords":["Flying"],"identifiers":{"scryfallOracleId":"df4b5f7b-9d83-49b1-bd5e-77d0652eb34c"}}"###,
+        r###"{"name":"Impending Flux","manaCost":"{2}{R}","manaValue":3,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"Paradox — Impending Flux deals X damage to each opponent and each creature they control, where X is 1 plus the number of spells you've cast from anywhere other than your hand this turn.\nForetell {1}{R}{R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)","keywords":["Foretell","Paradox"],"identifiers":{"scryfallOracleId":"7089512e-f9b6-4d8e-bccc-29e6785cc041"}}"###,
+        r###"{"name":"Demon of Fate's Design","manaCost":"{4}{B}{B}","manaValue":6,"type":"Enchantment Creature — Demon","types":["Enchantment","Creature"],"subtypes":["Demon"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"6","toughness":"6","layout":"normal","text":"Flying, trample\nOnce during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.\n{2}{B}, Sacrifice another enchantment: This creature gets +X/+0 until end of turn, where X is the sacrificed enchantment's mana value.","keywords":["Flying","Trample"],"identifiers":{"scryfallOracleId":"53716e0b-4d4e-40b0-8370-38e11f73d195"}}"###,
+        r###"{"name":"Conspiracy Unraveler","manaCost":"{5}{U}{U}","manaValue":7,"type":"Creature — Sphinx Detective","types":["Creature"],"subtypes":["Sphinx","Detective"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"6","toughness":"6","layout":"normal","text":"Flying\nYou may collect evidence 10 rather than pay the mana cost for spells you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)","keywords":["Collect evidence","Flying"],"identifiers":{"scryfallOracleId":"e4541d02-2860-46ef-b630-1d6307b60766"}}"###,
+        r###"{"name":"Ichneumon Druid","manaCost":"{1}{G}{G}","manaValue":3,"type":"Creature — Human Druid","types":["Creature"],"subtypes":["Human","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"1","layout":"normal","text":"Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, this creature deals 4 damage to that player.","identifiers":{"scryfallOracleId":"6aba2a04-0117-429e-a5df-6ba4645129d8"}}"###,
+        r###"{"name":"Peer Through Depths","manaCost":"{1}{U}","manaValue":2,"type":"Instant — Arcane","types":["Instant"],"subtypes":["Arcane"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Look at the top five cards of your library. You may reveal an instant or sorcery card from among them and put it into your hand. Put the rest on the bottom of your library in any order.","identifiers":{"scryfallOracleId":"a61f5100-aa38-4996-b23c-3ce4ed25ed09"}}"###,
+        r###"{"name":"Reach Through Mists","manaCost":"{U}","manaValue":1,"type":"Instant — Arcane","types":["Instant"],"subtypes":["Arcane"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Draw a card.","identifiers":{"scryfallOracleId":"c81ca8ff-92f3-481e-82f7-0673b6c74ea0"}}"###,
+        r###"{"name":"The Unspeakable","manaCost":"{6}{U}{U}{U}","manaValue":9,"type":"Legendary Creature — Spirit","types":["Creature"],"subtypes":["Spirit"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"6","toughness":"7","layout":"normal","text":"Flying, trample\nWhenever The Unspeakable deals combat damage to a player, you may return target Arcane card from your graveyard to your hand.","keywords":["Flying","Trample"],"identifiers":{"scryfallOracleId":"64e413c9-96e5-43c3-a182-84d53fef4327"}}"###,
+    ].into_iter().map(|record| serde_json::from_str(record).unwrap()).collect()
+}
+
+mod retained_spell_publication {
+    use super::*;
+    use crate::types::ability::{
+        Comparator, CountScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+    use crate::types::card::{CardFace, LayoutKind, PrintedCardRef};
+    use crate::types::phase::Phase;
+
+    fn history(kind: TypeFilter) -> TriggerCondition {
+        let typed = if kind == TypeFilter::Creature {
+            TypedFilter::creature()
+        } else {
+            TypedFilter::card().with_type(kind)
+        };
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(TargetFilter::Typed(typed)),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    fn expected_token(
+        name: &str,
+        power: i32,
+        toughness: i32,
+        types: &[&str],
+        keywords: &[Keyword],
+    ) -> Effect {
+        Effect::Token {
+            name: name.into(),
+            power: crate::types::ability::PtValue::Fixed(power),
+            toughness: crate::types::ability::PtValue::Fixed(toughness),
+            types: types.iter().map(|kind| (*kind).into()).collect(),
+            colors: vec![],
+            keywords: keywords.to_vec(),
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        }
+    }
+
+    #[test]
+    fn complete_spell_context_cohort_retains_ir_filters_metadata_and_both_loaders() {
+        let mut exports = serde_json::Map::new();
+        let mut faces = Vec::new();
+        for atomic in retained_spell_printed_cases() {
+            let multi = atomic.face_name.is_some();
+            let name = atomic.face_name.as_deref().unwrap_or(&atomic.name);
+            let input = crate::database::synthesis::prepare_oracle_parser_input(&atomic, multi);
+            let mut doc = parse_oracle_ir(
+                &input.oracle_text,
+                &input.card_name,
+                &input.keyword_names,
+                &atomic.types,
+                &atomic.subtypes,
+            );
+            assert_eq!(doc.source_text, input.oracle_text);
+            let mut ids = std::collections::HashSet::new();
+            let mut previous = (0, 0);
+            let mut ordinals = std::collections::BTreeMap::new();
+            for item in &doc.items {
+                assert!(ids.insert(item.id.clone()), "unique item id for {name}");
+                let span = item.source.span();
+                assert!(span.is_exact());
+                let ordinal = ordinals
+                    .entry((span.start_byte, span.end_byte))
+                    .or_insert(0);
+                assert_eq!(span.ordinal_within_span, *ordinal);
+                *ordinal += 1;
+                assert_eq!(
+                    item.source.fragment(),
+                    Some(&input.oracle_text[span.start_byte..span.end_byte])
+                );
+                assert_eq!(
+                    span.first_line,
+                    input.oracle_text[..span.start_byte]
+                        .bytes()
+                        .filter(|byte| *byte == b'\n')
+                        .count()
+                );
+                assert!(
+                    (span.start_byte, span.ordinal_within_span) >= previous,
+                    "written source order: {name}"
+                );
+                previous = (span.start_byte, span.ordinal_within_span);
+            }
+            let parsed = lower_oracle_ir(&mut doc);
+            let face = if multi {
+                crate::database::synthesis::build_oracle_face_multi(
+                    &atomic,
+                    atomic.identifiers.scryfall_oracle_id.clone(),
+                )
+            } else {
+                crate::database::synthesis::build_oracle_face(
+                    &atomic,
+                    atomic.identifiers.scryfall_oracle_id.clone(),
+                )
+            };
+            assert_eq!(face.name, name);
+            assert_eq!(face.oracle_text, atomic.text);
+            assert_eq!(
+                face.scryfall_oracle_id,
+                atomic.identifiers.scryfall_oracle_id
+            );
+            assert_eq!(face.card_type.subtypes, atomic.subtypes);
+            assert_eq!(
+                face.card_type.core_types,
+                atomic
+                    .types
+                    .iter()
+                    .filter_map(|kind| kind.parse::<crate::types::card_type::CoreType>().ok())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                face.card_type.supertypes,
+                atomic
+                    .supertypes
+                    .iter()
+                    .map(|kind| kind.parse::<crate::types::card_type::Supertype>().unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                face.power,
+                atomic
+                    .power
+                    .as_deref()
+                    .map(|value| crate::types::ability::PtValue::Fixed(value.parse().unwrap()))
+            );
+            assert_eq!(
+                face.toughness,
+                atomic
+                    .toughness
+                    .as_deref()
+                    .map(|value| crate::types::ability::PtValue::Fixed(value.parse().unwrap()))
+            );
+            assert_eq!(
+                face.color_identity,
+                atomic
+                    .color_identity
+                    .iter()
+                    .map(|color| match color.as_str() {
+                        "W" => crate::types::mana::ManaColor::White,
+                        "U" => crate::types::mana::ManaColor::Blue,
+                        "B" => crate::types::mana::ManaColor::Black,
+                        "R" => crate::types::mana::ManaColor::Red,
+                        "G" => crate::types::mana::ManaColor::Green,
+                        _ => panic!("unexpected pinned color identity"),
+                    })
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                face.mana_cost,
+                atomic
+                    .mana_cost
+                    .as_deref()
+                    .and_then(parse_mana_symbols)
+                    .map_or(crate::types::mana::ManaCost::NoCost, |(cost, _)| cost)
+            );
+            assert_eq!(face.abilities, parsed.abilities);
+            assert_eq!(face.triggers, parsed.triggers);
+            assert_eq!(face.static_abilities, parsed.statics);
+            assert_eq!(face.replacements, parsed.replacements);
+            let expected_counts = match name {
+                "Alicia Masters, Skilled Sculptor" => (0, 2, 0, 0),
+                "Council of Reeds" => (0, 1, 1, 0),
+                "Eshki Dragonclaw"
+                | "Fae Offering"
+                | "Franklin Richards, Ascendant"
+                | "Lockjaw, Slobbering Teleporter"
+                | "Ichneumon Druid"
+                | "The Unspeakable" => (0, 1, 0, 0),
+                "Human Torch" | "Invisible Woman" | "The Thing" => (0, 2, 0, 0),
+                "H.E.R.B.I.E., Lovable Robot" => (2, 1, 0, 0),
+                "Mister Fantastic" | "Ranger-Captain of Eos" => (1, 1, 0, 0),
+                "Seeker of Insight"
+                | "Tapestry of the Ages"
+                | "Capsizing Wave"
+                | "Calamity's Wake"
+                | "Permission Denied"
+                | "Sift Through Sands"
+                | "Impending Flux"
+                | "Peer Through Depths"
+                | "Reach Through Mists" => (1, 0, 0, 0),
+                "Lyse Hext" | "Gaddock Teeg" | "Heartwood Storyteller Avatar" => (0, 0, 2, 0),
+                "Nightscape Familiar" | "Demon of Fate's Design" => (1, 0, 1, 0),
+                "Traxos, Academy Guardian"
+                | "Silburlind Snapper"
+                | "Sword Coast Serpent"
+                | "Ethersworn Canonist"
+                | "Relic Runner"
+                | "Jhoira's Familiar"
+                | "Conspiracy Unraveler" => (0, 0, 1, 0),
+                _ => panic!(
+                    "every adopted complete face requires an explicit vector contract: {name}"
+                ),
+            };
+            assert_eq!(
+                (
+                    face.abilities.len(),
+                    face.triggers.len(),
+                    face.static_abilities.len(),
+                    face.replacements.len()
+                ),
+                expected_counts,
+                "complete independent vectors: {name}"
+            );
+            if matches!(
+                name,
+                "Alicia Masters, Skilled Sculptor"
+                    | "Council of Reeds"
+                    | "Eshki Dragonclaw"
+                    | "Fae Offering"
+                    | "H.E.R.B.I.E., Lovable Robot"
+                    | "Human Torch"
+                    | "Invisible Woman"
+                    | "Lockjaw, Slobbering Teleporter"
+                    | "Mister Fantastic"
+                    | "The Thing"
+                    | "Franklin Richards, Ascendant"
+            ) {
+                let trigger = face
+                    .triggers
+                    .iter()
+                    .find(|trigger| {
+                        trigger.phase == Some(Phase::BeginCombat)
+                            || (name == "Fae Offering" && trigger.phase == Some(Phase::End))
+                    })
+                    .expect("required phase producer");
+                let noncreature = history(TypeFilter::Non(Box::new(TypeFilter::Creature)));
+                assert_eq!(
+                    trigger.condition,
+                    Some(if matches!(name, "Eshki Dragonclaw" | "Fae Offering") {
+                        TriggerCondition::And {
+                            conditions: vec![history(TypeFilter::Creature), noncreature],
+                        }
+                    } else {
+                        noncreature
+                    }),
+                    "{name}"
+                );
+                let execute = trigger.execute.as_deref().expect("complete phase payoff");
+                let one = QuantityExpr::Fixed { value: 1 };
+                let counter = |value| Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::P1P1,
+                    count: QuantityExpr::Fixed { value },
+                    target: TargetFilter::SelfRef,
+                };
+                match name {
+                    "Alicia Masters, Skilled Sculptor" => {
+                        assert_eq!(
+                            *execute.effect,
+                            expected_token("Treasure", 0, 0, &["Artifact", "Treasure"], &[])
+                        );
+                        assert_eq!(face.triggers.len(), 2);
+                        assert_eq!(face.triggers[1].phase, Some(Phase::End));
+                        assert!(face.triggers[1].execute.is_some());
+                    }
+                    "Council of Reeds" => {
+                        assert_eq!(
+                            *execute.effect,
+                            Effect::CopyTokenOf {
+                                target: TargetFilter::SelfRef,
+                                owner: TargetFilter::Controller,
+                                source_filter: None,
+                                enters_attacking: false,
+                                tapped: false,
+                                count: one.clone(),
+                                extra_keywords: vec![],
+                                additional_modifications: vec![]
+                            }
+                        );
+                        assert_eq!(face.static_abilities.len(), 1);
+                    }
+                    "Eshki Dragonclaw" => {
+                        assert_eq!(
+                            *execute.effect,
+                            Effect::Draw {
+                                count: one.clone(),
+                                target: TargetFilter::Controller
+                            }
+                        );
+                        let next = execute
+                            .sub_ability
+                            .as_deref()
+                            .expect("two counters after draw");
+                        assert_eq!(*next.effect, counter(2));
+                        assert!(next.sub_ability.is_none());
+                    }
+                    "Fae Offering" => {
+                        let mut node = Some(execute);
+                        for kind in ["Clue", "Food", "Treasure"] {
+                            let body = node.expect("three distinct ordered token instructions");
+                            assert_eq!(
+                                *body.effect,
+                                expected_token(kind, 0, 0, &["Artifact", kind], &[])
+                            );
+                            node = body.sub_ability.as_deref();
+                        }
+                        assert!(node.is_none());
+                    }
+                    "H.E.R.B.I.E., Lovable Robot" => assert_eq!(
+                        *execute.effect,
+                        Effect::Surveil {
+                            count: one.clone(),
+                            target: TargetFilter::Controller
+                        }
+                    ),
+                    "Human Torch" => {
+                        let Effect::GenericEffect {
+                            static_abilities,
+                            duration,
+                            ..
+                        } = execute.effect.as_ref()
+                        else {
+                            panic!("all three granted keywords")
+                        };
+                        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                        let actual: Vec<_> = static_abilities
+                            .iter()
+                            .flat_map(|def| def.modifications.iter())
+                            .cloned()
+                            .collect();
+                        assert_eq!(
+                            actual,
+                            [Keyword::Flying, Keyword::DoubleStrike, Keyword::Haste]
+                                .into_iter()
+                                .map(|keyword| ContinuousModification::AddKeyword { keyword })
+                                .collect::<Vec<_>>()
+                        );
+                        assert_eq!(face.triggers.len(), 2);
+                    }
+                    "Invisible Woman" => {
+                        assert_eq!(
+                            *execute.effect,
+                            expected_token(
+                                "Wall",
+                                0,
+                                3,
+                                &["Creature", "Wall"],
+                                &[Keyword::Defender, Keyword::Reach]
+                            )
+                        );
+                        assert_eq!(face.triggers.len(), 2);
+                    }
+                    "The Thing" => {
+                        assert_eq!(*execute.effect, counter(4));
+                        assert_eq!(face.triggers.len(), 2);
+                    }
+                    "Lockjaw, Slobbering Teleporter" => {
+                        assert_eq!(*execute.effect, counter(1));
+                        assert!(face.keywords.contains(&Keyword::Vigilance));
+                    }
+                    "Mister Fantastic" => assert_eq!(
+                        *execute.effect,
+                        Effect::Draw {
+                            count: one.clone(),
+                            target: TargetFilter::Controller
+                        }
+                    ),
+                    "Franklin Richards, Ascendant" => assert_eq!(
+                        *execute.effect,
+                        Effect::Discover {
+                            mana_value_limit: QuantityExpr::Fixed { value: 6 },
+                            player: TargetFilter::Controller
+                        }
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            match name {
+                "Lyse Hext" => {
+                    assert_eq!(face.static_abilities.len(), 2);
+                    let StaticMode::ModifyCost { spell_filter, .. } =
+                        &face.static_abilities[0].mode
+                    else {
+                        panic!("noncreature reducer")
+                    };
+                    assert_eq!(
+                        *spell_filter,
+                        Some(TargetFilter::Typed(
+                            TypedFilter::card()
+                                .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                        ))
+                    );
+                    assert_eq!(
+                        face.static_abilities[1].condition,
+                        Some(StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::SpellsCastThisTurn {
+                                    scope: CountScope::Controller,
+                                    filter: spell_filter.clone()
+                                }
+                            },
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 2 }
+                        })
+                    );
+                    assert!(face.keywords.contains(&Keyword::Prowess));
+                }
+                "Gaddock Teeg" => {
+                    assert_eq!(face.static_abilities.len(), 2);
+                    for (def, property) in face.static_abilities.iter().zip([
+                        FilterProp::Cmc {
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::HasXInManaCost,
+                    ]) {
+                        assert_eq!(
+                            def.mode,
+                            StaticMode::CantBeCast {
+                                who: crate::types::statics::ProhibitionScope::AllPlayers
+                            }
+                        );
+                        assert_eq!(
+                            def.affected,
+                            Some(TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                                    .properties(vec![property])
+                            ))
+                        );
+                    }
+                }
+                "Heartwood Storyteller Avatar" => {
+                    assert_eq!(face.mana_cost, crate::types::mana::ManaCost::NoCost);
+                    assert!(face.card_type.core_types.is_empty());
+                    assert_eq!(face.static_abilities.len(), 2);
+                    for (index, def) in face.static_abilities.iter().enumerate() {
+                        let filter = TargetFilter::Typed(if index == 0 {
+                            TypedFilter::creature()
+                        } else {
+                            TypedFilter::card()
+                                .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                        });
+                        let expected_mode = if index == 0 {
+                            crate::types::statics::CostModifyMode::Reduce
+                        } else {
+                            crate::types::statics::CostModifyMode::Raise
+                        };
+                        assert!(
+                            matches!(&def.mode, StaticMode::ModifyCost { mode, amount, spell_filter: Some(actual), dynamic_count: None, .. } if *mode == expected_mode && *amount == crate::types::mana::ManaCost::generic(1) && actual == &filter)
+                        );
+                        assert_eq!(
+                            def.affected,
+                            Some(TargetFilter::Typed(TypedFilter::card().controller(
+                                if index == 0 {
+                                    ControllerRef::You
+                                } else {
+                                    ControllerRef::Opponent
+                                }
+                            )))
+                        );
+                        assert_eq!(
+                            def.condition,
+                            Some(StaticCondition::QuantityComparison {
+                                lhs: QuantityExpr::Ref {
+                                    qty: QuantityRef::SpellsCastThisTurn {
+                                        scope: CountScope::Controller,
+                                        filter: Some(filter)
+                                    }
+                                },
+                                comparator: Comparator::EQ,
+                                rhs: QuantityExpr::Fixed { value: 0 }
+                            })
+                        );
+                    }
+                }
+                "Ethersworn Canonist" => {
+                    assert_eq!(face.static_abilities.len(), 1);
+                    assert_eq!(
+                        face.static_abilities[0].mode,
+                        StaticMode::PerTurnCastLimit {
+                            who: crate::types::statics::ProhibitionScope::AllPlayers,
+                            max: 1,
+                            spell_filter: Some(TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
+                            ))
+                        }
+                    );
+                }
+                "H.E.R.B.I.E., Lovable Robot" => {
+                    assert_eq!(face.abilities.len(), 2);
+                    assert!(face.keywords.contains(&Keyword::Flying));
+                }
+                "Mister Fantastic" => {
+                    assert_eq!(face.abilities.len(), 1);
+                    assert!(matches!(
+                        *face.abilities[0].effect,
+                        Effect::CopySpell { .. }
+                    ));
+                    assert_eq!(
+                        face.abilities[0].repeat_for,
+                        Some(QuantityExpr::Fixed { value: 2 })
+                    );
+                }
+                "Traxos, Academy Guardian" => {
+                    assert!(face.keywords.contains(&Keyword::Flying));
+                    assert!(face.keywords.contains(&Keyword::Vigilance));
+                    assert!(face.keywords.contains(&Keyword::Prowess));
+                }
+                "Capsizing Wave" => {
+                    assert_eq!(face.abilities.len(), 1);
+                    assert!(matches!(
+                        *face.abilities[0].effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Hand,
+                            ..
+                        }
+                    ));
+                }
+                _ => {}
+            }
+            assert_eq!(
+                serde_json::from_str::<CardFace>(&serde_json::to_string(&face).unwrap()).unwrap(),
+                face
+            );
+            let mut entry = serde_json::to_value(&face).unwrap();
+            entry["layout"] = serde_json::json!(atomic.layout);
+            entry["face_index"] = serde_json::json!(if atomic.side.as_deref() == Some("b") {
+                1
+            } else {
+                0
+            });
+            exports.insert(face.name.to_lowercase(), entry);
+            faces.push(face);
+        }
+        let whole = serde_json::to_string(&exports).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            for face in &faces {
+                assert_eq!(database.get_face_by_name(&face.name), Some(face));
+            }
+            let serpent = database.get_face_by_name("Sword Coast Serpent").unwrap();
+            let wave = database.get_face_by_name("Capsizing Wave").unwrap();
+            let oracle_id = serpent.scryfall_oracle_id.as_ref().unwrap();
+            assert_eq!(
+                database.get_layout_kind(oracle_id),
+                Some(LayoutKind::Adventure)
+            );
+            assert_eq!(
+                database.get_other_face_by_printed_ref(&PrintedCardRef {
+                    oracle_id: oracle_id.clone(),
+                    face_name: serpent.name.clone()
+                }),
+                Some(wave)
+            );
+            assert_eq!(
+                database.get_other_face_by_printed_ref(&PrintedCardRef {
+                    oracle_id: oracle_id.clone(),
+                    face_name: wave.name.clone()
+                }),
+                Some(serpent)
+            );
+            let subset: serde_json::Value = serde_json::from_str(
+                &database.export_subset_json(
+                    &[serpent.name.clone(), wave.name.clone()]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(subset["sword coast serpent"]["layout"], "adventure");
+            assert_eq!(subset["sword coast serpent"]["face_index"], 0);
+            assert_eq!(subset["capsizing wave"]["face_index"], 1);
+        }
+    }
+
+    #[test]
+    fn unknown_complete_spell_sources_keep_refusal_geometry_and_following_keyword() {
+        for source in ["As long as you've cast two or more mysterious spells this turn, this creature has double strike.", "The first mysterious spell you cast each turn costs {1} less to cast.", "You may collect evidence 10 rather than pay the mana cost for mysterious spells you cast.", "Players can't cast mysterious spells this turn.", "The first noncreature spell nonsense you cast each turn costs {1} less to cast.", "You may collect evidence 10 rather than pay the mana cost for noncreature spells you cast nonsense.", "You may cast mysterious spells from your graveyard.", "Noncreature spells with mana value 4 or greater nonsense can't be cast.", "Noncreature or mysterious spells you cast cost {1} less to cast."] {
+            let complete = format!("{source}\nFlying");
+            let mut doc = parse_oracle_ir(&complete, "Synthetic spell refusal", &["Flying".into()], &["Creature".into()], &[]);
+            assert_eq!(doc.source_text, complete);
+            let refused = doc.items.iter().find(|item| item.source.fragment() == Some(source)).expect("whole refused atomic source");
+            assert!(matches!(refused.node, crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { .. } | crate::parser::oracle_ir::doc::OracleNodeIr::Spell(_)), "the refused operation retains its own item identity");
+            let span = refused.source.span(); assert!(span.is_exact()); assert_eq!((span.start_byte, span.end_byte, span.first_line, span.last_line, span.ordinal_within_span), (0, source.len(), 0, 0, 0));
+            let flying = doc.items.iter().find(|item| item.source.fragment() == Some("Flying")).unwrap();
+            assert_eq!(flying.source.span().start_byte, source.len() + 1);
+            let parsed = lower_oracle_ir(&mut doc);
+            assert!(parsed.keywords.contains(&Keyword::Flying));
+            let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).expect("whole refused operation");
+            assert_eq!(unsupported.description.as_deref(), Some(source));
+        }
+    }
+}
+
 // SHAPE: both complete printed Adventure faces use the ordinary synthesis and
 // linked export loaders. The runtime paid front-face test is in the Jev module.
 #[test]

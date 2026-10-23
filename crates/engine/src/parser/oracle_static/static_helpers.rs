@@ -53,12 +53,11 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
     ])))
 }
 
-/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a BARE-word spell-subject
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a property-qualified spell-subject
 /// filter for a cost modifier — a color or color-CATEGORY ("white", "colorless",
 /// "monocolored", "multicolored"), "historic", or a supertype ("legendary").
-/// `parse_type_phrase_folding` declines all of these because they carry no trailing type
-/// noun (it needs "white creature", not a lone "white"), so without this the
-/// whole restriction dropped and the cost modifier (mis)applied to EVERY spell.
+/// The full spell noun is proved before the existing property authorities read
+/// its adjective. A failed property cannot become an unrestricted modifier.
 ///
 /// The color word routes through the single [`nom_filter::parse_color_property`]
 /// authority, so the color-CATEGORY axis resolves identically to the noun-bearing
@@ -69,15 +68,21 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
 /// End) and "historic" (Jhoira's Familiar) — all of which then cheapened every spell.
 fn parse_bare_spell_subject_filter(base: &str) -> Option<TargetFilter> {
     let lower = base.trim().to_ascii_lowercase();
+    let (_, lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
     // CR 105.2: color / color-category, via the single color-property authority.
-    if let Ok((_, prop)) = all_consuming(nom_filter::parse_color_property).parse(lower.as_str()) {
+    if let Ok((_, prop)) = all_consuming(nom_filter::parse_color_property).parse(lower) {
         return Some(TargetFilter::Typed(
             TypedFilter::card().properties(vec![prop]),
         ));
     }
     // CR 700.6: "historic" = legendary supertype, artifact card type, or Saga subtype.
     if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
-        .parse(lower.as_str())
+        .parse(lower)
         .is_ok()
     {
         return Some(TargetFilter::Typed(
@@ -127,8 +132,8 @@ fn parse_cost_mod_mana_value_qualifier(prefix: &str) -> OracleResult<'_, (&str, 
 /// not one card.
 fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp>) {
     match parse_cost_mod_mana_value_qualifier(prefix) {
-        Ok((_, (before, prop))) => (before, Some(prop)),
-        Err(_) => (prefix, None),
+        Ok((rest, (before, prop))) if rest.trim().is_empty() => (before, Some(prop)),
+        _ => (prefix, None),
     }
 }
 
@@ -227,11 +232,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     };
 
     let base_part = strip_cost_mod_cast_scope_suffix(base_part);
-    let base_part = strip_cost_mod_spell_noun_suffix(base_part);
-
-    let typed_filter = if base_part.is_empty() {
-        None
-    } else {
+    let typed_filter = {
         let (filter, remainder) = parse_type_phrase_folding(base_part);
         let remainder = remainder.trim();
         match &filter {
@@ -250,10 +251,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             // noun ("white creature", "legendary permanent"). Route them through
             // the single bare-subject authority so the color-category axis is not
             // dropped (CR 105.2 + CR 700.6 + CR 205.4a).
-            _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
-                parse_bare_spell_subject_filter(base_part)
-            }
-            _ => None,
+            _ => Some(parse_bare_spell_subject_filter(base_part)?),
         }
     };
 
@@ -429,19 +427,6 @@ fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCond
         return (before, Some(StaticCondition::DuringYourTurn));
     }
     (text, None)
-}
-
-pub(super) fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
-    let (_, stripped) = all_consuming(alt((
-        value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
-        value("", terminated(tag("spell"), eof)),
-        terminated(take_until(" spells"), (tag(" spells"), eof)),
-        terminated(take_until(" spell"), (tag(" spell"), eof)),
-        rest,
-    )))
-    .parse(input)
-    .expect("rest fallback makes spell-noun suffix stripping infallible");
-    stripped.trim()
 }
 
 /// CR 601.2f + CR 118.8: Parse static-imposed additional non-mana costs such as
@@ -692,12 +677,16 @@ pub(crate) fn try_parse_cost_modification(
         let (prefix, turn_scope) = strip_cost_mod_during_your_turn_scope(prefix);
         during_your_turn_scope = turn_scope;
         let prefix = strip_cost_modifier_target_clause(prefix);
-        // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
+        // Peel the complete origin and caster scopes, retaining the spell noun.
         let without_from = if !cast_from_zones.is_empty() {
-            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            if let Some(from_idx) = prefix.find(" from ") {
-                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                &prefix[..from_idx]
+            if let Ok((suffix, before)) =
+                take_until::<_, _, OracleError<'_>>(" from ").parse(prefix)
+            {
+                let (_, _, consumed) = crate::parser::oracle_target::parse_zone_suffix(suffix)?;
+                if !suffix[consumed..].trim().is_empty() {
+                    return None;
+                }
+                before
             } else {
                 prefix
             }
@@ -711,8 +700,8 @@ pub(crate) fn try_parse_cost_modification(
         // `parse_continuous_subject_filter` for object-class chosen-name phrases.
         let (without_chosen, has_chosen_name) =
             match nom_primitives::split_once_on(without_from, " with the chosen name") {
-                Ok((_, (before, _))) => (before, true),
-                Err(_) => (without_from, false),
+                Ok((_, (before, after))) => (Cow::Owned(format!("{before}{after}")), true),
+                Err(_) => (Cow::Borrowed(without_from), false),
             };
         // CR 205.2a + CR 601.2f: Strip the "of the chosen type" / "of that type"
         // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
@@ -722,37 +711,39 @@ pub(crate) fn try_parse_cost_modification(
         // discriminator. Strip it here and re-attach IsChosenCardType /
         // IsChosenCreatureType after the base type is parsed — mirrors the
         // "with the chosen name" handling above.
-        let (without_chosen, has_chosen_type) = if let Ok((_, (before, _))) =
-            nom_primitives::split_once_on(without_chosen, " of the chosen type")
+        let (without_chosen_type, has_chosen_type) = if let Ok((_, (before, after))) =
+            nom_primitives::split_once_on(&without_chosen, " of the chosen type")
         {
-            (before, true)
-        } else if let Ok((_, (before, _))) =
-            nom_primitives::split_once_on(without_chosen, " of that type")
+            (Cow::Owned(format!("{before}{after}")), true)
+        } else if let Ok((_, (before, after))) =
+            nom_primitives::split_once_on(&without_chosen, " of that type")
         {
-            (before, true)
+            (Cow::Owned(format!("{before}{after}")), true)
         } else {
-            (without_chosen, false)
+            (Cow::Borrowed(without_chosen.as_ref()), false)
         };
         // CR 202.3 + CR 601.2f: Peel a trailing "with mana value N or greater/less"
         // gate BEFORE the "you cast"/"spells" end-trims. The qualifier sits after
         // the "spells you cast" infix, so without peeling it the trims never reach
         // the type words and the whole type+MV restriction is dropped (The Scarlet
         // Witch reduced EVERY spell, not just instants/sorceries — #5606).
-        let (without_chosen, mana_value_prop) = strip_cost_mod_mana_value_qualifier(without_chosen);
+        let (without_chosen, mana_value_prop) =
+            strip_cost_mod_mana_value_qualifier(&without_chosen_type);
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            .trim_end_matches(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            .trim_end_matches(" spell") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim();
         // "spells" alone means no type restriction (bare "Spells you cast cost...")
-        let typed_filter = if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell"
-        {
-            None
-        } else {
-            parse_cost_mod_spell_type_prefix(type_desc)
-        };
+        let typed_filter =
+            if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+                .parse(type_desc)
+                .is_ok()
+            {
+                None
+            } else {
+                Some(parse_cost_mod_spell_type_prefix(type_desc)?)
+            };
         // CR 205.2a: Re-attach the chosen-type discriminator stripped above. A
         // creature-typed base ("Creature spells ... of the chosen type",
         // Herald's Horn) pairs with a chosen CREATURE type; a bare-spells base
@@ -1283,8 +1274,9 @@ pub(crate) fn parse_cost_modifier_another_spell_condition(
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(rest) {
         return Ok((rest, TargetFilter::Any));
     }
-    let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
-    let (rest, _) = tag(" spell this turn").parse(rest)?;
+    let (rest, type_text) =
+        recognize((take_until(" spell this turn"), tag(" spell"))).parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
     let Some(filter) = nom_condition::parse_spell_history_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,

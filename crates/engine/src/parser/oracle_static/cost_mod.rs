@@ -566,12 +566,12 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let subject = subject.trim_end_matches('.').trim_end();
     let (after_spells_lower, type_prefix_lower) = alt((
         terminated(
-            take_until::<_, _, VE<'_>>("spells you cast"),
-            tag("spells you cast"),
+            recognize((take_until::<_, _, VE<'_>>("spells you cast"), tag("spells"))),
+            tag(" you cast"),
         ),
         terminated(
-            take_until::<_, _, VE<'_>>("spell you cast"),
-            tag("spell you cast"),
+            recognize((take_until::<_, _, VE<'_>>("spell you cast"), tag("spell"))),
+            tag(" you cast"),
         ),
     ))
     .parse(subject.lower)
@@ -637,7 +637,13 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 
     // CR 118.9: a bare leading article ("a"/"an") with no type word — "a spell you
     // cast" (As Foretold) — scopes to any spell, same as the no-prefix case.
-    let (base_filter, color_props) = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
+    let (base_filter, color_props) = if all_consuming(preceded(
+        opt(alt((tag::<_, _, VE<'_>>("a "), tag("an ")))),
+        alt((tag("spells"), tag("spell"))),
+    ))
+    .parse(type_prefix_lower.trim())
+    .is_ok()
+    {
         (TargetFilter::Typed(TypedFilter::card()), Vec::new())
     } else {
         // CR 601.2a: singular subjects carry an article before the type word —
@@ -652,10 +658,8 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
         // CR 105.2: peel a color-quality prefix ("colorless spell" — Darksteel
         // Monolith) via the shared authority — `parse_type_phrase_folding` drops the
         // word, which would silently over-broaden the grant to any spell. The
-        // helper expects the word with its trailing space, so re-pad the
-        // trimmed prefix slice.
-        let padded = format!("{after_article} ");
-        let (rest_padded, color_prop) = super::shared::peel_color_quality_prefix(&padded);
+        // complete noun-bearing slice already supplies the separating space.
+        let (rest_padded, color_prop) = super::shared::peel_color_quality_prefix(after_article);
         let rest = rest_padded.trim();
         let base = if rest.is_empty() {
             TargetFilter::Typed(TypedFilter::card())
@@ -664,7 +668,11 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
             // the remaining type words are the last `rest.len()` bytes of the
             // trimmed original slice (the TextPair length-mapping convention).
             let tail = &type_prefix_original[type_prefix_original.len() - rest.len()..];
-            parse_type_phrase_folding(tail).0
+            let (filter, remainder) = parse_type_phrase_folding(tail);
+            if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+                return None;
+            }
+            filter
         };
         (base, color_prop.into_iter().collect::<Vec<_>>())
     };
@@ -720,25 +728,27 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
         .trim_end_matches('.')
         .trim_end();
 
-    let (_, type_prefix_lower) = alt((
+    let (suffix, type_prefix_lower) = alt((
         terminated(
-            take_until::<_, _, VE<'_>>("spells you cast"),
-            tag("spells you cast"),
+            recognize((take_until::<_, _, VE<'_>>("spells you cast"), tag("spells"))),
+            tag(" you cast"),
         ),
         terminated(
-            take_until::<_, _, VE<'_>>("spell you cast"),
-            tag("spell you cast"),
+            recognize((take_until::<_, _, VE<'_>>("spell you cast"), tag("spell"))),
+            tag(" you cast"),
         ),
     ))
     .parse(subject.lower)
     .ok()?;
 
+    if !suffix.trim().is_empty() {
+        return None;
+    }
     let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
-    let base_filter = if type_prefix_original.is_empty() {
-        TargetFilter::Typed(TypedFilter::card())
-    } else {
-        parse_type_phrase_folding(type_prefix_original).0
-    };
+    let (base_filter, remainder) = parse_type_phrase_folding(type_prefix_original);
+    if !remainder.trim().is_empty() || matches!(base_filter, TargetFilter::Any) {
+        return None;
+    }
     let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
 
     Some(
@@ -938,11 +948,10 @@ pub(crate) fn parse_cast_by_paying_life_alt_cost(text: &str) -> Option<StaticDef
             (filter_for_parse, None)
         };
 
-    // Strip trailing "spell" / "spells" before type parsing — "enchantment spell" →
-    // "enchantment". `parse_type_phrase_folding` expects bare type words.
-    let filter_for_parse = strip_cost_mod_spell_noun_suffix(filter_for_parse);
-
-    let base_filter = if filter_for_parse.is_empty() {
+    let base_filter = if all_consuming(alt((tag::<_, _, VE<'_>>("spells"), tag("spell"))))
+        .parse(filter_for_parse)
+        .is_ok()
+    {
         TargetFilter::Typed(TypedFilter::card())
     } else {
         let (filter, remainder) = parse_type_phrase_folding(filter_for_parse);

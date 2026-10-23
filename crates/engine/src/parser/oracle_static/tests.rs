@@ -1,5 +1,167 @@
 use super::anthem::*;
 
+mod retained_spell_context {
+    use super::super::{cost_mod, grammar, restriction};
+    use super::*;
+
+    #[test]
+    fn nth_spell_complete_subject_survives_before_cost_verb() {
+        for (noun, expected) in [
+            (
+                "noncreature spell",
+                TypeFilter::Non(Box::new(TypeFilter::Creature)),
+            ),
+            ("creature spell", TypeFilter::Creature),
+        ] {
+            let source =
+                format!("the first {noun} each opponent casts each turn costs {{1}} more to cast");
+            let grammar::NthQualifiedSpell::Supported {
+                filter,
+                ordinal,
+                timing,
+            } = grammar::parse_nth_qualified_spell_filter(&source)
+            else {
+                panic!("{source}")
+            };
+            assert_eq!(ordinal, 1);
+            assert_eq!(
+                timing,
+                super::super::oracle_trigger::NthEventTimingKind::Unrestricted
+            );
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(if expected == TypeFilter::Creature {
+                    TypedFilter::creature()
+                } else {
+                    TypedFilter::card().with_type(expected)
+                })
+            );
+            let public = super::super::parse_static_line(&source).unwrap();
+            assert!(matches!(
+                public.mode,
+                StaticMode::ModifyCost {
+                    spell_filter: Some(_),
+                    ..
+                }
+            ));
+        }
+        for noun in [
+            "mysterious spell",
+            "noncreature mysterious spell",
+            "noncreature spell nonsense",
+        ] {
+            let source = format!("the first {noun} you cast each turn costs {{1}} less to cast");
+            assert!(matches!(
+                grammar::parse_nth_qualified_spell_filter(&source),
+                grammar::NthQualifiedSpell::UnsupportedQualifier
+            ));
+            assert!(super::super::parse_static_line(&source).is_none());
+        }
+    }
+
+    #[test]
+    fn static_spell_subjects_refuse_failed_filters_instead_of_becoming_blanket() {
+        for suffix in [" you cast cost {1} less to cast.", " can't be cast."] {
+            let good = format!("Noncreature spells{suffix}");
+            assert!(super::super::parse_static_line(&good).is_some(), "{good}");
+            for noun in [
+                "Mysterious spells",
+                "Noncreature or mysterious spells",
+                "Noncreature spells nonsense",
+            ] {
+                let bad = format!("{noun}{suffix}");
+                assert!(super::super::parse_static_line(&bad).is_none(), "{bad}");
+            }
+        }
+        let canonist = "each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.";
+        let def = restriction::parse_per_turn_cast_limit(canonist, canonist).unwrap();
+        assert!(
+            matches!(def.mode, StaticMode::PerTurnCastLimit { max: 1, spell_filter: Some(TargetFilter::Typed(ref typed)), .. } if typed.type_filters == vec![TypeFilter::Card, TypeFilter::Non(Box::new(TypeFilter::Artifact))])
+        );
+        assert!(restriction::parse_per_turn_cast_limit("each player who has cast a nonartifact spell this turn can't cast additional noncreature spells.", "synthetic mismatched predicates").is_none());
+        for suffix in [
+            "4 or mystery",
+            "mystery or greater",
+            "4 or greater nonsense",
+        ] {
+            assert!(
+                restriction::parse_passive_cant_be_cast_spell_filter(&format!(
+                    "noncreature spells with mana value {suffix}"
+                ))
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn collect_evidence_and_other_alternatives_retain_subject_and_complete_suffix() {
+        let bare = cost_mod::parse_collect_evidence_alt_cost(
+            "You may collect evidence 10 rather than pay the mana cost for spells you cast.",
+        )
+        .unwrap();
+        assert_eq!(
+            bare.affected,
+            Some(TargetFilter::Typed(TypedFilter::card()))
+        );
+        assert!(matches!(
+            bare.mode,
+            StaticMode::CastWithAlternativeCost {
+                cost: AbilityCost::CollectEvidence { amount: 10 },
+                frequency: CastFrequency::Unlimited,
+                ..
+            }
+        ));
+        for (payment, constructor) in [
+            (
+                "collect evidence 10",
+                cost_mod::parse_collect_evidence_alt_cost as fn(&str) -> Option<StaticDefinition>,
+            ),
+            ("pay {0}", cost_mod::parse_spells_alternative_cost),
+        ] {
+            let good = format!(
+                "You may {payment} rather than pay the mana cost for noncreature spells you cast."
+            );
+            let parsed = constructor(&good).unwrap();
+            assert_eq!(
+                parsed.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                ))
+            );
+            for source in [format!("You may {payment} rather than pay the mana cost for mysterious spells you cast."), format!("You may {payment} rather than pay the mana cost for noncreature spells you cast nonsense.")] {
+                assert!(constructor(&source).is_none(), "{source}");
+            }
+        }
+        assert!(cost_mod::parse_cast_by_paying_life_alt_cost("Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.").is_some());
+        assert!(cost_mod::parse_cast_by_paying_life_alt_cost("You may cast a mysterious spell by paying life equal to its mana value rather than paying its mana cost.").is_none());
+    }
+
+    #[test]
+    fn permission_callers_preserve_full_spell_subject_and_strict_refusal() {
+        for (good, bad) in [
+            (
+                "You may cast noncreature spells from your graveyard.",
+                "You may cast mysterious spells from your graveyard.",
+            ),
+            (
+                "You may cast noncreature spells from the top of your library.",
+                "You may cast mysterious spells from the top of your library.",
+            ),
+            (
+                "You may cast noncreature spells from your hand without paying their mana costs.",
+                "You may cast mysterious spells from your hand without paying their mana costs.",
+            ),
+            (
+                "You may spend mana of any type to cast noncreature spells.",
+                "You may spend mana of any type to cast mysterious spells.",
+            ),
+        ] {
+            assert!(super::super::parse_static_line(good).is_some(), "{good}");
+            assert!(super::super::parse_static_line(bad).is_none(), "{bad}");
+        }
+    }
+}
+
 // SHAPE: synthetic malformed sources must be owned before semantic validation,
 // including under the enclosing conditional and a provisional activation label.
 #[test]
@@ -22439,7 +22601,10 @@ fn per_turn_cast_limit_noncreature_filter() {
     };
     assert_eq!(
         tf.type_filters,
-        vec![TypeFilter::Non(Box::new(TypeFilter::Creature))]
+        vec![
+            TypeFilter::Card,
+            TypeFilter::Non(Box::new(TypeFilter::Creature))
+        ]
     );
 }
 
@@ -22481,7 +22646,10 @@ fn per_turn_cast_limit_ethersworn_canonist_nonartifact() {
     };
     assert_eq!(
         tf.type_filters,
-        vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))]
+        vec![
+            TypeFilter::Card,
+            TypeFilter::Non(Box::new(TypeFilter::Artifact))
+        ]
     );
 }
 

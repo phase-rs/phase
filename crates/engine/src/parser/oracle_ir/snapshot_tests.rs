@@ -7,6 +7,37 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn retained_spell_context_full_lyse_ir_and_lowered() {
+    let text = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nNoncreature spells you cast cost {1} less to cast.\nAs long as you've cast two or more noncreature spells this turn, Lyse Hext has double strike.";
+    let mut doc = parse_oracle_ir(
+        text,
+        "Lyse Hext",
+        &["Prowess".into()],
+        &["Creature".into()],
+        &["Human".into(), "Rebel".into(), "Monk".into()],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 3);
+    let lowered = lower_oracle_ir(&mut doc);
+    assert_eq!(lowered.statics.len(), 2);
+    let filter = crate::types::ability::TargetFilter::Typed(
+        crate::types::ability::TypedFilter::card().with_type(
+            crate::types::ability::TypeFilter::Non(Box::new(
+                crate::types::ability::TypeFilter::Creature,
+            )),
+        ),
+    );
+    assert!(
+        matches!(&lowered.statics[0].mode, crate::types::statics::StaticMode::ModifyCost { spell_filter: Some(actual), .. } if actual == &filter)
+    );
+    assert!(
+        matches!(&lowered.statics[1].condition, Some(crate::types::ability::StaticCondition::QuantityComparison { lhs: crate::types::ability::QuantityExpr::Ref { qty: crate::types::ability::QuantityRef::SpellsCastThisTurn { filter: Some(actual), .. } }, rhs: crate::types::ability::QuantityExpr::Fixed { value: 2 }, .. }) if actual == &filter)
+    );
+    insta::assert_json_snapshot!("retained_spell_context_full_lyse_ir", doc);
+    insta::assert_json_snapshot!("retained_spell_context_full_lyse_lowered", lowered);
+}
+
+#[test]
 fn jev_full_ashling() {
     use crate::parser::oracle_ir::doc::OracleNodeIr;
     use crate::types::ability::{FilterProp, ParitySource, TargetFilter};

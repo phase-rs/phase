@@ -965,15 +965,12 @@ pub(crate) fn parse_conditional_subject_per_turn_cast_limit(
             tag("who have cast "),
         )),
         alt((tag("a "), tag("an "))),
-        take_until(" spell"),
-        tag(" spell"),
+        recognize((take_until(" spell"), tag(" spell"))),
         tag(" this turn can't cast additional "),
-        take_until(" spell"),
-        alt((tag(" spells"), tag(" spell"))),
+        recognize((take_until(" spell"), alt((tag(" spells"), tag(" spell"))))),
         opt(tag(".")),
     );
-    let (rest, (_, _, subject_type_text, _, _, object_type_text, _, _)) =
-        parser.parse(predicate).ok()?;
+    let (rest, (_, _, subject_type_text, _, object_type_text, _)) = parser.parse(predicate).ok()?;
     // Disallow trailing content — we matched the entire restriction sentence.
     if !rest.trim().is_empty() {
         return None;
@@ -1052,21 +1049,14 @@ pub(crate) fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDe
         .strip_suffix(" each turn.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .or_else(|| rest.trim_start().strip_suffix(" each turn"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
-    // 5. Extract optional spell type filter between count and "spell(s)"
-    let type_text = before_each_turn
-        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| before_each_turn.strip_suffix(" spell")) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .unwrap_or("")
-        .trim();
-
-    let spell_filter = if type_text.is_empty() {
+    let type_text = before_each_turn.trim();
+    let spell_filter = if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+        .parse(type_text)
+        .is_ok()
+    {
         None
     } else {
-        let (filter, _) = parse_type_phrase_folding(type_text);
-        match &filter {
-            TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
-            _ => None,
-        }
+        Some(nom_condition::parse_spell_history_filter(type_text)?)
     };
 
     Some(
@@ -1471,21 +1461,13 @@ pub(crate) fn parse_cant_cast_type_spells(
     }
 
     // --- "[type] spells" / "[type] spell" — standard type-based prohibition ---
-    // 4. Require it ends with "spell" or "spells"
-    let before_spells = trimmed
-        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| trimmed.strip_suffix(" spell"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-
-    // 5. Parse type filter from the remaining text
-    let type_text = before_spells.trim();
-    let spell_filter = if type_text.is_empty() {
+    let spell_filter = if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+        .parse(trimmed)
+        .is_ok()
+    {
         None
     } else {
-        let (filter, _) = parse_type_phrase_folding(type_text);
-        match &filter {
-            TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
-            _ => None,
-        }
+        Some(nom_condition::parse_spell_history_filter(trimmed)?)
     };
 
     // CR 101.2: Wire the casting prohibition scope from the subject parse.
@@ -1512,11 +1494,15 @@ pub(crate) fn parse_cant_cast_type_spells(
 pub(crate) fn parse_passive_cant_be_cast_spell_filter(before_cant: &str) -> Option<TargetFilter> {
     // Check for "spells with mana value N or less/greater" pattern
     // E.g., "noncreature spells with mana value 4 or greater can't be cast"
-    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    if let Some(pos) = before_cant.find(" spells with mana value ") {
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        let type_text = &before_cant[..pos];
-        let mv_rest = &before_cant[pos + " spells with mana value ".len()..];
+    if let Ok((mv_rest, type_text)) = terminated(
+        recognize((
+            take_until::<_, _, OracleError<'_>>(" spells with mana value "),
+            tag(" spells"),
+        )),
+        tag(" with mana value "),
+    )
+    .parse(before_cant)
+    {
         let (filter, remainder) = parse_type_phrase_folding(type_text);
         if !remainder.trim().is_empty() {
             return None;
@@ -1525,21 +1511,20 @@ pub(crate) fn parse_passive_cant_be_cast_spell_filter(before_cant: &str) -> Opti
             TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => tf,
             _ => return None,
         };
-        // Parse mana value condition
-        if let Some((n, after_n)) = parse_number(mv_rest) {
-            let after_n = after_n.trim_start();
-            if nom_tag_lower(after_n, after_n, "or greater").is_some() {
-                tf = tf.properties(vec![FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value: QuantityExpr::Fixed { value: n as i32 },
-                }]);
-            } else if nom_tag_lower(after_n, after_n, "or less").is_some() {
-                tf = tf.properties(vec![FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value: QuantityExpr::Fixed { value: n as i32 },
-                }]);
-            }
-        }
+        let (n, after_n) = parse_number(mv_rest)?;
+        let (_, comparator) = all_consuming(terminated(
+            alt((
+                value(Comparator::GE, tag::<_, _, OracleError<'_>>("or greater")),
+                value(Comparator::LE, tag("or less")),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(after_n.trim())
+        .ok()?;
+        tf.properties.push(FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed { value: n as i32 },
+        });
         return Some(TargetFilter::Typed(tf));
     }
 
@@ -1550,8 +1535,8 @@ pub(crate) fn parse_passive_cant_be_cast_spell_filter(before_cant: &str) -> Opti
     // time by `cant_cast_filter_matches` → `SpellCastRecord.has_x_in_cost`.
     fn parse_passive_x_mana_cost_prefix(input: &str) -> OracleResult<'_, &str> {
         let (input, type_text) = terminated(
-            take_until(" spells with {x} in "),
-            tag(" spells with {x} in "),
+            recognize((take_until(" spells with {x} in "), tag(" spells"))),
+            tag(" with {x} in "),
         )
         .parse(input)?;
         let (input, _) = alt((tag("their mana costs"), tag("their mana cost"))).parse(input)?;
@@ -1586,10 +1571,7 @@ pub(crate) fn parse_passive_cant_be_cast_spell_filter(before_cant: &str) -> Opti
         }
     }
 
-    // Require " spells" at the end of the subject
-    let type_text = before_cant.strip_suffix(" spells")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-
-    let (filter, remainder) = parse_type_phrase_folding(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(before_cant);
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -1654,26 +1636,13 @@ pub(crate) fn parse_temporal_prefix_cant_cast(tp: &str, text: &str) -> Option<St
         .unwrap_or(trimmed)
         .trim();
 
-    // Extract optional spell type filter: "instant spells", "spells", etc.
-    let spell_filter = if let Some(before_spells) = trimmed
-        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| trimmed.strip_suffix(" spell"))
-    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+    let spell_filter = if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+        .parse(trimmed)
+        .is_ok()
     {
-        let type_text = before_spells.trim();
-        if type_text.is_empty() || type_text == "spells" {
-            None
-        } else {
-            let (filter, _) = parse_type_phrase_folding(type_text);
-            match &filter {
-                TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
-                _ => None,
-            }
-        }
-    } else if trimmed == "spells" || trimmed.is_empty() {
         None
     } else {
-        return None;
+        Some(nom_condition::parse_spell_history_filter(trimmed)?)
     };
 
     let mut def = StaticDefinition::new(StaticMode::CantCastDuring { who, when })
@@ -1696,19 +1665,13 @@ pub(crate) fn parse_enchanted_controller_cant_cast(
         .or_else(|| nom_tag_lower(rest, rest, "can\u{2019}t cast "))?;
 
     let trimmed = after_cant_cast.trim_end_matches('.');
-    let before_spells = trimmed
-        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| trimmed.strip_suffix(" spell"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-
-    let type_text = before_spells.trim();
-    let spell_filter = if type_text.is_empty() {
+    let spell_filter = if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+        .parse(trimmed)
+        .is_ok()
+    {
         None
     } else {
-        let (filter, _) = parse_type_phrase_folding(type_text);
-        match &filter {
-            TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
-            _ => None,
-        }
+        Some(nom_condition::parse_spell_history_filter(trimmed)?)
     };
 
     let mut def = StaticDefinition::new(StaticMode::CantBeCast {
@@ -2201,17 +2164,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
         .unwrap_or(filter_text);
 
-    // Remove " spell"/" spells" — parse_type_phrase_folding expects bare type words.
-    // "lands" is already a valid type phrase, so no stripping needed for Play mode.
-    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
-        Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if nom_primitives::scan_contains(filter_text, "spell") {
-        Cow::Owned(filter_text.replacen(" spell", "", 1))
-    } else {
-        Cow::Borrowed(filter_text)
-    };
-
-    let (filter, self_ref_permission) = parse_graveyard_permission_filter(&cleaned);
+    let (filter, self_ref_permission) = parse_graveyard_permission_filter(filter_text)?;
 
     // CR 607.1 + CR 122.1 + CR 614.1c: peel the linked "if you cast a spell this
     // way, that <permanent> enters with a [counter] counter on it" rider off the
@@ -3056,26 +3009,7 @@ fn parse_graveyard_branch_filter(branch: &str) -> Option<TargetFilter> {
         .or_else(|| nom_tag_lower(branch, branch, "an "))
         .unwrap_or(branch);
 
-    // Drop " spell"/" spells" so `parse_type_phrase_folding` sees the bare type word;
-    // "land"/"lands" is already a valid type phrase and needs no stripping.
-    let cleaned: Cow<str> = if nom_primitives::scan_contains(branch, "spells") {
-        Cow::Owned(branch.replacen(" spells", "", 1))
-    } else if nom_primitives::scan_contains(branch, "spell") {
-        Cow::Owned(branch.replacen(" spell", "", 1))
-    } else {
-        Cow::Borrowed(branch)
-    };
-
-    // CR 700.6: "historic spells" lowers to the Historic property on spell
-    // cards; suffix stripping leaves the bare adjective, so expand to the card
-    // phrase the type parser expects.
-    let cleaned: Cow<str> = if cleaned == "historic" {
-        Cow::Borrowed("historic card")
-    } else {
-        cleaned
-    };
-
-    let (filter, _self_ref) = parse_graveyard_permission_filter(&cleaned);
+    let (filter, _self_ref) = parse_graveyard_permission_filter(branch)?;
     // Reject the unparseable fallbacks so a branch we cannot model declines the
     // whole disjunctive parse rather than silently admitting everything.
     if usable_disjunctive_permission_filter(&filter) {
@@ -3215,22 +3149,12 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
         return None;
     };
 
-    // Drop trailing " spell"/" spells" so `parse_type_phrase_folding` sees the bare
-    // type. Mirrors the graveyard / top-of-library / hand sibling parsers.
-    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
-        Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if nom_primitives::scan_contains(filter_text, "spell") {
-        Cow::Owned(filter_text.replacen(" spell", "", 1))
-    } else {
-        Cow::Borrowed(filter_text)
-    };
-
     // `parse_type_phrase_folding` already composes the dynamic "with mana value …"
     // suffix through `parse_mana_value_suffix`, so Maralen's filter
     // ("spell with mana value less than or equal to the number of Elves and
     // Faeries you control") resolves through one call — no bespoke combinator
     // chain needed here.
-    let (filter, remainder) = parse_type_phrase_folding(&cleaned);
+    let (filter, remainder) = parse_type_phrase_folding(filter_text);
     if !remainder.trim().is_empty() {
         // Strict: any unconsumed remainder is a filter shape we don't yet
         // model. Decline so the line either dispatches to the next handler or
@@ -3685,16 +3609,9 @@ pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
         .or_else(|| nom_tag_lower(rest, &rest_lower, "an "))
         .unwrap_or(rest);
 
-    // Drop the trailing " spells"/" spell" token so `parse_type_phrase_folding` sees the
-    // bare type/subtype phrase. `strip_suffix` (not `replacen`) anchors to the
-    // end, so an interior "spell" (e.g. a hypothetical "spellshaper spells") is
-    // never clipped. Without the "spell(s)" anchor this is not the targeted
-    // class — bail so the static stays an honest defer rather than over-matching.
-    let cleaned = filter_text
-        .strip_suffix(" spells") // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
-        .or_else(|| filter_text.strip_suffix(" spell"))?; // allow-noncombinator: suffix cleanup on the pre-tokenized filter chunk, not parse dispatch
-
-    let (filter, tail) = parse_type_phrase_folding(cleaned);
+    // Retain the complete noun-bearing subject for the strict type authority.
+    // Its remainder proves that no unmodeled qualifier became a blanket grant.
+    let (filter, tail) = parse_type_phrase_folding(filter_text);
     // A non-empty unconsumed tail means an unrecognised spell class — defer.
     if !tail.trim().is_empty() {
         return None;
@@ -3862,17 +3779,10 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
         .unwrap_or(filter_text);
 
-    // Drop trailing " spell"/" spells" so `parse_type_phrase_folding` sees the bare
-    // type/subtype phrase. "lands" is already a valid type phrase.
-    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
-        Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if nom_primitives::scan_contains(filter_text, "spell") {
-        Cow::Owned(filter_text.replacen(" spell", "", 1))
-    } else {
-        Cow::Borrowed(filter_text)
-    };
-
-    let (filter, _) = parse_type_phrase_folding(&cleaned);
+    let (filter, remainder) = parse_type_phrase_folding(filter_text);
+    if !remainder.trim().is_empty() || filter == TargetFilter::Any {
+        return None;
+    }
 
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
@@ -4250,22 +4160,14 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
         );
     }
 
-    // Strip "a "/"an " article and " spell"/" spells" suffix for type parsing
+    // Peel the article while retaining the complete spell noun for type parsing.
     let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
         .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
         .unwrap_or(filter_text);
 
-    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
-        Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if nom_primitives::scan_contains(filter_text, "spell") {
-        Cow::Owned(filter_text.replacen(" spell", "", 1))
-    } else {
-        Cow::Borrowed(filter_text)
-    };
-
-    let (filter, remainder) = parse_type_phrase_folding(&cleaned);
-    if !remainder.trim().is_empty() && matches!(origin, CastFreeOrigin::DefaultCastPermission) {
-        // Unqualified branch is strict: an unconsumed remainder signals a
+    let (filter, remainder) = parse_type_phrase_folding(filter_text);
+    if !remainder.trim().is_empty() || filter == TargetFilter::Any {
+        // Every origin is strict: an unconsumed remainder signals a
         // complex filter we don't yet model (e.g. Fires of Invention's
         // dynamic mana-value bound). Decline rather than emit a partial
         // `Any` filter that would be wrong in a different way.

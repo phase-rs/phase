@@ -25,6 +25,41 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+#[cfg(test)]
+mod retained_spell_history_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_history_refuses_failed_qualified_and_empty_nouns() {
+        assert_eq!(
+            parse_spell_history_clause("noncreature spells you've cast this turn", CountScope::All),
+            Some((
+                CountScope::All,
+                Some(TargetFilter::Typed(
+                    TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                ))
+            ))
+        );
+        assert_eq!(
+            parse_spell_history_clause("spells you've cast this turn", CountScope::All),
+            Some((CountScope::All, None))
+        );
+        for text in [
+            "mysterious spells you've cast this turn",
+            "noncreature you've cast this turn",
+            "time you've cast this turn",
+            " you've cast this turn",
+            "noncreature spells you've cast this turn nonsense",
+        ] {
+            assert_eq!(
+                parse_spell_history_clause(text, CountScope::Controller),
+                None,
+                "{text}"
+            );
+        }
+    }
+}
+
 use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
@@ -3398,9 +3433,12 @@ fn parse_spell_history_clause(
             format!("{noun} {tail}")
         };
 
-        // Bare spell/time forms with no qualifier keep the historical
+        // Genuine bare spell forms with no qualifier keep the historical
         // `filter: None` behavior.
-        let bare = matches!(noun, "spells" | "spell" | "time" | "") && tail.is_empty();
+        let bare = all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+            .parse(noun)
+            .is_ok()
+            && tail.is_empty();
         if bare {
             return Some((scope, None));
         }
@@ -3426,25 +3464,6 @@ fn parse_spell_history_clause(
             return None;
         }
 
-        // Fallback for type-only phrasings the spell-history grammar may reject
-        // (e.g. "instant", "noncreature spell"): strip the trailing spell noun and
-        // run the context-free type-phrase parser. Cast-origin clauses never
-        // reach here (they parse above), so this only recovers legacy type forms.
-        // Strip the trailing spell noun via nom (mirrors
-        // `strip_spell_history_noun`) before the context-free type-phrase
-        // parse: "noncreature spell" → "noncreature", "instant" unchanged.
-        let qualifier = terminated(
-            take_until::<_, _, OracleError<'_>>(" spell"),
-            alt((tag(" spells"), tag(" spell"))),
-        )
-        .parse(noun)
-        .map(|(_, before)| before.trim())
-        .unwrap_or(noun);
-        let (filter, remainder) = parse_type_phrase_folding(qualifier);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some((scope, Some(filter)));
-        }
-
         // CR 608.2c: a noun that still carries an unconsumed aggregation head
         // ("colors among …", "card types among …") is NOT a spell-history noun —
         // the head belongs to a characteristic-count grammar that owns the whole
@@ -3456,10 +3475,8 @@ fn parse_spell_history_clause(
             return None;
         }
 
-        // Suffix-anchored noun with no recognized qualifier (e.g. an unknown
-        // spell noun that ended the clause): mirror the original arms' contract
-        // of returning the spell-history scope with no filter.
-        return Some((scope, None));
+        // A refused subject cannot become a population of every spell.
+        return None;
     }
 
     None

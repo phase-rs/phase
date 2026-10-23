@@ -5847,14 +5847,14 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             map(
                 preceded(
                     tag(" can't cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                    recognize((take_until(" spells"), tag(" spells"))),
                 ),
                 |text: &str| Some(text.to_string()),
             ),
             map(
                 preceded(
                     tag(" cannot cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                    recognize((take_until(" spells"), tag(" spells"))),
                 ),
                 |text: &str| Some(text.to_string()),
             ),

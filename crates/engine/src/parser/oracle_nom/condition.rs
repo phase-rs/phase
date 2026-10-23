@@ -9067,8 +9067,9 @@ fn parse_spell_count_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
         ));
     }
 
-    let (rest, type_text) = take_until(" spells this turn").parse(rest)?;
-    let (rest, _) = tag(" spells this turn").parse(rest)?;
+    let (rest, type_text) =
+        recognize((take_until(" spells this turn"), tag(" spells"))).parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
     let Some(filter) = parse_spell_history_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -9197,22 +9198,18 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     if let Some(filter) = parse_spell_history_filter_with_zone_suffix(type_text) {
         return Some(filter);
     }
-    let type_text = strip_spell_history_noun(type_text);
-    if let Ok((rest, filter)) = value(
-        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),
-        tag::<_, _, OracleError<'_>>("historic"),
-    )
-    .parse(type_text)
-    {
-        if rest.trim().is_empty() {
-            return Some(filter);
-        }
-    }
+    let type_text = type_text.trim();
     let (filter, leftover) = parse_type_phrase_folding(type_text);
     if leftover.trim().is_empty() && filter != TargetFilter::Any {
         return Some(filter);
     }
-    if let Ok((rest, (first, _, second))) = (parse_color, tag(" or "), parse_color).parse(type_text)
+    if let Ok((rest, (first, _, second, _))) = (
+        parse_color,
+        tag(" or "),
+        parse_color,
+        alt((tag(" spells"), tag(" spell"))),
+    )
+        .parse(type_text)
     {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Or {
@@ -9229,7 +9226,9 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
         }
     }
 
-    let (rest, color) = parse_color(type_text).ok()?;
+    let (rest, (color, _)) = (parse_color, alt((tag(" spells"), tag(" spell"))))
+        .parse(type_text)
+        .ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -9307,7 +9306,9 @@ fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<Filt
 }
 
 fn parse_spell_history_base_filter(type_text: &str) -> Option<TargetFilter> {
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))).parse(type_text)
+    {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Any);
         }
@@ -9339,17 +9340,55 @@ fn add_spell_history_filter_qualifiers(
     }
 }
 
-fn strip_spell_history_noun(type_text: &str) -> &str {
-    let type_text = type_text.trim();
-    if let Ok((rest, before)) =
-        nom::sequence::terminated(take_until::<_, _, OracleError<'_>>(" spell"), tag(" spell"))
-            .parse(type_text)
-    {
-        if rest.trim().is_empty() {
-            return before.trim();
+#[cfg(test)]
+mod retained_spell_context_tests {
+    use super::*;
+
+    #[test]
+    fn spell_history_retains_complete_noun_and_refuses_unknown_subjects() {
+        // CR 112.1: a spell supplies the card noun for a qualified population.
+        let expected = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        );
+        for noun in ["noncreature spell", "noncreature spells"] {
+            assert_eq!(
+                parse_spell_history_filter(noun),
+                Some(expected.clone()),
+                "{noun}"
+            );
+        }
+        for noun in [
+            "noncreature",
+            "mysterious spells",
+            "noncreature spells nonsense",
+            "noncreature or mysterious spells",
+            "",
+            "time",
+        ] {
+            assert_eq!(parse_spell_history_filter(noun), None, "{noun}");
         }
     }
-    type_text
+
+    #[test]
+    fn plural_noncreature_threshold_retains_noun_and_exact_owned_remainder() {
+        let (rest, condition) =
+            parse_spell_count_this_turn("two or more noncreature spells this turn, tail").unwrap();
+        assert_eq!(rest, ", tail");
+        assert_eq!(
+            condition,
+            make_quantity_ge(
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                    )),
+                },
+                2
+            )
+        );
+        assert!(parse_spell_count_this_turn("two or more mysterious spells this turn").is_err());
+    }
 }
 
 /// CR 603.4: "two or more spells were cast last turn" — the table-wide count
@@ -20135,7 +20174,7 @@ mod tests {
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
-                    } if type_filters == &vec![TypeFilter::Non(Box::new(TypeFilter::Creature))]
+                    } if type_filters == &vec![TypeFilter::Card, TypeFilter::Non(Box::new(TypeFilter::Creature))]
                 )));
             }
             other => panic!("expected compound SpellsCastThisTurn condition, got {other:?}"),

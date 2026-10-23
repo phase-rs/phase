@@ -1,9 +1,11 @@
 //! Coordinated card populations through the production casting pipeline.
+use super::jev_spell_history_context::printed_db;
 use super::support::shared_card_export_json;
 use engine::database::card_db::CardDatabase;
 use engine::game::game_object::BackFaceData;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityCost, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, QuantityExpr,
     QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
@@ -25,6 +27,434 @@ use std::path::Path;
 const SAILORS: &str = "This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
 
 const LOCKET: &str = "Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.";
+
+/// CR 601.2f + CR 700.6: overlapping colors/historic qualities cause one
+/// application of each printed reducer, with the colored component retained.
+#[test]
+fn retained_color_and_historic_cost_subjects_apply_once_per_source() {
+    let db = printed_db();
+    for source in ["Nightscape Familiar", "Jhoira's Familiar"] {
+        for matching in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_real_card(P0, source, Zone::Battlefield, &db);
+            let spell = if source == "Nightscape Familiar" {
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Synthetic overlapping color instant",
+                        true,
+                        "You gain 1 life.",
+                    )
+                    .with_mana_cost(if matching {
+                        ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
+                        }
+                    } else {
+                        ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                        }
+                    })
+                    .id()
+            } else if matching {
+                scenario
+                    .add_artifact_to_hand_from_oracle(P0, "Synthetic legendary artifact", "")
+                    .as_legendary()
+                    .with_mana_cost(blue_cost(1, 2))
+                    .id()
+            } else {
+                scenario
+                    .add_creature_to_hand_from_oracle(
+                        P0,
+                        "Synthetic nonhistoric creature",
+                        1,
+                        1,
+                        "",
+                    )
+                    .with_mana_cost(blue_cost(1, 2))
+                    .id()
+            };
+            scenario.with_mana_pool(
+                P0,
+                [ManaType::Blue, ManaType::Red, ManaType::Green]
+                    .into_iter()
+                    .flat_map(|kind| {
+                        (0..5).map(move |_| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            runner.cast(spell).resolve();
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                if matching { 13 } else { 12 }
+            );
+            assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 1);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+        }
+    }
+}
+
+/// CR 601.2f: the retained noncreature subject reduces only generic mana;
+/// CR 611.3a: Lyse's live threshold reads the same turn's completed casts.
+#[test]
+fn retained_lyse_discount_paid_casts_prowess_and_next_turn_history_reset() {
+    let db = printed_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lyse = scenario.add_real_card(P0, "Lyse Hext", Zone::Battlefield, &db);
+    let creature = scenario
+        .add_creature_to_hand_from_oracle(P0, "Synthetic cost creature", 1, 1, "")
+        .with_mana_cost(blue_cost(1, 1))
+        .id();
+    let spells: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic cost instant",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(blue_cost(1, 1))
+                .id()
+        })
+        .collect();
+    scenario.with_library_top(P0, &["P0 reserve", "P0 second"]);
+    scenario.with_library_top(P1, &["P1 reserve", "P1 second"]);
+    mana(&mut scenario, 8);
+    let mut runner = scenario.build();
+    runner.cast(creature).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    assert!(!runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    runner.cast(spells[0]).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 5);
+    assert_eq!(runner.state().objects[&lyse].power, Some(3));
+    assert!(!runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    runner.cast(spells[1]).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 4);
+    assert_eq!(runner.state().objects[&lyse].power, Some(4));
+    assert!(runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 3);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    let old_turn = runner.state().turn_number;
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(runner.state().turn_number > old_turn);
+    assert!(runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .values()
+        .all(|records| records.is_empty()));
+    assert_eq!(runner.state().objects[&lyse].controller, P0);
+    assert_eq!(runner.state().objects[&lyse].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&lyse].power, Some(2));
+    assert!(!runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+}
+
+/// CR 601.2f + CR 601.2i: the in-flight Guardian cannot count itself as an
+/// earlier noncreature. A prior creature is the paid negative twin.
+#[test]
+fn retained_academy_guardian_uses_actual_prior_noncreature_and_pays_full_colored_cost() {
+    let db = printed_db();
+    for noncreature in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let guardian = scenario.add_real_card(P0, "Traxos, Academy Guardian", Zone::Hand, &db);
+        let prior = if noncreature {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic prior instant",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(blue_cost(0, 1))
+                .id()
+        } else {
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Synthetic prior creature", 1, 1, "")
+                .with_mana_cost(blue_cost(0, 1))
+                .id()
+        };
+        mana(&mut scenario, 8);
+        let mut runner = scenario.build();
+        runner.cast(prior).resolve();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 7);
+        let committed = runner.cast(guardian).commit();
+        assert_eq!(
+            committed.state().players[0].mana_pool.total(),
+            if noncreature { 5 } else { 3 }
+        );
+        assert_eq!(
+            committed.state().spells_cast_this_turn_by_player[&P0].len(),
+            2
+        );
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[guardian], Zone::Battlefield);
+        for keyword in [Keyword::Flying, Keyword::Vigilance, Keyword::Prowess] {
+            assert!(outcome.state().objects[&guardian]
+                .keywords
+                .contains(&keyword));
+        }
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty() && outcome.state().trigger_stack.is_empty());
+    }
+}
+
+/// CR 611.3a + CR 601.2f: Lyse reads completed casts immediately on entry;
+/// its live reducer stops functioning when a real bounce removes its source.
+#[test]
+fn retained_lyse_late_entry_and_departure_use_existing_history_and_live_source() {
+    let db = printed_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lyse = scenario.add_real_card(P0, "Lyse Hext", Zone::Hand, &db);
+    let prior: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic earlier noncreature",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(blue_cost(0, 1))
+                .id()
+        })
+        .collect();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic reducer bounce",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .with_mana_cost(blue_cost(1, 1))
+        .id();
+    let after = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic post-departure instant",
+            true,
+            "You gain 1 life.",
+        )
+        .with_mana_cost(blue_cost(1, 1))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..10)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .chain(std::iter::once(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            )))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    for spell in prior {
+        runner.cast(spell).resolve();
+    }
+    runner.cast(lyse).resolve();
+    assert!(runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    assert_eq!(runner.state().objects[&lyse].power, Some(2));
+    let before = runner.state().players[0].mana_pool.total();
+    runner.cast(bounce).target_object(lyse).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), before - 1);
+    assert_eq!(runner.state().objects[&lyse].zone, Zone::Hand);
+    let before = runner.state().players[0].mana_pool.total();
+    runner.cast(after).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), before - 2);
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 5);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+}
+
+/// CR 601.2f: two distinct reducers apply once each, the generic floor is
+/// zero, and neither reducer can pay an absent colored shard.
+#[test]
+fn retained_lyse_cost_floor_colored_failure_and_foreign_source() {
+    let db = printed_db();
+    for (source_controller, reducers, generic, blue, allowed, paid) in [
+        (P0, 1, 0, 1, true, 1),
+        (P0, 2, 2, 1, true, 1),
+        (P0, 1, 1, 0, false, 0),
+        (P0, 1, 2, 1, false, 0),
+        (P1, 1, 1, 2, true, 2),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(source_controller, "Lyse Hext", Zone::Battlefield, &db);
+        if reducers == 2 {
+            scenario.add_real_card(P0, "Nightscape Familiar", Zone::Battlefield, &db);
+        }
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic generic floor instant",
+                true,
+                "You gain 1 life.",
+            )
+            .with_mana_cost(blue_cost(generic, 1))
+            .id();
+        mana(&mut scenario, blue);
+        let mut runner = scenario.build();
+        if blue == 0 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let before = runner.state().players[0].mana_pool.total();
+        let result = runner.cast(spell).try_resolve();
+        if allowed {
+            result.unwrap();
+            assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 1);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            assert!(runner
+                .state()
+                .spells_cast_this_turn_by_player
+                .get(&P0)
+                .is_none_or(|records| records.is_empty()));
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), before - paid);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    }
+}
+
+/// CR 514.1 + CR 514.2 + CR 514.3a: a real cleanup discard trigger
+/// opens the lawful same-turn priority window after prowess has expired.
+#[test]
+fn retained_lyse_cleanup_priority_keeps_history_based_double_strike() {
+    let db = printed_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lyse = scenario.add_real_card(P0, "Lyse Hext", Zone::Battlefield, &db);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Synthetic cleanup discard witness",
+        "Whenever you discard a card, you gain 1 life.",
+    );
+    let fillers: Vec<_> = (0..8)
+        .map(|index| scenario.add_card_to_hand(P0, &format!("Cleanup card {index}")))
+        .collect();
+    let spells: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic cleanup history instant",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(blue_cost(1, 1))
+                .id()
+        })
+        .collect();
+    scenario.with_library_top(P1, &["Next draw", "Reserve"]);
+    mana(&mut scenario, 8);
+    let mut runner = scenario.build();
+    for spell in spells {
+        runner.cast(spell).resolve();
+    }
+    assert_eq!(runner.state().objects[&lyse].power, Some(4));
+    assert!(runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    let turn = runner.state().turn_number;
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.advance_to_phase(Phase::Cleanup);
+    let WaitingFor::DiscardChoice {
+        player,
+        cards,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("real cleanup discard: {:?}", runner.state().waiting_for)
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(
+        cards
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        fillers.iter().copied().collect()
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fillers[7]],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().phase, Phase::Cleanup);
+    assert_eq!(runner.state().turn_number, turn);
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 2);
+    assert_eq!(runner.state().objects[&lyse].power, Some(2));
+    assert!(runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    assert_eq!(runner.life(P0), 23);
+    assert_eq!(runner.state().objects[&fillers[7]].zone, Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(runner.state().turn_number > turn);
+    assert!(!runner.state().objects[&lyse]
+        .keywords
+        .contains(&Keyword::DoubleStrike));
+    assert!(runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .values()
+        .all(|records| records.is_empty()));
+    assert_eq!(runner.state().spells_cast_this_game_by_player[&P0].len(), 2);
+}
 
 #[test]
 #[cfg(feature = "cli")]

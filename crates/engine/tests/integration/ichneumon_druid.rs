@@ -88,6 +88,15 @@ fn ichneumon_druid_damages_only_after_opponents_first_instant() {
         initial_life - 8,
         "every later instant must trigger"
     );
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P1].len(), 4);
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().trigger_stack.is_empty());
 }
 
 /// In Two-Headed Giant, P0/P1 are teammates and P2/P3 are the

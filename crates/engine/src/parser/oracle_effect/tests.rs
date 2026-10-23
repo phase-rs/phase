@@ -7,6 +7,54 @@ use super::*;
 use crate::parser::oracle::has_unimplemented as has_unimplemented_ability;
 
 #[test]
+fn temporary_noncreature_ban_keeps_full_noun_and_surrounding_chain() {
+    let source = "Exile all graveyards. Players can't cast noncreature spells this turn. Exile Calamity's Wake.";
+    let parsed =
+        crate::parser::parse_oracle_text(source, "Calamity's Wake", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let head = &parsed.abilities[0];
+    assert!(!has_unimplemented_ability(head));
+    let ban = head.sub_ability.as_ref().unwrap();
+    let Effect::AddRestriction {
+        restriction:
+            GameRestriction::ProhibitActivity {
+                activity:
+                    ProhibitedActivity::CastSpells {
+                        spell_filter: Some(filter),
+                    },
+                ..
+            },
+    } = ban.effect.as_ref()
+    else {
+        panic!("{head:#?}")
+    };
+    assert_eq!(
+        *filter,
+        TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+        )
+    );
+    assert!(
+        ban.sub_ability.is_some(),
+        "independent self-exile must survive"
+    );
+    for source in [
+        "Players can't cast mysterious spells this turn.",
+        "Players can't cast noncreature or mysterious spells this turn.",
+    ] {
+        let parsed = crate::parser::parse_oracle_text(
+            source,
+            "Synthetic strict ban",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert!(has_unimplemented_ability(&parsed.abilities[0]), "{source}");
+    }
+}
+
+#[test]
 fn destroy_compound_delegates_core_and_commits_only_owned_remainder() {
     for head in [
         "Destroy target creature",

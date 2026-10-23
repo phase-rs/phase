@@ -1085,6 +1085,7 @@ mod jeskai_ascendancy_pump_untap_anaphora_6857;
 mod jev_chosen_parity;
 mod jev_cost_populations;
 mod jev_seek_perpetual;
+mod jev_spell_history_context;
 mod jill_shiva_cold_snap_return_prompt_pollution;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;

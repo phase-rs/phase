@@ -2188,12 +2188,12 @@ pub(crate) fn parse_basic_landwalk_qualifier(input: &str) -> OracleResult<'_, &'
 /// permission names (CR 604.6 — the permission applies while the card is in a zone
 /// it could be cast from). A non-self-reference filter (e.g. a creature
 /// type) falls through to `parse_type_phrase_folding` and is not zone-restricted here.
-pub(crate) fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
+pub(crate) fn parse_graveyard_permission_filter(input: &str) -> Option<(TargetFilter, bool)> {
     if all_consuming(parse_self_subject).parse(input).is_ok() {
-        return (TargetFilter::SelfRef, true);
+        return Some((TargetFilter::SelfRef, true));
     }
-    let (filter, _) = parse_type_phrase_folding(input);
-    (filter, false)
+    let (filter, remainder) = parse_type_phrase_folding(input);
+    (remainder.trim().is_empty() && filter != TargetFilter::Any).then_some((filter, false))
 }
 
 /// The permission's own source card as a cast-permission subject.
@@ -2469,29 +2469,16 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
         return NthQualifiedSpell::UnsupportedQualifier;
     }
 
-    // Pre-spell type/keyword qualifier (strip a bare trailing "spell" noun so a
-    // post-modifier-only subject collapses to no type filter).
+    // Keep the recognized noun for the strict nominal authority. Only a whole
+    // bare spell has no pre-caster restriction.
     let pre_trimmed = pre.trim();
-    let pre_type = if all_consuming(tag::<_, _, OracleError<'_>>("spell"))
+    let type_filter = if all_consuming(tag::<_, _, OracleError<'_>>("spell"))
         .parse(pre_trimmed)
         .is_ok()
     {
-        ""
-    } else if let Ok((_, stripped)) = all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>(" spell"),
-        tag(" spell"),
-    ))
-    .parse(pre_trimmed)
-    {
-        stripped
-    } else {
-        pre_trimmed
-    }
-    .trim();
-    let type_filter = if pre_type.is_empty() {
         None
-    } else if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
-        .parse(pre_type)
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("historic spell"))
+        .parse(pre_trimmed)
         .is_ok()
     {
         // CR 700.6: bare "historic" is a card-property adjective, not a type word.
@@ -2503,8 +2490,8 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
         Some(TargetFilter::Typed(
             TypedFilter::card().properties(vec![FilterProp::Historic]),
         ))
-    } else if all_consuming(tag::<_, _, OracleError<'_>>("kicked"))
-        .parse(pre_type)
+    } else if all_consuming(tag::<_, _, OracleError<'_>>("kicked spell"))
+        .parse(pre_trimmed)
         .is_ok()
     {
         // CR 702.33d: bare "kicked spell" — kicker-paid qualifier for Vine Gecko
@@ -2513,7 +2500,7 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
             TypedFilter::card().properties(vec![FilterProp::WasKicked]),
         ))
     } else {
-        let (filter, remainder) = parse_type_phrase_folding(pre_type);
+        let (filter, remainder) = parse_type_phrase_folding(pre_trimmed);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             Some(filter)
         } else {

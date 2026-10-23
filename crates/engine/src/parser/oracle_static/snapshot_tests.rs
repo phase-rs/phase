@@ -7,6 +7,39 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn retained_noncreature_prohibition_cost_and_nth_static() {
+    let sources = [
+        "Noncreature spells you cast cost {1} less to cast.",
+        "Noncreature spells with mana value 4 or greater can't be cast.",
+        "Noncreature spells with {X} in their mana costs can't be cast.",
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast.",
+    ];
+    let definitions: Vec<_> = sources
+        .into_iter()
+        .map(|source| parse_static_line(source).unwrap())
+        .collect();
+    let expected = vec![
+        TypeFilter::Card,
+        TypeFilter::Non(Box::new(TypeFilter::Creature)),
+    ];
+    for def in &definitions {
+        let filter = match &def.mode {
+            StaticMode::ModifyCost {
+                spell_filter: Some(filter),
+                ..
+            } => filter,
+            StaticMode::CantBeCast { .. } => def.affected.as_ref().unwrap(),
+            other => panic!("unexpected static: {other:?}"),
+        };
+        assert!(matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == expected));
+    }
+    insta::assert_json_snapshot!(
+        "retained_noncreature_prohibition_cost_and_nth_static",
+        definitions
+    );
+}
+
+#[test]
 fn jev_chosen_quality_haste() {
     let def = parse_static_line("Each creature with mana value of the chosen quality has haste.")
         .unwrap();

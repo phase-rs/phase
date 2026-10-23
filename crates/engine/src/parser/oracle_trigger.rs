@@ -10,6 +10,33 @@ use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 #[cfg(test)]
+mod retained_other_than_first_spell_tests {
+    use super::*;
+
+    #[test]
+    fn both_repeated_nouns_and_the_same_actor_are_required() {
+        let source = "an opponent casts a noncreature spell other than the first noncreature spell that player casts each turn";
+        let OtherThanFirstSpellParse::Accepted(def) = parse_other_than_first_spell_trigger(source)
+        else {
+            panic!("{source}")
+        };
+        let expected = TargetFilter::Typed(
+            TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        );
+        assert_eq!(def.valid_card, Some(expected.clone()));
+        assert!(
+            matches!(def.constraint, Some(TriggerConstraint::NthSpellThisTurn { n: 1, comparator: Comparator::GT, filter: Some(ref filter) }) if filter == &expected)
+        );
+        for source in [
+            "an opponent casts a noncreature spell other than the first creature spell that player casts each turn",
+            "an opponent casts a noncreature spell other than the first noncreature spell you cast each turn",
+            "an opponent casts a mysterious spell other than the first mysterious spell that player casts each turn",
+            "an opponent casts a noncreature spell other than the first noncreature spell that player casts each turn nonsense",
+        ] { assert!(matches!(parse_other_than_first_spell_trigger(source), OtherThanFirstSpellParse::Rejected), "{source}"); }
+    }
+}
+
+#[cfg(test)]
 mod revealed_result_following_condition_tests {
     #[test]
     fn game_preserve_following_condition_is_on_the_move() {
@@ -20965,17 +20992,20 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     };
     let Ok((after_marker, first_qualifier)) = alt((
         terminated(
-            take_until(" spell other than the first "),
-            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+            recognize((
+                take_until(" spell other than the first "),
+                tag::<_, _, OracleError<'_>>(" spell"),
+            )),
+            tag(" other than the first "),
         ),
-        value("", tag("spell other than the first ")),
+        terminated(tag("spell"), tag(" other than the first ")),
     ))
     .parse(after_actor) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
     let Ok((after_repeated, repeated_qualifier)) = alt((
-        terminated(take_until(" spell "), tag(" spell ")),
-        value("", tag::<_, _, OracleError<'_>>("spell ")),
+        terminated(recognize((take_until(" spell "), tag(" spell"))), tag(" ")),
+        terminated(tag::<_, _, OracleError<'_>>("spell"), tag(" ")),
     ))
     .parse(after_marker) else {
         return OtherThanFirstSpellParse::Rejected;
@@ -21000,7 +21030,10 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     }
     let parse_qualifier = |qualifier: &str| {
         let qualifier = qualifier.trim();
-        if qualifier.is_empty() {
+        if all_consuming(tag::<_, _, OracleError<'_>>("spell"))
+            .parse(qualifier)
+            .is_ok()
+        {
             Some(None)
         } else {
             // Shared spell-history grammar handles the same typed/color

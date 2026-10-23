@@ -15,6 +15,35 @@ use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+#[cfg(test)]
+mod retained_spell_journal_tests {
+    use super::*;
+
+    #[test]
+    fn journal_delegate_retains_qualified_spell_noun_and_owned_remainder() {
+        let (rest, source) =
+            parse_turn_journal_source("noncreature spells you've cast this turn, tail").unwrap();
+        assert_eq!(rest, ", tail");
+        assert_eq!(
+            source,
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                ))
+            }
+        );
+        for text in [
+            "mysterious spells you've cast this turn",
+            "noncreature you've cast this turn",
+            "noncreature or mysterious spells you've cast this turn",
+        ] {
+            assert!(parse_turn_journal_source(text).is_err(), "{text}");
+        }
+    }
+}
+
 use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
