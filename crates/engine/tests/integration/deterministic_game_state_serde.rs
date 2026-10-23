@@ -2239,7 +2239,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        45,
+        46,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
