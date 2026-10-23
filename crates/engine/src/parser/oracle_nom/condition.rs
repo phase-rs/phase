@@ -23,6 +23,7 @@ use super::primitives::{
 use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
+use crate::parser::oracle_quantity::is_empty_typed_filter;
 use crate::parser::oracle_target::{
     cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
     parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
@@ -9200,7 +9201,8 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     }
     let type_text = type_text.trim();
     let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if leftover.trim().is_empty() && filter != TargetFilter::Any {
+    if leftover.trim().is_empty() && filter != TargetFilter::Any && !is_empty_typed_filter(&filter)
+    {
         return Some(filter);
     }
     if let Ok((rest, (first, _, second, _))) = (
@@ -9357,16 +9359,48 @@ mod retained_spell_context_tests {
                 "{noun}"
             );
         }
+        for noun in ["spell", "spells"] {
+            assert_eq!(
+                parse_spell_history_filter(noun),
+                Some(TargetFilter::Typed(TypedFilter::card())),
+                "{noun}"
+            );
+            assert_eq!(
+                parse_spell_history_base_filter(noun),
+                Some(TargetFilter::Any)
+            );
+        }
         for noun in [
             "noncreature",
             "mysterious spells",
             "noncreature spells nonsense",
             "noncreature or mysterious spells",
             "",
+            " \t\n ",
+            " from your graveyard",
+            " \t from anywhere other than your hand this turn",
             "time",
         ] {
             assert_eq!(parse_spell_history_filter(noun), None, "{noun}");
         }
+        for noun in [
+            "",
+            " \t\n ",
+            "a",
+            "an",
+            "a from your graveyard",
+            "an from anywhere other than your hand this turn",
+        ] {
+            assert_eq!(
+                parse_spell_history_filter_with_optional_article(noun),
+                None,
+                "{noun}"
+            );
+        }
+        assert_eq!(
+            parse_spell_history_filter_with_optional_article("a noncreature spell"),
+            Some(expected)
+        );
     }
 
     #[test]

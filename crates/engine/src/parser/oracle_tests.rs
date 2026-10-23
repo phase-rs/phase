@@ -402,7 +402,7 @@ mod retained_spell_publication {
             }
             "Impending Flux" => {
                 keywords=serde_json::from_value(json!([{"Foretell":{"type":"Cost","generic":1,"shards":["Red","Red"]}}])).unwrap();
-                let mut damage=expected_spell(expected_effect(json!({"type":"DamageAll","amount":{"type":"Offset","inner":{"type":"Ref","qty":{"type":"SpellsCastThisTurn","scope":"Controller","filter":{"type":"Typed","type_filters":["Card"],"properties":[{"type":"InAnyZone","zones":["Graveyard","Library","Exile","Command"]}]}}},"offset":1},"target":{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]},"player_filter":{"type":"Opponent"}})));
+                let mut damage=expected_spell(expected_effect(json!({"type":"DamageAll","amount":{"type":"Offset","inner":{"type":"Ref","qty":{"type":"SpellsCastThisTurn","scope":"Controller","filter":{"type":"Typed","type_filters":[],"properties":[{"type":"InAnyZone","zones":["Graveyard","Library","Exile","Command"]}]}}},"offset":1},"target":{"type":"Typed","type_filters":["Creature"],"controller":"Opponent","properties":[]},"player_filter":{"type":"Opponent"}})));
                 damage.description=Some("Paradox — ~ deals X damage to each opponent and each creature they control, where X is 1 plus the number of spells you've cast from anywhere other than your hand this turn.".into()); abilities.push(damage);
             }
             "Demon of Fate's Design" => {
