@@ -3412,6 +3412,17 @@ fn parse_subject_application_for(
                 TargetFilter::ParentTargetController
             } else if matches!(
                 ctx.relative_player_scope,
+                Some(ControllerRef::ParentTargetOwner)
+            ) && matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+            {
+                // CR 400.3 + CR 608.2c: an owner-keyed head ("put into an opponent's /
+                // a player's graveyard") makes the graveyard's owner, i.e. the moving
+                // card's owner, the antecedent of "that player"; mirrors
+                // `resolve_they_pronoun`'s arm for the same scope. The `Player`
+                // discriminant keeps "that attacking player" on its event-context ref.
+                TargetFilter::ParentTargetOwner
+            } else if matches!(
+                ctx.relative_player_scope,
                 Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
             ) {
                 // CR 608.2c + CR 106.12a: An explicit triggering/defending player
@@ -11079,6 +11090,44 @@ mod tests {
         assert_eq!(
             result.unwrap().affected,
             TargetFilter::ParentTargetController
+        );
+    }
+
+    /// CR 400.3 + CR 608.2c: an owner-keyed trigger head ("put into an opponent's / a
+    /// player's graveyard") scopes "that player" to the graveyard's owner, read from
+    /// the zone-change record as `ParentTargetOwner`. The `Player` anaphors ("that
+    /// player", "that opponent") honour it; "that attacking player" names the attacker
+    /// and keeps its event-context ref, and with no scope "that player" stays the
+    /// triggering player.
+    #[test]
+    fn parse_subject_that_player_honors_parent_target_owner_scope() {
+        let subject_for = |text: &str, scope: Option<ControllerRef>| {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::Typed(TypedFilter::default())),
+                relative_player_scope: scope,
+                ..ParseContext::default()
+            };
+            parse_subject_application(text, &mut ctx)
+                .unwrap_or_else(|| panic!("{text:?} must parse as a player subject"))
+                .affected
+        };
+        let owner = Some(ControllerRef::ParentTargetOwner);
+
+        assert_eq!(
+            subject_for("that player", owner.clone()),
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            subject_for("that opponent", owner.clone()),
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            subject_for("that attacking player", owner),
+            TargetFilter::TriggeringPlayer
+        );
+        assert_eq!(
+            subject_for("that player", None),
+            TargetFilter::TriggeringPlayer
         );
     }
 

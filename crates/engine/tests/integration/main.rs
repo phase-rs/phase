@@ -521,6 +521,7 @@ mod granted_storm_snapshot;
 mod granted_sunburst_5337;
 mod graveyard_permission_announcement;
 mod graveyard_permission_owner_zone;
+mod graveyard_possessive_owner_scope;
 mod graveyard_to_hand_activation_zone;
 mod great_aurora_owner_shuffle;
 mod great_work_chapter_three_8750;
