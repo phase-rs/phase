@@ -4085,7 +4085,7 @@ mod tests {
             }
         }
 
-        /// CR 101.3 + CR 616.1: a parsed Boon Reflection ("If you would gain life,
+        /// Engine numeric capacity + CR 616.1: a parsed Boon Reflection ("If you would gain life,
         /// you gain twice that much life instead.") and two hand-built x1,000
         /// multipliers would take a requested 1,000,000 to 2,000,000,000,000, past
         /// an `i32`. Prompts are asked while two or more candidates remain (three,
@@ -4156,7 +4156,7 @@ mod tests {
             );
         }
 
-        /// CR 101.3 + CR 616.1f: the loop-head stop, through the production
+        /// Engine numeric capacity + CR 616.1f: the loop-head stop, through the production
         /// action. Four x100 multipliers on 1,000,000: the first application
         /// gives 100,000,000 (fits) and the second 10,000,000,000, which
         /// overflows an `i32` in any order. Prompts are asked only while two or
@@ -4226,7 +4226,7 @@ mod tests {
             assert_eq!(life(&runner, P1), 20);
         }
 
-        /// CR 101.3: the loss twin of the large-multiplier gain row. Three
+        /// Engine numeric capacity: the loss twin of the large-multiplier gain row. Three
         /// multipliers (x10, x10, x1,000) take 1,000,000 past an `i32`; the loss is
         /// rejected unchanged. The loop-stop discrimination is in the `replacement`
         /// unit row `lose_life_times_overflow_stops_the_loop_at_the_overflowing_replacement`.
