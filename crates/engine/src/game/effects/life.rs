@@ -297,9 +297,13 @@ fn run_ingress_life_change(
 /// Under `Reject` an unrepresentable final edit returns `Err` BEFORE the
 /// stashed post-replacement continuation drains (nothing settles; the action
 /// boundary discards the stash with everything else). Under `IgnoreImpossible`
-/// the settle step skips only the impossible change and the continuation
-/// drains exactly as it does for an applied change (CR 101.3: only the
-/// impossible part of the instruction is ignored).
+/// the settle step skips only the change the engine's numeric capacity cannot
+/// represent and the continuation drains exactly as it does for an applied
+/// change. That skip is an engine limit and a compatibility fallback for
+/// ordinary resolution outside a public action boundary (and for legacy
+/// serialized `PendingReplacement` policy payloads), NOT a CR 101.3
+/// impossibility: public boundaries reject the action and restore their entry
+/// state instead.
 fn apply_life_change_core(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -558,8 +562,9 @@ fn settle_unrepresentable(
                 Some(window) => {
                     window.failed_player.get_or_insert(unrepresentable.player);
                 }
-                // CR 101.3: the unrepresentable change is the impossible part
-                // of the instruction; it is ignored and the rest runs.
+                // The engine's numeric capacity, not a CR 101.3 impossibility:
+                // outside an open ingress window this is the compatibility
+                // fallback for ordinary resolution; the log records the skip.
                 None => unrepresentable.log_discarded(site),
             }
             Ok(0)
@@ -568,11 +573,12 @@ fn settle_unrepresentable(
 }
 
 /// Consumes a replacement-quantity overflow recorded while this life event was
-/// replaced. CR 101.3: the overflowed result is an impossible part of the
-/// instruction, so it takes the same failure branch as any other unrepresentable
-/// life change (`Reject` returns the error, `IgnoreImpossible` skips only this
-/// change). Taken first so the record is always cleared, even when an ingress
-/// window has already failed. `None` when nothing was recorded.
+/// replaced. The overflowed result exceeds the engine's numeric range, so it
+/// takes the same failure branch as any other engine-unrepresentable life
+/// change (`Reject` returns the error, `IgnoreImpossible` skips only this
+/// change as the compatibility fallback). This is a capacity limit, not a
+/// CR 101.3 impossibility. Taken first so the record is always cleared, even
+/// when an ingress window has already failed. `None` when nothing was recorded.
 fn settle_quantity_overflow(
     state: &mut GameState,
     pid: PlayerId,
@@ -590,7 +596,8 @@ fn settle_quantity_overflow(
 }
 
 /// Applies a post-replacement `ProposedEvent::LifeGain` to the game state under
-/// the ordinary policy (an unrepresentable result is skipped, CR 101.3).
+/// the ordinary policy (an engine-unrepresentable result is skipped by the
+/// compatibility fallback outside a public action boundary).
 ///
 /// Extracted from `apply_life_gain`'s Execute arm so the same mutation can be
 /// invoked by `resolve_gain`. Caller is responsible for emitting `EffectResolved`.
@@ -755,7 +762,8 @@ fn settle_life_loss(
 }
 
 /// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state
-/// under the ordinary policy (an unrepresentable result is skipped, CR 101.3).
+/// under the ordinary policy (an engine-unrepresentable result is skipped by
+/// the compatibility fallback outside a public action boundary).
 ///
 /// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
 /// emitting `EffectResolved`.
@@ -2848,7 +2856,8 @@ mod tests {
             };
             let mut events = Vec::new();
 
-            // Ordinary entries: the impossible change is skipped (CR 101.3).
+            // Ordinary entries: the capacity-exceeding change is skipped by the
+            // compatibility fallback outside a public action boundary.
             let mut state = GameState::new_two_player(42);
             state.record_replacement_quantity_overflow(source);
             assert_eq!(apply_life_gain(&mut state, player, 3, &mut events), Ok(0));

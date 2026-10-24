@@ -246,11 +246,21 @@ pub fn resolve_all_ready_prefix_with(
     // A rejected public batch must leave the game exactly as its caller found
     // it. Prefix progress made by earlier iterations is not committed if a
     // later iteration proves a life change unrepresentable.
+    //
+    // The frame also owns the lifecycle observations emitted by accepted inner
+    // boundaries: they are held until this whole public call succeeds, so a
+    // later rejection can retract them instead of stranding them in an
+    // enclosing prospective parent.
+    let lifecycle = super::lifecycle::enter_action_frame();
     let entry = state.clone();
     match resolve_all_ready_prefix_with_inner(state, requester, continuation) {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            lifecycle.commit_into_parent();
+            Ok(result)
+        }
         Err(error) => {
             *state = entry;
+            lifecycle.discard();
             Err(error)
         }
     }
@@ -301,11 +311,22 @@ fn resolve_all_ready_prefix_with_inner(
         // resolution. Suspend the whole clone-local map: an UntilStackEmpty
         // entry could otherwise run beyond this proof's one-entry limit.
         let suspended_auto_passes = std::mem::take(&mut proof.auto_pass);
+        // Each proof owns its own frame: a proof this loop later refuses must not
+        // leave its observations behind, even though its apply call succeeded.
+        let proof_lifecycle = super::lifecycle::enter_action_frame();
         let materialized = materialize_one_consented_resolution(&mut proof, &run);
         proof.auto_pass = suspended_auto_passes;
-        let Some((boundary, mut actions)) = materialized? else {
-            proof_stopped = true;
-            break;
+        let (boundary, mut actions) = match materialized {
+            Ok(Some(materialized)) => materialized,
+            Ok(None) => {
+                proof_lifecycle.discard();
+                proof_stopped = true;
+                break;
+            }
+            Err(error) => {
+                proof_lifecycle.discard();
+                return Err(error);
+            }
         };
 
         // CR 117.5 + CR 704.3 + CR 603.3b: do not collapse across any new
@@ -318,10 +339,12 @@ fn resolve_all_ready_prefix_with_inner(
             || !stack::priority_checkpoint_is_settled(&proof)
             || !consent_authorization_matches(&proof, &run)
         {
+            proof_lifecycle.discard();
             proof_stopped = true;
             break;
         }
 
+        proof_lifecycle.commit_into_parent();
         items_resolved += 1;
         events.extend(boundary.events);
         log_entries.extend(boundary.log_entries);
@@ -547,6 +570,9 @@ pub fn resume_restored_stack_automation(
 ) -> Result<RestoredStackAutomationResume, EngineError> {
     // A rejected resume must not leave a half-repaired or half-resolved
     // persisted state behind: the caller re-enters from its decode boundary.
+    // The public frame also holds the lifecycle observations of the resumed
+    // runner until the whole resume succeeds, so a rejection discards them.
+    let lifecycle = super::lifecycle::enter_action_frame();
     let entry = state.clone();
     let completed = (|| -> Result<RestoredStackAutomationResult, EngineError> {
         Ok(match classify_restored_stack_automation(state) {
@@ -568,9 +594,13 @@ pub fn resume_restored_stack_automation(
         })
     })();
     match completed {
-        Ok(completed) => Ok(RestoredStackAutomationResume::from_completed(completed)),
+        Ok(completed) => {
+            lifecycle.commit_into_parent();
+            Ok(RestoredStackAutomationResume::from_completed(completed))
+        }
         Err(error) => {
             *state = entry;
+            lifecycle.discard();
             Err(error)
         }
     }
@@ -815,7 +845,10 @@ where
     // An unrepresentable life change rejects the public batch atomically.
     // Non-representability is the only failure that escalates out of the
     // per-boundary stop policy; every other engine error keeps the established
-    // greatest-safe-prefix stop below.
+    // greatest-safe-prefix stop below. The public frame owns the lifecycle
+    // observations of every accepted inner boundary, so a later rejection
+    // retracts the whole batch's observations along with its state.
+    let lifecycle = super::lifecycle::enter_action_frame();
     let entry = state.clone();
     let total = state.stack.len();
     let resolution_cap = if max_resolutions == 0 {
@@ -915,6 +948,7 @@ where
             Ok(boundary) => boundary,
             Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
                 *state = entry;
+                lifecycle.discard();
                 return Err(error);
             }
             Err(_) => break,
@@ -957,6 +991,7 @@ where
         finalize_display_state(state);
     }
 
+    lifecycle.commit_into_parent();
     Ok(ResolveAllFastForwardResult {
         events,
         waiting_for: state.waiting_for.clone(),

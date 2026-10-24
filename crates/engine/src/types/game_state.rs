@@ -27718,11 +27718,12 @@ pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
     /// action through the boundary snapshot restore (nothing settles).
     Reject,
-    /// Ordinary resolution. Engine representability limit, not a rule: the
-    /// change cannot be recorded, so it is skipped the way CR 101.3 treats an
-    /// impossible part of an instruction ("Any part of an instruction that's
-    /// impossible to perform is ignored."). Log once, skip this change, and
-    /// continue the instruction as if it applied with amount 0.
+    /// Compatibility fallback for ordinary resolution outside a public action
+    /// boundary and for older serialized payloads. This is an engine numeric
+    /// capacity limit, NOT a rule: the change cannot be recorded, so it is
+    /// logged once, skipped, and the instruction continues as if it applied
+    /// with amount 0. Public action boundaries reject the action and restore
+    /// their entry state instead.
     #[default]
     IgnoreImpossible,
 }
@@ -27743,12 +27744,13 @@ pub(crate) struct IngressLifeWindow {
 }
 
 /// A replacement's computed life quantity overflowed the engine's numeric
-/// range, so the modified event cannot be represented. CR 101.3: that result is
-/// an impossible part of the instruction and is ignored rather than clamped
-/// (CR 119.3 would otherwise adjust the life total by a made-up amount). The
-/// applier records the overflowing replacement's source (diagnostic) and the
-/// life settle step takes the record and routes it through the existing
-/// unrepresentable-life-change authority.
+/// range, so the modified event cannot be represented. This is an engine
+/// capacity limit, NOT a CR 101.3 impossibility: the applier records the
+/// overflowing replacement's source (diagnostic) and the life settle step takes
+/// the record and routes it through the existing unrepresentable-life-change
+/// authority. A public action boundary rejects and restores; the ordinary
+/// fallback outside one skips the change for compatibility (never clamping,
+/// and never inventing a CR 119.3 amount).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplacementQuantityOverflow {
     pub(crate) source: ObjectId,
