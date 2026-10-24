@@ -57,12 +57,17 @@ describe("RetargetChoiceModal (via CardChoiceModal)", () => {
   // Only `All`-scope prompts reach this modal at all (`CardChoiceModal`
   // routes `Single` scope to the board's `TargetingOverlay` instead), so
   // this is the modal's only reachable retarget shape.
-  it("renders only the active slot's own pool, not the flat union", () => {
+  it("renders per-slot pools for opaque coin paths and submits only positional choices", () => {
     setUp({
       player: 0,
       scope: { type: "All" },
-      current_targets: [opp2, opp1],
-      slot_pools: [[opp2], [opp1, opp2]],
+      current_targets: [opp2, opp1, opp2],
+      slots: [
+        { path: [{ CoinFlipBranch: { result: "Won" } }], slot: 0 },
+        { path: [{ CoinFlipBranch: { result: "Lost" } }], slot: 0 },
+        { path: ["SubAbility"], slot: 0 },
+      ],
+      slot_pools: [[opp2], [opp1, opp2], [opp2]],
       legal_new_targets: [opp1, opp2],
     });
     render(<CardChoiceModal />);
@@ -74,6 +79,17 @@ describe("RetargetChoiceModal (via CardChoiceModal)", () => {
     // — match on a name PREFIX rather than the exact label.
     expect(screen.getByRole("button", { name: /^Opp 2/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Opp 1/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Target 2/ }));
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Target 3/ }));
+    expect(screen.queryByRole("button", { name: /^Opp 1/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "RetargetSpell",
+      data: { new_targets: [null, opp2, null] },
+    });
   });
 
   // Paired positive control: an outer-empty `slot_pools` (a compat payload

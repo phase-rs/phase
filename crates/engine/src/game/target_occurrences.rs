@@ -172,11 +172,8 @@ pub fn validate_target_pin_alignment(
     ability: &ResolvedAbility,
 ) -> Result<(), TargetPinAlignmentError> {
     node_pin_alignment(ability)?;
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        validate_target_pin_alignment(sub)?;
-    }
-    if let Some(other) = ability.else_ability.as_deref() {
-        validate_target_pin_alignment(other)?;
+    for (_, child) in ability.child_links() {
+        validate_target_pin_alignment(child)?;
     }
     Ok(())
 }

@@ -251,23 +251,23 @@ impl Walk<'_> {
             node,
             acted_on: own,
         });
-        let children = [
-            (node.sub_ability.as_deref(), prepared.sub_ability.as_deref()),
-            (
-                node.else_ability.as_deref(),
-                prepared.else_ability.as_deref(),
-            ),
-        ];
-        for (index, (child, prepared_child)) in children.into_iter().enumerate() {
-            debug_assert_eq!(
-                child.is_some(),
+        for (edge, child) in node.child_links() {
+            let prepared_child = prepared
+                .child_links()
+                .find_map(|(prepared_edge, child)| (prepared_edge == edge).then_some(child));
+            debug_assert!(
                 prepared_child.is_some(),
-                "the resolution rewrites keep the chain's shape"
+                "resolution rewrites keep the chain's shape"
             );
-            let (Some(child), Some(prepared_child)) = (child, prepared_child) else {
+            let Some(prepared_child) = prepared_child else {
                 continue;
             };
-            if index == 0 && instead.is_some() {
+            let sequential = match edge {
+                crate::types::game_state::ChainStep::SubAbility => true,
+                crate::types::game_state::ChainStep::ElseAbility
+                | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => false,
+            };
+            if sequential && instead.is_some() {
                 // What runs in this node's place when the swap happened. The
                 // nodes below it are not answered.
                 reaches.push(NodeReach {
@@ -277,10 +277,9 @@ impl Walk<'_> {
                 push_unanswered_below(child, reaches);
                 continue;
             }
-            // An `else_ability` runs when this node's condition is false or its
-            // "you may" is declined, and neither is answered.
+            // Neither an ordinary else nor an unselected coin outcome is answered.
             let handed = board
-                .filter(|_| index == 0)
+                .filter(|_| sequential)
                 .zip(written.clone())
                 .zip(handed_child(&performed, prepared_child));
             let Some(((child_board, written), child_bound)) = handed else {
@@ -395,10 +394,7 @@ impl Walk<'_> {
 
 /// `node`'s subtree below it, every node answering nothing.
 fn push_unanswered_below<'a>(node: &'a ResolvedAbility, reaches: &mut Vec<NodeReach<'a>>) {
-    for child in [node.sub_ability.as_deref(), node.else_ability.as_deref()]
-        .into_iter()
-        .flatten()
-    {
+    for (_, child) in node.child_links() {
         reaches.push(NodeReach {
             node: child,
             acted_on: Vec::new(),

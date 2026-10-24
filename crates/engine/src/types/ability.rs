@@ -31811,6 +31811,12 @@ pub struct SpellContext {
     /// `finalize_cast`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2c: the selected coin outcome's declared-slot numbering base,
+    /// addressed in the resolution carrier's original chain. Unlike source
+    /// identity, this distinguishes Won and Lost and survives parked choices.
+    /// Absent on ordinary non-coin chains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin_branch_slot_base: Option<Vec<crate::types::game_state::ChainStep>>,
     /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
     /// spell was cast. Used by effects that say "if you controlled a [filter]
     /// as you cast this spell"; the resolver checks this snapshot instead of
@@ -37025,12 +37031,38 @@ impl ChosenTargetSlots {
     }
 }
 
+/// Bound outcome instructions. Each child owns its announced targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedCoinBranches {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub won: Option<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost: Option<ResolvedAbility>,
+}
+
+impl ResolvedCoinBranches {
+    pub fn get(&self, result: CoinFlipResult) -> Option<&ResolvedAbility> {
+        match result {
+            CoinFlipResult::Won => self.won.as_ref(),
+            CoinFlipResult::Lost => self.lost.as_ref(),
+        }
+    }
+
+    pub fn get_mut(&mut self, result: CoinFlipResult) -> Option<&mut ResolvedAbility> {
+        match result {
+            CoinFlipResult::Won => self.won.as_mut(),
+            CoinFlipResult::Lost => self.lost.as_mut(),
+        }
+    }
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 ///
 /// Serde goes through the derived implementation (`remote = "Self"`) plus the
 /// hand-written `Deserialize` below, which normalizes and validates the target
-/// occurrence pins of every decoded node — whatever owner holds it (stack,
-/// resolution frames, pending casts, prompts) — before any reader sees it.
+/// occurrence pins and coin-branch correspondence of every decoded node —
+/// whatever owner holds it (stack, resolution frames, pending casts, prompts) —
+/// before any reader sees it. Legacy unbound coin branches are never inferred.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub struct ResolvedAbility {
@@ -37194,6 +37226,9 @@ pub struct ResolvedAbility {
     /// CR 608.2c: Alternative branch ("Otherwise") executed when condition is not met.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub else_ability: Option<Box<ResolvedAbility>>,
+    /// CR 601.2c: Both coin outcomes declare targets before the flip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin_branches: Option<Box<ResolvedCoinBranches>>,
     #[serde(default)]
     pub duration: Option<Duration>,
     /// Condition that must be met for this ability to execute during resolution.
@@ -37541,6 +37576,26 @@ impl<'de> Deserialize<'de> for ResolvedAbility {
         ability
             .normalize_decoded_target_pins()
             .map_err(de::Error::custom)?;
+        let valid_branches = match &ability.effect {
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => match ability.coin_branches.as_deref() {
+                Some(branches) => {
+                    (win_effect.is_some() || lose_effect.is_some())
+                        && win_effect.is_some() == branches.won.is_some()
+                        && lose_effect.is_some() == branches.lost.is_some()
+                }
+                None => win_effect.is_none() && lose_effect.is_none(),
+            },
+            _ => ability.coin_branches.is_none(),
+        };
+        if !valid_branches {
+            return Err(de::Error::custom(
+                "INVALID_COIN_BRANCH_BINDINGS: resolved coin branches do not match the instruction",
+            ));
+        }
         Ok(ability)
     }
 }
@@ -37566,6 +37621,7 @@ impl PartialEq for ResolvedAbility {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             effect: a_effect,
+            coin_branches: a_coin_branches,
             targets: a_targets,
             declares_chosen_group: a_declares_chosen_group,
             reads_chosen_group: a_reads_chosen_group,
@@ -37643,6 +37699,7 @@ impl PartialEq for ResolvedAbility {
         let Self {
             effect: b_effect,
             targets: b_targets,
+            coin_branches: b_coin_branches,
             declares_chosen_group: b_declares_chosen_group,
             reads_chosen_group: b_reads_chosen_group,
             declares_return_result: b_declares_return_result,
@@ -37718,6 +37775,7 @@ impl PartialEq for ResolvedAbility {
         } = other;
 
         a_effect == b_effect
+            && a_coin_branches == b_coin_branches
             && a_targets == b_targets
             && a_declares_chosen_group == b_declares_chosen_group
             && a_reads_chosen_group == b_reads_chosen_group
@@ -37802,6 +37860,63 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// Immediate live children in declaration order; no definition templates.
+    pub fn child_links(
+        &self,
+    ) -> impl Iterator<Item = (crate::types::game_state::ChainStep, &ResolvedAbility)> {
+        use crate::types::game_state::ChainStep;
+        let (won, lost) = match self.coin_branches.as_deref() {
+            Some(branches) => (branches.won.as_ref(), branches.lost.as_ref()),
+            None => (None, None),
+        };
+        [
+            (
+                ChainStep::CoinFlipBranch {
+                    result: CoinFlipResult::Won,
+                },
+                won,
+            ),
+            (
+                ChainStep::CoinFlipBranch {
+                    result: CoinFlipResult::Lost,
+                },
+                lost,
+            ),
+            (ChainStep::SubAbility, self.sub_ability.as_deref()),
+            (ChainStep::ElseAbility, self.else_ability.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(edge, child)| child.map(|child| (edge, child)))
+    }
+
+    pub fn child_links_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (crate::types::game_state::ChainStep, &mut ResolvedAbility)> {
+        use crate::types::game_state::ChainStep;
+        let (won, lost) = match self.coin_branches.as_deref_mut() {
+            Some(branches) => (branches.won.as_mut(), branches.lost.as_mut()),
+            None => (None, None),
+        };
+        [
+            (
+                ChainStep::CoinFlipBranch {
+                    result: CoinFlipResult::Won,
+                },
+                won,
+            ),
+            (
+                ChainStep::CoinFlipBranch {
+                    result: CoinFlipResult::Lost,
+                },
+                lost,
+            ),
+            (ChainStep::SubAbility, self.sub_ability.as_deref_mut()),
+            (ChainStep::ElseAbility, self.else_ability.as_deref_mut()),
+        ]
+        .into_iter()
+        .filter_map(|(edge, child)| child.map(|child| (edge, child)))
+    }
+
     /// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
     /// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
     /// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
@@ -37822,13 +37937,8 @@ impl ResolvedAbility {
                 .as_ref()
                 .is_some_and(AbilityCondition::references_cost_paid_object)
             || self
-                .sub_ability
-                .as_deref()
-                .is_some_and(ResolvedAbility::references_cost_paid_object)
-            || self
-                .else_ability
-                .as_deref()
-                .is_some_and(ResolvedAbility::references_cost_paid_object)
+                .child_links()
+                .any(|(_, child)| child.references_cost_paid_object())
     }
 
     /// CR 610.3: The "until" event bounding this node's own zone change, for
@@ -38082,13 +38192,8 @@ impl ResolvedAbility {
     pub(crate) fn contains_duration_event(&self, event: DurationEvent) -> bool {
         self.bounded_zone_change_event() == Some(event)
             || self
-                .sub_ability
-                .as_ref()
-                .is_some_and(|sub| sub.contains_duration_event(event))
-            || self
-                .else_ability
-                .as_ref()
-                .is_some_and(|branch| branch.contains_duration_event(event))
+                .child_links()
+                .any(|(_, child)| child.contains_duration_event(event))
     }
 
     pub(crate) fn record_duration_event_recursive(&mut self, event: DurationEvent) {
@@ -38097,11 +38202,8 @@ impl ResolvedAbility {
         {
             self.context.duration_events.push(event);
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.record_duration_event_recursive(event);
-        }
-        if let Some(branch) = self.else_ability.as_mut() {
-            branch.record_duration_event_recursive(event);
+        for (_, child) in self.child_links_mut() {
+            child.record_duration_event_recursive(event);
         }
     }
 
@@ -38109,11 +38211,8 @@ impl ResolvedAbility {
     /// branch, mirroring [`Self::record_duration_event_recursive`].
     pub(crate) fn clear_duration_events_recursive(&mut self) {
         self.context.duration_events.clear();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_duration_events_recursive();
-        }
-        if let Some(branch) = self.else_ability.as_mut() {
-            branch.clear_duration_events_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_duration_events_recursive();
         }
     }
 
@@ -38139,6 +38238,7 @@ impl ResolvedAbility {
             kind: AbilityKind::default(),
             sub_ability: None,
             else_ability: None,
+            coin_branches: None,
             duration: None,
             condition: None,
             context: SpellContext::default(),
@@ -38246,11 +38346,8 @@ impl ResolvedAbility {
         if self.chosen_target_slots.is_unrecorded() {
             self.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.start_target_record_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.start_target_record_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.start_target_record_recursive();
         }
     }
 
@@ -38296,11 +38393,8 @@ impl ResolvedAbility {
         if let Effect::EpicCopy { spell } = &mut self.effect {
             spell.set_cast_occurrence_recursive(occurrence);
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_cast_occurrence_recursive(occurrence);
-        }
-        if let Some(branch) = self.else_ability.as_mut() {
-            branch.set_cast_occurrence_recursive(occurrence);
+        for (_, child) in self.child_links_mut() {
+            child.set_cast_occurrence_recursive(occurrence);
         }
     }
 
@@ -38311,24 +38405,16 @@ impl ResolvedAbility {
         if let Effect::EpicCopy { spell } = &mut self.effect {
             spell.normalize_cast_occurrence_for_loop_recursive();
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.normalize_cast_occurrence_for_loop_recursive();
-        }
-        if let Some(branch) = self.else_ability.as_mut() {
-            branch.normalize_cast_occurrence_for_loop_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.normalize_cast_occurrence_for_loop_recursive();
         }
     }
 
     pub(crate) fn cast_occurrence_matches_recursive(&self, occurrence: CastOccurrence) -> bool {
         self.cast_occurrence == Some(occurrence)
             && self
-                .sub_ability
-                .as_deref()
-                .is_none_or(|sub| sub.cast_occurrence_matches_recursive(occurrence))
-            && self
-                .else_ability
-                .as_deref()
-                .is_none_or(|branch| branch.cast_occurrence_matches_recursive(occurrence))
+                .child_links()
+                .all(|(_, child)| child.cast_occurrence_matches_recursive(occurrence))
             && match &self.effect {
                 Effect::EpicCopy { spell } => spell.cast_occurrence_matches_recursive(occurrence),
                 _ => true,
@@ -38337,11 +38423,8 @@ impl ResolvedAbility {
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
         self.may_trigger_origin = Some(origin.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_may_trigger_origin_recursive(origin.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_may_trigger_origin_recursive(origin);
+        for (_, child) in self.child_links_mut() {
+            child.set_may_trigger_origin_recursive(origin.clone());
         }
     }
 
@@ -38353,11 +38436,8 @@ impl ResolvedAbility {
         self.controller = source.lki.controller;
         self.original_controller = Some(source.lki.controller);
         self.trigger_source = Some(source.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_trigger_source_recursive(source.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_trigger_source_recursive(source);
+        for (_, child) in self.child_links_mut() {
+            child.set_trigger_source_recursive(source.clone());
         }
     }
 
@@ -38371,11 +38451,8 @@ impl ResolvedAbility {
     /// creator. Walk mirrors `set_trigger_source_recursive` exactly.
     pub fn set_gameplay_source_recursive(&mut self, source: ObjectId) {
         self.source_id = source;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_gameplay_source_recursive(source);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_gameplay_source_recursive(source);
+        for (_, child) in self.child_links_mut() {
+            child.set_gameplay_source_recursive(source);
         }
     }
 
@@ -38387,11 +38464,8 @@ impl ResolvedAbility {
         event: &crate::types::events::GameEvent,
     ) {
         self.context.creation_lookback_event = Some(Box::new(event.clone()));
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_creation_lookback_event_recursive(event);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_creation_lookback_event_recursive(event);
+        for (_, child) in self.child_links_mut() {
+            child.set_creation_lookback_event_recursive(event);
         }
     }
 
@@ -38404,11 +38478,8 @@ impl ResolvedAbility {
         if let Some(event) = self.context.creation_lookback_event.as_deref_mut() {
             f(event);
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.for_each_creation_lookback_event_mut(f);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.for_each_creation_lookback_event_mut(f);
+        for (_, child) in self.child_links_mut() {
+            child.for_each_creation_lookback_event_mut(f);
         }
     }
 
@@ -38420,26 +38491,24 @@ impl ResolvedAbility {
         source: TriggerSourceContext,
     ) {
         self.trigger_source = Some(source.clone());
-        if let Some(sub) = self
-            .sub_ability
-            .as_mut()
-            .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
-        {
-            sub.update_trigger_source_context_in_resolution_segment(source.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.update_trigger_source_context_in_resolution_segment(source);
+        for (edge, child) in self.child_links_mut() {
+            match edge {
+                crate::types::game_state::ChainStep::SubAbility
+                    if child.sub_link != SubAbilityLink::ContinuationStep => {}
+                crate::types::game_state::ChainStep::SubAbility
+                | crate::types::game_state::ChainStep::ElseAbility
+                | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => {
+                    child.update_trigger_source_context_in_resolution_segment(source.clone());
+                }
+            }
         }
     }
 
     /// Install the exact definition occurrence over every continuation branch.
     pub fn set_trigger_definition_ref_recursive(&mut self, definition_ref: TriggerDefinitionRef) {
         self.trigger_definition_ref = Some(definition_ref.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_trigger_definition_ref_recursive(definition_ref.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_trigger_definition_ref_recursive(definition_ref);
+        for (_, child) in self.child_links_mut() {
+            child.set_trigger_definition_ref_recursive(definition_ref.clone());
         }
     }
 
@@ -38464,11 +38533,8 @@ impl ResolvedAbility {
                 ForceBlockAttackerRef::EventSource => event_attacker,
             };
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.bind_force_block_attacker_recursive(event_attacker);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.bind_force_block_attacker_recursive(event_attacker);
+        for (_, child) in self.child_links_mut() {
+            child.bind_force_block_attacker_recursive(event_attacker);
         }
     }
 
@@ -38483,13 +38549,8 @@ impl ResolvedAbility {
                 ..
             }
         ) || self
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| sub.has_event_source_force_block_recursive())
-            || self
-                .else_ability
-                .as_ref()
-                .is_some_and(|else_branch| else_branch.has_event_source_force_block_recursive())
+            .child_links()
+            .any(|(_, child)| child.has_event_source_force_block_recursive())
     }
 
     /// Bind only source-referential force-block effects at the shared stack
@@ -38508,11 +38569,8 @@ impl ResolvedAbility {
         {
             self.force_block_attacker = source;
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.bind_force_block_source_recursive(source);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.bind_force_block_source_recursive(source);
+        for (_, child) in self.child_links_mut() {
+            child.bind_force_block_source_recursive(source);
         }
     }
 
@@ -38549,11 +38607,8 @@ impl ResolvedAbility {
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_trigger_identity_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_trigger_identity_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_trigger_identity_recursive();
         }
     }
 
@@ -38584,11 +38639,8 @@ impl ResolvedAbility {
     /// `ability_tag`/`chosen_x`/other per-node context fields).
     pub fn set_chain_root_targets_recursive(&mut self, chain_root_targets: Vec<TargetRef>) {
         self.context.chain_root_targets = chain_root_targets.clone();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_chain_root_targets_recursive(chain_root_targets.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_chain_root_targets_recursive(chain_root_targets);
+        for (_, child) in self.child_links_mut() {
+            child.set_chain_root_targets_recursive(chain_root_targets.clone());
         }
     }
 
@@ -38597,11 +38649,8 @@ impl ResolvedAbility {
     /// intentionally distinct from full triggered-source provenance.
     pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.source_incarnation = incarnation;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_source_incarnation_recursive(incarnation);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_source_incarnation_recursive(incarnation);
+        for (_, child) in self.child_links_mut() {
+            child.set_source_incarnation_recursive(incarnation);
         }
     }
 
@@ -38612,25 +38661,23 @@ impl ResolvedAbility {
     /// creation never touch it.
     pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.announced_source_incarnation = incarnation;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_announced_source_incarnation_recursive(incarnation);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_announced_source_incarnation_recursive(incarnation);
+        for (_, child) in self.child_links_mut() {
+            child.set_announced_source_incarnation_recursive(incarnation);
         }
     }
 
-    /// CR 400.7 + CR 603.7c: Pin this ability's object referents — and every
-    /// continuation branch's — to the incarnations observed at delayed-trigger
-    /// creation. Recursive because chain propagation copies `targets` into
-    /// sub-abilities at fire time, so each link must carry the same pins.
+    /// CR 400.7 + CR 603.7c: Pin inherited delayed-trigger referents to their
+    /// creation-time incarnations. A declaring root retains its own authority
+    /// but still pins its non-declaring riders. A declaring child starts a new
+    /// scope; neither it nor its descendants inherit the incoming pins.
     pub fn set_target_incarnations_recursive(&mut self, pins: Vec<ObjectIncarnationRef>) {
-        self.target_incarnations = pins.clone();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_target_incarnations_recursive(pins.clone());
+        if !crate::game::ability_utils::node_has_stack_target_declaration(self) {
+            self.target_incarnations = pins.clone();
         }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_target_incarnations_recursive(pins);
+        for (_, child) in self.child_links_mut() {
+            if !crate::game::ability_utils::node_has_stack_target_declaration(child) {
+                child.set_target_incarnations_recursive(pins.clone());
+            }
         }
     }
 
@@ -38643,37 +38690,49 @@ impl ResolvedAbility {
         state: &crate::types::game_state::GameState,
     ) {
         self.announce_target_pins(state);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.capture_target_incarnations_recursive(state);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.capture_target_incarnations_recursive(state);
+        for (_, child) in self.child_links_mut() {
+            child.capture_target_incarnations_recursive(state);
         }
     }
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
-    /// KEYED, not positional: the same predicate applies to an id drawn from
-    /// `self.targets` or from any handler's local projection — which is why the
-    /// handler-direct reads share one authority. It also means a wholesale
-    /// `targets` overwrite (`triggers.rs`, the Stationed/VehicleCrewed/Saddled
-    /// reseed) degrades safely: the new id has no pin and passes through.
-    ///
-    /// FAIL-OPEN AT THE LOOKUP, NEVER AT THE PIN: `is_none_or` here means "no
-    /// pin was ever recorded for this id, so this is not a pinned
-    /// delayed-trigger referent and it passes through unchanged". Once a pin
-    /// exists it is compared by strict equality with no escape hatch. Do not
-    /// convert this to an `Option` on the element — that reintroduces the
-    /// `source_is_current` anti-pattern.
+    /// An ID projection, not a positional lookup. Every node honors its keyed
+    /// creation-time pins; independently declaring instructions also consult
+    /// announcement pins. Inherited reference riders do not consult announcement
+    /// pins: a preceding instruction may have moved their referent to a public
+    /// zone (CR 400.7j) without invalidating that instruction's reference.
+    /// Position-sensitive consumers additionally use `target_pin_at`.
     pub fn target_pin_is_current(
         &self,
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        self.target_incarnations
+        // CR 400.7 + CR 603.7c: a recorded delayed/event reference remains an
+        // independent constraint, even when this node also declares targets.
+        if self
+            .target_incarnations
             .iter()
             .find(|pin| pin.object_id == id)
-            .is_none_or(|pin| pin.is_current(state))
+            .is_some_and(|pin| !pin.is_current(state))
+        {
+            return false;
+        }
+        // CR 400.7 + CR 601.2c: a new declaration owns its occurrences.
+        if crate::game::ability_utils::node_has_stack_target_declaration(self) {
+            let mut positional = self
+                .targets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, target)| {
+                    (*target == TargetRef::Object(id))
+                        .then(|| self.target_pin_at(index))
+                        .flatten()
+                })
+                .peekable();
+            return positional.peek().is_none() || positional.any(|pin| pin.is_current(state));
+        }
+        true
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still
@@ -38701,15 +38760,24 @@ impl ResolvedAbility {
         state: &crate::types::game_state::GameState,
         excluded: Option<usize>,
     ) -> Vec<TargetRef> {
+        let declares_targets = crate::game::ability_utils::node_has_stack_target_declaration(self);
         self.targets
             .iter()
             .enumerate()
-            .filter(|(index, _)| Some(*index) != excluded)
-            .map(|(_, target)| target)
-            .filter(|target| match target {
-                TargetRef::Object(id) => self.target_pin_is_current(*id, state),
-                TargetRef::Player(_) => true,
+            .filter(|(index, target)| {
+                Some(*index) != excluded
+                    && match target {
+                        TargetRef::Object(id) => {
+                            self.target_pin_is_current(*id, state)
+                                && self
+                                    .target_pin_at(*index)
+                                    .filter(|_| declares_targets)
+                                    .is_none_or(|pin| pin.is_current(state))
+                        }
+                        TargetRef::Player(_) => true,
+                    }
             })
+            .map(|(_, target)| target)
             .cloned()
             .collect()
     }
@@ -38722,14 +38790,13 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        !self.target_incarnations.is_empty()
-            && self
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(_)))
-            && !self.targets.iter().any(
-                |t| matches!(t, TargetRef::Object(id) if self.target_pin_is_current(*id, state)),
-            )
+        (!self.target_incarnations.is_empty()
+            || (crate::game::ability_utils::node_has_stack_target_declaration(self)
+                && self.target_pins.iter().any(Option::is_some)))
+            && self.targets.iter().any(|target| matches!(target, TargetRef::Object(_)))
+            && !self.targets.iter().any(|target| {
+                matches!(target, TargetRef::Object(id) if self.target_pin_is_current(*id, state))
+            })
     }
 
     /// Test-only fixture helper for a triggered ability whose source has
@@ -38757,11 +38824,8 @@ impl ResolvedAbility {
     /// through every branch of an activated or triggered ability.
     pub fn set_source_transformation_count_recursive(&mut self, count: Option<u32>) {
         self.context.source_transformation_count = count;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_source_transformation_count_recursive(count);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_source_transformation_count_recursive(count);
+        for (_, child) in self.child_links_mut() {
+            child.set_source_transformation_count_recursive(count);
         }
     }
 
@@ -38772,11 +38836,8 @@ impl ResolvedAbility {
         provenance: Option<AbilityProvenance>,
     ) {
         self.context.source_ability_provenance = provenance;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_source_ability_provenance_recursive(provenance);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_source_ability_provenance_recursive(provenance);
+        for (_, child) in self.child_links_mut() {
+            child.set_source_ability_provenance_recursive(provenance);
         }
     }
 
@@ -39121,8 +39182,7 @@ impl ResolvedAbility {
         }
         fn walk(ability: &ResolvedAbility) -> bool {
             change_zone_self_from_gy(&ability.effect)
-                || ability.sub_ability.as_deref().is_some_and(walk)
-                || ability.else_ability.as_deref().is_some_and(walk)
+                || ability.child_links().any(|(_, child)| walk(child))
         }
         walk(self)
     }
@@ -39143,11 +39203,8 @@ impl ResolvedAbility {
         concrete: crate::types::identifiers::TrackedSetId,
     ) {
         self.effect.bind_tracked_set_sentinel(concrete);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.bind_tracked_set_sentinel_recursive(concrete);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.bind_tracked_set_sentinel_recursive(concrete);
+        for (_, child) in self.child_links_mut() {
+            child.bind_tracked_set_sentinel_recursive(concrete);
         }
     }
 
@@ -39155,11 +39212,8 @@ impl ResolvedAbility {
     /// CR 107.1b: X is one value per cast — the same for all effects produced.
     pub fn set_chosen_x_recursive(&mut self, value: u32) {
         self.chosen_x = Some(value);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_chosen_x_recursive(value);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_chosen_x_recursive(value);
+        for (_, child) in self.child_links_mut() {
+            child.set_chosen_x_recursive(value);
         }
     }
 
@@ -39169,11 +39223,8 @@ impl ResolvedAbility {
     /// resolution.
     pub fn set_cost_paid_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
         self.cost_paid_object = Some(snapshot.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_cost_paid_object_recursive(snapshot.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_cost_paid_object_recursive(snapshot);
+        for (_, child) in self.child_links_mut() {
+            child.set_cost_paid_object_recursive(snapshot.clone());
         }
     }
 
@@ -39255,11 +39306,8 @@ impl ResolvedAbility {
                 record.settle_after_cost_move(state, outcome);
             }
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.settle_cost_paid_provenance_recursive(state, moved, outcome);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.settle_cost_paid_provenance_recursive(state, moved, outcome);
+        for (_, child) in self.child_links_mut() {
+            child.settle_cost_paid_provenance_recursive(state, moved, outcome);
         }
     }
 
@@ -39326,11 +39374,8 @@ impl ResolvedAbility {
                 record.refresh_capture_from_live(state);
             }
         }
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.refresh_cost_paid_capture_recursive(state, object_ids);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.refresh_cost_paid_capture_recursive(state, object_ids);
+        for (_, child) in self.child_links_mut() {
+            child.refresh_cost_paid_capture_recursive(state, object_ids);
         }
     }
 
@@ -39345,11 +39390,8 @@ impl ResolvedAbility {
     /// `None` default and silently note nothing.
     pub fn set_noted_mana_payment_recursive(&mut self, payment: NotedManaPayment) {
         self.noted_mana_payment = Some(payment.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_noted_mana_payment_recursive(payment.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_noted_mana_payment_recursive(payment);
+        for (_, child) in self.child_links_mut() {
+            child.set_noted_mana_payment_recursive(payment.clone());
         }
     }
 
@@ -39364,11 +39406,8 @@ impl ResolvedAbility {
     /// shape in reverse.
     pub fn clear_noted_mana_payment_recursive(&mut self) {
         self.noted_mana_payment = None;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_noted_mana_payment_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_noted_mana_payment_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_noted_mana_payment_recursive();
         }
     }
 
@@ -39437,11 +39476,8 @@ impl ResolvedAbility {
     /// whose characteristics are undefined.
     pub fn add_cost_paid_records_recursive(&mut self, records: &[CostPaidObjectRecord]) {
         self.cost_paid_objects.extend_from_slice(records);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.add_cost_paid_records_recursive(records);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.add_cost_paid_records_recursive(records);
+        for (_, child) in self.child_links_mut() {
+            child.add_cost_paid_records_recursive(records);
         }
     }
 
@@ -39451,11 +39487,8 @@ impl ResolvedAbility {
     /// the battlefield.
     pub fn set_effect_context_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
         self.effect_context_object = Some(snapshot.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_effect_context_object_recursive(snapshot.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_effect_context_object_recursive(snapshot);
+        for (_, child) in self.child_links_mut() {
+            child.set_effect_context_object_recursive(snapshot.clone());
         }
     }
 
@@ -39465,21 +39498,15 @@ impl ResolvedAbility {
     /// immediate consumer.
     pub fn set_direct_discard_result_for_immediate_node(&mut self, result: DiscardedCardResult) {
         self.context.direct_discard_result = Some(result);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_direct_discard_result_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_direct_discard_result_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_direct_discard_result_recursive();
         }
     }
 
     fn clear_direct_discard_result_recursive(&mut self) {
         self.context.direct_discard_result = None;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_direct_discard_result_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_direct_discard_result_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_direct_discard_result_recursive();
         }
     }
 
@@ -39488,21 +39515,15 @@ impl ResolvedAbility {
     /// result cannot leak beyond its typed completion node.
     pub fn set_prior_effect_result_for_immediate_node(&mut self, result: EffectResolutionResult) {
         self.context.prior_effect_result = Some(result);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_prior_effect_result_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_prior_effect_result_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_prior_effect_result_recursive();
         }
     }
 
     pub(crate) fn clear_prior_effect_result_recursive(&mut self) {
         self.context.prior_effect_result = None;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.clear_prior_effect_result_recursive();
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.clear_prior_effect_result_recursive();
+        for (_, child) in self.child_links_mut() {
+            child.clear_prior_effect_result_recursive();
         }
     }
 
@@ -39510,11 +39531,8 @@ impl ResolvedAbility {
     /// across every continuation branch in this resolution.
     pub fn set_amassed_army_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
         self.amassed_army_object = Some(snapshot.clone());
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_amassed_army_object_recursive(snapshot.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_amassed_army_object_recursive(snapshot);
+        for (_, child) in self.child_links_mut() {
+            child.set_amassed_army_object_recursive(snapshot.clone());
         }
     }
 
@@ -39522,11 +39540,8 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_scoped_player_recursive(player);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_scoped_player_recursive(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_scoped_player_recursive(player);
         }
     }
 
@@ -39534,11 +39549,8 @@ impl ResolvedAbility {
     /// post-replacement continuation and any branch/sub-chain it resolves.
     pub fn set_replacement_applied_recursive(&mut self, applied: HashSet<AppliedReplacementKey>) {
         self.replacement_applied = applied.clone();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_replacement_applied_recursive(applied.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_replacement_applied_recursive(applied);
+        for (_, child) in self.child_links_mut() {
+            child.set_replacement_applied_recursive(applied.clone());
         }
     }
 
@@ -39572,10 +39584,7 @@ impl ResolvedAbility {
     /// the public entry always sources the text from the chain head rather than
     /// from whichever link the recursion currently sits on.
     fn fill_missing_link_descriptions(&mut self, description: &str) {
-        for link in [self.sub_ability.as_mut(), self.else_ability.as_mut()]
-            .into_iter()
-            .flatten()
-        {
+        for (_, link) in self.child_links_mut() {
             if link.description.is_none() {
                 link.description = Some(description.to_string());
             }
@@ -39590,11 +39599,8 @@ impl ResolvedAbility {
     /// for `IfYouDo` / `IfAPlayerDoes` gates to evaluate correctly.
     pub fn set_optional_effect_performed_recursive(&mut self, performed: bool) {
         self.context.optional_effect_performed = performed;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_optional_effect_performed_recursive(performed);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_optional_effect_performed_recursive(performed);
+        for (_, child) in self.child_links_mut() {
+            child.set_optional_effect_performed_recursive(performed);
         }
     }
 
@@ -39637,13 +39643,8 @@ impl ResolvedAbility {
             .as_ref()
             .is_some_and(AbilityCondition::is_optional_effect_performed)
             || self
-                .sub_ability
-                .as_ref()
-                .is_some_and(|sub| sub.has_optional_effect_performed_gate())
-            || self
-                .else_ability
-                .as_ref()
-                .is_some_and(|else_branch| else_branch.has_optional_effect_performed_gate())
+                .child_links()
+                .any(|(_, child)| child.has_optional_effect_performed_gate())
     }
 
     /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.
@@ -39654,11 +39655,8 @@ impl ResolvedAbility {
     /// drain (mirrors `set_optional_effect_performed_recursive`).
     pub fn set_guess_outcome_recursive(&mut self, outcome: Option<GuessOutcome>) {
         self.context.guess_outcome = outcome;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_guess_outcome_recursive(outcome);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_guess_outcome_recursive(outcome);
+        for (_, child) in self.child_links_mut() {
+            child.set_guess_outcome_recursive(outcome);
         }
     }
 
@@ -39667,22 +39665,28 @@ impl ResolvedAbility {
     /// the guesser. Inserted at the front so it wins the first-player-target
     /// lookup.
     pub fn push_front_player_target_recursive(&mut self, player: PlayerId) {
-        self.move_target_to_front(TargetRef::Player(player));
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.push_front_player_target_recursive(player);
+        fn propagate(node: &mut ResolvedAbility, player: PlayerId, independently_declaring: bool) {
+            if !independently_declaring
+                || !crate::game::ability_utils::node_has_stack_target_declaration(node)
+            {
+                node.move_target_to_front(TargetRef::Player(player));
+            }
+            for (edge, child) in node.child_links_mut() {
+                let independently_declaring = match edge {
+                    crate::types::game_state::ChainStep::CoinFlipBranch { .. } => true,
+                    crate::types::game_state::ChainStep::SubAbility
+                    | crate::types::game_state::ChainStep::ElseAbility => independently_declaring,
+                };
+                propagate(child, player, independently_declaring);
+            }
         }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.push_front_player_target_recursive(player);
-        }
+        propagate(self, player, false);
     }
 
     pub fn set_original_controller_recursive(&mut self, player: PlayerId) {
         self.original_controller = Some(player);
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_original_controller_recursive(player);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_original_controller_recursive(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_original_controller_recursive(player);
         }
     }
 
@@ -39697,11 +39701,8 @@ impl ResolvedAbility {
     /// `original_controller` (CR 109.5), so "you" references are unaffected.
     pub fn set_controller_recursive(&mut self, player: PlayerId) {
         self.controller = player;
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_controller_recursive(player);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_controller_recursive(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_controller_recursive(player);
         }
     }
 
@@ -39712,21 +39713,15 @@ impl ResolvedAbility {
     /// reference deeper in the continuation chain sees every earlier choice.
     pub fn set_chosen_players_recursive(&mut self, players: &[PlayerId]) {
         self.chosen_players = players.to_vec();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_chosen_players_recursive(players);
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_chosen_players_recursive(players);
+        for (_, child) in self.child_links_mut() {
+            child.set_chosen_players_recursive(players);
         }
     }
 
     pub fn set_context_recursive(&mut self, context: SpellContext) {
         self.context = context.clone();
-        if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_context_recursive(context.clone());
-        }
-        if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_context_recursive(context);
+        for (_, child) in self.child_links_mut() {
+            child.set_context_recursive(context.clone());
         }
     }
 

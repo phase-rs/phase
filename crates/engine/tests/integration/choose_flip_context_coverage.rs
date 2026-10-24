@@ -294,6 +294,7 @@ fn round_trip_isolated_context(empty_result_only: bool) {
         // This is a wire fixture, not a claim that changing the live choice is legal.
         FlipBranchContext {
             chosen_players: vec![],
+            parent_occurrences: Default::default(),
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 game.runner.state(),
                 &[],
@@ -308,10 +309,14 @@ fn round_trip_isolated_context(empty_result_only: bool) {
             .clone()
     };
     assert_eq!(original.chosen_players.is_empty(), empty_result_only);
-    assert_eq!(
-        original.forwarded_result_context.is_some(),
-        empty_result_only
-    );
+    if empty_result_only {
+        assert!(original
+            .forwarded_result_context
+            .as_deref()
+            .unwrap()
+            .targets
+            .is_empty());
+    }
     game.runner
         .state_mut()
         .active_coin_flip_frame_mut()
@@ -371,6 +376,33 @@ fn second_chosen_player_receives_the_creature_after_krark() {
     // REVERT: FlipRun::park frame capture / resume_after_keep context forwarding,
     // or the parser's enclosing scope, loses or misindexes the second answer.
     let mut game = two_choices(true);
+    let context = game
+        .runner
+        .state()
+        .active_coin_flip_frame()
+        .unwrap()
+        .branch_context
+        .clone();
+    assert_eq!(
+        context.parent_occurrences.targets,
+        vec![engine::types::ability::TargetRef::Object(game.picked)]
+    );
+    game.runner.state_mut().capture_rng_word_pos();
+    let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+        game.runner.state().clone(),
+    ))
+    .unwrap();
+    *game.runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+        .unwrap()
+        .into_game_state();
+    assert_eq!(
+        game.runner
+            .state()
+            .active_coin_flip_frame()
+            .unwrap()
+            .branch_context,
+        context
+    );
     game.keep(
         false,
         PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -559,4 +591,146 @@ fn branch_local_player_choice_follows_the_enclosing_choice_inline() {
 #[test]
 fn branch_local_player_choice_follows_the_enclosing_choice_after_krark() {
     branch_local_player_choice(true);
+}
+
+#[test]
+fn thumb_incoming_references_restore_without_repinning_and_reject_missing_pins() {
+    use engine::types::ability::TargetRef;
+    for forwarded in [false, true] {
+        for stale in [false, true] {
+            let mut game = two_choices(true);
+            if forwarded {
+                let context =
+                    ForwardedResultContext::from_object_ids(game.runner.state(), &[game.picked]);
+                game.runner
+                    .state_mut()
+                    .active_coin_flip_frame_mut()
+                    .unwrap()
+                    .branch_context
+                    .forwarded_result_context = Some(Box::new(context));
+            }
+            let original = game
+                .runner
+                .state()
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context
+                .clone();
+            assert_eq!(
+                original.parent_occurrences.targets,
+                vec![TargetRef::Object(game.picked)]
+            );
+            assert!(
+                original.parent_occurrences.pins[0].is_some(),
+                "production choice captured its identity"
+            );
+            game.runner.state_mut().capture_rng_word_pos();
+            let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+                game.runner.state().clone(),
+            ))
+            .unwrap();
+            for corrupt in 0..3 {
+                let mut malformed = wire.clone();
+                let frame = malformed["resolution_frames"]["frames"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|frame| frame["type"] == "CoinFlip")
+                    .unwrap();
+                let incoming = &mut frame["data"]["branch_context"]["parent_occurrences"];
+                match corrupt {
+                    0 => {
+                        incoming
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("parent_target_pins");
+                    }
+                    1 => {
+                        incoming["parent_target_pins"][0]["object_id"] =
+                            serde_json::to_value(game.unpicked).unwrap();
+                    }
+                    2 => {
+                        incoming["parent_target_pins"] = serde_json::json!([null]);
+                    }
+                    _ => unreachable!(),
+                }
+                let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("pin"), "{error}");
+            }
+            if forwarded {
+                let mut malformed = wire.clone();
+                let frame = malformed["resolution_frames"]["frames"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|frame| frame["type"] == "CoinFlip")
+                    .unwrap();
+                frame["data"]["branch_context"]["forwarded_result_context"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("object_incarnations");
+                let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("forwarded object pins"), "{error}");
+            }
+            *game.runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state();
+            assert_eq!(
+                game.runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .branch_context,
+                original
+            );
+            if stale {
+                game.runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&game.picked)
+                    .unwrap()
+                    .incarnation += 1;
+            }
+            game.keep(
+                false,
+                PendingCoinFlipKind::Exactly { remaining: 0 },
+                &[P0, P2],
+            );
+            if stale {
+                for _ in 0..12 {
+                    if game.runner.state().stack.is_empty() {
+                        break;
+                    }
+                    game.act(GameAction::PassPriority);
+                }
+                let kept: Vec<_> = game
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::CoinFlipped { player_id, won } => Some((*player_id, *won)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(kept, vec![(P1, false)]);
+                assert_eq!(game.runner.state().objects[&game.picked].controller, P1);
+                assert_eq!(game.runner.state().objects[&game.unpicked].controller, P1);
+                assert!(!game
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::ControllerChanged { .. })));
+                assert!(game.runner.state().stack.is_empty());
+                assert!(game.runner.state().resolution_stack.is_empty());
+                assert!(matches!(
+                    game.runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            } else {
+                game.finish(&[false], P2);
+            }
+        }
+    }
 }

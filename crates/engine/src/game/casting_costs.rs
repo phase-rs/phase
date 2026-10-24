@@ -263,11 +263,8 @@ fn collect_controller_controlled_as_cast_filters(
     if let Some(condition) = &ability.condition {
         collect_controller_controlled_as_cast_filters_from_condition(condition, filters);
     }
-    if let Some(sub_ability) = &ability.sub_ability {
-        collect_controller_controlled_as_cast_filters(sub_ability, filters);
-    }
-    if let Some(else_ability) = &ability.else_ability {
-        collect_controller_controlled_as_cast_filters(else_ability, filters);
+    for (_, child) in ability.child_links() {
+        collect_controller_controlled_as_cast_filters(child, filters);
     }
 }
 
@@ -567,11 +564,8 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     let announcing_opponent = ability.context.announcing_opponent;
     ability.context = shared.clone();
     ability.context.announcing_opponent = announcing_opponent;
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        propagate_shared_cast_context(sub, shared);
-    }
-    if let Some(else_branch) = ability.else_ability.as_mut() {
-        propagate_shared_cast_context(else_branch, shared);
+    for (_, child) in ability.child_links_mut() {
+        propagate_shared_cast_context(child, shared);
     }
 }
 
@@ -1898,8 +1892,7 @@ pub(crate) fn next_announcing_opponent_choice(
 ) -> Option<AnnouncingOpponentChoice> {
     let mut next = None;
     let mut count = 0;
-    let mut node = Some(ability);
-    while let Some(link) = node {
+    super::ability_utils::walk_announced_nodes(ability, &mut |link, _| {
         if matches!(link.target_chooser, Some(TargetFilter::Opponent)) {
             count += 1;
             if link.context.announcing_opponent.is_none() && next.is_none() {
@@ -1910,8 +1903,7 @@ pub(crate) fn next_announcing_opponent_choice(
                 });
             }
         }
-        node = link.sub_ability.as_deref();
-    }
+    });
     next.map(|choice| AnnouncingOpponentChoice { count, ..choice })
 }
 
@@ -1950,17 +1942,17 @@ pub(crate) fn assign_next_announcing_opponent(
     ability: &mut ResolvedAbility,
     chosen: PlayerId,
 ) -> bool {
-    let mut node = Some(ability);
-    while let Some(link) = node {
-        let needs = link.context.announcing_opponent.is_none()
-            && matches!(link.target_chooser, Some(TargetFilter::Opponent));
-        if needs {
+    let mut assigned = false;
+    super::ability_utils::walk_announced_nodes_mut(ability, &mut |link| {
+        if !assigned
+            && link.context.announcing_opponent.is_none()
+            && matches!(link.target_chooser, Some(TargetFilter::Opponent))
+        {
             link.context.announcing_opponent = Some(chosen);
-            return true;
+            assigned = true;
         }
-        node = link.sub_ability.as_deref_mut();
-    }
-    false
+    });
+    assigned
 }
 
 /// CR 601.2c + CR 601.2f: a spell whose deferred target declaration completed

@@ -481,6 +481,7 @@ fn rewrite_resolved_ability(
         // The rest of the chain is rewritten recursively.
         sub_ability,
         else_ability,
+        coin_branches,
         // Runtime state, never text: choices, identities, paid costs and display strings are fixed at announcement (CR 601.2b) and keep the old words.
         targets: _,
         declares_chosen_group: _,
@@ -556,6 +557,17 @@ fn rewrite_resolved_ability(
         + substitution.rewrite_in_place(activation_cost_reduction)
         + substitution.rewrite_in_place(repeat_until)
         + substitution.rewrite_in_place(mode_abilities);
+    // CR 612.1 + CR 612.2: live outcomes read the changed rules text too.
+    // Their templates already contribute the word count above; counting both
+    // representations would distort dependency ordering.
+    if let Some(branches) = coin_branches {
+        for child in [&mut branches.won, &mut branches.lost]
+            .into_iter()
+            .flatten()
+        {
+            rewrite_resolved_ability(child, substitution);
+        }
+    }
     for next in [sub_ability, else_ability].into_iter().flatten() {
         occurrences += rewrite_resolved_ability(next, substitution);
     }

@@ -630,8 +630,8 @@ pub fn resolve(
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
     //
-    // MUST run after `set_target_incarnations_recursive` (which overwrites every
-    // node's pins with the root's) and after the root `targets` assignment —
+    // MUST run after `set_target_incarnations_recursive` (which stamps the
+    // inherited-reference scope) and after the root `targets` assignment —
     // either would otherwise clobber the per-node bindings.
     //
     // Gated on the same creation-time-provenance test as the root snapshot:
@@ -845,11 +845,8 @@ fn bind_event_subject_nodes(
             ability.target_incarnations = pins;
         }
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        bind_event_subject_nodes(sub, state, source_id);
-    }
-    if let Some(alt) = ability.else_ability.as_deref_mut() {
-        bind_event_subject_nodes(alt, state, source_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_event_subject_nodes(child, state, source_id);
     }
 }
 
@@ -1019,11 +1016,8 @@ fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
 /// enforce that creation-event binding at delayed-trigger resolution.
 fn stamp_triggering_source_origins_in_ability_chain(ability: &mut ResolvedAbility, expected: Zone) {
     stamp_triggering_source_origins(&mut ability.effect, expected);
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(sub_ability, expected);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(else_ability, expected);
+    for (_, child) in ability.child_links_mut() {
+        stamp_triggering_source_origins_in_ability_chain(child, expected);
     }
 }
 
@@ -1517,20 +1511,14 @@ fn snapshot_parent_dependent_quantities_in_ability_chain(
         parent,
         first_instruction_amount,
     );
-    // CR 608.2c: "Otherwise" runs in place of this instruction — same position in the payload.
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(
-            else_ability,
-            state,
-            parent,
-            first_instruction_amount,
-        );
-    }
-    // CR 608.2c: a later instruction's "that many" stays live (pre-existing behavior); a
-    // later-instruction anaphor to the creation amount needs its own design. Parent-target-
-    // dependent leaves still freeze here (None only withholds EventContextAmount).
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(sub_ability, state, parent, None);
+    // CR 608.2c: Else replaces this instruction; sub and coin outcomes follow it.
+    for (edge, child) in ability.child_links_mut() {
+        let amount = match edge {
+            crate::types::game_state::ChainStep::ElseAbility => first_instruction_amount,
+            crate::types::game_state::ChainStep::SubAbility
+            | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => None,
+        };
+        snapshot_parent_dependent_quantities_in_ability_chain(child, state, parent, amount);
     }
 }
 
@@ -1852,11 +1840,8 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
         bind_tracked_set_to_ability_definition(effect, real_id);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(sub_ability, real_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(else_ability, real_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_tracked_set_to_ability_chain(child, real_id);
     }
     for mode in &mut ability.mode_abilities {
         bind_tracked_set_to_ability_definition(mode, real_id);

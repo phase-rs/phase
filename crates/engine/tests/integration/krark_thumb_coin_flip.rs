@@ -1019,6 +1019,8 @@ fn downgrade_coin_flips_to_v7(wire: &mut serde_json::Value) -> DowngradeCount {
             return;
         };
         *kind = legacy;
+        object.remove("bound_branches");
+        object.remove("branch_context");
         count.frames += 1;
     }
 
@@ -1030,6 +1032,7 @@ fn downgrade_coin_flips_to_v7(wire: &mut serde_json::Value) -> DowngradeCount {
                 }
             }
             Value::Object(object) => {
+                object.remove("coin_branches");
                 for key in ["effect", "replacement_effect"] {
                     if let Some(effect) = object.get_mut(key) {
                         downgrade_effect(effect, count);
@@ -1068,6 +1071,16 @@ fn restore_wire(runner: &mut GameRunner, wire: serde_json::Value) {
     let restored: ResolutionStateWire =
         serde_json::from_value(wire).expect("the persisted coin-flip state restores");
     *runner.state_mut() = restored.into_game_state();
+}
+
+fn assert_legacy_coin_refused(wire: serde_json::Value) {
+    let error = serde_json::from_value::<ResolutionStateWire>(wire)
+        .expect_err("unbound legacy coin state must be refused")
+        .to_string();
+    assert!(
+        error.contains("RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"),
+        "{error}"
+    );
 }
 
 /// Cast `effect` under P0's Krark's Thumb, scanning seeds for a first keep prompt whose
@@ -1148,11 +1161,9 @@ fn assert_resting_at_priority(runner: &GameRunner) {
     assert!(runner.state().active_coin_flip_frame().is_none());
 }
 
-/// CR 705.1 + CR 614.1a: a save written before the coin-flip variants merged (a `FlipCoin`
-/// spell, Krark's `FlipCoins { count }` replacement and a `Single` frame) restores at the
-/// persisted boundary and finishes the paused flip.
+/// An old Single frame is refused; the current binding resumes and pays once.
 #[test]
-fn legacy_v7_single_flip_save_restores_and_completes() {
+fn legacy_v7_single_flip_save_is_refused_current_completes() {
     let effect = single_flip_with_win_life(2);
     let (mut runner, spell, results) =
         pause_at_first_keep(&effect, |results| results.contains(&true));
@@ -1211,18 +1222,12 @@ fn legacy_v7_single_flip_save_restores_and_completes() {
         !legacy.to_string().contains("\"flips\""),
         "no current-shape run survives the downgrade"
     );
-    restore_wire(&mut runner, legacy);
-    assert!(
-        runner.state().active_coin_flip_frame().is_some(),
-        "the legacy `Single` frame restores as the prompt-owning frame"
-    );
-    keep_win(&mut runner);
+    assert_legacy_coin_refused(legacy);
 }
 
-/// CR 705.1 + CR 614.1a: a legacy `FlipN` frame with a `FlipCoins { count }` effect, paused at
-/// the first of three keeps, restores and drives the remaining two flips.
+/// An old bare FlipN frame is refused, while its current payload completes.
 #[test]
-fn legacy_v7_flip_n_save_restores_and_completes() {
+fn legacy_v7_flip_n_save_is_refused_current_completes() {
     let effect = Effect::FlipCoins {
         flips: CoinFlipRun::Exactly {
             count: QuantityExpr::Fixed { value: 3 },
@@ -1246,7 +1251,9 @@ fn legacy_v7_flip_n_save_restores_and_completes() {
         "the paused frame is a legacy `FlipN`"
     );
 
-    for (label, wire) in [("current", current), ("legacy", legacy)] {
+    assert_legacy_coin_refused(legacy);
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         assert_eq!(kept.len(), 3, "{label}: three prompts in total");
@@ -1260,10 +1267,9 @@ fn legacy_v7_flip_n_save_restores_and_completes() {
     }
 }
 
-/// CR 705.2: a legacy `UntilLose { wins_so_far: 0 }` frame with a `FlipCoinUntilLose` effect
-/// restores and runs to the kept loss.
+/// An old UntilLose frame is refused even before any rewards are owed.
 #[test]
-fn legacy_v7_until_lose_frame_without_wins_restores() {
+fn legacy_v7_until_lose_frame_without_wins_is_refused() {
     let (mut runner, spell, _) = pause_at_first_keep(&until_loss_gain_life(), |_| true);
     let start_life = life_of(&runner, P0);
     let current = wire_json(&runner);
@@ -1280,7 +1286,9 @@ fn legacy_v7_until_lose_frame_without_wins_restores() {
         "the paused frame is a legacy `UntilLose` with no wins"
     );
 
-    for (label, wire) in [("current", current), ("legacy", legacy)] {
+    assert_legacy_coin_refused(legacy);
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         let kept_wins = kept.iter().filter(|won| **won).count() as i32;
@@ -1299,10 +1307,9 @@ fn legacy_v7_until_lose_frame_without_wins_restores() {
     }
 }
 
-/// CR 705.2 + CR 608.2c: a legacy `UntilLose { wins_so_far: n > 0 }` frame restores
-/// losslessly, so the rewards already owed are still paid after the kept loss.
+/// An old UntilLose frame with owed rewards is refused; current rewards survive.
 #[test]
-fn legacy_v7_until_lose_frame_with_owed_rewards_pays_them() {
+fn legacy_v7_until_lose_frame_with_owed_rewards_is_refused() {
     let (mut runner, spell, results) =
         pause_at_first_keep(&until_loss_gain_life(), |results| results.contains(&true));
     let start_life = life_of(&runner, P0);
@@ -1337,8 +1344,9 @@ fn legacy_v7_until_lose_frame_with_owed_rewards_pays_them() {
         "the paused frame is a legacy `UntilLose` owing one reward"
     );
 
-    let mut totals = Vec::new();
-    for (label, wire) in [("current", current), ("legacy", legacy)] {
+    assert_legacy_coin_refused(legacy);
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         let wins_after_restore = kept.iter().filter(|won| **won).count() as i32;
@@ -1370,12 +1378,7 @@ fn legacy_v7_until_lose_frame_with_owed_rewards_pays_them() {
         );
         assert_eq!(coin_run_markers(&events, spell), 1, "{label}");
         assert_resting_at_priority(&runner);
-        totals.push(delta);
     }
-    assert_eq!(
-        totals[0], totals[1],
-        "legacy and current saves pay the same total"
-    );
 }
 
 /// CR 705.2 + CR 707.2: a pre-merge save with no coin-flip frame at all (Mirror March's

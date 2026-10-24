@@ -451,6 +451,7 @@ fn sub_effect_as_resolved(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new((*def.effect).clone(), Vec::new(), source_id, controller);
+    crate::game::ability_utils::materialize_coin_branches(&mut resolved);
     resolved.kind = def.kind;
     resolved.sub_ability = def
         .sub_ability

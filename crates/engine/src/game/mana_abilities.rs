@@ -455,44 +455,18 @@ fn sole_produced_color(produced: &[ManaType]) -> Option<ManaColor> {
     Some(first)
 }
 
-/// Visit every reachable link of `ability` — head + `sub_ability` chain +
-/// `else_ability` branches at each link — and return `true` iff `pred` holds
-/// for all of them. Mirrors `chain_is_all_mana` / `chain_has_any_targets`'s
-/// single traversal shape so the two walkers stay structurally identical.
+/// Visit every live link, including coin outcomes, and require `pred` for all.
 fn visit_links_all(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if !pred(ability) {
-        return false;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if !visit_links_all(sub, pred) {
-            return false;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if !visit_links_all(else_branch, pred) {
-            return false;
-        }
-    }
-    true
+    pred(ability)
+        && ability
+            .child_links()
+            .all(|(_, child)| visit_links_all(child, pred))
 }
 
 /// Dual of [`visit_links_all`]: returns `true` iff `pred` holds for any
 /// reachable link.
 fn visit_links_any(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if visit_links_any(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if visit_links_any(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    super::triggers::any_reachable_link(ability, pred)
 }
 
 /// CR 605.4a: Resolve a triggered mana ability inline (stack-skipped).

@@ -1242,17 +1242,9 @@ fn resolved_ability_target_filters_safe(ability: &ResolvedAbility) -> bool {
             return false;
         }
     }
-    if let Some(sub) = &ability.sub_ability {
-        if !resolved_ability_target_filters_safe(sub) {
-            return false;
-        }
-    }
-    if let Some(els) = &ability.else_ability {
-        if !resolved_ability_target_filters_safe(els) {
-            return false;
-        }
-    }
-    true
+    ability
+        .child_links()
+        .all(|(_, child)| resolved_ability_target_filters_safe(child))
 }
 
 /// Conservative per-`FilterPipeline::apply` poison gates, computed ONCE via a

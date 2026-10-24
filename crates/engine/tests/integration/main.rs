@@ -183,6 +183,7 @@ mod cobra_king_guarded_reflexive_modal;
 mod code_of_constraint_addendum;
 mod codie_prepared_spell_trigger;
 mod codie_turn14_effect_zone_wedge;
+mod coin_flip_branch_targets;
 mod coin_flip_until_loss_loop;
 mod coin_of_fate;
 mod collector_ouphe_mana_ability_prohibition;

@@ -44,12 +44,13 @@ pub fn resolve(
     // Capture it as a `ResolvedAbility` so the post-replacement continuation
     // drain (`apply_post_replacement_resolved_effect`) dispatches it directly
     // with the source/controller bound at install time (CR 121.1).
-    let substitute = ResolvedAbility::new(
+    let mut substitute = ResolvedAbility::new(
         (**replacement_effect).clone(),
         vec![],
         ability.source_id,
         ability.controller,
     );
+    crate::game::ability_utils::materialize_coin_branches(&mut substitute);
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.

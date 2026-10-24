@@ -1007,11 +1007,8 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
 
 fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: PlayerId) {
     ability.controller = controller;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_controller_recursive(sub_ability, controller);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_controller_recursive(else_ability, controller);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_controller_recursive(child, controller);
     }
 }
 
@@ -1023,11 +1020,8 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
     ability.source_id = source_id;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_source_recursive(sub_ability, source_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_source_recursive(else_ability, source_id);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_source_recursive(child, source_id);
     }
 }
 
@@ -1064,11 +1058,8 @@ fn rewrite_copy_spell_object_targets(
         })
         .collect();
     ability.replace_target_occurrences(occurrences);
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
-    }
-    if let Some(else_ab) = ability.else_ability.as_mut() {
-        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
+    for (_, child) in ability.child_links_mut() {
+        rewrite_copy_spell_object_targets(child, new_target, new_target_pin);
     }
 }
 
@@ -1086,11 +1077,8 @@ fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> O
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
     ability.context.cast_from_zone = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        clear_cast_from_zone_recursive(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        clear_cast_from_zone_recursive(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_cast_from_zone_recursive(child);
     }
 }
 

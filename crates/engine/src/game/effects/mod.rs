@@ -1638,13 +1638,8 @@ fn branch_declares_return_result(
 
     ability.declares_return_result == Some(result_id)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| branch_declares_return_result(sub, result_id))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|other| branch_declares_return_result(other, result_id))
+            .child_links()
+            .any(|(_, child)| branch_declares_return_result(child, result_id))
         || ability
             .mode_abilities
             .iter()
@@ -3661,11 +3656,8 @@ fn consume_reflexive_creation_gate(ability: &mut ResolvedAbility) {
     if AbilityCondition::take_when_you_do_marker(&mut ability.condition) {
         settle_reflexive_zone_change_event(&mut ability.condition);
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        consume_reflexive_creation_gate(sub);
-    }
-    if let Some(alt) = ability.else_ability.as_deref_mut() {
-        consume_reflexive_creation_gate(alt);
+    for (_, child) in ability.child_links_mut() {
+        consume_reflexive_creation_gate(child);
     }
 }
 
@@ -5021,8 +5013,7 @@ fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
         if effect_may_apply_with_entry(&node.effect) {
             return true;
         }
-        stack.extend(node.sub_ability.as_deref());
-        stack.extend(node.else_ability.as_deref());
+        stack.extend(node.child_links().map(|(_, child)| child));
     }
     false
 }
@@ -5182,11 +5173,11 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
             pending
                 .win_effect
                 .as_deref()
-                .is_some_and(definition_chain_may_apply_with_entry)
+                .is_some_and(resolved_chain_may_apply_with_entry)
                 || pending
                     .lose_effect
                     .as_deref()
-                    .is_some_and(definition_chain_may_apply_with_entry)
+                    .is_some_and(resolved_chain_may_apply_with_entry)
         }
         ResolutionFrame::DieRoll(pending) => pending
             .results_table
@@ -7048,6 +7039,7 @@ fn instruction_outlives_declined_gate(
         // and resume after a declined gate is untested), so it reads as governed.
         condition,
         else_ability,
+        coin_branches,
         repeat_for,
         repeat_until,
         player_scope,
@@ -7134,6 +7126,7 @@ fn instruction_outlives_declined_gate(
         && declares_return_result.is_none()
         && reads_return_result.is_none()
         && else_ability.is_none()
+        && coin_branches.is_none()
         && repeat_for.is_none()
         && repeat_until.is_none()
         && player_scope.is_none()
@@ -12806,10 +12799,13 @@ fn is_sole_chain_producer(state: &GameState, ability: &ResolvedAbility) -> bool 
 /// binds nothing. The stop is applied inside `walk`, which covers the seed and
 /// both recursions uniformly.
 fn later_node_is_publisher_position(ability: &ResolvedAbility) -> bool {
-    ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(node_or_later_is_publisher_position)
+    ability.child_links().any(|(edge, child)| match edge {
+        crate::types::game_state::ChainStep::SubAbility
+        | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => {
+            node_or_later_is_publisher_position(child)
+        }
+        crate::types::game_state::ChainStep::ElseAbility => false,
+    })
 }
 
 /// CR 608.2c + CR 700.2: is THIS node, or any strictly-later node of its chain,
@@ -12832,13 +12828,8 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
     // then binds — measured, not predicted.
     next_sub_needs_tracked_set(node)
         || node
-            .sub_ability
-            .as_deref()
-            .is_some_and(node_or_later_is_publisher_position)
-        || node
-            .else_ability
-            .as_deref()
-            .is_some_and(node_or_later_is_publisher_position)
+            .child_links()
+            .any(|(_, child)| node_or_later_is_publisher_position(child))
 }
 
 /// CR 608.2c: what a `ParentTarget` anaphor at a node names, relative to a
@@ -12937,16 +12928,13 @@ fn node_or_branch_references_tracked_set(
     } else {
         ParentAnaphor::NamesPublisher
     };
-    let enters = |node: Option<&ResolvedAbility>| {
-        node.is_some_and(|n| {
-            !crosses_modal_boundary(n) && node_or_branch_references_tracked_set(n, child_anaphor)
-        })
+    let enters = |node: &ResolvedAbility| {
+        !crosses_modal_boundary(node) && node_or_branch_references_tracked_set(node, child_anaphor)
     };
     consumes
         || (anaphor == ParentAnaphor::NamesPublisher
             && grant_affects_parent_target(&ability.effect))
-        || enters(ability.sub_ability.as_deref())
-        || enters(ability.else_ability.as_deref())
+        || ability.child_links().any(|(_, child)| enters(child))
 }
 
 /// Returns true if the effect references the most recent tracked set through
@@ -14579,8 +14567,9 @@ fn first_tracked_set_consumer_mode(
     if consumes_here {
         return Some(TrackedSetPublicationMode::Normal);
     }
-    first_tracked_set_consumer_mode(ability.sub_ability.as_deref())
-        .or_else(|| first_tracked_set_consumer_mode(ability.else_ability.as_deref()))
+    ability
+        .child_links()
+        .find_map(|(_, child)| first_tracked_set_consumer_mode(Some(child)))
 }
 
 pub(crate) fn tracked_set_publication_mode(
@@ -15577,13 +15566,8 @@ fn effect_refs_event_subject(effect: &Effect, anaphor: &TargetFilter) -> bool {
 fn ability_refs_event_subject(ability: &ResolvedAbility, anaphor: &TargetFilter) -> bool {
     effect_refs_event_subject(&ability.effect, anaphor)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| ability_refs_event_subject(sub, anaphor))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|alt| ability_refs_event_subject(alt, anaphor))
+            .child_links()
+            .any(|(_, child)| ability_refs_event_subject(child, anaphor))
 }
 
 /// CR 608.2k: Which of the [`EVENT_SUBJECT_ANAPHORS`] this ability chain names,
@@ -15631,13 +15615,8 @@ fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
 pub(crate) fn ability_refs_parent_target(ability: &ResolvedAbility) -> bool {
     effect_refs_parent_target(&ability.effect)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_refs_parent_target)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_refs_parent_target)
+            .child_links()
+            .any(|(_, child)| ability_refs_parent_target(child))
 }
 
 /// True when any effect in the ability chain references a parent OBJECT anaphor
@@ -15649,13 +15628,8 @@ pub(crate) fn ability_pins_object_anaphor(ability: &ResolvedAbility) -> bool {
         .iter()
         .any(|filter| delayed_trigger::filter_refs_parent_object_anaphor(filter))
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_pins_object_anaphor)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_pins_object_anaphor)
+            .child_links()
+            .any(|(_, child)| ability_pins_object_anaphor(child))
 }
 
 /// CR 608.2c + CR 615.5 + CR 400.7: bind a continuation that is about to be DETACHED from its
@@ -16650,21 +16624,10 @@ pub(crate) fn ability_uses_relative_controller_scoped(ability: &ResolvedAbility)
             Effect::ChangeZoneAll { target, .. } if filter_uses_relative_controller_scoped(target)
         )
     }
-    let mut node = Some(ability);
-    while let Some(current) = node {
-        if effect_moves_scoped_filter(&current.effect) {
-            return true;
-        }
-        if current
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_uses_relative_controller_scoped)
-        {
-            return true;
-        }
-        node = current.sub_ability.as_deref();
-    }
-    false
+    effect_moves_scoped_filter(&ability.effect)
+        || ability
+            .child_links()
+            .any(|(_, child)| ability_uses_relative_controller_scoped(child))
 }
 
 pub(crate) fn controller_for_relative_filter(
@@ -17095,13 +17058,8 @@ fn ability_refs_post_replacement_event_target(ability: &ResolvedAbility) -> bool
         .iter()
         .any(|filter| filter_refs_post_replacement_event_target(filter))
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_refs_post_replacement_event_target)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_refs_post_replacement_event_target)
+            .child_links()
+            .any(|(_, child)| ability_refs_post_replacement_event_target(child))
 }
 
 fn filter_refs_post_replacement_event_target(filter: &TargetFilter) -> bool {
@@ -18130,10 +18088,13 @@ fn tail_reads_created_referent(tail: &ResolvedAbility) -> bool {
                     node.announced_x.as_ref(),
                     node.modal.as_ref(),
                 ))
-            || node
-                .else_ability
-                .as_deref()
-                .is_some_and(tail_reads_created_referent)
+            || node.child_links().any(|(edge, child)| match edge {
+                crate::types::game_state::ChainStep::SubAbility => false,
+                crate::types::game_state::ChainStep::ElseAbility
+                | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => {
+                    tail_reads_created_referent(child)
+                }
+            })
             || node
                 .mode_abilities
                 .iter()
@@ -18641,22 +18602,16 @@ pub(super) fn bind_resolution_exile_batch_paths(
                 }
             }
         }
-        if let Some(sub) = ability.sub_ability.as_mut() {
-            bind_resolution_exile_batch_paths(sub, batch);
-        }
-        if let Some(else_branch) = ability.else_ability.as_mut() {
-            bind_resolution_exile_batch_paths(else_branch, batch);
+        for (_, child) in ability.child_links_mut() {
+            bind_resolution_exile_batch_paths(child, batch);
         }
         return;
     }
     if linked_exile_producer_barrier(ability) {
         return;
     }
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        bind_resolution_exile_batch_paths(sub, batch);
-    }
-    if let Some(else_branch) = ability.else_ability.as_mut() {
-        bind_resolution_exile_batch_paths(else_branch, batch);
+    for (_, child) in ability.child_links_mut() {
+        bind_resolution_exile_batch_paths(child, batch);
     }
 }
 
@@ -20255,11 +20210,8 @@ fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[Objec
             };
         }
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        bind_revealed_pile_placement(sub, revealed);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        bind_revealed_pile_placement(else_ability, revealed);
+    for (_, child) in ability.child_links_mut() {
+        bind_revealed_pile_placement(child, revealed);
     }
 }
 
@@ -25235,6 +25187,7 @@ fn no_referent_leg(mut seat_leg: ResolvedAbility) -> Option<ResolvedAbility> {
         return None;
     }
     seat_leg.effect = Effect::NoOp;
+    seat_leg.coin_branches = None;
     seat_leg.optional = false;
     seat_leg.optional_for = None;
     seat_leg.repeat_for = None;
@@ -25564,13 +25517,8 @@ fn bound_result_is_empty(ability: &ResolvedAbility) -> bool {
 fn ability_chain_depends_on_missing_forward_result(ability: &ResolvedAbility) -> bool {
     effect_chain_depends_on_missing_forward_result(&ability.effect)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_chain_depends_on_missing_forward_result)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_chain_depends_on_missing_forward_result)
+            .child_links()
+            .any(|(_, child)| ability_chain_depends_on_missing_forward_result(child))
 }
 
 fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -> bool {
@@ -25644,6 +25592,28 @@ fn generic_static_depends_on_missing_forward_result(
     }
 }
 
+/// CR 608.2c: Whether the absent forwarded object is named by this instruction
+/// through one of the hidden ROLE slots the effect resolves itself, which
+/// [`effect_refs_parent_target`] does not surface (it reads only
+/// `target_filter()`): `Fight.subject` ("that creature fights ...") and
+/// `MoveCounters.source` ("put counters from that creature"). The other hidden
+/// object slots — `Attach.attachment`, `UnattachAll.attachment`,
+/// `Token.attach_to` and `CopyTokenOf.target` — are already covered there via
+/// `effect_parent_ref_slots`.
+///
+/// Scoped to the declaring-node boundary in
+/// [`without_missing_forward_result_dependencies`]: these roles are consulted
+/// only when the node already announced its own target, leaving the
+/// non-declaring path byte-identical to the established
+/// [`effect_chain_depends_on_missing_forward_result`] contract.
+fn declaring_node_role_refs_missing_forward_result(effect: &Effect) -> bool {
+    match effect {
+        Effect::Fight { subject, .. } => filter_refs_parent_target(subject),
+        Effect::MoveCounters { source, .. } => filter_refs_parent_target(source),
+        _ => false,
+    }
+}
+
 /// CR 608.2c: Does this application filter *require* the object the preceding
 /// forward-result instruction failed to produce?
 ///
@@ -25695,13 +25665,20 @@ fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
-    // CR 608.2c + CR 115.10a: an untargeted resolution-time choice ("choose a
-    // creature you control") is a NEW producer. Its own subtree names ITS pick,
-    // not the earlier producer's absent referent, so pruning stops here; the
-    // chooser re-binds (and supersedes the inherited marker) when it resolves.
-    if matches!(ability.effect, Effect::TargetOnly { .. })
-        && awaits_resolution_object_choice(ability)
+    // CR 601.2c + CR 608.2c: an independent announcement starts a new
+    // reference scope. Its riders name its own target, not the earlier empty
+    // producer. The same boundary applies to a new resolution-time chooser.
+    if crate::game::ability_utils::node_has_stack_target_declaration(ability)
+        || (matches!(ability.effect, Effect::TargetOnly { .. })
+            && awaits_resolution_object_choice(ability))
     {
+        // CR 608.2c: an announced recipient does not supply a missing
+        // subject, attachment, or counter source used by this effect itself.
+        if effect_chain_depends_on_missing_forward_result(&ability.effect)
+            || declaring_node_role_refs_missing_forward_result(&ability.effect)
+        {
+            return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+        }
         return Some(ability.clone());
     }
     let mut remaining = ability.clone();
@@ -25733,6 +25710,9 @@ fn without_missing_forward_result_dependencies(
         .as_deref()
         .and_then(without_missing_forward_result_dependencies)
         .map(Box::new);
+    // CR 608.2c: keep pristine coin outcomes here. The selected branch is pruned
+    // at run_flip_branch entry using this node's completed-empty incoming result;
+    // an unselected dependent outcome must not remove the coin instruction.
     Some(remaining)
 }
 
@@ -62081,6 +62061,43 @@ mod untargeted_target_only_choice_tests {
                     .map(|context| context.targets.is_empty())
             });
         assert_eq!(stamped, Some(true));
+    }
+
+    #[test]
+    fn missing_forward_result_prunes_declaring_fight_but_keeps_independent_payoff() {
+        use crate::types::ability::TypedFilter;
+        let mut runner = GameScenario::new().build();
+        let mut payoff = gain_life(4);
+        payoff.sub_link = SubAbilityLink::SequentialSibling;
+        let declaring = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                subject: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+        .sub_ability(payoff);
+        assert!(crate::game::ability_utils::node_has_stack_target_declaration(&declaring));
+        let remaining = without_missing_forward_result_dependencies(&declaring).unwrap();
+        assert!(
+            matches!(remaining.effect, Effect::GainLife { .. }),
+            "the missing-subject instruction must be pruned before its independent payoff"
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &remaining, &mut events, 0).unwrap();
+        assert_eq!(runner.state().players[0].life, 24);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::Fight,
+                    ..
+                }
+            )),
+            "a declaring target does not supply the missing fight subject"
+        );
     }
 }
 

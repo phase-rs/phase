@@ -569,6 +569,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         effect,
         sub_ability,
         else_ability,
+        coin_branches,
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
@@ -703,6 +704,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     // sub_ability / else_ability branches. Recursion is retained HERE, where it is a
     // pure AST walk costing nothing, and dropped from the probe below.
     effect_offers_choice(effect)
+        || coin_branches.is_some()
         || sub_ability.as_deref().is_some_and(chain_offers_choice)
         || else_ability.as_deref().is_some_and(chain_offers_choice)
 }
