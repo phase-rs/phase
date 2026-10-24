@@ -14,9 +14,9 @@
 //!   `three_faces_are_supported` and `combat_trigger_on_the_stack_is_a_complete_until_loss_run`
 //!   reject the old parser's unsupported stub. The no-Thumb runtime already looped
 //!   through the first loss and paid one trigger per won flip.
-//! * THUMB REGRESSIONS: K1 and K2 preserve won-flip observers across repeated keep
-//!   prompts; they fail without the keep-response parking fix. K9 distinguishes
-//!   copy-owned observers from ordinary observers while CopyRetarget is pending.
+//! * THUMB REGRESSIONS: preserve won-flip observers across repeated keep prompts
+//!   and zone-change observers when a parent continuation pauses after the flip.
+//!   Copy tests distinguish copy-owned observers while CopyRetarget is pending.
 //! * PRESERVATION PINS: the remaining runtime tests cover no-Thumb runs, flipper
 //!   scoping, and the final-action collector's single-kept-flip path.
 //!
@@ -570,7 +570,8 @@ fn the_run_resolves_after_its_source_left_the_battlefield() {
     );
 }
 
-/// K1. CR 603.2c + CR 603.3: each kept win triggers once, after the run completes.
+/// CR 603.2c + CR 603.3: each kept win triggers once; those abilities reach the stack
+/// after the run completes.
 #[test]
 fn krarks_thumb_run_triggers_once_per_kept_win_after_the_run() {
     let mut scenario = two_player_table();
@@ -583,21 +584,13 @@ fn krarks_thumb_run_triggers_once_per_kept_win_after_the_run() {
     let mut events = resolve_combat_trigger(&mut runner, combat_id);
     let mut prompts = 0;
     for want in [W, W, L] {
-        let WaitingFor::CoinFlipKeepChoice {
-            player,
-            results,
-            keep_count,
-        } = runner.state().waiting_for.clone()
-        else {
-            panic!(
-                "required Thumb keep prompt: {:?}",
-                runner.state().waiting_for
-            );
-        };
-        assert_eq!(player, P0);
-        assert_eq!(keep_count, 1);
-        assert_eq!(results.len(), 2);
-        assert_ne!(results[0], results[1], "reach guard: mixed pair");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { .. }
+            ),
+            "required Thumb keep prompt"
+        );
         prompts += 1;
         assert_eq!(
             flips(&events).len(),
@@ -613,25 +606,9 @@ fn krarks_thumb_run_triggers_once_per_kept_win_after_the_run() {
                     Some(Effect::Draw { .. })
                 )
         }));
-        let index = results.iter().position(|&result| result == want).unwrap();
-        let result = runner
-            .act(GameAction::SelectCoinFlips {
-                keep_indices: vec![index],
-            })
-            .expect("valid keep response");
-        assert_eq!(flips(&result.events), vec![(P0, want)]);
-        events.extend(result.events);
+        events.extend(keep_mixed_coin(&mut runner, want));
     }
-    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
-        events.extend(
-            runner
-                .act(GameAction::OrderTriggers {
-                    order: (0..triggers.len()).collect(),
-                })
-                .expect("order identical draw triggers")
-                .events,
-        );
-    }
+    events.extend(drain_trigger_ordering(&mut runner));
     let draw_triggers = runner
         .state()
         .stack
@@ -658,7 +635,7 @@ fn krarks_thumb_run_triggers_once_per_kept_win_after_the_run() {
     assert!(runner.state().resolution_stack.is_empty());
 }
 
-/// K9. CR 707.10 + CR 603.2c: a copy is not cast; Magecraft sees cast + copy once each.
+/// CR 707.10 + CR 603.2c: a copy is not cast; Magecraft sees cast + copy once each.
 #[test]
 fn krarks_thumb_copy_retarget_draws_once_for_cast_and_once_for_copy() {
     thumb_copy_magecraft(true);
@@ -769,24 +746,7 @@ fn thumb_copy_magecraft(retarget: bool) {
             _ => break,
         }
     }
-    let WaitingFor::CoinFlipKeepChoice {
-        player,
-        results,
-        keep_count,
-    } = runner.state().waiting_for.clone()
-    else {
-        panic!("required Thumb prompt: {:?}", runner.state().waiting_for);
-    };
-    assert_eq!(player, P0);
-    assert_eq!(keep_count, 1);
-    assert_eq!(results.len(), 2);
-    assert_ne!(results[0], results[1]);
-    let result = runner
-        .act(GameAction::SelectCoinFlips {
-            keep_indices: vec![results.iter().position(|&won| won).unwrap()],
-        })
-        .expect("keep the winning coin");
-    assert_eq!(flips(&result.events), vec![(P0, W)]);
+    events.extend(keep_mixed_coin(&mut runner, W));
     let WaitingFor::CopyRetarget { copy_id, .. } = runner.state().waiting_for.clone() else {
         panic!(
             "required copy retarget prompt: {:?}",
@@ -794,7 +754,6 @@ fn thumb_copy_magecraft(retarget: bool) {
         );
     };
     assert_ne!(copy_id, spell, "the copy has a distinct stack identity");
-    events.extend(result.events);
     let action = if retarget {
         GameAction::ChooseTarget {
             target: Some(TargetRef::Object(b)),
@@ -861,7 +820,22 @@ fn keep_mixed_coin(runner: &mut GameRunner, want: bool) -> Vec<GameEvent> {
     events
 }
 
-/// K2. CR 603.2c + CR 701.10b: each kept win doubles the current P/T at resolution.
+fn drain_trigger_ordering(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        events.extend(
+            runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("order simultaneous triggers")
+                .events,
+        );
+    }
+    events
+}
+
+/// CR 603.2c + CR 701.10b: each kept win doubles the current P/T at resolution.
 #[test]
 fn krarks_thumb_okaun_doubles_separately_after_the_run() {
     let mut scenario = two_player_table();
@@ -880,16 +854,7 @@ fn krarks_thumb_okaun_doubles_separately_after_the_run() {
             "CR 603.3: doubling waits until the run completes"
         );
     }
-    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
-        events.extend(
-            runner
-                .act(GameAction::OrderTriggers {
-                    order: (0..triggers.len()).collect(),
-                })
-                .expect("order the two doubling triggers")
-                .events,
-        );
-    }
+    events.extend(drain_trigger_ordering(&mut runner));
     assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
     assert_eq!(runner.state().stack.len(), 2, "one doubling per kept win");
     assert!(runner
@@ -912,7 +877,7 @@ fn krarks_thumb_okaun_doubles_separately_after_the_run() {
     assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
 }
 
-/// K4. CR 603.2c + CR 705.2: the final-action collector sees only the kept result.
+/// CR 603.2c + CR 614.1a: the final-action collector sees only the kept result.
 #[test]
 fn krarks_thumb_single_flip_final_collector_fires_once() {
     for want in [W, L] {
@@ -955,7 +920,8 @@ fn krarks_thumb_single_flip_final_collector_fires_once() {
     }
 }
 
-/// K5. CR 705.2: the opponent's Thumb does not replace the active player's flips.
+/// CR 109.5 + CR 614.1a: an opponent's Thumb ("If you would flip") does not replace
+/// the active player's flips.
 #[test]
 fn opponents_thumb_preserves_unprompted_until_loss_run() {
     let mut scenario = two_player_table();
@@ -971,4 +937,107 @@ fn opponents_thumb_preserves_unprompted_until_loss_run() {
     let events = drive_to_rest(&mut runner);
     assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
     assert_eq!(hand_size(&runner, P0) - before, 2);
+}
+
+/// CR 603.2c + CR 603.3: a sacrifice observer waits through a later draw choice.
+#[test]
+fn krarks_thumb_strongbox_preserves_zone_observer_through_dredge() {
+    strongbox_zone_observer(true);
+}
+
+#[test]
+fn krarks_thumb_strongbox_preserves_zone_observer_without_draw_replacement() {
+    strongbox_zone_observer(false);
+}
+
+fn strongbox_zone_observer(dredge: bool) {
+    let mut scenario = two_player_table();
+    let strongbox = scenario
+        .add_artifact_from_oracle(P0, "Sorcerer's Strongbox",
+            "{2}, {T}: Flip a coin. If you win the flip, sacrifice this artifact and draw three cards.")
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Krark's Thumb", KRARK);
+    scenario.add_creature(P0, "Marionette Apprentice", 1, 2)
+        .from_oracle_text_with_keywords(&["Fabricate"], "Fabricate 1 (When this creature enters, put a +1/+1 counter on it or create a 1/1 colorless Servo artifact creature token.)\nWhenever another creature or artifact you control is put into a graveyard from the battlefield, each opponent loses 1 life.");
+    if dredge {
+        scenario.add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text_with_keywords(&["Flying", "Dredge"], "Flying\nWhenever this creature deals combat damage to a creature, destroy that creature.\nDredge 5 (If you would draw a card, you may mill five cards instead. If you do, return this card from your graveyard to your hand.)");
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[1].life;
+    let hand_before = hand_size(&runner, P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: strongbox,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate printed Strongbox");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay Strongbox activation");
+    }
+    let activation = runner
+        .state()
+        .stack
+        .back()
+        .expect("Strongbox activation on stack")
+        .id;
+    pin(&mut runner, &[W, L]);
+    let mut events = resolve_combat_trigger(&mut runner, activation);
+    events.extend(keep_mixed_coin(&mut runner, W));
+    assert_eq!(runner.state().objects[&strongbox].zone, Zone::Graveyard);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+            if *object_id == strongbox
+    )), "the kept win sacrificed Strongbox");
+    if dredge {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "required dredge prompt after sacrifice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_name == "Stinkweed Imp"));
+        for _ in 0..3 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .expect("decline dredge and draw the card")
+                    .events,
+            );
+        }
+    }
+    events.extend(drive_to_rest(&mut runner));
+    assert_eq!(flips(&events), vec![(P0, W)]);
+    assert_eq!(
+        hand_size(&runner, P0) - hand_before,
+        3,
+        "the parent draw completed"
+    );
+    assert_eq!(
+        life_before - runner.state().players[1].life,
+        1,
+        "CR 603.2c: Strongbox's sacrifice triggers exactly one opponent life loss"
+    );
 }

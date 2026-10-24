@@ -2229,21 +2229,18 @@ pub(super) fn handle_resolution_choice(
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
-            // CR 608.2c: re-suspended for another interactive choice, else the
-            // whole flip effect completed — drain back to Priority.
+            // CR 608.2c: resume the parent only after the coin run completes.
             let wf = match next {
-                Some(wf) => {
-                    // CR 603.2 + CR 603.3b: preserve observers while the resumed
-                    // coin branch waits for another choice, until priority returns.
-                    crate::game::triggers::park_observer_triggers_if_paused(
-                        state,
-                        events,
-                        events_before_resume,
-                    );
-                    wf
-                }
+                Some(wf) => wf,
                 None => finish_with_continuation(state, player, events),
             };
+            // CR 603.2 + CR 603.3b: the coin branch or a later parent instruction
+            // can pause; preserve observers until priority returns.
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                events_before_resume,
+            );
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (
