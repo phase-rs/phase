@@ -22309,12 +22309,37 @@ mod stage2_injector_tests {
         (committed, boundary, template, cap)
     }
 
+    /// Park a test offer with the shared certificate and caller-provided schema and road.
+    fn park_on_shortcut_offer(
+        state: &mut GameState,
+        schema: crate::analysis::decision_template::ShortcutDecisionSchema,
+        road: crate::analysis::loop_check::OfferRoad,
+    ) {
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
+        use crate::analysis::resource::BoardDelta;
+
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: None,
+            certificate: LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
+                mandatory: false,
+                residual_board_delta: BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema,
+            declaration: None,
+            road,
+            period: Default::default(),
+        };
+    }
+
     /// Attach a ring-road proposal to the existing real two-drainer board and keep all
     /// declaration validation live by publishing the template's two target points.
     fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
         use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
-        use crate::analysis::loop_check::{LoopCertificate, WinKind};
-        use crate::analysis::resource::BoardDelta;
         use crate::types::ability::TargetRef;
 
         let (mut state, _, template, _) = two_drainer_rig();
@@ -22334,22 +22359,11 @@ mod stage2_injector_tests {
                 other => panic!("the two-drainer fixture only publishes targets: {other:?}"),
             })
             .collect();
-        state.waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
-            predicted_winner: None,
-            certificate: LoopCertificate {
-                unbounded: Vec::new(),
-                win_kind: Some(WinKind::LethalDamage),
-                win_kind_at: None,
-                mandatory: false,
-                residual_board_delta: BoardDelta::default(),
-                per_cycle: None,
-            },
-            schema: build_shortcut_schema(points, IterationCount::Fixed(3), None),
-            declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
-            period: Default::default(),
-        };
+        park_on_shortcut_offer(
+            &mut state,
+            build_shortcut_schema(points, IterationCount::Fixed(3), None),
+            crate::analysis::loop_check::OfferRoad::Ring,
+        );
         (state, template)
     }
 
@@ -22360,7 +22374,6 @@ mod stage2_injector_tests {
     #[test]
     fn public_ring_take_rejects_unrepresentable_life_before_fallback() {
         fn declare(state: &mut GameState, template: DecisionTemplate, count: u32) {
-            assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
             apply(
                 state,
                 P0,
@@ -25182,20 +25195,9 @@ mod stage2_injector_tests {
         use crate::analysis::decision_template::{
             DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
         };
-        use crate::analysis::loop_check::{LoopCertificate, WinKind};
-        use crate::analysis::resource::BoardDelta;
-        state.waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
-            predicted_winner: None,
-            certificate: LoopCertificate {
-                unbounded: vec![],
-                win_kind: Some(WinKind::LethalDamage),
-                win_kind_at: None,
-                mandatory: false,
-                residual_board_delta: BoardDelta::default(),
-                per_cycle: None,
-            },
-            schema: ShortcutDecisionSchema {
+        park_on_shortcut_offer(
+            state,
+            ShortcutDecisionSchema {
                 points: vec![DecisionPoint {
                     slot: DecisionSlot {
                         source: this_object(src),
@@ -25206,10 +25208,8 @@ mod stage2_injector_tests {
                 }],
                 ..ShortcutDecisionSchema::default()
             },
-            declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
-            period: Default::default(),
-        };
+            crate::analysis::loop_check::OfferRoad::RecordedPeriod,
+        );
     }
 
     /// R28 arm (b) — **the DRIVE seam cannot see a `template.owner` the engine never bound; the
