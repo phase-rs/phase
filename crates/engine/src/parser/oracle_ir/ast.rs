@@ -999,6 +999,10 @@ pub(crate) enum ImperativeFamilyAst {
     /// the TARDIS, TARDIS Bay). Resolves to a no-op outside a Planechase game
     /// (CR 701.31a).
     Planeswalk,
+    /// CR 701.33a-b: An ability abandons the face-up ongoing scheme that
+    /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
+    /// the source is a face-up ongoing scheme.
+    AbandonScheme,
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -3175,6 +3179,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

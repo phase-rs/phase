@@ -507,7 +507,7 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
             subject: ControllerSubject::Direct(controller),
             tense: ControllerTense::Present,
             ..
-        } => admits_type_phrase_controller(&controller).then_some(controller),
+        } => admits_suffix_controller(&controller).then_some(controller),
         ControllerPhrase {
             subject: ControllerSubject::Direct(_),
             tense: ControllerTense::Past,
@@ -521,6 +521,19 @@ pub fn parse_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
     .parse(input)
 }
 
+/// The direct controllers the type-phrase suffix admits: the shared
+/// direct-present set, plus the chosen player. CR 607.2d: schemes choose an
+/// opponent as they are set in motion, so the persisted choice IS populated
+/// for the Archenemy cards that read it here (Bow to My Command, Imprison
+/// This Insolent Wretch). This combinator's callers carry no chosen-player
+/// arm of their own, so the extension only converts failures into successes;
+/// the folding path keeps declining via `admits_type_phrase_controller`
+/// because its remainder-coupled callers own the trailing scope themselves.
+fn admits_suffix_controller(controller: &ControllerRef) -> bool {
+    admits_type_phrase_controller(controller)
+        || matches!(controller, ControllerRef::SourceChosenPlayer)
+}
+
 /// The direct controllers a type phrase's present-tense controller suffix
 /// admits.
 pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool {
@@ -532,8 +545,13 @@ pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool 
         | ControllerRef::DefendingPlayer
         | ControllerRef::EnchantedPlayer
         | ControllerRef::ActivePlayer => true,
-        // Whether a source's "choose a player" populates the chosen player is
-        // not established for the cards that would read it here.
+        // The chosen player is excluded from the SHARED set: the folding
+        // path's remainder-coupled callers (the quantity "the number of"
+        // path, static subjects) own their trailing controller scope via
+        // their own chosen-player arms, and consuming the suffix here would
+        // strand them. The type-phrase suffix extends this set with the
+        // chosen player for its own callers (CR 607.2d); see
+        // `admits_suffix_controller`.
         ControllerRef::SourceChosenPlayer => false,
         // The grammar never yields these as a direct subject.
         ControllerRef::ScopedPlayer
@@ -1756,9 +1774,11 @@ mod tests {
     }
 
     /// The type-phrase suffix is the direct, present-tense projection of
-    /// `parse_controller_phrase`: it admits the direct present phrases, declines
-    /// every anaphor (no context to bind it) and the chosen player, and stops at
-    /// a word boundary so a past-tense look-back is not half-consumed.
+    /// `parse_controller_phrase`: it admits the direct present phrases plus
+    /// the chosen player (CR 607.2d: populated by schemes as they are set in
+    /// motion; see `admits_suffix_controller`), declines every anaphor (no
+    /// context to bind it), and stops at a word boundary so a past-tense
+    /// look-back is not half-consumed.
     #[test]
     fn parse_controller_suffix_is_the_direct_present_projection() {
         // Positive guard: the projection is reached and keeps the remainder.
@@ -1791,6 +1811,14 @@ mod tests {
                 ControllerRef::ActivePlayer,
                 "",
             ),
+            // CR 607.2d: scheme statics (Bow to My Command, Imprison This
+            // Insolent Wretch) scope to the opponent chosen as the scheme
+            // was set in motion.
+            (
+                "the chosen player controls",
+                ControllerRef::SourceChosenPlayer,
+                "",
+            ),
             ("your opponents control", ControllerRef::Opponent, ""),
             ("target player controls", ControllerRef::TargetPlayer, ""),
             (
@@ -1809,7 +1837,6 @@ mod tests {
             "that player controls",
             "they control",
             "its controller controls",
-            "the chosen player controls",
         ] {
             assert!(
                 parse_controller_suffix(declined).is_err(),

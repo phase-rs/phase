@@ -585,7 +585,7 @@ fn ascend_status_in(
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
 pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     cant_lose_active_for(state, player_id)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| cant_lose_active_for(state, teammate)))
@@ -651,8 +651,10 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
 
     let poison_loss = state.players.iter().any(|player| {
         // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
+        // Archenemy Commander takes the individual branch for every seat —
+        // CR 904.13c keeps poison unshared even though life is shared.
         !player.is_eliminated
-            && if super::topology::has_two_headed_giant_shared_resources(state) {
+            && if super::topology::has_shared_poison(state, player.id) {
                 super::players::team_poison_total(state, player.id) >= 15
             } else {
                 player.poison_counters >= 10
@@ -777,7 +779,9 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            if super::topology::has_two_headed_giant_shared_resources(state) {
+            // Twin of the `has_pending_player_loss_sba` poison branch above:
+            // Archenemy Commander takes the individual branch (CR 904.13c).
+            if super::topology::has_shared_poison(state, p.id) {
                 super::players::team_poison_total(state, p.id) >= 15
             } else {
                 p.poison_counters >= 10
@@ -4956,6 +4960,304 @@ mod tests {
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_team_dies_together_at_zero_shared_life() {
+        // CR 810.8c: the 60-life shared total at 0 or less loses the team
+        // the game, even though each head individually still has life.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].life = -10;
+        state.players[1].life = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_team_loses_at_fifteen_shared_poison() {
+        // CR 810.8d: 15+ poison shared by the team loses the game. Ten on
+        // one head alone is not enough — the 2HG threshold, not CR 704.5c's.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        state.players[1].poison_counters = 5;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_fourteen_shared_poison_does_not_eliminate() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        state.players[1].poison_counters = 4;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_2hg_commander_damage_21_to_one_head_eliminates_the_team() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR 903.10a + CR 810.8a: the dealt head loses at 21 from one
+        // commander, and the team loses with it.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sba_2hg_commander_damage_tracks_per_head_not_pooled_per_team() {
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR-compositional reading (no CR rule defines the combination):
+        // 10 on one head plus 11 on the other from the same commander is
+        // not lethal — CR 903.10a counts per player. Some groups pool
+        // per-team instead; this pins the engine's reading.
+        let mut state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        let cmd_id = ObjectId(999);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: cmd_id,
+            damage: 10,
+        });
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 11,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_heroes_lose_together_at_zero_shared_life() {
+        use crate::types::format::FormatConfig;
+
+        // CR 810.8c-via-904.13b: the heroes' shared 60 at 0 or less loses
+        // every hero the game, and the archenemy wins.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[1].life = -10;
+        state.players[2].life = 10;
+        state.players[3].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_archenemy_loss_lets_heroes_win() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[0].life = 0;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_ten_poison_eliminates_one_hero_and_team() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c + CR 810.8a-via-904.13b: one hero at 10 poison loses,
+        // and the team loses with them.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[2].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_split_poison_is_not_lethal() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c pins the life/poison split: 9 + 9 across two heroes
+        // would kill a 2HG team (15 shared) but nobody here — poison is
+        // individual even though life is shared.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[1].poison_counters = 9;
+        state.players[2].poison_counters = 9;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_ten_poison_eliminates_archenemy() {
+        use crate::types::format::FormatConfig;
+
+        // CR 904.13c: the archenemy loses individually at 10 poison.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_damage_21_to_hero_eliminates_team() {
+        use crate::types::format::FormatConfig;
+        use crate::types::game_state::CommanderDamageEntry;
+
+        // CR 903.10a + CR 810.8a-via-904.13b: the dealt hero loses at 21
+        // from one commander, and the team loses with them.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_damage_21_to_archenemy_ends_it() {
+        use crate::types::format::FormatConfig;
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: ObjectId(999),
+            damage: 21,
+        });
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        ));
+    }
+
+    #[test]
+    fn sba_archenemy_commander_empty_draw_eliminates_hero_team() {
+        use crate::types::format::FormatConfig;
+
+        // CR 704.5b + CR 810.8a-via-904.13b: a hero drawing from empty
+        // loses, and the cascade takes the team.
+        let mut state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        state.players[3].drew_from_empty_library = true;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        assert!(state.players[3].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
         ));
     }
 

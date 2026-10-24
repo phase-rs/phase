@@ -3505,6 +3505,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,

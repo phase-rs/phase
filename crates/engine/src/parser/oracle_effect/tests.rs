@@ -553,7 +553,8 @@ fn owner_subject_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -596,7 +597,8 @@ fn goat_post_extraction_body_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -6190,7 +6192,7 @@ fn bare_damage_continuation_each_object_is_mass_damage() {
 #[test]
 fn damage_each_player_scope_rejects_compound_phrase() {
     assert_eq!(
-        parse_damage_each_player_scope("each opponent and each creature they control"),
+        parse_damage_each_player_scope("each opponent and each creature they control", false),
         None
     );
 }
@@ -6198,7 +6200,7 @@ fn damage_each_player_scope_rejects_compound_phrase() {
 #[test]
 fn damage_each_player_scope_allows_trailing_punctuation() {
     assert_eq!(
-        parse_damage_each_player_scope("each opponent,"),
+        parse_damage_each_player_scope("each opponent,", false),
         Some(PlayerFilter::Opponent)
     );
 }
@@ -6252,7 +6254,7 @@ fn effect_damage_to_each_player_uses_player_scope() {
 #[test]
 fn damage_each_player_scope_other_opponent() {
     assert_eq!(
-        parse_damage_each_player_scope("each other opponent"),
+        parse_damage_each_player_scope("each other opponent", false),
         Some(PlayerFilter::OpponentOtherThanTriggering)
     );
 }
@@ -6263,7 +6265,7 @@ fn damage_each_player_scope_other_opponent() {
 #[test]
 fn damage_each_player_scope_other_player() {
     assert_eq!(
-        parse_damage_each_player_scope("each other player"),
+        parse_damage_each_player_scope("each other player", false),
         Some(PlayerFilter::Opponent)
     );
 }
@@ -6272,7 +6274,7 @@ fn damage_each_player_scope_other_player() {
 #[test]
 fn damage_each_player_scope_other_opponent_with_trailing_punctuation() {
     assert_eq!(
-        parse_damage_each_player_scope("each other opponent."),
+        parse_damage_each_player_scope("each other opponent.", false),
         Some(PlayerFilter::OpponentOtherThanTriggering)
     );
 }
@@ -6595,6 +6597,65 @@ fn damage_to_itself_equal_to_power_low_level() {
             }
         ),
         "expected DealDamage with TargetPower/ParentTarget, got: {e:?}"
+    );
+}
+
+/// CR 608.2c: `try_parse_damage` must decline (not half-accept) when a
+/// compound connector trails the primary — the continuation instruction was
+/// never consumed by any splitter, so accepting would silently drop half the
+/// damage. Burns/Great-Work-I class.
+#[test]
+fn try_parse_damage_declines_on_unconsumed_compound_connector() {
+    // The Burns continuation: targeted primary + verb-less each-leg.
+    assert!(
+        try_parse_damage(
+            "deals 3 damage to target opponent and each creature they control.",
+            "deals 3 damage to target opponent and each creature they control.",
+            &mut ParseContext::default(),
+        )
+        .is_none(),
+        "unconsumed 'and each' continuation must decline"
+    );
+    // A verb-led continuation the splitters never saw (subject path calls this
+    // wrapper directly): swallowing it would drop the card draw.
+    assert!(
+        try_parse_damage(
+            "deals 2 damage to any target, and each player draws a card.",
+            "deals 2 damage to any target, and each player draws a card.",
+            &mut ParseContext::default(),
+        )
+        .is_none(),
+        "unconsumed 'and' continuation must decline"
+    );
+    // Comma trailers are NOT connectors for this guard: ", where X is ..."
+    // is a live amount binding (Basalt Ravager, Minsc & Boo, Mana Cannons).
+    assert!(
+        try_parse_damage(
+            "deals X damage to any target, where X is the number of colors among permanents you control.",
+            "deals X damage to any target, where X is the number of colors among permanents you control.",
+            &mut ParseContext::default(),
+        )
+        .is_some(),
+        "', where X' amount binding must keep accepting"
+    );
+    // Clean terminators still accept.
+    assert!(
+        try_parse_damage(
+            "deals 3 damage to any target.",
+            "deals 3 damage to any target.",
+            &mut ParseContext::default(),
+        )
+        .is_some(),
+        "punctuation-only remainder must accept"
+    );
+    assert!(
+        try_parse_damage(
+            "deals 3 damage to any target",
+            "deals 3 damage to any target",
+            &mut ParseContext::default(),
+        )
+        .is_some(),
+        "empty remainder must accept"
     );
 }
 
@@ -13180,6 +13241,69 @@ fn great_work_chapter_three_lowers_to_a_grant_then_a_self_flicker() {
         legs[2]
     );
     assert!(!tree_has_unimplemented(execute));
+}
+
+/// CR 608.2c: The Great Work chapter I (verbatim) stays HONESTLY gapped: the
+/// "and each creature they control" continuation is a target-anchored fan-out
+/// no splitter consumes, and the `try_parse_damage` compound-connector guard
+/// declines the half-parse instead of dealing 3 to the opponent while
+/// silently sparing their creatures. Reclaimed by the same future
+/// target-plus-each fan-out as Burns.
+#[test]
+fn great_work_chapter_one_fails_closed_on_creature_continuation() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I — This Saga deals 3 damage to target opponent and each creature they control.\n\
+         II — Create three Treasure tokens.\n\
+         III — Until end of turn, you may cast instant and sorcery spells from any graveyard. If a spell cast this way would be put into a graveyard, exile it instead. Exile this Saga, then return it to the battlefield (front face up).",
+        "The Great Work",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_i = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(1))
+        .expect("The Great Work chapter I must parse as a trigger");
+    let execute = chapter_i
+        .execute
+        .as_deref()
+        .expect("chapter I trigger executes");
+    assert!(
+        tree_has_unimplemented(execute),
+        "chapter I's dropped continuation must fail closed, got {execute:?}"
+    );
+}
+
+/// Verbatim Disorder. Detector P's former corpus witness: "and each player who
+/// controls a white creature" is a qualified player set no splitter consumes,
+/// and the `try_parse_damage` compound-connector guard now declines the
+/// half-parse (2 to the white creatures while silently sparing the players)
+/// instead of representing one audience and reporting the other. Reclaimed by
+/// a future qualified-scope fan-out — the same DamageAll-with-player_filter
+/// shape as the Burns/Great Work target-plus-each work, hung off a scope
+/// anchor rather than an announced target.
+#[test]
+fn disorder_fails_closed_on_qualified_player_continuation() {
+    let parsed = parse_oracle_text(
+        "Disorder deals 2 damage to each white creature and each player who controls a white creature.",
+        "Disorder",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let [ability] = parsed.abilities.as_slice() else {
+        panic!(
+            "Disorder must parse to exactly one spell ability, got {:?}",
+            parsed.abilities
+        );
+    };
+    assert!(
+        matches!(*ability.effect, Effect::Unimplemented { .. }),
+        "Disorder's dropped continuation must fail closed, got {:?}",
+        ability.effect
+    );
 }
 
 /// The graveyard cast permission a class-wide grant lowers to, with the grant's
@@ -21188,6 +21312,7 @@ fn choose_a_creature_type() {
     assert_eq!(
         e,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::creature_type(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -23210,6 +23335,7 @@ fn choose_a_color() {
     assert_eq!(
         e,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::color(),
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -35007,7 +35133,7 @@ fn strip_each_player_subject_skips_static_restrictions() {
         "each player may cast spells only during their own turns",
     ];
     for text in &cases {
-        let (scope, result) = strip_each_player_subject(text);
+        let (scope, result) = strip_each_player_subject(text, false);
         assert!(
             scope.is_none(),
             "should not strip static restriction: {text}"
@@ -35019,25 +35145,64 @@ fn strip_each_player_subject_skips_static_restrictions() {
 #[test]
 fn strip_each_player_subject_still_strips_imperatives() {
     // These should still be stripped (imperative effects, not static restrictions)
-    let (scope, result) = strip_each_player_subject("each opponent discards a card");
+    let (scope, result) = strip_each_player_subject("each opponent discards a card", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_eq!(result, "discard a card");
 
-    let (scope, result) = strip_each_player_subject("each other player sacrifices a creature");
+    let (scope, result) =
+        strip_each_player_subject("each other player sacrifices a creature", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_eq!(result, "sacrifice a creature");
 
-    let (scope, result) = strip_each_player_subject("each player draws a card");
+    let (scope, result) = strip_each_player_subject("each player draws a card", false);
     assert_eq!(scope, Some(PlayerFilter::All));
     assert_eq!(result, "draw a card");
 
-    let (scope, result) = strip_each_player_subject("each player mills three cards");
+    let (scope, result) = strip_each_player_subject("each player mills three cards", false);
     assert_eq!(scope, Some(PlayerFilter::All));
     assert_eq!(result, "mill three cards");
 
-    let (scope, result) = strip_each_player_subject("each opponent loses 2 life");
+    let (scope, result) = strip_each_player_subject("each opponent loses 2 life", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_eq!(result, "lose 2 life");
+}
+
+/// CR 102.2 + CR 608.2c + CR 109.4: "each of your other opponents/foes" — the
+/// partitive + "other" subject spelling (Surrender Your Thoughts, Feed the
+/// Machine, May Civilization Collapse). The "other" anaphors to a TARGETED
+/// player from an earlier instruction in the same chain, so the scope lowers to
+/// opponents-except-the-parent-target. Gated on the caller's
+/// `chain_prior_targeted_player`: without one the anchor is undefined and the
+/// arm declines (falling through to the subject path, the pre-existing route
+/// for unanchored partitives).
+#[test]
+fn strip_each_player_subject_accepts_of_your_other_opponents_with_target_anchor() {
+    let (scope, result) =
+        strip_each_player_subject("each of your other opponents discards two cards", true);
+    assert_eq!(
+        scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        }),
+        "gated arm must bind the target-anchored exclusion"
+    );
+    assert_eq!(result, "discard two cards");
+    // The archaic "foe" synonym behaves identically.
+    let (scope, _) =
+        strip_each_player_subject("each of your other foes sacrifices a creature", true);
+    assert_eq!(
+        scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        }),
+    );
+    // Without a targeted-player antecedent the anchor is undefined: decline.
+    let (scope, result) =
+        strip_each_player_subject("each of your other opponents discards two cards", false);
+    assert_eq!(scope, None, "the gated arm must decline rather than guess");
+    assert_eq!(result, "each of your other opponents discards two cards");
 }
 
 /// CR 102.2 + CR 102.3 + CR 603.2 (issue #8440): the possessive
@@ -35058,7 +35223,7 @@ fn each_of_possessive_opponents_subject_grammar() {
     // Anchor axis. Both anchors, same filter, predicate deconjugated identically.
     for anchor in ["that player", "its controller"] {
         let (scope, result) =
-            strip_each_player_subject(&format!("each of {anchor}'s opponents draws a card"));
+            strip_each_player_subject(&format!("each of {anchor}'s opponents draws a card"), false);
         assert_eq!(
             scope,
             Some(PlayerFilter::OpponentOfTriggeringPlayer),
@@ -35070,8 +35235,10 @@ fn each_of_possessive_opponents_subject_grammar() {
     // Apostrophe axis, crossed with the anchor axis: the curly U+2019 form Oracle
     // text actually ships must behave identically to the ASCII form.
     for anchor in ["that player", "its controller"] {
-        let (scope, result) =
-            strip_each_player_subject(&format!("each of {anchor}\u{2019}s opponents gains 2 life"));
+        let (scope, result) = strip_each_player_subject(
+            &format!("each of {anchor}\u{2019}s opponents gains 2 life"),
+            false,
+        );
         assert_eq!(
             scope,
             Some(PlayerFilter::OpponentOfTriggeringPlayer),
@@ -35084,7 +35251,7 @@ fn each_of_possessive_opponents_subject_grammar() {
     // DIFFERENT player set (the ability controller's opponents). `Some(Opponent)`
     // plus the stripped predicate proves the text reached this parser, so the
     // "not OpponentOfTriggeringPlayer" half is a real discrimination.
-    let (scope, result) = strip_each_player_subject("each opponent draws a card");
+    let (scope, result) = strip_each_player_subject("each opponent draws a card", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_ne!(
         scope,
@@ -35096,7 +35263,7 @@ fn each_of_possessive_opponents_subject_grammar() {
 
     // The possessive must not match a foreign anchor. Positive reach-guard: the
     // fallthrough still strips a scope, so the text was parsed, not rejected.
-    let (scope, _) = strip_each_player_subject("each player draws a card");
+    let (scope, _) = strip_each_player_subject("each player draws a card", false);
     assert_eq!(scope, Some(PlayerFilter::All));
 }
 
@@ -35224,7 +35391,7 @@ fn strip_each_player_subject_attacked_this_turn_clause() {
     for subject in ["each player", "each opponent"] {
         for selfref in ["this creature", "~", "it"] {
             let text = format!("{subject} {selfref} attacked this turn loses the game");
-            let (scope, result) = strip_each_player_subject(&text);
+            let (scope, result) = strip_each_player_subject(&text, false);
             assert_eq!(
                 scope,
                 Some(PlayerFilter::OpponentAttacked {
@@ -35238,8 +35405,10 @@ fn strip_each_player_subject_attacked_this_turn_clause() {
     }
 
     // General over the predicate verb (not just "loses the game").
-    let (scope, result) =
-        strip_each_player_subject("each player this creature attacked this turn loses 2 life");
+    let (scope, result) = strip_each_player_subject(
+        "each player this creature attacked this turn loses 2 life",
+        false,
+    );
     assert_eq!(
         scope,
         Some(PlayerFilter::OpponentAttacked {
@@ -35255,15 +35424,15 @@ fn strip_each_player_subject_strips_leading_also() {
     // CR 608.2c: Leading "also" continuation adverb after a player scope is
     // dropped before deconjugation — covers the whole class, not just
     // Liliana's Triumph.
-    let (scope, result) = strip_each_player_subject("each opponent also discards a card");
+    let (scope, result) = strip_each_player_subject("each opponent also discards a card", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_eq!(result, "discard a card");
 
-    let (scope, result) = strip_each_player_subject("each player also draws a card");
+    let (scope, result) = strip_each_player_subject("each player also draws a card", false);
     assert_eq!(scope, Some(PlayerFilter::All));
     assert_eq!(result, "draw a card");
 
-    let (scope, result) = strip_each_player_subject("each other player also loses 2 life");
+    let (scope, result) = strip_each_player_subject("each other player also loses 2 life", false);
     assert_eq!(scope, Some(PlayerFilter::Opponent));
     assert_eq!(result, "lose 2 life");
 }
@@ -35380,7 +35549,7 @@ fn strip_each_player_subject_chosen_number_matrix() {
     use crate::types::ability::{AggregateFunction, PlayerRelation, PlayerScope};
 
     fn expect(text: &str) -> (PlayerRelation, Comparator, AggregateFunction, String) {
-        let (scope, body) = strip_each_player_subject(text);
+        let (scope, body) = strip_each_player_subject(text, false);
         let Some(PlayerFilter::PlayerAttribute {
             relation,
             attr,
@@ -35713,6 +35882,7 @@ fn chosen_number_read_from_a_condition_forces_persistence() {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::NumberRange {
                     min: 0,
                     max: Some(20),
@@ -36292,7 +36462,7 @@ fn liliana_waker_of_the_dead_plus_one_cross_scope_decline_tail() {
 #[test]
 fn strip_player_scope_subject_linked_exile_owner() {
     let (scope, result) =
-        strip_player_scope_subject("the exiled card's owner creates an X/X token");
+        strip_player_scope_subject("the exiled card's owner creates an X/X token", false);
     assert_eq!(scope, Some(PlayerFilter::OwnersOfCardsExiledBySource));
     assert_eq!(result, "create an X/X token");
 }
@@ -36304,8 +36474,10 @@ fn strip_player_scope_subject_linked_exile_owner() {
 fn strip_each_player_subject_controls_permanent_clause() {
     use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
 
-    let (scope, result) =
-        strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
+    let (scope, result) = strip_each_player_subject(
+        "each opponent who doesn't control an Elf loses 1 life",
+        false,
+    );
     assert_eq!(result, "lose 1 life");
     match scope {
         // "doesn't control an Elf" ≡ count == 0 (old `ControlsNone`).
@@ -36327,7 +36499,8 @@ fn strip_each_player_subject_controls_permanent_clause() {
     }
 
     // The affirmative form maps to `{ GE, Fixed(1) }` (old `Controls`).
-    let (scope, _) = strip_each_player_subject("each player who controls a creature draws a card");
+    let (scope, _) =
+        strip_each_player_subject("each player who controls a creature draws a card", false);
     match scope {
         Some(PlayerFilter::ControlsCount {
             relation,
@@ -36352,6 +36525,7 @@ fn strip_each_player_subject_poison_counter_clause() {
 
     let (scope, result) = strip_each_player_subject(
         "each opponent who has three or more poison counters exiles the top card of their library face down",
+        false,
     );
     assert_eq!(
         result, "exile the top card of their library face down",
@@ -36393,6 +36567,7 @@ fn strip_each_player_subject_poison_counter_clause() {
 fn bonders_ornament_controls_named_permanent_scope() {
     let (scope, result) = strip_each_player_subject(
         "each player who controls a permanent named Bonder's Ornament draws a card",
+        false,
     );
     assert_eq!(result, "draw a card");
     match scope {
@@ -36432,8 +36607,10 @@ fn migration_presence_forms_map_to_comparator_count() {
     use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
 
     // Depopulate — affirmative "controls a multicolored creature" → GE/1.
-    let (scope, result) =
-        strip_each_player_subject("each player who controls a multicolored creature draws a card");
+    let (scope, result) = strip_each_player_subject(
+        "each player who controls a multicolored creature draws a card",
+        false,
+    );
     assert_eq!(result, "draw a card");
     match scope {
         Some(PlayerFilter::ControlsCount {
@@ -36454,8 +36631,10 @@ fn migration_presence_forms_map_to_comparator_count() {
     }
 
     // Thornbow Archer — negative "doesn't control an Elf" → EQ/0.
-    let (scope, _) =
-        strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
+    let (scope, _) = strip_each_player_subject(
+        "each opponent who doesn't control an Elf loses 1 life",
+        false,
+    );
     match scope {
         Some(PlayerFilter::ControlsCount {
             relation,
@@ -36479,6 +36658,7 @@ fn strip_each_player_subject_named_permanent() {
     use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
     let (scope, result) = strip_each_player_subject(
         "each player who controls a permanent named Bonder's Ornament draws a card",
+        false,
     );
     assert_eq!(result, "draw a card");
     match scope {
@@ -68886,6 +69066,9 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Per-member owner anchor: carries no nested filter, so `false` like
+        // the other leaf variants above.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -69031,9 +69214,9 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
 /// used to sit in [`filter_has_chosen_color`]'s `=> false` list, which answered
 /// "no" for every filter boxed inside a player filter. `OpponentDealtDamage`
 /// boxes a source `TargetFilter` (CR 120.9), `ControlsCount` and
-/// `TrackedSetPossessor` each carry one outright, and `AllExcept` and `AnyOf`
-/// recurse into `PlayerFilter` itself. Every other variant carries no nested
-/// filter.
+/// `TrackedSetPossessor` each carry one outright, and `AllExcept`,
+/// `OpponentExcept` and `AnyOf` recurse into `PlayerFilter` itself. Every
+/// other variant carries no nested filter.
 ///
 /// The `..` on `ControlsCount` is the quantity-field boundary
 /// [`filter_has_chosen_color`] states: its `count` sub-expression is a count,
@@ -69043,7 +69226,7 @@ fn player_filter_has_chosen_color(pf: &PlayerFilter) -> bool {
         PlayerFilter::OpponentDealtDamage { source, .. } => {
             source.as_deref().is_some_and(filter_has_chosen_color)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_has_chosen_color(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_has_chosen_color(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_has_chosen_color),
         PlayerFilter::ControlsCount { filter, .. } => filter_has_chosen_color(filter),
         PlayerFilter::TrackedSetPossessor { filter, .. } => filter_has_chosen_color(filter),
@@ -69175,6 +69358,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
         filter_has_chosen_color(&TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::AllExcept {
                 exclude: Box::new(controls_stamped(FilterProp::IsChosenColor)),
+                relation: PlayerRelation::All,
             }),
         }),
         "axis 3: a prop stamped under PlayerMatching → AllExcept → ControlsCount must be seen"
@@ -69183,6 +69367,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
         !filter_has_chosen_color(&TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::AllExcept {
                 exclude: Box::new(controls_stamped(FilterProp::Tapped)),
+                relation: PlayerRelation::All,
             }),
         }),
         "axis 3 negative: the same player-filter nesting without the prop must NOT be seen"
@@ -69400,6 +69585,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -70053,6 +70239,7 @@ fn printed_color_choice_over_an_existing_color_chooser_is_refused() {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type,
                 persist: false,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -71278,7 +71465,7 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
     // `parse_target`, yielding `Typed{type_filters: []}` — a filter naming NO
     // type, which `filter.rs` then treats as matching EVERY permanent.
     assert_eq!(
-        parse_damage_each_player_scope("each of your opponents"),
+        parse_damage_each_player_scope("each of your opponents", false),
         Some(PlayerFilter::Opponent),
         "CR 109.5: 'your' resolves to the ability's controller, so the \
          partitive names that controller's opponents — the same set the bare \
@@ -71286,12 +71473,12 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
     );
     // The singular spelling is unchanged.
     assert_eq!(
-        parse_damage_each_player_scope("each opponent"),
+        parse_damage_each_player_scope("each opponent", false),
         Some(PlayerFilter::Opponent),
     );
     // And the plural bare spelling, which the new `opt(tag("s"))` also admits.
     assert_eq!(
-        parse_damage_each_player_scope("each opponents"),
+        parse_damage_each_player_scope("each opponents", false),
         Some(PlayerFilter::Opponent),
     );
     // The anaphoric partitive is deliberately NOT accepted: "their opponents"
@@ -71299,9 +71486,52 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
     // it onto the static controller-relative filter would install a
     // wrong-referent rule with no card driving it.
     assert_eq!(
-        parse_damage_each_player_scope("each of their opponents"),
+        parse_damage_each_player_scope("each of their opponents", false),
         None,
         "the anaphoric partitive must decline rather than guess a referent",
+    );
+}
+
+/// CR 102.2 + CR 608.2c + CR 109.4: "each of your other opponents/foes" — the
+/// partitive + "other" spelling (The Fate of the Flammable). Unlike bare "each
+/// other opponent" (trigger-anchored), the "other" anaphors to a TARGETED
+/// player from an earlier instruction in the same chain, so the scope lowers to
+/// opponents-except-the-parent-target. The gate is the caller's
+/// `chain_prior_targeted_player`: without a targeted-player antecedent the
+/// anchor is undefined and the arm declines rather than guessing.
+#[test]
+fn damage_each_player_scope_accepts_of_your_other_opponents_with_target_anchor() {
+    assert_eq!(
+        parse_damage_each_player_scope("each of your other opponents", true),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        }),
+        "gated arm must bind the target-anchored exclusion",
+    );
+    // The archaic "foe" synonym behaves identically.
+    assert_eq!(
+        parse_damage_each_player_scope("each of your other foes", true),
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        }),
+    );
+    // Without a targeted-player antecedent the anchor is undefined: decline.
+    assert_eq!(
+        parse_damage_each_player_scope("each of your other opponents", false),
+        None,
+        "the gated arm must decline rather than guess a referent",
+    );
+    // The bare trigger-anchored spelling is unaffected by the gate in either
+    // position — it never consults the target anchor.
+    assert_eq!(
+        parse_damage_each_player_scope("each other opponent", true),
+        Some(PlayerFilter::OpponentOtherThanTriggering),
+    );
+    assert_eq!(
+        parse_damage_each_player_scope("each other opponent", false),
+        Some(PlayerFilter::OpponentOtherThanTriggering),
     );
 }
 
@@ -77398,6 +77628,7 @@ fn compound_choice_c4_full_gamble_execute_shape() {
     assert_eq!(
         choose.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77433,6 +77664,7 @@ fn compound_choice_c7_oracle_coin_branch_reads_the_chosen_opponent() {
     assert_eq!(
         choose.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77520,6 +77752,7 @@ fn compound_choice_c9_coin_branch_after_two_choices_reads_index_one() {
     assert_eq!(
         player.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::player(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -77600,6 +77833,7 @@ fn compound_choice_c5_nested_player_choice_increments_chain_counter() {
     assert_eq!(
         player.effect.as_ref(),
         &Effect::Choose {
+            chooser: ControllerRef::You,
             choice_type: ChoiceType::player(),
             persist: false,
             selection: TargetSelectionMode::Chosen
@@ -77626,6 +77860,7 @@ fn compound_choice_c6_existing_player_nouns_keep_their_parse() {
         assert_eq!(
             bare.effect.as_ref(),
             &Effect::Choose {
+                chooser: ControllerRef::You,
                 choice_type: expected.clone(),
                 persist: false,
                 selection: TargetSelectionMode::Chosen

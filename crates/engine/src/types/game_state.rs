@@ -31470,7 +31470,7 @@ impl GameState {
         let players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
-                life: config.starting_life_for_player(PlayerId(i)),
+                life: config.starting_life_for_player(PlayerId(i), usize::from(player_count)),
                 ..Player::default()
             })
             .collect();

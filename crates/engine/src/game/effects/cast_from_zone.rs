@@ -1781,6 +1781,9 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::ParentTargetController
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — nothing to rewrite,
+        // identity like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource

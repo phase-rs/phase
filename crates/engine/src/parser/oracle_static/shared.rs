@@ -6522,6 +6522,34 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
         });
     }
 
+    // CR 607.2d: "<type> the chosen player controls" (scheme statics: Bow to
+    // My Command, Imprison This Insolent Wretch). The folding grammar
+    // deliberately leaves this suffix unconsumed — remainder-coupled callers
+    // such as the quantity "the number of" path own the trailing controller
+    // scope (`parse_quantity_controller_suffix` carries its own chosen-player
+    // arm and fails closed on an empty remainder) — so the static subject
+    // composes it here: the head noun folds as usual, and the persisted-choice
+    // controller attaches only when the folded filter is controller-free and
+    // the remainder is EXACTLY the suffix (nom `tag` terminal anchor, matched
+    // on the lowered remainder so a capitalized head noun never breaks it).
+    // Anything else falls through to the honest `None` below.
+    let rest_lower = rest.to_lowercase();
+    if let Ok((tail, _)) =
+        tag::<_, _, OracleError<'_>>(" the chosen player controls").parse(rest_lower.as_str())
+    {
+        if tail.trim().is_empty() {
+            if let TargetFilter::Typed(mut tf) = filter {
+                if tf.controller.is_none() {
+                    tf.controller = Some(ControllerRef::SourceChosenPlayer);
+                    return Some(match attachment_prop {
+                        Some(prop) => merge_filter_prop(TargetFilter::Typed(tf), prop),
+                        None => TargetFilter::Typed(tf),
+                    });
+                }
+            }
+        }
+    }
+
     None
 }
 

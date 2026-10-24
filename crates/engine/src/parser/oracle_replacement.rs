@@ -2112,6 +2112,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -2123,6 +2124,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -2228,6 +2230,7 @@ fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect
     // entering permanent, so replaying observers before the name is bound changes no
     // observable outcome.
     let choose_opponent = Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         // CR 608.2d + CR 102.3: the controller chooses one opponent.
         choice_type: ChoiceType::opponent(),
         persist: true,
@@ -2326,6 +2329,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type,
             persist: true,
             selection,
@@ -2672,6 +2676,7 @@ fn parse_as_becomes_attached_choose(
             let step = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type,
                     persist: true,
                     selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -3074,6 +3079,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(text: &str) -> Option<AsEnter
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: labels.clone(),
                 },
@@ -36116,6 +36122,7 @@ mod as_enters_at_random_selection_tests {
                 "Camato Scout",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
                 selection: TargetSelectionMode::Random,
@@ -36137,6 +36144,7 @@ mod as_enters_at_random_selection_tests {
                 "A-Thran Portal",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -36150,6 +36158,7 @@ mod as_enters_at_random_selection_tests {
                 "Adaptive Automaton",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::creature_type(),
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -36172,6 +36181,7 @@ mod as_enters_at_random_selection_tests {
                 "Test Card",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::color(),
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -36192,6 +36202,7 @@ mod as_enters_at_random_selection_tests {
                 "Haktos the Unscarred",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::NumberRange {
                     min: 2,
                     max: Some(4),
@@ -36235,6 +36246,7 @@ mod as_enters_at_random_selection_tests {
                 "Haktos the Unscarred",
             ),
             Some(Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::NumberRange {
                     min: 2,
                     max: Some(4),
@@ -36271,6 +36283,7 @@ mod as_enters_at_random_selection_tests {
             assert_eq!(
                 choose_effect(text, name),
                 Some(Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: expected,
                     persist: true,
                     selection: TargetSelectionMode::Chosen,

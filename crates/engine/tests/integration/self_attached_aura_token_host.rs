@@ -403,6 +403,7 @@ impl RoleChain {
             ..AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Choose {
+                    chooser: engine::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::Opponent {
                         restriction: None,
                         distinctness: PlayerChoiceDistinctness::default(),

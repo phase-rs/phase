@@ -130,6 +130,19 @@ pub struct Player {
     pub descended_this_turn: bool,
     #[serde(default)]
     pub cards_drawn_this_turn: u32,
+    /// CR 121.1 + CR 603.4: Number of cards this player drew during the
+    /// previous turn, snapshotted at turn start. Used by "if you drew a card
+    /// last turn" intervening-if conditions (Mine Is the Only Truth).
+    #[serde(default)]
+    pub cards_drawn_last_turn: u32,
+    /// CR 601.2i + CR 603.4: Number of spells this player's opponents have
+    /// cast since this player's last turn ended. Bumped in
+    /// `ledger::apply_resolved_ledger_edit` on every finalized cast, reset
+    /// for the completed player in `turns.rs::start_next_turn`. Used by "if
+    /// no opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe).
+    #[serde(default)]
+    pub opponent_spells_cast_since_own_last_turn: u32,
     /// CR 121.1 + CR 504.1: Number of cards this player has drawn during the
     /// current step. Reset on every step transition (`turns.rs::advance_phase`)
     /// and at turn start (`start_next_turn`). Used by
@@ -242,6 +255,8 @@ impl Default for Player {
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
+            cards_drawn_last_turn: 0,
+            opponent_spells_cast_since_own_last_turn: 0,
             cards_drawn_this_step: 0,
             speed: None,
             speed_trigger_used_this_turn: false,

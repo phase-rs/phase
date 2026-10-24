@@ -1482,6 +1482,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        // CR 608.2d: `chooser` (controller / declared-target read) is subsumed
+        // by CONSERVATIVE on every axis; a future refinement of this arm must
+        // destructure the field and classify it per-axis.
         Effect::Choose { .. } => Axes::CONSERVATIVE,
         Effect::ChooseDamageSource { source_filter } => {
             let mut acc = Axes::NONE;
@@ -1740,6 +1743,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::TakeTheInitiative => Axes::NONE,
         Effect::ArrangePlanarDeckTop { .. } => Axes::NONE,
         Effect::Planeswalk => Axes::NONE,
+        Effect::AbandonScheme => Axes::NONE,
         Effect::OpenAttractions { count: _ } => Axes::NONE,
         Effect::RollToVisitAttractions => Axes::NONE,
         Effect::AssembleContraptions { count } => {
@@ -2889,6 +2893,26 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_scope(player));
             acc
         }
+        QuantityRef::CardsDrawnLastTurn { player } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+                history: HistoryReads::NONE,
+            };
+            acc = acc.or(scan_player_scope(player));
+            acc
+        }
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            let mut acc = Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+                history: HistoryReads::NONE,
+            };
+            acc = acc.or(scan_player_scope(player));
+            acc
+        }
         QuantityRef::BattlefieldEntriesThisTurn { player, filter } => {
             // CR 732.2a: axis-2 self-assertion. `record_battlefield_entry`
             // (game/restrictions.rs) APPENDS to `battlefield_entries_this_turn` on every
@@ -3243,6 +3267,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::EffectOutcome { signal: _ } => Axes::NONE,
         AbilityCondition::EventOutcomeWon => Axes::NONE,
         AbilityCondition::CoinFlipOutcome { result: _ } => Axes::NONE,
+        AbilityCondition::ChosenLabelIs { label: _ } => Axes::NONE,
         AbilityCondition::WhenYouDo => Axes::NONE,
         AbilityCondition::WasCast { zone: _ } => Axes::NONE,
         AbilityCondition::CastDuringPhase { phases: _ } => Axes::NONE,
@@ -3810,6 +3835,12 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         }
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
+        // CR 108.3: owner-of-each-affected-member anchor — the same owner-field
+        // read as `Owner` (source object's owner), evaluated per member at
+        // install by `force_attack::resolve`'s owner-relative graft. No
+        // event/sibling/projected axis: ownership is not trigger-event state,
+        // not a sibling-mutated aggregate, and not a monotone resource.
+        TargetFilter::AffectedObjectOwner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
         // CR 615: controller-relative compound recipient — no event/sibling axes.
         TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
@@ -5127,7 +5158,10 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
         // resource, matching the `OpponentAttacked` / `DefendingPlayer` arms.
         PlayerFilter::OpponentAttackingEnchantedPlayer => Axes::NONE,
         PlayerFilter::All => Axes::NONE,
-        PlayerFilter::AllExcept { exclude } => {
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_filter(exclude, mode));
             acc
@@ -7185,6 +7219,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }
@@ -7598,6 +7633,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         // Susan Foreman reorders the PLANAR DECK top (Planechase),
         // not a battlefield population ⇒ not a live-board census (relax).
         | Effect::ArrangePlanarDeckTop { .. }

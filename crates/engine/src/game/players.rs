@@ -428,7 +428,7 @@ where
 {
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = super::topology::shared_resource_dedup_key(state, pid);
+        let key = super::topology::shared_life_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -449,7 +449,7 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_life_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
@@ -459,9 +459,10 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
 /// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
 /// for the player and their (living) teammates. Non-team formats degenerate
-/// to the player's own count.
+/// to the player's own count, as does Archenemy Commander for every seat:
+/// CR 904.13c keeps poison individual even though life is shared.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_poison_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)

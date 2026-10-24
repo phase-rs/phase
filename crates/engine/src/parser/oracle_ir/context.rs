@@ -684,6 +684,16 @@ pub(crate) struct ParseContext {
     /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
     /// standalone and non-chosen parse.
     pub chain_prior_chosen_target: Option<TargetFilter>,
+    /// CR 608.2c + CR 109.4 + CR 115.1: the nearest player-referent clause
+    /// earlier in this same chain names a TARGETED player — a `Choose` with a
+    /// targeted chooser ("target opponent chooses self or others", the
+    /// self-or-others scheme class) or a player-typed `TargetOnly`. A later
+    /// "that player" / "the player" anaphor then names that announced target
+    /// (`ParentTarget`), not the trigger event's player (`TriggeringPlayer`).
+    /// Seeded per chunk in the chunk loop via
+    /// `chain_prior_targeted_player(builder.clauses())`; `false` on every
+    /// standalone parse and on the first chunk of every chain.
+    pub chain_prior_targeted_player: bool,
     /// CR 601.2c + CR 608.2c: the object-target FILTER declared by the nearest
     /// EARLIER clause of this same effect chain — the antecedent a later
     /// clause's demonstrative anaphor ("that token", "that artifact") can name.

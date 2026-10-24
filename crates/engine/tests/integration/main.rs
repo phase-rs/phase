@@ -2,7 +2,7 @@
 // crate's own unit-test censuses use. `#[path]` rather than a copy: `src/source_census.rs` is
 // `#![cfg(test)]`, and `cfg(test)` HOLDS in this venue too (an integration target is built with
 // `--test`), so one implementation serves both without shipping guard code in a release build.
-// MEASURED, not assumed â€” the alternative already in this tree is `test_support.rs` / `support.rs`,
+// MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #[path = "../../src/source_census.rs"]
 mod source_census;
@@ -125,6 +125,7 @@ mod booster_tutor_open_pack;
 mod borg_queen_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
+mod bow_to_my_command_as_choice;
 mod braids_arisen_nightmare_decline;
 mod brainspoil;
 mod brass_knuckles_equipment_threshold;
@@ -199,6 +200,7 @@ mod comet_stellar_pup;
 mod comeuppance;
 mod commander_draft_deck_legality;
 mod commander_draft_filler;
+mod commander_team_formats;
 mod companion_special_action;
 mod composite_cost_shared_resources;
 mod consume_spirit_legal_targets;
@@ -435,6 +437,7 @@ mod farideh_fireball_die_branch_selection;
 mod fateful_handoff_target_mana_value_draw;
 mod faunsbane_troll_sacrifice_attached_aura;
 mod favor_of_the_mighty_greatest_mana_value_protection;
+mod feed_the_machine_self_branch;
 mod felisa_fang_of_silverquill;
 mod feral_ghoul_dies_rad_counters;
 mod festival_of_embers_graveyard_additional_cost;
@@ -1332,6 +1335,7 @@ mod phyrexian_processor_entry_payment;
 mod physical_contest;
 mod pitfall_trap_attacking_count_alt_cost;
 mod plaguecrafter_etb_class;
+mod planechase_commander;
 mod play_trace;
 mod player_action_recording_after_choice;
 mod player_hexproof_shroud_grants;
@@ -1660,7 +1664,7 @@ mod yenna_aura_token_copy;
 mod yuriko_combat_damage;
 
 // Folded in from former top-level tests/*.rs files (each was its own ~130MB
-// test binary linking the full engine â€” see no_top_level_test_binaries).
+// test binary linking the full engine — see no_top_level_test_binaries).
 mod a_killer_among_us;
 mod a_sigil_of_myrkul;
 mod aang_journey_partial_fail_to_find_2722;
@@ -1776,6 +1780,7 @@ mod identity_crisis_multi_zone_exile;
 mod impulsive_maneuvers_batch_shield;
 mod incredible_hulk_enrage_attacking;
 mod indestructible_survives_destroy;
+mod isildur_object_controller_exile;
 mod issue_4365_msh_legality;
 mod issue_4376_elspeth_resplendent_nonmodal_labels;
 mod issue_4937_iona_chosen_color;
@@ -1855,6 +1860,7 @@ mod momir_token_firebreathing_duration;
 mod moon_girl_second_draw_base_pt;
 mod mox_diamond_discard_cost_2853;
 mod multi_source_each_power_damage;
+mod my_forces_collective_sacrifice;
 mod mycoloth_devour_drain_strand;
 mod nadu_lavaspur_boots_max_times;
 mod najeela_extra_combat_grant_2898;

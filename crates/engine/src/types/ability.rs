@@ -6951,6 +6951,13 @@ pub enum ControllerRef {
     },
 }
 
+impl ControllerRef {
+    /// `skip_serializing_if` predicate — the controller default needs no JSON byte.
+    pub fn is_you(&self) -> bool {
+        matches!(self, Self::You)
+    }
+}
+
 /// CR 301 / CR 303: Kinds of attachments to permanents.
 /// Used by `FilterProp::HasAttachment` and `QuantityRef::AttachmentsOnLeavingObject`
 /// to parameterize attachment-predicate checks.
@@ -8594,6 +8601,21 @@ pub enum TargetFilter {
     /// Distinct from `Owner` (which always reads the source object's owner) and
     /// `ParentTargetController` (which returns the controller per CR 109.4).
     ParentTargetOwner,
+    /// CR 108.3 + CR 508.1d + CR 608.2c: The owner of each object in the
+    /// affected set, resolved per member — the defender anchor for "Each of
+    /// them attacks its owner" (My Crushing Masterstroke) and "Each of those
+    /// creatures attacks its owner" (The Dead Shall Serve). Unlike
+    /// `ParentTargetOwner` (the owner of the parent ability's single target)
+    /// and `Owner` (the source object's owner), this names no one player at
+    /// parse time: every affected member can have a different owner, so the
+    /// anchor is only meaningful per member.
+    ///
+    /// ONLY consumer: `force_attack::resolve`'s owner-relative graft, which
+    /// enumerates the affected population and installs one per-object
+    /// requirement pinned to that member's owner. Every other consumer fails
+    /// closed (resolves to no player / matches nothing) — a single-player
+    /// reading of a per-member anchor would be silently wrong.
+    AffectedObjectOwner,
     /// CR 607.2d + CR 608.2c: Resolves to the player chosen for the source by
     /// a linked persisted choice ("the chosen player"). This is not a target
     /// slot and is distinct from `ControllerRef::ChosenPlayer`, which is
@@ -10392,6 +10414,22 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 121.1 + CR 603.4: Number of cards drawn during the previous turn,
+    /// scoped by `player`. Reads `Player::cards_drawn_last_turn`, snapshotted
+    /// from `cards_drawn_this_turn` at turn start (`turns.rs::start_next_turn`).
+    /// Backs "if you drew a card last turn" intervening-if conditions (Mine Is
+    /// the Only Truth). The this-turn/last-turn pair mirrors the
+    /// `SpellsCastThisTurn` / `SpellsCastLastTurn` split.
+    CardsDrawnLastTurn { player: PlayerScope },
+    /// CR 601.2i + CR 603.4: Number of spells cast by `player`'s opponents
+    /// since `player`'s last turn ended. Reads
+    /// `Player::opponent_spells_cast_since_own_last_turn`, bumped on every
+    /// finalized cast and reset when `player`'s turn ends. Backs "if no
+    /// opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe). Only `Controller` scope is
+    /// meaningful (each player tracks their own window); other scopes resolve
+    /// through the generic aggregate path without special semantics.
+    OpponentSpellsCastSinceLastTurn { player: PlayerScope },
     /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
     /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
     /// snapshots. CR 608.2i is the look-back exception that makes a departed
@@ -10785,6 +10823,8 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::CardsDrawnLastTurn { player }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -11012,6 +11052,8 @@ impl QuantityRef {
             | QuantityRef::DescendedThisTurn
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
             | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::CardsDrawnLastTurn { .. }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
             | QuantityRef::CardsDiscardedThisTurn { .. }
             | QuantityRef::PlayerActionsThisTurn { .. }
             | QuantityRef::DungeonsCompleted
@@ -11049,6 +11091,8 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::CardsDrawnLastTurn { player }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -12063,17 +12107,27 @@ pub enum PlayerFilter {
     OpponentAttackingEnchantedPlayer,
     /// All players.
     All,
-    /// CR 608.2c + CR 109.4 + CR 608.2h: All non-eliminated players except those
-    /// matching `exclude`. The iteration-axis analogue of
-    /// `PlayerScope::AllPlayers { exclude }` (the quantity axis): the exclusion
-    /// anchor is itself a `PlayerFilter`, composing the enum with itself so
-    /// "each player other than its controller" parses to
+    /// CR 608.2c + CR 109.4 + CR 608.2h: Non-eliminated players matching
+    /// `relation` except those matching `exclude`. The iteration-axis analogue
+    /// of `PlayerScope::AllPlayers { exclude }` (the quantity axis): the
+    /// exclusion anchor is itself a `PlayerFilter`, composing the enum with
+    /// itself so "each player other than its controller" parses to
     /// `exclude: ParentObjectTargetController` and any future "each player other
-    /// than ⟨ref⟩" reuses the same variant. When the anchor object has left the
+    /// than ⟨ref⟩" reuses the same variant. `relation` selects the base
+    /// population (`All` preserves the original reading; `Opponent` covers
+    /// "each of your other opponents" with CR 102.3-aware opponent-ness via
+    /// `players::matches_relation`). When the anchor object has left the
     /// battlefield (e.g. the exiled permanent of Fractured Identity), the anchor
     /// is resolved with last-known information (CR 608.2h). `Box` breaks the
     /// enum's self-referential size cycle.
-    AllExcept { exclude: Box<PlayerFilter> },
+    AllExcept {
+        exclude: Box<PlayerFilter>,
+        #[serde(
+            default = "player_relation_all",
+            skip_serializing_if = "is_player_relation_all"
+        )]
+        relation: PlayerRelation,
+    },
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
     HighestSpeed,
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
@@ -19965,6 +20019,25 @@ pub enum Effect {
     /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
     Choose {
         choice_type: ChoiceType,
+        /// CR 608.2d + CR 109.4: which player makes this choice. `You` (the
+        /// default) is the ability controller — the historic behavior for every
+        /// existing card. `TargetPlayer` / `TargetOpponent` bind a TARGETED
+        /// chooser ("target opponent chooses self or others" — the
+        /// self-or-others scheme class: The Fate of the Flammable, Feed the
+        /// Machine, May Civilization Collapse, Surrender Your Thoughts),
+        /// resolved from the ability's announced targets like the
+        /// `TargetFilter`-reading twin (`filter_inner` on `ability.targets`).
+        /// `ControllerRef` (not `PlayerFilter`) because it already carries the
+        /// announced-target slot — the same role `OpponentGuess::guesser`
+        /// plays. A targeted chooser surfaces its stack slot through the
+        /// companion-target-player path (`effect_references_target_player`),
+        /// never through `target_filter()` (still `None`: the choice is made
+        /// during resolution, CR 608.2d).
+        #[serde(
+            default = "default_controller_ref_you",
+            skip_serializing_if = "ControllerRef::is_you"
+        )]
+        chooser: ControllerRef,
         /// When true, persistable choice types store the chosen value on the
         /// source object's chosen_attributes. Some non-persisting choice types
         /// still carry source context for logs or prompts.
@@ -20735,6 +20808,12 @@ pub enum Effect {
     /// triggers and is put on the stack; on resolution its controller (the
     /// roller, CR 901.8) planeswalks (CR 701.31).
     Planeswalk,
+    /// CR 701.33a-b / CR 904.11: Abandon this scheme — turn the face-up ongoing
+    /// scheme that sourced this ability face down and put it on the bottom of
+    /// its owner's scheme deck. Payload-less resolving keyword action (mirrors
+    /// `Effect::Planeswalk`): the scheme is the ability source, never a target.
+    /// RUNTIME: abandon_scheme::resolve via game::archenemy::abandon.
+    AbandonScheme,
     /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's "whenever chaos
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
@@ -23908,6 +23987,8 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            // CR 701.33b: abandoning names no stack object at all.
+            | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
         }
     }
@@ -24158,6 +24239,8 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            // CR 701.33b: abandoning resolves its slot as operand.
+            | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
         }
     }
@@ -24676,6 +24759,9 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            // CR 701.33b: AbandonScheme is non-targeted — "abandon this scheme"
+            // abandons its own source, no slot.
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -25137,6 +25223,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -25826,6 +25913,7 @@ impl Effect {
             | Effect::PhaseIn { .. }
             | Effect::PhaseOut { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::Populate
             | Effect::PreventDamage { .. }
             | Effect::Proliferate
@@ -26163,6 +26251,7 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            | Effect::AbandonScheme
             => None,
         }
     }
@@ -26836,6 +26925,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -27166,6 +27256,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -27521,6 +27612,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -27791,6 +27883,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -27973,6 +28066,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::ArrangePlanarDeckTop { .. } => "ArrangePlanarDeckTop",
         Effect::Planeswalk => "Planeswalk",
+        Effect::AbandonScheme => "AbandonScheme",
         Effect::ChaosEnsues => "ChaosEnsues",
         Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
@@ -28231,6 +28325,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     ArrangePlanarDeckTop,
     Planeswalk,
+    AbandonScheme,
     ChaosEnsues,
     RedistributeLifeTotals,
     ReverseTurnOrder,
@@ -28509,6 +28604,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::ArrangePlanarDeckTop { .. } => EffectKind::ArrangePlanarDeckTop,
             Effect::Planeswalk => EffectKind::Planeswalk,
+            Effect::AbandonScheme => EffectKind::AbandonScheme,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
             Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
@@ -30359,6 +30455,18 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
+    /// CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — true
+    /// when the ability source's persisted `ChosenAttribute::Label` matches
+    /// the anchor word (case-insensitive). The effect-resolution mirror of
+    /// `StaticCondition::ChosenLabelIs` / `TriggerCondition::ChosenLabelIs`:
+    /// those gate anchor-word linked abilities (Khans Sieges); this gates
+    /// sequential if-chose branches on a label persisted EARLIER IN THE SAME
+    /// resolution (the self-or-others scheme class: The Fate of the Flammable,
+    /// Feed the Machine, May Civilization Collapse, Surrender Your Thoughts).
+    /// Evaluated by `evaluate_condition` via `conditions::eval_chosen_label_is`
+    /// against `ability.source_id` — the same object the preceding
+    /// `Choose { Labeled, persist }` wrote.
+    ChosenLabelIs { label: String },
     /// CR 603.12: "When you do" — a reflexive trigger based on whether the
     /// parent event actually occurred. An optional non-cost parent must be
     /// performed; an unpayable or declined `Effect::PayCost` is not an occurrence.
@@ -30938,6 +31046,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -31052,6 +31161,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => None,
         }
     }
@@ -31176,6 +31286,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -31282,6 +31393,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
         }
     }
@@ -37951,6 +38063,7 @@ impl ResolvedAbility {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals

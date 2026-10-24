@@ -861,6 +861,7 @@ const CLAUSE_HEAD_VERBS: &[&str] = &[
     "populate",
     "clash",
     "planeswalk",
+    "abandon",
     "recruit",
     "assimilate",
     // Pre-dispatch verbs handled in `parse_effect_clause` before imperative dispatch.

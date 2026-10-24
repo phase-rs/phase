@@ -2107,6 +2107,7 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),

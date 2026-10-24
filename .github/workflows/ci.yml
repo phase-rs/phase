@@ -215,7 +215,10 @@ jobs:
   rust-test-build:
     name: Rust tests (build archive)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Archive build (~11 min) + runtime binaries (~5 min) + multi-GB upload
+    # now exceed 20 min as the workspace grows; match the 30-min bound used
+    # by the lint and shard jobs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

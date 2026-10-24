@@ -574,6 +574,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -5259,6 +5260,8 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// - `you pay N life[.]`                      → `AbilityCost::PayLife { amount }`
 /// - `you mill [N] card(s)[.]`  → `AbilityCost::Mill { count }`
 /// - `you remove [N] [type] counter(s) from [target][.]` → `AbilityCost::RemoveCounter`
+/// - `you <cost> or <cost> [or <cost>][.]` → `AbilityCost::OneOf { costs }`
+///   (Fear My Authority's "unless you discard a card or pay 3 life")
 ///
 /// Returns `None` for any other shape (mana costs and unknown forms fall
 /// through to the existing mana-cost path in `extract_unless_pay_modifier`).
@@ -5268,6 +5271,53 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// (player-chosen). Those phrases stay unimplemented (Balduvian Horde class)
 /// until the unless-payment path preserves `CardSelectionMode::Random`.
 pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
+    // CR 118.12a: "you <cost> or <cost>" disjunctions bind before the
+    // single-cost arms below, which would otherwise prefix-match the first
+    // branch and drop the rest. Falls through (None) unless every branch
+    // parses, so single-cost riders — and riders whose " or " sits inside a
+    // filter ("power 2 or greater") — reach the singles unchanged.
+    if let Some(cost) = parse_unless_you_disjunction(after_unless) {
+        return Some(cost);
+    }
+    parse_unless_you_single_alt_cost(after_unless)
+}
+
+/// CR 118.12a: "you <cost> or <cost> [or <cost>]" — disjunctive controller
+/// unless-costs. English elides the repeated subject, so branch 2+ re-enters
+/// the single-cost grammar with "you " restored. Segments rejoin to the full
+/// rider by construction, so a parse of every branch is full consumption;
+/// any branch failure (including an empty branch from a trailing " or ")
+/// returns None.
+fn parse_unless_you_disjunction(after_unless: &str) -> Option<AbilityCost> {
+    let text = after_unless.trim_end_matches('.').trim();
+    tag::<_, _, OracleError<'_>>("you ").parse(text).ok()?;
+    let mut segments = Vec::new();
+    let mut rest = text;
+    while let Ok(("", (before, after))) = nom_primitives::split_once_on(rest, " or ") {
+        segments.push(before);
+        rest = after;
+    }
+    segments.push(rest);
+    if segments.len() < 2 {
+        return None;
+    }
+    let mut costs = Vec::with_capacity(segments.len());
+    for (i, seg) in segments.iter().enumerate() {
+        let branch = seg.trim();
+        if branch.is_empty() {
+            return None;
+        }
+        let branch_text = if i == 0 {
+            branch.to_string()
+        } else {
+            format!("you {branch}")
+        };
+        costs.push(parse_unless_you_single_alt_cost(&branch_text)?);
+    }
+    Some(AbilityCost::OneOf { costs })
+}
+
+fn parse_unless_you_single_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // CR 118.12 + CR 118.7a: "you pay its mana cost reduced by {N}" reduces only
     // the generic component of the source's own mana cost.
     if let Ok((_, (_, _, _, crate::types::mana::ManaCost::Cost { shards, generic }))) =
@@ -16958,6 +17008,29 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::SetInMotion, def));
     }
 
+    // CR 904.9 + CR 603.1: "As you set this scheme in motion" (Bow to My
+    // Command) is a choice made inside the turn-based action, NOT a triggered
+    // ability — it must never touch the stack (no priority, not counterable).
+    // It lowers to the dedicated `AsSetInMotion` mode, which the matcher
+    // dispatch and the index both skip; the post-action scan resolves it via
+    // `archenemy::resolve_pending_as_set_in_motion_choices` before the
+    // scheme's "when" triggers collect. The persist post-pass in
+    // `lower_trigger_ir` still stores the choice for the scheme's linked
+    // "the chosen player" abilities (CR 607.2d). Composed per-axis
+    // (temporal-prefix × subject × event) in the neighboring planeswalk
+    // tuple's style, all-consuming so a qualified variant never binds here.
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("as "),
+        tag("you "),
+        tag("set this scheme in motion"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::AsSetInMotion;
+        return Some((TriggerMode::AsSetInMotion, def));
+    }
+
     if matches!(
         lower,
         "whenever you crank this contraption"
@@ -21463,6 +21536,7 @@ fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
     }
     ability.player_scope = Some(PlayerFilter::AllExcept {
         exclude: Box::new(PlayerFilter::TriggeringPlayer),
+        relation: PlayerRelation::All,
     });
 }
 
