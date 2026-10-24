@@ -16724,6 +16724,24 @@ pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
         || nom_primitives::scan_contains(clause_lower, "on all ")
 }
 
+/// CR 608.2c: A counter-placement subject that is an anaphor to a BOUNDED set
+/// of already-identified objects, never a battlefield-wide type scan:
+/// `ParentTarget` (the chosen targets of the parent, "each of them" after a
+/// targeting clause) and `LastCreated` (the tokens the same chain just
+/// created, "each of them" after a token clause, CR 111.1). The
+/// `PutCounterAll` resolver matches its filter against every battlefield
+/// object, so it is the wrong effect for a bounded anaphor; a mass-worded
+/// ("on each") placement onto one of these routes to `PutCounter`, whose
+/// `resolve_defined_or_targets` binds the anaphor's object set. Single
+/// authority for both mass-vs-single routing sites (`parse_zone_counter_ast`
+/// here and `try_parse_verb_and_target` in `oracle_effect/mod.rs`).
+pub(super) fn counter_target_is_bounded_anaphor(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::ParentTarget | TargetFilter::LastCreated
+    )
+}
+
 /// CR 122.1 + CR 608.2c: In a distributive "put a number of +1/+1 counters on
 /// EACH ... equal to THAT CREATURE's <stat>" (Canopy Gargantuan), "that
 /// creature" is the per-iteration recipient — each object receives counters
@@ -17032,18 +17050,18 @@ pub(super) fn parse_zone_counter_ast<'a>(
                 if !terminal_punctuation_only(remainder) {
                     return Some(Err(text));
                 }
-                // CR 608.2c: A `ParentTarget` placement subject ("each of them")
-                // is an anaphor to a bounded set of chosen objects, not a
+                // CR 608.2c: A bounded-anaphor placement subject ("each of
+                // them" → `ParentTarget` for chosen objects, or `LastCreated`
+                // for the tokens this chain just created) is not a
                 // battlefield-wide type scan. The `PutCounterAll` resolver
-                // matches its filter against every battlefield object and cannot
-                // resolve a bare `ParentTarget` (it has no target slot to bind),
-                // so route the anaphor to `PutCounter`, whose
-                // `resolve_defined_or_targets` binds `ability.targets` (the
-                // chosen creatures). Typed mass placements ("on each creature you
-                // control") and tracked-set demonstratives still take the
-                // `PutCounterAll` path.
-                if is_all && multi_target.is_none() && !matches!(target, TargetFilter::ParentTarget)
-                {
+                // matches its filter against every battlefield object, which is
+                // the wrong effect for a bounded anaphor, so route it to
+                // `PutCounter`, whose
+                // `resolve_defined_or_targets` binds the anaphor's object set.
+                // Typed mass placements ("on each creature you control") and
+                // tracked-set demonstratives still take the `PutCounterAll` path.
+                // `counter_target_is_bounded_anaphor` is the shared authority.
+                if is_all && multi_target.is_none() && !counter_target_is_bounded_anaphor(&target) {
                     Some(Ok(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
                         count: rebind_distributive_recipient_count(count, lower),

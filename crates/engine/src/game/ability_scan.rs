@@ -9625,6 +9625,13 @@ mod tests {
                  zones (CR 601.2f); battlefield path is source/ParentTarget-bounded",
             ),
             (
+                "stickers.rs",
+                false,
+                "bounded recipient selection: recipient_ids enumerates candidates for one \
+                 bound object; count/up-to placements retain that SpecificObject, not every \
+                 matching object",
+            ),
+            (
                 "token_copy.rs",
                 false,
                 "CopyTokenOf source_filter is scanned as a live census by its own scan_effect \

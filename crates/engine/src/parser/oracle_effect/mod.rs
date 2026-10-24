@@ -1459,6 +1459,11 @@ fn merge_clause_conditions(
 }
 
 fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut ClauseIr) {
+    // CR 608.2c: the repeat directive takes no condition of its own; it is
+    // reached through the gate on the clause it trails.
+    if clause.parsed.effect.is_repeat_directive() {
+        return;
+    }
     let inner = clause
         .condition
         .take()
@@ -13319,7 +13324,8 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Opt
 ///   immediately preceding clause in the same effect chain created one — e.g.
 ///   Agent of Raffine's "Conjure a duplicate ... into your hand. It
 ///   perpetually gains ..." (`ctx.token_created_in_chain`, via
-///   `counter::counter_anaphor_created_token_binding`) — and otherwise falls
+///   `counter::counter_anaphor_created_token_binding`, which also binds the
+///   distributive plural "each of them") — and otherwise falls
 ///   back to the parent target, mirroring the demonstrative form (a bare "it"
 ///   with no created referent back-references a prior chosen/tracked object,
 ///   e.g. the self-spell cost grant's "Choose a nonland card ... It
@@ -13371,7 +13377,9 @@ fn parse_perpetual_self_subject<'a>(
         // nearest first:
         //
         //  1. The chain's most-recently CREATED object (Agent of Raffine's
-        //     conjured duplicate) -- `counter::counter_anaphor_created_token_binding`.
+        //     conjured duplicate) -- `counter::counter_anaphor_created_token_binding`
+        //     (called with the literal "it"; its plural "each of them" class
+        //     is not reachable from here).
         //  2. An earlier SAME-CHAIN typed/chosen referent -- a prior "choose a
         //     card in your hand" clause (`ctx.parent_target_available`) or an
         //     immediately preceding `Effect::ChooseFromZone`
@@ -13431,8 +13439,9 @@ fn parse_perpetual_self_subject<'a>(
         //     Lightning Bolts) -- `ctx.token_created_in_chain`, the same
         //     predicate the "it" arm reaches through
         //     `counter::counter_anaphor_created_token_binding` (whose
-        //     recipient-pronoun set has no subject-plural member, so the
-        //     equivalent flag read is inline here). `LastCreated` fans out to
+        //     recipient-pronoun set and object-plural "each of them" class have
+        //     no subject-plural member, so the equivalent flag read is inline
+        //     here). `LastCreated` fans out to
         //     every object the conjure published.
         //  2. An earlier SAME-CHAIN typed/chosen referent (Racketeer Boss's
         //     "choose up to two ... cards in your hand") --
@@ -19647,7 +19656,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             after_counter_on
         };
         // CR 608.2c + CR 111.10: a same-chain counter anaphor ("it"/"that token"/
-        // "the token"/…) placed after a token-creating clause binds to the
+        // "the token"/"each of them"/…) placed after a token-creating clause binds to the
         // just-created token (`LastCreated`). The for-each counter dispatch
         // intercepts these clauses before the shared put-counter path, so it must
         // consult the SAME binding helper as `resolve_counter_placement_target`,
@@ -22090,12 +22099,14 @@ fn try_parse_verb_and_target<'a>(
             // UTF-8 char boundary and `text[..text.len() - rem.len()]` is sound.
             let primary_clause = &text[..text.len() - rem.len()];
             let primary_clause_lower = primary_clause.to_ascii_lowercase();
-            // CR 608.2c: A `ParentTarget` placement subject ("each of them") is
-            // an anaphor to a bounded set of chosen objects, not a battlefield-
-            // wide type scan — mirror imperative.rs mass-classification authority.
+            // CR 608.2c: A bounded-anaphor placement subject ("each of them" →
+            // `ParentTarget` / `LastCreated`) is not a battlefield-wide type
+            // scan. The rule is shared with `parse_zone_counter_ast` through
+            // `imperative::counter_target_is_bounded_anaphor`, so the two
+            // mass-vs-single routing sites cannot drift.
             let ast = if imperative::counter_placement_is_mass(&primary_clause_lower)
                 && multi_target.is_none()
-                && !matches!(target, TargetFilter::ParentTarget)
+                && !imperative::counter_target_is_bounded_anaphor(&target)
             {
                 ZoneCounterImperativeAst::PutCounterAll {
                     counter_type,
@@ -40099,14 +40110,21 @@ fn try_parse_repeat_until_stop_conditions(
 ///   `repeat_for` root together with its own unless-payment / player-scope gate,
 ///   while a following sentence is an independent sibling that runs once after the
 ///   loop. A multi-clause process therefore keeps the consume-only outcome.
-/// - `ConsumeOnly` — the bare / "if you do" form (Primal Surge) is recognized so
-///   the directive is consumed rather than producing an `Unimplemented` gap, but
-///   it sets no predicate (its game-state-predicate semantics stay deferred).
+/// - `Bare` — the unconditional, uncapped directive with no "if you do" and no
+///   cap token ("If an Insect card was milled this way, put a loyalty counter on
+///   Grist and repeat this process"). The chunk loop emits the structural
+///   repeat-directive node when the directive trails a comma-joined clause, so
+///   it is reached only through that clause's gate (CR 608.2c).
+/// - `ConsumeOnly` — the "if you do" form (Primal Surge) and "any number of
+///   times" are recognized so the directive is consumed rather than producing an
+///   `Unimplemented` gap, but they set no predicate (their game-state-predicate
+///   semantics stay deferred).
 #[derive(Debug)]
 enum RepeatProcessOutcome {
     Continuation(crate::types::ability::RepeatContinuation),
     FixedCount(QuantityExpr),
     CappedRepeat(QuantityExpr),
+    Bare,
     ConsumeOnly,
 }
 
@@ -40119,7 +40137,7 @@ enum RepeatProcessOutcome {
 /// stripped via the shared condition helpers and threaded into a
 /// `WhileCondition` predicate; the trailing "once"/"N times" sets its
 /// `max_iterations` cap. With no condition, "you may repeat …" maps to
-/// `ControllerChoice` and the bare / "if you do" forms are consumed only.
+/// `ControllerChoice`, the bare form is the structural `Bare` outcome (reached only through the gate of the comma-joined clause it trails), and the "if you do" forms are consumed only.
 fn try_parse_repeat_process_directive(
     text: &str,
     ctx: &mut ParseContext,
@@ -40160,8 +40178,8 @@ fn try_parse_repeat_process_directive(
     let body_lower = body.to_lowercase();
     let (parsed_directive, _) = nom_on_lower(body.as_str(), &body_lower, |i| {
         let (i, you_may) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
-        // The bare/"if you do" forms have no condition and no "you may" — keep
-        // them recognized (consume-only) so they don't leak Unimplemented gaps.
+        // The bare/"if you do" forms have no condition and no "you may". The "if you do"
+        // form stays recognized consume-only so it doesn't leak Unimplemented gaps; the bare form is `Bare`.
         let (i, if_you_do) = opt(alt((
             tag::<_, _, OracleError<'_>>("if you do, "),
             tag("if you do "),
@@ -40191,13 +40209,25 @@ fn try_parse_repeat_process_directive(
             value(None, tag(" any number of times")),
         )))
         .parse(i)?;
+        // `cap_token` distinguishes "no cap token" (`None`) from "any number of
+        // times" (`Some(None)`): only the former is the `Bare` directive.
+        let cap_token = cap.is_some();
         let cap = cap.flatten();
         let (i, _) = opt(tag(".")).parse(i)?;
         eof(i)?;
-        Ok((i, (cap, you_may.is_some(), if_you_do.is_some(), more_times)))
+        Ok((
+            i,
+            (
+                cap,
+                cap_token,
+                you_may.is_some(),
+                if_you_do.is_some(),
+                more_times,
+            ),
+        ))
     })?;
 
-    let (cap, you_may, if_you_do, more_times) = parsed_directive;
+    let (cap, cap_token, you_may, if_you_do, more_times) = parsed_directive;
     if let Some(condition) = condition {
         return Some(RepeatProcessOutcome::Continuation(
             RepeatContinuation::WhileCondition {
@@ -40230,6 +40260,10 @@ fn try_parse_repeat_process_directive(
             }),
             offset: 1,
         }));
+    }
+    // CR 608.2c: the unconditional, uncapped directive without "if you do".
+    if !if_you_do && !cap_token {
+        return Some(RepeatProcessOutcome::Bare);
     }
     Some(RepeatProcessOutcome::ConsumeOnly)
 }
@@ -43552,6 +43586,32 @@ fn parse_effect_chain_ir_body(
                                     "repeat_process_multi_clause",
                                     normalized_text.to_string(),
                                 )),
+                                chunk.boundary_after,
+                                ClauseDisposition::Emit {
+                                    followup: None,
+                                    intrinsic: None,
+                                },
+                            )
+                            .push();
+                    }
+                }
+                // CR 608.2c: "<A> and repeat this process" — the " and " split
+                // inside one sentence (previous clause bounded by a comma) makes
+                // the directive a tail child of A's clause, so it is reached
+                // only when A's gate held. After a sentence break it stays
+                // consume-only, as before.
+                RepeatProcessOutcome::Bare => {
+                    if builder
+                        .clauses()
+                        .last()
+                        .is_some_and(|c| c.boundary == Some(ClauseBoundary::Comma))
+                    {
+                        builder
+                            .clause(
+                                normalized_text,
+                                parsed_clause(Effect::RuntimeHandled {
+                                    handler: crate::types::ability::RuntimeHandler::RepeatProcess,
+                                }),
                                 chunk.boundary_after,
                                 ClauseDisposition::Emit {
                                     followup: None,
