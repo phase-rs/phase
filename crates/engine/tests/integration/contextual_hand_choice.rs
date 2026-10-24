@@ -1134,6 +1134,20 @@ fn contextual_hand_paid_spells_exact_nondefault_selection_and_public_rejections(
             offered.push(ids.creature);
         }
         prompt(&runner, &offered, false);
+        let disposal = &runner.state().active_ability_continuation().unwrap().chain;
+        assert_eq!(
+            disposal.effect,
+            Effect::DiscardCard {
+                target: TargetFilter::ParentTarget,
+                count: 1,
+            }
+        );
+        assert_eq!(disposal.source_id, source);
+        assert_eq!(disposal.controller, P0);
+        assert_eq!(
+            disposal.original_controller.unwrap_or(disposal.controller),
+            P0
+        );
         let pending = serde_json::to_value(runner.state()).unwrap();
         for (actor, action) in [
             (
@@ -1194,9 +1208,25 @@ fn contextual_hand_paid_spells_exact_nondefault_selection_and_public_rejections(
                 .filter(|event| matches!(
                     event,
                     GameEvent::EffectResolved {
-                        kind: EffectKind::Discard,
+                        kind: EffectKind::DiscardCard,
+                        source_id,
                         ..
-                    }
+                    } if *source_id == source
+                ))
+                .count(),
+            1
+        );
+        // CR 701.9a: the selected card is discarded from its owner's hand exactly once.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::Discarded {
+                        player_id,
+                        object_id,
+                        source_id: Some(discard_source),
+                    } if *player_id == P1 && *object_id == ids.second && *discard_source == source
                 ))
                 .count(),
             1
