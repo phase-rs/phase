@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4537
-- **Total card appearances across root causes:** 4570 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4535
+- **Total card appearances across root causes:** 4568 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -27,7 +27,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 10 | Trigger event/mode unrecognized → Unknown | 165 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 128 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 127 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 80 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 82 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
@@ -41,11 +41,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 12 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 11 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2416/4570 ≈ 53% of all misparse appearances; the top 10 cover 3406/4570 ≈ 74.5%. Fix these first.
+> The top **5** root causes cover 2416/4568 ≈ 53% of all misparse appearances; the top 10 cover 3406/4568 ≈ 74.6%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -3893,7 +3893,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (128 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (127 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3991,7 +3991,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Prosper, Tome-Bound
 - Psychic Theft
 - Purraj of Urborg
-- Rampaging Cyclops
 - Rassilon, the War President
 - Ratatwotwo
 - Rayami, First of the Fallen
@@ -4915,7 +4914,7 @@ are outside the detector's class.
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (12 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (11 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -4926,7 +4925,6 @@ are outside the detector's class.
 - Fixer, Techno Terror
 - Garenbrig Squire
 - Goremand
-- Grizzled Wolverine
 - Hermit of the Natterknolls
 - Hurkyl's Final Meditation
 - Ichneumon Druid
