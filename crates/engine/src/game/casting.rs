@@ -31086,6 +31086,11 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // whether it reads a chosen target is exactly whether that filter does.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => target_filter_reads_chosen_target(filter, read),
         FilterProp::SharesQuality { reference, .. } => reference
             .as_deref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),

@@ -958,6 +958,65 @@ pub(crate) fn event_source_is_live_incarnation(
     }
 }
 
+/// CR 400.7 + CR 608.2h: the incarnation the CURRENT event proves for an
+/// event-context role. The event is the authority — an attack declaration stamps
+/// the attacker's incarnation, a zone change stamps the entrant's or the
+/// departing object's, a tap/damage stamps its subject. `None` when the event
+/// records nothing for this role: a legacy or synthetic event cannot
+/// discriminate, and the caller must fall back to live-by-id.
+///
+/// Deliberately NOT a scan of `zone_changes_this_turn`: a storage id can carry
+/// several exits in one turn (blink, die, re-enter), and only the firing event
+/// names the one this ability is about.
+pub(crate) fn event_context_incarnation(
+    filter: &TargetFilter,
+    event: &GameEvent,
+    id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    match filter {
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => match event {
+            GameEvent::AttackersDeclared {
+                declaration_records,
+                ..
+            } => declaration_records
+                .iter()
+                .find(|record| record.object_id == id)
+                .and_then(|record| record.incarnation)
+                .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                record,
+                ..
+            } => record
+                .entered_incarnation
+                .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context
+                .as_ref()
+                .map(|context| context.identity.reference)
+                .filter(|pin| pin.object_id == id),
+            GameEvent::PermanentTapped {
+                incarnation: Some(incarnation),
+                ..
+            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            GameEvent::DamageDealt {
+                source_incarnation: Some(incarnation),
+                ..
+            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            _ => None,
+        },
+        TargetFilter::EventTarget => match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context
+                .as_ref()
+                .map(|context| context.identity.reference)
+                .filter(|pin| pin.object_id == id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// CR 400.7 + CR 120.1: whether the live permanent `obj` is the very object a
 /// damage event dealt damage to (the recipient role, `EventTarget`), as opposed
 /// to a later incarnation at the same `ObjectId`. The event itself stamps only

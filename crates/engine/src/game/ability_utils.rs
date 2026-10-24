@@ -5358,6 +5358,13 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::PtComparison { value, .. } => {
             crate::game::quantity::quantity_expr_contains_scope(value, scope)
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), exactly as it does for `CanEnchant`, so this
+        // per-prop classifier answers only for the node it is called on.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| filter_prop_contains_quantity_scope(p, scope)),
@@ -5525,6 +5532,13 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         FilterProp::SharesQuality { reference, .. } => {
             matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
         FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
         // Every remaining prop enumerated explicitly (no `_ =>`) — see

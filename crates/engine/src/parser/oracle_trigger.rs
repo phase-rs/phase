@@ -73,12 +73,12 @@ use crate::types::ability::ManaProduction;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
-    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    AttachmentReferent, AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation,
+    CombatRelationSubject, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect, EffectScope,
+    FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
     OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
@@ -2206,6 +2206,35 @@ pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
     }
 }
 
+/// CR 603.10a + CR 704.5n: whether this trigger reads the attachment relation of
+/// an object that has already left the battlefield ("equipped/enchanted creature
+/// dies"). The CR 704.5m/n SBAs detach those permanents before the look-back, and
+/// the departure path does not yet queue such triggers — so the clause is
+/// reported as an engine gap instead of a silent no-op.
+fn trigger_depends_on_departure_attachment_relation(def: &TriggerDefinition) -> bool {
+    matches!(def.mode, TriggerMode::ChangesZone)
+        && def.origin == Some(Zone::Battlefield)
+        && def
+            .valid_card
+            .as_ref()
+            .is_some_and(filter_uses_departure_attachment_prop)
+}
+
+fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
+            FilterProp::EquippedBy | FilterProp::EnchantedBy => true,
+            FilterProp::AttachedTo { .. } | FilterProp::Not { .. } => false,
+            _ => false,
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_departure_attachment_prop)
+        }
+        TargetFilter::Not { filter } => filter_uses_departure_attachment_prop(filter),
+        _ => false,
+    }
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2430,6 +2459,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // CR 101.1 + CR 608.2b: root only — resolve_top reads the stack entry's root.
     if let Some(ability) = execute.as_deref_mut() {
         ability.illegal_targets_disposition = modifiers.illegal_targets_disposition;
+    }
+    // CR 603.10a: a leaves-the-battlefield trigger whose subject filter needs the
+    // departure attachment relation ("whenever an equipped/enchanted creature
+    // dies") is not supported end to end — the record captures the relation, but
+    // the death trigger does not queue it, so the instruction would silently do
+    // nothing. Mark the clause with the generic unsupported effect (never a
+    // card-name special case) so coverage reports the honest gap.
+    if trigger_depends_on_departure_attachment_relation(&def) {
+        execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "departure_attachment_relation",
+                def.description.clone().unwrap_or_default(),
+            ),
+        )));
     }
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -3582,6 +3626,12 @@ fn rebind_parent_target_to_event_target_in_prop(prop: &mut FilterProp) {
         | FilterProp::Targets { filter: target } => {
             rebind_parent_target_to_event_target_in_filter(target);
         }
+        // CR 701.3a: a mass object set defined by attachment to the parent
+        // referent ("destroy all Auras attached to that creature") names the
+        // parent inside the host filter, so a BecomesTarget rebind must reach it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: target },
+        } => rebind_parent_target_to_event_target_in_filter(target),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
@@ -3622,6 +3672,12 @@ fn filter_prop_contains_event_target(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { reference: target }
         | FilterProp::TargetsOnly { filter: target }
         | FilterProp::Targets { filter: target } => target_filter_contains_event_target(target),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // a host referent that names the triggering event is found by the same
+        // recursion (the rebind above must agree with this detector).
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: target },
+        } => target_filter_contains_event_target(target),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
@@ -25130,5 +25186,50 @@ mod number_quality_bridge_tests {
                 condition: Box::new(expected),
             })
         );
+    }
+}
+
+/// CR 701.3a + CR 115.1: P16 — the trigger rebind walkers reach a
+/// `Host { ParentTarget }` filter, so a `BecomesTarget` trigger rebinds the host
+/// anaphor too.
+#[cfg(test)]
+mod attached_set_trigger_tests {
+    use super::*;
+    use crate::types::ability::{AttachmentReferent, TypedFilter};
+
+    fn host_prop(filter: TargetFilter) -> FilterProp {
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host {
+                filter: Box::new(filter),
+            },
+        }
+    }
+
+    #[test]
+    fn p16_event_target_walkers_recurse_into_the_host_filter() {
+        let mut prop = host_prop(TargetFilter::ParentTarget);
+        assert!(filter_prop_contains_event_target(&prop));
+        rebind_parent_target_to_event_target_in_prop(&mut prop);
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Host { filter }
+                } if **filter == TargetFilter::EventTarget
+            ),
+            "the host leaf is rebound to EventTarget, got {prop:?}"
+        );
+
+        // Hostile control: a Host over an explicit typed filter names no event
+        // target, so neither walker fires.
+        let mut typed = host_prop(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(!filter_prop_contains_event_target(&typed));
+        rebind_parent_target_to_event_target_in_prop(&mut typed);
+        assert!(matches!(
+            &typed,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter }
+            } if **filter == TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 }

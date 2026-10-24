@@ -234,6 +234,8 @@ struct DelayedPayloadAntecedent {
     /// CR 603.7a: the payload's own reflexive-result gate, if it has one.
     /// `Option<AbilityCondition>` — never a bool.
     result: Option<AbilityCondition>,
+    /// CR 506.1: the combat step the payload fires in, if it fires in one.
+    combat_step: Option<Phase>,
 }
 
 /// Which arm of the delayed-payload continuation decision fired.
@@ -292,6 +294,44 @@ fn clause_delayed_payload(clause: &ClauseIr, kind: AbilityKind) -> Option<Abilit
         }
         _ => None,
     }
+}
+
+/// CR 506.1: the combat step an installer clause's delayed payload fires in.
+fn clause_delayed_combat_step(clause: &ClauseIr) -> Option<Phase> {
+    let condition = match &clause.parsed.effect {
+        Effect::CreateDelayedTrigger { condition, .. } => Some(condition),
+        _ => clause.delayed_condition.as_ref(),
+    }?;
+    match condition {
+        DelayedTriggerCondition::AtNextPhase { phase }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { phase, .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
+            Some(*phase).filter(|phase| phase.is_combat())
+        }
+        DelayedTriggerCondition::WhenLeavesPlay { .. }
+        | DelayedTriggerCondition::WhenDies { .. }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
+        | DelayedTriggerCondition::WhenEntersBattlefield { .. }
+        | DelayedTriggerCondition::WhenDiesOrExiled { .. }
+        | DelayedTriggerCondition::WheneverEvent { .. }
+        | DelayedTriggerCondition::WhenNextEvent { .. } => None,
+    }
+}
+
+/// Whether the clause ends in "that combat".
+fn clause_names_that_combat(clause: &ClauseIr) -> bool {
+    clause.source.fragment().is_some_and(|source| {
+        let lower = source.to_lowercase();
+        nom_primitives::scan_at_word_boundaries(&lower, |i| {
+            (
+                tag::<_, _, OracleError<'_>>("that combat"),
+                opt(tag(".")),
+                eof,
+            )
+                .parse(i)
+        })
+        .is_some()
+    })
 }
 
 /// V2 is deliberately pinned to the two actual delayed-trigger producer fields.
@@ -377,6 +417,10 @@ fn classify_continuation_clause(
     if link == Some(ClauseBoundary::Then) {
         return ContinuationVerdict::Nest;
     }
+    // CR 506.1 + CR 608.2c: "that combat" names the combat in which the open delayed payload fires.
+    if antecedent.combat_step.is_some() && clause_names_that_combat(clause) {
+        return ContinuationVerdict::Nest;
+    }
     let result = clause_reflexive_result(clause);
     if result.as_ref().is_some_and(|result| {
         antecedent
@@ -460,6 +504,7 @@ fn resolve_delayed_payload_placements(clauses: &mut [ClauseIr], kind: AbilityKin
                 open.push(DelayedPayloadAntecedent {
                     mint: payload_mint(&payload),
                     result: clause_reflexive_result(clause),
+                    combat_step: clause_delayed_combat_step(clause),
                 });
                 last_contiguous_clause = Some(clause_index);
             }
@@ -20980,6 +21025,16 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if let Some(clause) = try_parse_counter_all_conjunction(text, ctx) {
         return clause;
     }
+    // CR 115.1a + CR 115.1d + CR 701.3a + CR 608.2c: "a mass object set defined
+    // by attachment to a referenced permanent or player" — "<verb> all/each
+    // <filter> attached to <referent>" and its head/compound families. Claimed
+    // BEFORE the compound splitter (whose fail-closed attachment block would
+    // otherwise see the clause) and only when the whole clause parses; the
+    // production declines a Context-site Destroy that the existing declared-slot
+    // authority owns (F2) and rolls back its tentative parse context on decline.
+    if let Some(clause) = imperative::parse_attached_set_clause(text, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
@@ -27266,6 +27321,64 @@ pub(super) fn resolve_declared_slot_anaphor<'a>(
         .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))?
         .index
         .map(|slot| (slot, rest))
+}
+
+/// CR 601.2c + CR 608.2c: the PRONOUN-ONLY sibling of
+/// [`resolve_declared_slot_anaphor`] — bind a bare, word-bounded "it"/"them" at
+/// the start of `phrase_lower` to the unique NUMBERED declared slot of the
+/// chain's registry.
+///
+/// Deliberately a separate entry point with a single caller
+/// (`imperative::parse_attached_set_referent`): widening the shared resolver
+/// would change its second consumer, the die-exile rider antecedent binder,
+/// which requires a definite noun. Here a bare pronoun is exactly the
+/// D2 family's shape ("… you gain control of all Equipment that were attached
+/// to it", Fumble / Murderous Spoils).
+///
+/// The registry is the chain-wide authority (`Context::chain_declared_slots`),
+/// NOT the Choose-head-local `declared_target_slots`: zero candidates, several
+/// candidates, an unnumbered slot, or an `Indeterminate` registry all give
+/// `None`, so a pronoun is never bound on a guess. A candidate whose own filter
+/// reads a declared slot is excluded for the same reason
+/// `resolve_declared_slot_anaphor` excludes it — referents never chain.
+pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
+    phrase_lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<(usize, &'a str)> {
+    if ctx.body_scope == crate::parser::oracle_ir::context::BodyScope::ModalMode {
+        return None;
+    }
+    let (rest, _) = nom::branch::alt((
+        |input| crate::parser::oracle_target::parse_word_bounded(input, "them"),
+        |input| crate::parser::oracle_target::parse_word_bounded(input, "it"),
+    ))
+    .parse(phrase_lower)
+    .ok()?;
+    let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+        return None;
+    };
+    // Eligibility comes first: a candidate whose own filter reads a declared
+    // slot is never an antecedent (referents never chain), so it is not
+    // evidence either way.
+    let eligible: Vec<&crate::parser::oracle_ir::context::DeclaredSlotEntry> = entries
+        .iter()
+        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+    // An incomplete registry is not a signal: any eligible entry without a
+    // chain-wide index means the numbered subset does not name the chain's
+    // slots, so nothing is bound on a guess. Exactly one numbered candidate
+    // binds; zero or several decline.
+    let slots = eligible
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<Option<Vec<usize>>>()?;
+    match slots.as_slice() {
+        [slot] => Some((*slot, rest)),
+        _ => None,
+    }
 }
 
 /// CR 115.1: does this clause announce a target of its OWN — an instance of the
@@ -36561,19 +36674,18 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
 /// so "it" names the source object, not the chain tracked set. Nearest-first
 /// scan mirrors the `draw_object_count_filter` precedent; using the same
 /// publisher set as the tracked-set rewrite keeps both branches consistent
-/// about what "affected objects" means.
-fn nearest_publisher_is_self_move(defs: &[AbilityDefinition]) -> bool {
+/// about what "affected objects" means. Returns the zone the source moved to.
+fn nearest_self_move_destination(defs: &[AbilityDefinition]) -> Option<Zone> {
     defs.iter()
         .rev()
         .find(|d| publishes_tracked_set_from_resolution(&d.effect))
-        .is_some_and(|d| {
-            matches!(
-                &*d.effect,
-                Effect::ChangeZone {
-                    target: TargetFilter::SelfRef,
-                    ..
-                }
-            )
+        .and_then(|d| match &*d.effect {
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                destination,
+                ..
+            } => Some(*destination),
+            _ => None,
         })
 }
 
@@ -37466,9 +37578,8 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect, cast_anaphor_is_ex
 /// "Exile ~, then return it to the battlefield" binds "it" to the source
 /// object itself (the thing the prior clause moved), not to the chain tracked
 /// set, whose membership may include unrelated riders (Cold Snap's tap leg).
-/// Non-recursive over CreateDelayedTrigger, mirroring
-/// [`rewrite_parent_targets_to_tracked_set`]: a delayed payload keeps its own
-/// CR 603.7c referent machinery (Aetherling, Otherworldly Journey).
+/// Non-recursive over CreateDelayedTrigger: a delayed payload is rewritten by
+/// [`rewrite_delayed_singular_recall_to_self`].
 fn rewrite_singular_battlefield_recall_to_self(effect: &mut Effect) {
     if let Effect::ChangeZone {
         target,
@@ -37479,6 +37590,28 @@ fn rewrite_singular_battlefield_recall_to_self(effect: &mut Effect) {
         if matches!(target, TargetFilter::ParentTarget) {
             *target = TargetFilter::SelfRef;
         }
+    }
+}
+
+/// The delayed form of [`rewrite_singular_battlefield_recall_to_self`] (Aetherling,
+/// Noctis): `origin` is the zone the self-move put the source in.
+fn rewrite_delayed_singular_recall_to_self(effect: &mut Effect, expected: Zone) {
+    let Effect::CreateDelayedTrigger {
+        effect: payload, ..
+    } = effect
+    else {
+        return;
+    };
+    if let Effect::ChangeZone {
+        target: target @ TargetFilter::ParentTarget,
+        destination: Zone::Battlefield,
+        origin: origin @ None,
+        ..
+    } = &mut *payload.effect
+    {
+        // CR 400.7j + CR 603.7c: "it" after a self-move is the moved card; the origin guard keeps a card that already left that zone.
+        *target = TargetFilter::SelfRef;
+        *origin = Some(expected);
     }
 }
 

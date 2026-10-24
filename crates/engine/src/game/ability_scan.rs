@@ -4991,6 +4991,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         FilterProp::PtComparison { value, .. } => scan_quantity_expr(value, mode),
 
         // --- Box<TargetFilter>-bearing: recurse (a nested Typed could be projected).
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // any player-resource read it carries is reached by the same recursion.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::CanEnchant { target } => scan_target_filter(target, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DifferentNameFrom { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DistinctFrom { reference } => scan_target_filter(reference, FilterReadContext::LiveBoardCensus, mode),

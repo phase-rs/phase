@@ -5101,6 +5101,11 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { reference: f }
         | FilterProp::TargetsOnly { filter: f }
         | FilterProp::Targets { filter: f } => target_filter_reads_life_total(f),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`,
+        // so a life-reading host predicate is routed the same way.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: f },
+        } => target_filter_reads_life_total(f),
         // Multi-target group constraint carries an OPTIONAL reference filter.
         FilterProp::SharesQuality { reference, .. } => reference
             .as_deref()
