@@ -86,13 +86,13 @@ pub enum TriggerEventKey {
     /// CR 701.8: A permanent was destroyed.
     Destroyed,
     /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
-    /// event published by every control-changing instruction (`GainControl`,
-    /// `ExchangeControl`, the cleanup reversion of an "until end of turn"
-    /// control effect).
+    /// event published by the control-changing instruction handlers
+    /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
+    /// of turn" control effect).
     /// NOTE: Control changes that publish no `ControllerChanged` event
-    /// (static / Aura control, CR 800.4a elimination) do NOT flow through this
-    /// bucket — they are not caught by `TriggerMode::ChangesController` either
-    /// (see `match_changes_controller`).
+    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
+    /// elimination) do NOT flow through this bucket — they are not caught by
+    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,

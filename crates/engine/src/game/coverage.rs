@@ -7867,9 +7867,10 @@ fn trigger_mode_is_supported(
 /// triggering event is not published for every way the game can produce it, so
 /// the printed ability would silently miss real occurrences. `Gains` of a
 /// `ChangesController` trigger fires on `GameEvent::ControllerChanged`, which
-/// spell/effect control changes publish but layer-2 control-changing effects
-/// (CR 613.1b: Confiscate's "You control enchanted permanent", Control Magic)
-/// do not: `layers.rs` only assigns `obj.controller`. Tracked upstream as
+/// spell/effect control changes publish but control the layer pass assigns or
+/// retires does not (CR 613.1b: Confiscate's "You control enchanted permanent",
+/// Control Magic, a lapsed `ForAsLongAs` duration): `layers.rs` only assigns
+/// `obj.controller` and diffs the settled controllers. Tracked upstream as
 /// phase-rs/phase#9903; lift this when static/layer control changes publish
 /// `ControllerChanged`. The `Loses` side is not charged here. The runtime
 /// matcher stays registered so the effect-driven control changes still fire it.

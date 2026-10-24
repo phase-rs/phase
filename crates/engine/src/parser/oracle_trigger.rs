@@ -20175,7 +20175,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 603.2 + CR 603.10 + CR 603.10d: "When[ever] you lose control of ~" /
     // "When[ever] you gain control of ~[ from another player]". Maps to
     // ChangesController, which fires on the `ControllerChanged` event published by
-    // the control-changing instructions (not by layer-2 static control, #9903).
+    // the control-changing instructions (not by control the layer pass assigns or
+    // retires, #9903).
     // valid_card = SelfRef gates the trigger to
     // changes on this specific object; the `side` names which endpoint of the
     // change is "you" (CR 603.3a: the trigger's controller). "From another player"
