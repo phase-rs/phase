@@ -6595,8 +6595,7 @@ fn replacement_valid_card_matches(
     // type (`SelfRef`, a "card" filter), is not touched; a placement on a
     // player has no object and fails the filter as before.
     if repl_def.event == ReplacementEvent::AddCounter
-        && filter.population_zones().is_empty()
-        && super::filter::filter_implies_battlefield_permanent(filter)
+        && super::filter::filter_denotes_battlefield_permanent(filter)
         && !event
             .affected_object_id()
             .and_then(|oid| state.objects.get(&oid))

@@ -559,6 +559,7 @@ mod heroic_sacrifice_redirect;
 mod hit_the_mother_lode;
 mod hogaak_cant_spend_mana_1095;
 mod hollow_one_cost_reduction;
+mod horobi_becomes_target_battlefield_only;
 mod howlsquad_max_speed_reads_controller;
 mod hundred_battle_veteran_counter_kind_gate;
 mod hunters_insight_combat_draw;
