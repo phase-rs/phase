@@ -260,11 +260,7 @@ pub(crate) fn change_zone_all_player_scope(
             ability,
             &TargetFilter::ParentTargetOwner,
         ),
-        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ScopedPlayer,
-        ),
+        TargetFilter::ScopedPlayer => ability.scoped_player.or(Some(ability.controller)),
         _ => None,
     }
 }
@@ -592,12 +588,29 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
-fn publish_finalized_owner_library_subjects(
+pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
     objects: &[ObjectId],
 ) {
-    let participants = super::prospective_subject_participants(state, ability, objects);
+    let mut participants = super::prospective_subject_participants(state, ability, objects);
+    // CR 701.24d: even when the zone is empty, the owner must be a recorded
+    // participant so the terminal owner-library shuffle includes their
+    // (empty) library in the shuffle. `collect_filter_participants` does not
+    // add players for a bare `TargetFilter::Controller` target, so an empty
+    // zone would otherwise publish nobody and the owner's shuffle would be
+    // dropped.
+    if objects.is_empty() {
+        if let Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            ..
+        } = &ability.effect
+        {
+            participants.push(ability.controller);
+        }
+    }
+    participants.sort_unstable();
+    participants.dedup();
     super::publish_tracked_set_for_resolution(
         state,
         ability,
