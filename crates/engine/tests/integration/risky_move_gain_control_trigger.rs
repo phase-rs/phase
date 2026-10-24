@@ -679,6 +679,21 @@ fn r6_the_gainers_krarks_thumb_applies() {
 #[test]
 fn r7_the_previous_controllers_krarks_thumb_does_not_apply() {
     let mut board = Board::new(Opts::on_battlefield(P0).thumb(P0));
+    // Reach guard: the previous controller's Krark's Thumb is on the battlefield with its
+    // replacement, so the missing keep choice below is owed to who controls it, not to a
+    // Thumb that was never installed.
+    let thumb = board
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Krark's Thumb")
+        .expect("Krark's Thumb is in the game");
+    assert_eq!(thumb.zone, Zone::Battlefield);
+    assert_eq!(thumb.controller, P0);
+    assert!(
+        !thumb.base_replacement_definitions.is_empty(),
+        "Krark's Thumb carries its flip replacement"
+    );
     board.drive_to_prompt();
     let chosen = board.creatures[1][0];
     board.pick_creature(P1, chosen);
