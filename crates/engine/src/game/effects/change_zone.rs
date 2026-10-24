@@ -949,6 +949,7 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            super::settle_empty_forwarded_zone_result(state, ability.source_id);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1361,6 +1362,7 @@ pub fn resolve(
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    super::bind_warp_forwarded_zone_group(state, ability, &logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
@@ -1550,6 +1552,7 @@ pub fn resolve(
         &mut events[logical_group_event_start..],
     )
     .expect("completed ChangeZone owns every terminal member outcome");
+    super::settle_forwarded_zone_result(state, &logical_zone_change_group);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

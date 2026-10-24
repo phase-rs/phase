@@ -6346,13 +6346,16 @@ pub(crate) fn create_warp_delayed_trigger(
             permission: CastingPermission::WarpExile {
                 castable_after_turn: state.turn_number,
             },
-            target: crate::types::ability::TargetFilter::SelfRef,
-            grantee: crate::types::ability::PermissionGrantee::AbilityController,
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
         },
     ));
 
     let mut delayed_ability =
         ResolvedAbility::new(*exile_def.effect, vec![], object_id, controller);
+    // CR 702.185a + CR 400.7j: the right belongs to the card this delayed
+    // instruction actually exiles, not merely the current same-ID holder.
+    delayed_ability.forward_result = true;
     if let Some(sub) = exile_def.sub_ability {
         delayed_ability = delayed_ability.sub_ability(ResolvedAbility::new(
             *sub.effect,
@@ -8469,7 +8472,7 @@ mod tests {
     #[test]
     fn warp_exile_does_not_emit_airbend_event() {
         // CR 702.185a: WarpExile permissions should NOT trigger Airbend events.
-        use crate::types::ability::{CastingPermission, Effect, TargetFilter};
+        use crate::types::ability::CastingPermission;
 
         let mut state = setup();
         let obj_id = create_object(
@@ -8477,24 +8480,18 @@ mod tests {
             CardId(1),
             PlayerId(0),
             "Warp Card".to_string(),
-            Zone::Exile,
-        );
-
-        let ability = ResolvedAbility::new(
-            Effect::GrantCastingPermission {
-                permission: CastingPermission::WarpExile {
-                    castable_after_turn: 1,
-                },
-                target: TargetFilter::SelfRef,
-                grantee: crate::types::ability::PermissionGrantee::AbilityController,
-            },
-            vec![],
-            obj_id,
-            PlayerId(0),
+            Zone::Battlefield,
         );
         let mut events = Vec::new();
-
-        crate::game::effects::grant_permission::resolve(&mut state, &ability, &mut events).unwrap();
+        create_warp_delayed_trigger(&mut state, obj_id, PlayerId(0), &mut events);
+        state.phase = Phase::End;
+        assert!(!check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged { phase: Phase::End }]
+        )
+        .is_empty());
+        resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
 
         // Verify permission was granted
         let obj = state.objects.get(&obj_id).unwrap();
@@ -8587,6 +8584,10 @@ mod tests {
             Zone::Battlefield,
             "a blinked warp creature must NOT be exiled by the stale delayed trigger"
         );
+        assert!(state.objects[&obj_id]
+            .casting_permissions
+            .iter()
+            .all(|permission| !matches!(permission, CastingPermission::WarpExile { .. })));
     }
 
     #[test]

@@ -925,6 +925,149 @@ pub(super) fn restore_continuation_trigger_firing(
     }
 }
 
+fn is_warp_exile_grant(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.effect,
+        Effect::GrantCastingPermission {
+            permission: crate::types::ability::CastingPermission::WarpExile { .. },
+            ..
+        }
+    )
+}
+
+fn warp_grant_member(
+    ability: &ResolvedAbility,
+) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+    if !is_warp_exile_grant(ability) {
+        return None;
+    }
+    let identity = &ability.trigger_source.as_ref()?.identity;
+    (identity.expected_zone == Zone::Battlefield
+        && identity.reference.object_id == ability.source_id)
+        .then_some(identity.reference)
+}
+
+/// CR 702.185a + CR 603.7c: recognize only the captured delayed
+/// battlefield exile and its immediate Warp permission, including old saves.
+fn warp_exile_producer_member(
+    ability: &ResolvedAbility,
+) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+    if !matches!(
+        ability.effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let child = ability.sub_ability.as_deref()?;
+    if !matches!(
+        child.effect,
+        Effect::GrantCastingPermission {
+            target: TargetFilter::SelfRef | TargetFilter::ParentTarget,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let member = warp_grant_member(child)?;
+    let identity = &ability.trigger_source.as_ref()?.identity;
+    (ability.source_id == member.object_id
+        && identity.reference == member
+        && identity.expected_zone == Zone::Battlefield)
+        .then_some(member)
+}
+
+fn normalize_warp_grant(ability: &mut ResolvedAbility) {
+    if let Effect::GrantCastingPermission {
+        target, grantee, ..
+    } = &mut ability.effect
+    {
+        *target = TargetFilter::ParentTarget;
+        *grantee = crate::types::ability::PermissionGrantee::ObjectOwner;
+    }
+}
+
+/// CR 400.7j + CR 702.185a: the local group is bound before replacement
+/// can run; no other group's events can settle this selected producer.
+pub(super) fn bind_warp_forwarded_zone_group(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    group: &crate::types::game_state::LogicalZoneChangeGroup,
+) {
+    let Some(member) = warp_exile_producer_member(ability) else {
+        return;
+    };
+    if group.prospective_battlefield_members.len() != 1
+        || group.prospective_battlefield_members[0].identity != member
+    {
+        return;
+    }
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        if warp_grant_member(&frame.pending.chain) == Some(member) {
+            if let Some(marker) = frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .as_mut()
+            {
+                if marker.producer == member.object_id
+                    && marker.selected.as_deref() == Some(&[member][..])
+                    && marker.group.is_none()
+                {
+                    marker.group = Some(group.logical_group_id);
+                }
+            }
+        }
+    }
+}
+
+/// CR 400.7j: Exile has no battlefield-entry stamp. Authenticate precisely
+/// the captured departure and checked immediate successor in that public zone.
+fn warp_exile_result(
+    state: &GameState,
+    member: crate::types::identifiers::ObjectIncarnationRef,
+    records: &[crate::types::game_state::ZoneChangeRecord],
+) -> ForwardedResultContext {
+    let mut result = ForwardedResultContext {
+        targets: Vec::new(),
+        object_incarnations: Vec::new(),
+    };
+    let [record] = records else {
+        return result;
+    };
+    let Some(source) = record.trigger_source_context() else {
+        return result;
+    };
+    if record.object_id != member.object_id
+        || record.from_zone != Some(Zone::Battlefield)
+        || record.to_zone != Zone::Exile
+        || source.identity.reference != member
+        || source.identity.expected_zone != Zone::Battlefield
+    {
+        return result;
+    }
+    let Some(incarnation) = member.incarnation.checked_add(1) else {
+        return result;
+    };
+    let pin = crate::types::identifiers::ObjectIncarnationRef::of(member.object_id, incarnation);
+    if pin.is_current(state)
+        && state.exile.contains(&member.object_id)
+        && state
+            .objects
+            .get(&member.object_id)
+            .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        result.targets.push(TargetRef::Object(member.object_id));
+        result.object_incarnations.push(pin);
+    }
+    result
+}
+
 pub(crate) fn settle_forwarded_zone_result(
     state: &mut GameState,
     group: &crate::types::game_state::LogicalZoneChangeGroup,
@@ -936,6 +1079,41 @@ pub(crate) fn settle_forwarded_zone_result(
         return;
     };
     if marker.group != Some(group.logical_group_id) {
+        return;
+    }
+    if let Some(child) = state
+        .active_ability_continuation()
+        .map(|pending| &pending.chain)
+        .filter(|child| is_warp_exile_grant(child))
+    {
+        let Some(member) = warp_grant_member(child) else {
+            return;
+        };
+        if marker.producer != member.object_id
+            || marker.selected.as_deref() != Some(&[member][..])
+            || group.prospective_battlefield_members.len() != 1
+            || group.prospective_battlefield_members[0].identity != member
+            || !group.immediately_after_latched
+            || group.terminal_outcomes.len() != 1
+        {
+            return;
+        }
+        use crate::types::game_state::LogicalZoneChangeTerminalOutcome;
+        let result = match group.terminal_outcomes[0] {
+            LogicalZoneChangeTerminalOutcome::Pending => return,
+            LogicalZoneChangeTerminalOutcome::Moved { .. } => warp_exile_result(
+                state,
+                member,
+                &crate::types::game_state::settled_logical_zone_change_records(group),
+            ),
+            LogicalZoneChangeTerminalOutcome::Prevented
+            | LogicalZoneChangeTerminalOutcome::Remained
+            | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            },
+        };
+        bind_completed_forwarded_zone_result(state, result);
         return;
     }
     let result = forwarded_zone_result_from_events(
@@ -1227,21 +1405,131 @@ fn park_forwarded_zone_result_on_active_continuation(
     }
 }
 
+/// Select the captured identity before replacement consumes its boundary.
+/// Ungrouped historical tails use the canonical constructor with their typed
+/// source; they never discover an earlier birth by inspecting current Exile.
+pub(crate) fn warp_zone_delivery_from_replacement(
+    state: &GameState,
+) -> Option<crate::types::game_state::PendingZoneChangeDelivery> {
+    let member = state
+        .resolution_stack
+        .active_ability_continuation_or_post_replacement_child()
+        .and_then(|frame| warp_grant_member(&frame.pending.chain));
+    match member {
+        Some(member) => state.pending_zone_change_delivery_from_replacement_for_member(member),
+        None => state.pending_zone_change_delivery_from_replacement(),
+    }
+}
+
 /// CR 614.6: a replaced move settles its rider from its own terminal delivery slice.
+pub(crate) fn normalize_warp_zone_delivery_tail(
+    state: &mut GameState,
+    delivery: &crate::types::game_state::PendingZoneChangeDelivery,
+) {
+    if !matches!(delivery.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange {
+        object_id, from: Zone::Battlefield, to: Zone::Exile, ..
+    } if object_id == delivery.member.object_id)
+    {
+        return;
+    }
+    let Some((frame, group)) = state
+        .resolution_stack
+        .ability_continuation_outside_active_change_zone_delivery_mut(delivery)
+    else {
+        return;
+    };
+    let tail = &mut frame.pending.chain;
+    if warp_grant_member(tail) != Some(delivery.member)
+        || !matches!(
+            tail.effect,
+            Effect::GrantCastingPermission {
+                target: TargetFilter::SelfRef | TargetFilter::ParentTarget,
+                ..
+            }
+        )
+        || tail.context.forwarded_result_context.is_some()
+    {
+        return;
+    }
+    if tail
+        .context
+        .pending_forwarded_zone_result
+        .as_ref()
+        .is_some_and(|marker| {
+            marker.producer != delivery.member.object_id
+                || marker.selected.as_deref() != Some(&[delivery.member][..])
+                || marker.group != group
+        })
+    {
+        return;
+    }
+    // CR 702.185a + CR 400.7j: normalize before resume consumes the retained
+    // parent boundary; neither an Exile holder nor a buried same-source tail
+    // can manufacture the selected departure's earning proof.
+    normalize_warp_grant(tail);
+    tail.replace_target_occurrences(Vec::new());
+    tail.context.pending_forwarded_zone_result =
+        Some(crate::types::ability::PendingForwardedZoneResult {
+            producer: delivery.member.object_id,
+            selected: Some(vec![delivery.member]),
+            group,
+        });
+}
+
+/// CR 614.6 + CR 400.7j: only explicit parent completion settles its own
+/// retained boundary. A replacement child's move cannot certify that parent.
 pub(crate) fn settle_replaced_forwarded_zone_delivery(
     state: &mut GameState,
-    member: crate::types::identifiers::ObjectIncarnationRef,
+    delivery: &crate::types::game_state::PendingZoneChangeDelivery,
+    completion: crate::types::game_state::ZoneMoveCompletion,
     delivery_events: &[GameEvent],
 ) {
+    let member = delivery.member;
+    if delivery
+        .terminal_completion
+        .is_some_and(|retained| retained != completion)
+    {
+        return;
+    }
     let owns_delivery = state
         .active_ability_continuation()
         .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
         .is_some_and(|marker| {
-            marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..])
+            marker.producer == member.object_id
+                && marker.group.is_none()
+                && marker.selected.as_deref() == Some(&[member][..])
         });
     if owns_delivery {
-        let result =
-            forwarded_zone_result_from_events(state, Some(&[member]), delivery_events.iter());
+        let result = if state
+            .active_ability_continuation()
+            .is_some_and(|pending| is_warp_exile_grant(&pending.chain))
+        {
+            if state
+                .active_ability_continuation()
+                .and_then(|pending| warp_grant_member(&pending.chain))
+                != Some(member)
+                || !matches!(delivery.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange {
+                    object_id, from: Zone::Battlefield, to: Zone::Exile, ..
+                } if object_id == member.object_id)
+            {
+                return;
+            }
+            let records: Vec<_> =
+                if completion == crate::types::game_state::ZoneMoveCompletion::Moved {
+                    delivery_events
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::ZoneChanged { record, .. } => Some((**record).clone()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            warp_exile_result(state, member, &records)
+        } else {
+            forwarded_zone_result_from_events(state, Some(&[member]), delivery_events.iter())
+        };
         bind_completed_forwarded_zone_result(state, result);
     }
 }
@@ -1319,6 +1607,18 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
+        // CR 608.2c + CR 702.185a: an unresolved retained parent still owns
+        // its grant. It cannot enter the generic orphan-to-empty retirement.
+        if state.active_ability_continuation().is_some_and(|pending| {
+            is_warp_exile_grant(&pending.chain)
+                && pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .is_some()
+        }) {
+            return;
+        }
         // Each sidecar channel is extended only when it is live: the linked
         // batch when the detached tail holds a linked-exile consumer, the
         // created-token union when the driver opened it.
@@ -21747,6 +22047,23 @@ fn resolve_chain_body(
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
+    // CR 702.185a: old typed delayed roots acquire the same selected-result
+    // dependency before they attempt the move. No historical move is inferred.
+    let normalized_warp;
+    let ability = if warp_exile_producer_member(ability).is_some() {
+        let mut normalized = ability.clone();
+        normalized.forward_result = true;
+        normalize_warp_grant(
+            normalized
+                .sub_ability
+                .as_deref_mut()
+                .expect("recognized immediate Warp grant"),
+        );
+        normalized_warp = normalized;
+        &normalized_warp
+    } else {
+        ability
+    };
     validate_addressed_quantity_reads(state, ability)?;
     let mut progress = ResolutionProgress::Complete;
     let mut tail_ownership = TailOwnership::Caller;
@@ -23542,6 +23859,29 @@ fn resolve_chain_body(
         }
     }
 
+    // CR 608.2c + CR 702.185a: park the one dependent tail before the
+    // producer captures its child boundary. Parent context must be applied
+    // before installing the selected marker, since it replaces child context.
+    let warp_member = warp_exile_producer_member(ability);
+    if let Some(member) = warp_member {
+        let mut tail = ability
+            .sub_ability
+            .as_deref()
+            .expect("recognized Warp tail")
+            .clone();
+        apply_parent_chain_context(&mut tail, ability, None, state);
+        tail.replace_target_occurrences(Vec::new());
+        tail.context.forwarded_result_context = None;
+        tail.context.pending_forwarded_zone_result =
+            Some(crate::types::ability::PendingForwardedZoneResult {
+                producer: member.object_id,
+                selected: Some(vec![member]),
+                group: None,
+            });
+        state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+        tail_ownership = TailOwnership::Transferred;
+    }
+
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
     // CR 608.2e: a generated seat leg of a paused player-scope token clause
@@ -24033,7 +24373,9 @@ fn resolve_chain_body(
                     match resolved {
                         Ok(step) => {
                             progress = step.progress;
-                            tail_ownership = step.tail;
+                            if tail_ownership == TailOwnership::Caller {
+                                tail_ownership = step.tail;
+                            }
                             if iterations == 1 {
                                 immediate_effect_result = step.result;
                             }
@@ -24233,6 +24575,11 @@ fn resolve_chain_body(
         &linked_batch_owned
     };
     let result_context_owned;
+    // A completed ChangeZone publishes its own result even when settlement
+    // changed the pre-existing continuation and the legacy boundary therefore
+    // classified that frame mutation as queued. The result proves completion;
+    // absence of a new prompt alone does not.
+    let completed_effect_result = immediate_effect_result.is_some();
     let ability = if let Some(result) = immediate_effect_result {
         let mut owned = ability.clone();
         owned.context.prior_effect_result = Some(result);
@@ -24618,7 +24965,35 @@ fn resolve_chain_body(
     }
 
     match tail_ownership {
-        TailOwnership::Transferred => return Ok(progress),
+        TailOwnership::Transferred => {
+            if warp_member.is_some()
+                && (!progress.is_pending() || completed_effect_result)
+                && !waits_for_resolution_choice(&state.waiting_for)
+                && state
+                    .active_ability_continuation()
+                    .is_some_and(|pending| warp_grant_member(&pending.chain) == warp_member)
+            {
+                // A completed no-move branch has no logical group. Publish its
+                // explicit empty result before the ordinary depth-1 drain.
+                if state.active_ability_continuation().is_some_and(|pending| {
+                    pending
+                        .chain
+                        .context
+                        .pending_forwarded_zone_result
+                        .as_ref()
+                        .is_some_and(|marker| marker.group.is_none())
+                }) {
+                    settle_empty_forwarded_zone_result(state, ability.source_id);
+                }
+                drain_pending_continuation(state, events);
+                return Ok(if waits_for_resolution_choice(&state.waiting_for) {
+                    ResolutionProgress::Waiting
+                } else {
+                    ResolutionProgress::Complete
+                });
+            }
+            return Ok(progress);
+        }
         TailOwnership::Caller => {}
     }
 
@@ -28671,6 +29046,479 @@ mod tests {
         ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
         ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    /// CR 608.2c + CR 702.185a: pending parent delivery retains its dependent tail.
+    #[test]
+    fn warp_grouped_and_authentic_ungrouped_pauses_complete_once_with_independent_draw() {
+        use crate::types::ability::{CastingPermission, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+        for grouped in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let source = scenario
+                .add_creature(P0, "Typed Warp delivery fixture", 7, 5)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(Zone::Exile)
+                        .mode(ReplacementMode::Optional { decline: None }),
+                )
+                .id();
+            scenario.with_library_top(P0, &["Independent sibling Draw", "Reserve"]);
+            let mut runner = scenario.build();
+            crate::game::stack::create_warp_delayed_trigger(
+                runner.state_mut(),
+                source,
+                P0,
+                &mut Vec::new(),
+            );
+            if !grouped {
+                let root = &mut runner.state_mut().delayed_triggers[0].ability;
+                root.forward_result = false;
+                if let Effect::GrantCastingPermission { target, .. } =
+                    &mut root.sub_ability.as_mut().unwrap().effect
+                {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                P0,
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            runner.state_mut().delayed_triggers[0]
+                .ability
+                .sub_ability
+                .as_mut()
+                .unwrap()
+                .sub_ability = Some(Box::new(draw));
+            runner.advance_to_end_step();
+            runner.advance_until_stack_empty();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            let delivery = runner
+                .state()
+                .pending_zone_change_delivery_from_replacement()
+                .unwrap();
+            assert!(delivery.terminal_completion.is_none());
+            for wrong in ["member", "cause", "group", "producer"] {
+                let mut foreign = runner.state().clone();
+                let mut key = delivery.clone();
+                match wrong {
+                    "member" => key.member.incarnation += 1,
+                    "cause" => {
+                        if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                            cause,
+                            ..
+                        } = &mut key.expected_event
+                        {
+                            *cause = Some(ObjectId(999));
+                        }
+                    }
+                    "group" | "producer" => {
+                        let owner = foreign
+                            .resolution_stack
+                            .active_change_zone_or_post_replacement_child()
+                            .unwrap()
+                            .pending
+                            .as_ref()
+                            .unwrap()
+                            .clone();
+                        foreign.take_active_change_zone_frame().unwrap();
+                        let marker = foreign
+                            .active_ability_continuation_frame_mut()
+                            .unwrap()
+                            .pending
+                            .chain
+                            .context
+                            .pending_forwarded_zone_result
+                            .as_mut()
+                            .unwrap();
+                        if wrong == "group" {
+                            marker.group =
+                                Some(crate::types::identifiers::LogicalZoneChangeGroupId(999));
+                        } else {
+                            marker.producer = ObjectId(999);
+                        }
+                        foreign.push_change_zone_iteration(owner);
+                    }
+                    _ => unreachable!(),
+                }
+                let before = foreign.resolution_stack.clone();
+                normalize_warp_zone_delivery_tail(&mut foreign, &key);
+                assert_eq!(
+                    foreign.resolution_stack, before,
+                    "foreign {wrong} cannot normalize or consume another frame"
+                );
+            }
+            if !grouped {
+                runner
+                    .state_mut()
+                    .take_active_change_zone_frame()
+                    .unwrap()
+                    .unwrap();
+                let frame = runner
+                    .state_mut()
+                    .active_ability_continuation_frame_mut()
+                    .unwrap();
+                frame
+                    .pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_mut()
+                    .unwrap()
+                    .group = None;
+                if let Effect::GrantCastingPermission { target, .. } =
+                    &mut frame.pending.chain.effect
+                {
+                    *target = TargetFilter::SelfRef;
+                }
+                let key = warp_zone_delivery_from_replacement(runner.state()).expect(
+                    "typed captured member authenticates the original ungrouped pending boundary",
+                );
+                assert_eq!(key.member, delivery.member);
+                normalize_warp_zone_delivery_tail(runner.state_mut(), &key);
+            }
+            let before = runner.state().resolution_stack.clone();
+            for _ in 0..2 {
+                drain_pending_continuation(runner.state_mut(), &mut Vec::new());
+            }
+            assert_eq!(
+                runner.state().resolution_stack,
+                before,
+                "pending is never completed-empty"
+            );
+            let action = crate::ai_support::legal_actions(runner.state())
+                .into_iter()
+                .find(|action| matches!(action, GameAction::ChooseReplacement { index: 1 }))
+                .unwrap();
+            runner.act(action).unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+            assert_eq!(
+                runner.state().objects[&source]
+                    .casting_permissions
+                    .iter()
+                    .filter(|permission| matches!(permission, CastingPermission::WarpExile { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                1,
+                "independent sibling completes after the dependent grant"
+            );
+            drain_pending_continuation(runner.state_mut(), &mut Vec::new());
+            assert_eq!(runner.state().players[0].hand.len(), 1);
+            assert_eq!(
+                runner.state().objects[&source].casting_permissions.len(),
+                1,
+                "completed own result drains once"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+        }
+    }
+
+    /// CR 614.6 + CR 702.185a: another instruction's movement does not earn this parent's grant.
+    #[test]
+    fn warp_parent_remained_cannot_borrow_child_move_and_keeps_independent_draw() {
+        use crate::types::ability::{CastingPermission, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+        for grouped in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let source = scenario
+                .add_creature(P0, "Replacement-child moved member", 7, 5)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(Zone::Exile)
+                        .mode(ReplacementMode::Optional { decline: None }),
+                )
+                .id();
+            scenario.with_library_top(P0, &["Independent completed-empty Draw", "Reserve"]);
+            let mut runner = scenario.build();
+            crate::game::stack::create_warp_delayed_trigger(
+                runner.state_mut(),
+                source,
+                P0,
+                &mut Vec::new(),
+            );
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                P0,
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            runner.state_mut().delayed_triggers[0]
+                .ability
+                .sub_ability
+                .as_mut()
+                .unwrap()
+                .sub_ability = Some(Box::new(draw));
+            runner.advance_to_end_step();
+            runner.advance_until_stack_empty();
+            let original = runner
+                .state()
+                .pending_zone_change_delivery_from_replacement()
+                .unwrap();
+            if !grouped {
+                runner
+                    .state_mut()
+                    .take_active_change_zone_frame()
+                    .unwrap()
+                    .unwrap();
+                let chain = &mut runner
+                    .state_mut()
+                    .active_ability_continuation_frame_mut()
+                    .unwrap()
+                    .pending
+                    .chain;
+                chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_mut()
+                    .unwrap()
+                    .group = None;
+                if let Effect::GrantCastingPermission { target, .. } = &mut chain.effect {
+                    *target = TargetFilter::SelfRef;
+                }
+            }
+            let mut child_events = Vec::new();
+            crate::game::zones::move_to_zone(
+                runner.state_mut(),
+                source,
+                Zone::Exile,
+                &mut child_events,
+            );
+            assert!(child_events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+            assert!(!original.member.is_current(runner.state()));
+            let retained = warp_zone_delivery_from_replacement(runner.state()).unwrap();
+            assert_eq!(retained.member, original.member);
+            assert!(retained.terminal_completion.is_none(), "typed ungrouped key selects the still-pending original; it invents no terminal proof after child movement");
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert!(
+                !runner.state().objects[&source]
+                    .casting_permissions
+                    .iter()
+                    .any(|permission| matches!(permission, CastingPermission::WarpExile { .. })),
+                "parent Remained cannot earn from a real replacement child movement"
+            );
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                1,
+                "completed-empty prunes only the dependent grant"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 614.6 + CR 702.185a: explicit terminal proof controls only its dependent instruction.
+    #[test]
+    fn warp_ungrouped_explicit_terminal_and_missing_proof_keep_independent_sibling() {
+        use crate::types::ability::{CastingPermission, PendingForwardedZoneResult};
+        use crate::types::game_state::{
+            PendingZoneChangeDelivery, ResolutionSourceRelatch, ZoneMoveCompletion,
+        };
+        use crate::types::proposed_event::ProposedEvent;
+        for terminal in [
+            Some(ZoneMoveCompletion::Moved),
+            Some(ZoneMoveCompletion::Remained),
+            Some(ZoneMoveCompletion::Prevented),
+            None,
+        ] {
+            let mut scenario = GameScenario::new();
+            let source = scenario
+                .add_creature(P0, "Explicit retained terminal member", 7, 5)
+                .id();
+            scenario.with_library_top(P0, &["Independent retained-result Draw", "Reserve"]);
+            let mut state = scenario.build().state().clone();
+            crate::game::stack::create_warp_delayed_trigger(
+                &mut state,
+                source,
+                P0,
+                &mut Vec::new(),
+            );
+            let mut grant = state.delayed_triggers[0]
+                .ability
+                .sub_ability
+                .as_deref()
+                .unwrap()
+                .clone();
+            let member = grant.trigger_source.as_ref().unwrap().identity.reference;
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                P0,
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            grant.sub_ability = Some(Box::new(draw));
+            if let Effect::GrantCastingPermission { target, .. } = &mut grant.effect {
+                *target = TargetFilter::SelfRef;
+            }
+            state.phase = crate::types::phase::Phase::End;
+            assert!(!crate::game::triggers::check_delayed_triggers(
+                &mut state,
+                &[GameEvent::PhaseChanged {
+                    phase: crate::types::phase::Phase::End
+                }]
+            )
+            .is_empty());
+            state.resolving_stack_entry = state.stack.pop_back();
+            assert!(
+                state.resolving_stack_entry.is_some(),
+                "the normal delayed producer supplies the resolving source carrier"
+            );
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(
+                &state.objects[&source],
+            );
+            assert_eq!(
+                state.resolution_source_relatch,
+                Some(ResolutionSourceRelatch {
+                    object_id: source,
+                    original_stamp: member.incarnation,
+                    current_incarnation: pin.incarnation,
+                })
+            );
+            if terminal.is_some() {
+                grant.context.pending_forwarded_zone_result = Some(PendingForwardedZoneResult {
+                    producer: source,
+                    selected: Some(vec![member]),
+                    group: None,
+                });
+            }
+            state.park_ability_continuation(PendingContinuation::new(Box::new(grant), &state));
+            if let Some(completion) = terminal {
+                let mut retained = PendingZoneChangeDelivery::new(
+                    member,
+                    ProposedEvent::zone_change(
+                        source,
+                        Zone::Battlefield,
+                        Zone::Exile,
+                        Some(source),
+                    ),
+                );
+                retained.record_terminal_completion(completion).unwrap();
+                retained.append_delivery_events(&events);
+                settle_replaced_forwarded_zone_delivery(
+                    &mut state,
+                    &retained,
+                    completion,
+                    &retained.delivery_events,
+                );
+                assert!(state
+                    .active_ability_continuation()
+                    .unwrap()
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .is_none());
+            } else {
+                assert!(
+                    warp_zone_delivery_from_replacement(&state).is_none(),
+                    "a bare post-move tail has no retained earning proof"
+                );
+            }
+            let mut forms = vec![
+                state.clone(),
+                serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+                crate::types::game_state::PersistedGameState::capture(state.clone())
+                    .into_game_state()
+                    .unwrap(),
+            ];
+            let mut v1 = serde_json::to_value(&state).unwrap();
+            v1.as_object_mut().unwrap().remove("resolution_stack");
+            v1["resolution_state_version"] = serde_json::json!(1);
+            v1["pending_continuation"] =
+                serde_json::to_value(state.active_ability_continuation().unwrap()).unwrap();
+            forms.push(
+                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(v1)
+                    .unwrap()
+                    .into_game_state(),
+            );
+            for version in [2, 3, 4] {
+                let mut wire = serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap();
+                wire["resolution_state_version"] = serde_json::json!(version);
+                forms.push(
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(wire)
+                        .unwrap()
+                        .into_game_state(),
+                );
+            }
+            for state in &mut forms {
+                drain_pending_continuation(state, &mut Vec::new());
+                assert_eq!(
+                    state.objects[&source]
+                        .casting_permissions
+                        .iter()
+                        .filter(|permission| matches!(
+                            permission,
+                            CastingPermission::WarpExile { .. }
+                        ))
+                        .count(),
+                    usize::from(terminal == Some(ZoneMoveCompletion::Moved)),
+                    "explicit parent terminal controls earning even beside real child movement"
+                );
+                assert_eq!(
+                    state.players[0].hand.len(),
+                    1,
+                    "missing or empty dependent result preserves the independent Draw"
+                );
+                drain_pending_continuation(state, &mut Vec::new());
+                assert_eq!(
+                    state.players[0].hand.len(),
+                    1,
+                    "completed tail drains exactly once"
+                );
+                assert!(state.resolution_stack.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn optional_decline_selector_preserves_none_borrowed_and_owned_branches() {

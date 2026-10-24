@@ -1169,6 +1169,59 @@ impl ResolutionStack {
         }
     }
 
+    /// Read the ungrouped continuation only at the active boundary or beneath
+    /// its direct PostReplacement child. Classification belongs to effects.
+    pub(crate) fn active_ability_continuation_or_post_replacement_child(
+        &self,
+    ) -> Option<&AbilityContinuationFrame> {
+        match self.last() {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            Some(ResolutionFrame::PostReplacement(_)) => match self.active_predecessor() {
+                Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+                Some(_) | None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
+    /// Address only the continuation immediately outside this retained
+    /// delivery's active ChangeZone owner (optionally with its direct
+    /// PostReplacement child), or the corresponding ungrouped pair. An
+    /// unrelated inner child is never skipped to find an outer continuation.
+    pub(crate) fn ability_continuation_outside_active_change_zone_delivery_mut(
+        &mut self,
+        delivery: &crate::types::game_state::PendingZoneChangeDelivery,
+    ) -> Option<(
+        &mut AbilityContinuationFrame,
+        Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
+    )> {
+        let top = self.frames.top()?;
+        let owner = match self.frames.get(top)? {
+            ResolutionFrame::PostReplacement(_) => self.frames.below(top)?,
+            ResolutionFrame::ChangeZone(_) | ResolutionFrame::AbilityContinuation(_) => top,
+            _ => return None,
+        };
+        let (continuation, group) = match self.frames.get(owner)? {
+            ResolutionFrame::ChangeZone(frame) => {
+                let pending = frame.pending.as_ref()?;
+                let paused = pending.paused_current.as_ref()?;
+                if !paused.captures(delivery.member, &delivery.expected_event) {
+                    return None;
+                }
+                (
+                    self.frames.below(owner)?,
+                    Some(pending.logical_zone_change_group.logical_group_id),
+                )
+            }
+            ResolutionFrame::AbilityContinuation(_) => (owner, None),
+            _ => return None,
+        };
+        match self.frames.get_mut(continuation) {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some((frame, group)),
+            Some(_) | None => None,
+        }
+    }
+
     /// Returns the active continuation only when the exact discard operation
     /// is its immediate parent. This fixed adjacency is the authority that
     /// permits a Recruit result to cross a replacement pause; arbitrary stack
@@ -3272,6 +3325,23 @@ impl ResolutionStack {
                 Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
                 Some(_) | None => None,
             },
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable mirror of the exact active ChangeZone/direct-child relation.
+    /// Existing top-only accessors deliberately retain their stricter contract.
+    pub fn active_change_zone_or_post_replacement_child_mut(
+        &mut self,
+    ) -> Option<&mut ChangeZoneFrame> {
+        let top = self.frames.top()?;
+        let owner = match self.frames.get(top)? {
+            ResolutionFrame::ChangeZone(_) => top,
+            ResolutionFrame::PostReplacement(_) => self.frames.below(top)?,
+            _ => return None,
+        };
+        match self.frames.get_mut(owner) {
+            Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
             Some(_) | None => None,
         }
     }

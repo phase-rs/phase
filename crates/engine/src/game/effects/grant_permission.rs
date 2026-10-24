@@ -7,6 +7,39 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 
+/// CR 702.185a + CR 400.7j: consume the completed delayed exile's one
+/// immediate successor. The relatch authenticates identity; the forwarded
+/// result, supplied only by the owning terminal delivery, proves earning.
+fn earned_warp_exile_target(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
+    if ability.context.pending_forwarded_zone_result.is_some() {
+        return None;
+    }
+    let captured = &ability.trigger_source.as_ref()?.identity;
+    if captured.expected_zone != crate::types::zones::Zone::Battlefield
+        || captured.reference.object_id != ability.source_id
+    {
+        return None;
+    }
+    let result = ability.context.forwarded_result_context.as_deref()?;
+    let [pin] = result.object_incarnations.as_slice() else {
+        return None;
+    };
+    if result.targets.as_slice() != [TargetRef::Object(ability.source_id)]
+        || pin.object_id != ability.source_id
+        || Some(pin.incarnation) != captured.reference.incarnation.checked_add(1)
+        || !pin.is_current(state)
+        || !state.exile.contains(&pin.object_id)
+        || state.objects.get(&pin.object_id)?.zone != crate::types::zones::Zone::Exile
+    {
+        return None;
+    }
+    let relatch = state.resolution_source_relatch?;
+    (relatch.object_id == pin.object_id
+        && relatch.original_stamp == captured.reference.incarnation
+        && relatch.current_incarnation == pin.incarnation)
+        .then_some(pin.object_id)
+}
+
 #[cfg(test)]
 use crate::game::casting::{can_pay_cost_after_auto_tap, spell_objects_available_to_cast};
 #[cfg(test)]
@@ -84,95 +117,109 @@ pub fn resolve(
     // `ability.targets`. Short-circuit BEFORE the chosen-targets fallback so
     // chained grants don't inherit parent targets via
     // `effects::mod.rs::resolve_ability_chain`.
-    let (target_ids, tracked_set_group): (Vec<_>, Option<TrackedSetId>) = match target_filter {
-        // CR 400.7j: Plot names the exact card its own cost moved.
-        filter @ TargetFilter::CostPaidObject {
-            reference: crate::types::ability::CostPaidObjectRef::Source,
-        } => (
-            crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter),
-            None,
-        ),
-        TargetFilter::SelfRef => (ability.self_ref_binding(state).into_iter().collect(), None),
-        // CR 608.2c: The `TrackedSetId(0)` sentinel binds to the highest tracked
-        // set id — the set the immediately preceding effect in this chain
-        // published. Empty sets are *not* skipped: an empty current set means
-        // the preceding effect affected nothing, not "fall back to a stale
-        // set." This deliberately differs from `targeting::latest_tracked_set_id`
-        // (which skips empties for inline "from among the milled cards"
-        // continuations) — see the regression test
-        // `tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty`.
-        // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
-        // instruction published" — the ordering argument is written once, on
-        // `effects::publish_tracked_set`. Deliberately not routed through
-        // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
-        // under mode scoping not skipping is the correct semantics here.
-        TargetFilter::TrackedSet {
-            id: TrackedSetId(0),
-        } => state
-            .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(id, objects)| (objects.clone(), Some(*id)))
-            .unwrap_or_default(),
-        TargetFilter::TrackedSet { id } => (
-            state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
-            Some(*id),
-        ),
-        TargetFilter::ParentTarget => {
-            let ids: Vec<_> = ability
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(obj_id) => Some(*obj_id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
-            // CR 608.2c: an anaphoric "it"/"this card" with no explicit target
-            // slot (e.g. The Foretold Soldier — "exile it ... it becomes
-            // foretold") binds to the ability's own source, which the preceding
-            // chained ChangeZone left in the new zone (the engine preserves the
-            // ObjectId across zone moves). Guarded on the empty case so grants
-            // that carry explicit object targets (plotted / PlayFromExile) are
-            // unaffected.
-            if ids.is_empty() {
-                (ability.self_ref_binding(state).into_iter().collect(), None)
-            } else {
-                (ids, None)
-            }
-        }
-        TargetFilter::Any | TargetFilter::None if !ability.targets.is_empty() => (
-            ability
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(obj_id) => Some(*obj_id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect(),
-            None,
-        ),
-        TargetFilter::Any | TargetFilter::None => {
-            (ability.self_ref_binding(state).into_iter().collect(), None)
-        }
-        other => {
-            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let (target_ids, tracked_set_group): (Vec<_>, Option<TrackedSetId>) =
+        if matches!(permission, CastingPermission::WarpExile { .. }) {
             (
-                state
-                    .objects
-                    .keys()
-                    .copied()
-                    .filter(|obj_id| {
-                        crate::game::filter::matches_target_filter(state, *obj_id, other, &ctx)
-                    })
+                earned_warp_exile_target(state, ability)
+                    .into_iter()
                     .collect(),
                 None,
             )
-        }
-    };
+        } else {
+            match target_filter {
+                // CR 400.7j: Plot names the exact card its own cost moved.
+                filter @ TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Source,
+                } => (
+                    crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter),
+                    None,
+                ),
+                TargetFilter::SelfRef => {
+                    (ability.self_ref_binding(state).into_iter().collect(), None)
+                }
+                // CR 608.2c: The `TrackedSetId(0)` sentinel binds to the highest tracked
+                // set id — the set the immediately preceding effect in this chain
+                // published. Empty sets are *not* skipped: an empty current set means
+                // the preceding effect affected nothing, not "fall back to a stale
+                // set." This deliberately differs from `targeting::latest_tracked_set_id`
+                // (which skips empties for inline "from among the milled cards"
+                // continuations) — see the regression test
+                // `tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty`.
+                // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
+                // instruction published" — the ordering argument is written once, on
+                // `effects::publish_tracked_set`. Deliberately not routed through
+                // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
+                // under mode scoping not skipping is the correct semantics here.
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                } => state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(id, objects)| (objects.clone(), Some(*id)))
+                    .unwrap_or_default(),
+                TargetFilter::TrackedSet { id } => (
+                    state
+                        .tracked_object_sets
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    Some(*id),
+                ),
+                TargetFilter::ParentTarget => {
+                    let ids: Vec<_> = ability
+                        .targets
+                        .iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(obj_id) => Some(*obj_id),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect();
+                    // CR 608.2c: an anaphoric "it"/"this card" with no explicit target
+                    // slot (e.g. The Foretold Soldier — "exile it ... it becomes
+                    // foretold") binds to the ability's own source, which the preceding
+                    // chained ChangeZone left in the new zone (the engine preserves the
+                    // ObjectId across zone moves). Guarded on the empty case so grants
+                    // that carry explicit object targets (plotted / PlayFromExile) are
+                    // unaffected.
+                    if ids.is_empty() {
+                        (ability.self_ref_binding(state).into_iter().collect(), None)
+                    } else {
+                        (ids, None)
+                    }
+                }
+                TargetFilter::Any | TargetFilter::None if !ability.targets.is_empty() => (
+                    ability
+                        .targets
+                        .iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(obj_id) => Some(*obj_id),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect(),
+                    None,
+                ),
+                TargetFilter::Any | TargetFilter::None => {
+                    (ability.self_ref_binding(state).into_iter().collect(), None)
+                }
+                other => {
+                    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                    (
+                        state
+                            .objects
+                            .keys()
+                            .copied()
+                            .filter(|obj_id| {
+                                crate::game::filter::matches_target_filter(
+                                    state, *obj_id, other, &ctx,
+                                )
+                            })
+                            .collect(),
+                        None,
+                    )
+                }
+            }
+        };
 
     // CR 611.2b: set when a host-bound lifetime was attached below.
     let mut needs_lifetime_check = false;
@@ -187,6 +234,14 @@ pub fn resolve(
         // branch; harmless to precompute for other permissions.
         let derived_foretell = crate::game::casting::foretell_cost(state, obj_id);
         let mut granted = permission.clone();
+        // CR 702.185a: "after the current turn" means the actual exile turn,
+        // including a delayed trigger installed after an End step began.
+        if let CastingPermission::WarpExile {
+            castable_after_turn,
+        } = &mut granted
+        {
+            *castable_after_turn = state.turn_number;
+        }
         // CR 611.2a: refuse a stated lifetime no lifecycle seam can end, rather
         // than attaching it as an unbounded permission. Placed BEFORE any of
         // the stamping below, all of which has side effects on the object
@@ -394,6 +449,170 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::phase::Phase;
     use crate::types::zones::Zone;
+
+    /// CR 702.185a + CR 400.7j: only the completed immediate successor earns the owner right.
+    #[test]
+    fn warp_grant_requires_the_complete_single_immediate_result_and_coherent_relatch() {
+        use crate::types::ability::{ForwardedResultContext, PendingForwardedZoneResult};
+        use crate::types::game_state::ResolutionSourceRelatch;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let mut state = GameState::new_two_player(7185);
+        state.turn_number = 19;
+        let source = create_object(
+            &mut state,
+            CardId(7185),
+            PlayerId(1),
+            "Captured Warp member".into(),
+            Zone::Battlefield,
+        );
+        let captured = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        crate::game::stack::create_warp_delayed_trigger(
+            &mut state,
+            source,
+            PlayerId(0),
+            &mut Vec::new(),
+        );
+        let mut grant = state.delayed_triggers[0]
+            .ability
+            .sub_ability
+            .as_deref()
+            .unwrap()
+            .clone();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        grant.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+            targets: vec![TargetRef::Object(source)],
+            object_incarnations: vec![pin],
+        }));
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id: source,
+            original_stamp: captured.incarnation,
+            current_incarnation: pin.incarnation,
+        });
+        assert_eq!(
+            earned_warp_exile_target(&state, &grant),
+            Some(source),
+            "the authentic complete delivery reaches the grant"
+        );
+        for malformed in [
+            "absent",
+            "empty",
+            "unpinned",
+            "multiple objects",
+            "multiple pins",
+            "foreign",
+            "old pin",
+            "pending",
+            "foreign source",
+            "wrong zone",
+            "wrong relatch",
+            "absent relatch",
+            "overflow",
+        ] {
+            let mut state = state.clone();
+            let mut candidate = grant.clone();
+            match malformed {
+                "absent" => candidate.context.forwarded_result_context = None,
+                "empty" => {
+                    candidate.context.forwarded_result_context =
+                        Some(Box::new(ForwardedResultContext {
+                            targets: Vec::new(),
+                            object_incarnations: Vec::new(),
+                        }))
+                }
+                "unpinned" => candidate
+                    .context
+                    .forwarded_result_context
+                    .as_mut()
+                    .unwrap()
+                    .object_incarnations
+                    .clear(),
+                "multiple objects" => candidate
+                    .context
+                    .forwarded_result_context
+                    .as_mut()
+                    .unwrap()
+                    .targets
+                    .push(TargetRef::Object(source)),
+                "multiple pins" => candidate
+                    .context
+                    .forwarded_result_context
+                    .as_mut()
+                    .unwrap()
+                    .object_incarnations
+                    .push(pin),
+                "foreign" => {
+                    candidate
+                        .context
+                        .forwarded_result_context
+                        .as_mut()
+                        .unwrap()
+                        .object_incarnations[0]
+                        .object_id = ObjectId(99)
+                }
+                "old pin" => {
+                    candidate
+                        .context
+                        .forwarded_result_context
+                        .as_mut()
+                        .unwrap()
+                        .object_incarnations[0] = captured
+                }
+                "pending" => {
+                    candidate.context.pending_forwarded_zone_result =
+                        Some(PendingForwardedZoneResult {
+                            producer: source,
+                            selected: Some(vec![captured]),
+                            group: None,
+                        })
+                }
+                "foreign source" => candidate.source_id = ObjectId(99),
+                "wrong zone" => {
+                    state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+                }
+                "wrong relatch" => {
+                    state
+                        .resolution_source_relatch
+                        .as_mut()
+                        .unwrap()
+                        .original_stamp += 1
+                }
+                "absent relatch" => state.resolution_source_relatch = None,
+                "overflow" => {
+                    candidate
+                        .trigger_source
+                        .as_mut()
+                        .unwrap()
+                        .identity
+                        .reference
+                        .incarnation = u64::MAX
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                earned_warp_exile_target(&state, &candidate),
+                None,
+                "malformed earning proof refuses: {malformed}"
+            );
+            resolve(&mut state, &candidate, &mut Vec::new()).unwrap();
+            assert!(
+                state.objects[&source].casting_permissions.is_empty(),
+                "no raw SelfRef/ParentTarget fallback: {malformed}"
+            );
+        }
+        resolve(&mut state, &grant, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.objects[&source].casting_permissions,
+            vec![CastingPermission::WarpExile {
+                castable_after_turn: 19
+            }]
+        );
+        assert_eq!(
+            state.objects[&source].owner,
+            PlayerId(1),
+            "resolving controller cannot replace object owner authority"
+        );
+    }
 
     /// CR 611.2a default: grantee defaults to the ability controller.
     #[test]

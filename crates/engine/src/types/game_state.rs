@@ -31315,15 +31315,114 @@ impl GameState {
     pub fn pending_zone_change_delivery_from_replacement(
         &self,
     ) -> Option<PendingZoneChangeDelivery> {
+        self.pending_zone_change_delivery_from_replacement_with_member(None)
+    }
+
+    /// Selects a pending key from an authentic ungrouped continuation's typed
+    /// captured member. It never infers that member or past completion from
+    /// the current object, even when a replacement child has moved it.
+    pub(crate) fn pending_zone_change_delivery_from_replacement_for_member(
+        &self,
+        member: ObjectIncarnationRef,
+    ) -> Option<PendingZoneChangeDelivery> {
+        self.pending_zone_change_delivery_from_replacement_with_member(Some(member))
+    }
+
+    fn pending_zone_change_delivery_from_replacement_with_member(
+        &self,
+        captured_member: Option<ObjectIncarnationRef>,
+    ) -> Option<PendingZoneChangeDelivery> {
         let pending = self.pending_replacement.as_ref()?;
         // The owner parked on the record's boundary, which an answered
         // pre-entry choice or a CR 616.1f re-park may have left behind `proposed`.
         let expected_event = pending.delivery_boundary_event().clone();
-        let object_id = match &expected_event {
-            ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+        let (object_id, origin) = match &expected_event {
+            ProposedEvent::ZoneChange {
+                object_id, from, ..
+            } => (*object_id, *from),
             _ => return None,
         };
-        let member = ObjectIncarnationRef::from_object(self.objects.get(&object_id)?);
+        let retained = self
+            .resolution_stack
+            .active_change_zone_or_post_replacement_child()
+            .and_then(|frame| frame.pending.as_ref())
+            .and_then(|owner| owner.paused_current.as_ref())
+            .or_else(|| {
+                let batch = match self.resolution_stack.last() {
+                    Some(crate::types::resolution::ResolutionFrame::BatchDelivery(batch)) => {
+                        Some(batch.as_ref())
+                    }
+                    Some(crate::types::resolution::ResolutionFrame::PostReplacement(_)) => {
+                        match self.resolution_stack.active_predecessor() {
+                            Some(crate::types::resolution::ResolutionFrame::BatchDelivery(
+                                batch,
+                            )) => Some(batch.as_ref()),
+                            Some(_) | None => None,
+                        }
+                    }
+                    Some(_) | None => None,
+                };
+                batch.and_then(|owner| owner.paused_current.as_ref())
+            })
+            .or_else(|| {
+                let entry = self.resolving_stack_entry.as_ref()?;
+                let owed = self.resolving_spell_final_part.as_ref()?;
+                let (_, paused) = owed.pending_adventure_exile.as_ref()?;
+                (entry.id == owed.spell
+                    && entry.id == paused.member.object_id
+                    && owed.stack_incarnation == Some(paused.member.incarnation)
+                    && matches!(
+                        entry.kind,
+                        StackEntryKind::Spell {
+                            casting_variant: CastingVariant::Adventure,
+                            ..
+                        }
+                    ))
+                .then_some(paused)
+            });
+        if let Some(retained) = retained.filter(|delivery| delivery.member.object_id == object_id) {
+            if retained.expected_event != expected_event
+                || captured_member.is_some_and(|member| member != retained.member)
+            {
+                return None;
+            }
+            return Some(retained.clone());
+        }
+        if let Some(captured) = captured_member {
+            let frame = self
+                .resolution_stack
+                .active_ability_continuation_or_post_replacement_child()?;
+            if captured.object_id != object_id
+                || frame
+                    .pending
+                    .chain
+                    .context
+                    .forwarded_result_context
+                    .is_some()
+                || frame
+                    .pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_ref()
+                    .is_some_and(|marker| {
+                        marker.producer != object_id
+                            || marker.selected.as_deref() != Some(&[captured][..])
+                            || marker.group.is_some()
+                    })
+            {
+                return None;
+            }
+            // This is the exact typed continuation's original pending proposal,
+            // not a reconstructed completion. Only the upcoming resume's own
+            // terminal classification and bounded events may complete it.
+            return Some(PendingZoneChangeDelivery::new(captured, expected_event));
+        }
+        let object = self.objects.get(&object_id)?;
+        if object.zone != origin {
+            return None;
+        }
+        let member = ObjectIncarnationRef::from_object(object);
         Some(PendingZoneChangeDelivery::new(member, expected_event))
     }
 
@@ -31385,15 +31484,16 @@ impl GameState {
     ) -> bool {
         let mut occurrence = None;
         let matched = if let Some(paused) = self
-            .active_change_zone_frame_mut()
+            .resolution_stack
+            .active_change_zone_or_post_replacement_child_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            paused.append_delivery_events(delivery_events);
             if paused.face_down_in_exile.is_face_down() {
                 occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
             }
@@ -31415,10 +31515,10 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            paused.append_delivery_events(delivery_events);
             if paused.face_down_in_exile.is_face_down() {
                 occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
             }
@@ -31453,10 +31553,10 @@ impl GameState {
                 .and_then(|owed| owed.pending_adventure_exile.as_mut())
                 .filter(|(_, paused)| paused.captures(member, expected_event))
             {
-                paused.append_delivery_events(delivery_events);
                 paused
                     .record_terminal_completion(terminal_completion)
                     .expect("one Adventure final-part proposal has one terminal completion");
+                paused.append_delivery_events(delivery_events);
                 return true;
             }
         }
@@ -31474,7 +31574,8 @@ impl GameState {
         delivery_events: &[GameEvent],
     ) -> bool {
         if let Some(paused) = self
-            .active_change_zone_frame_mut()
+            .resolution_stack
+            .active_change_zone_or_post_replacement_child_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.member.object_id == member_id)
@@ -39640,6 +39741,273 @@ mod tests {
         );
     }
 
+    fn paused_warp_delivery_fixture() -> (GameState, PendingZoneChangeDelivery) {
+        let mut state = GameState::new_two_player(71);
+        let object = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(0),
+            "Captured permanent".into(),
+            Zone::Battlefield,
+        );
+        let member = ObjectIncarnationRef::from_object(&state.objects[&object]);
+        let expected =
+            ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
+        state.pending_replacement = Some(PendingReplacement {
+            damage_source_context: None,
+            proposed: expected.clone(),
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: Default::default(),
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+        });
+        (state, PendingZoneChangeDelivery::new(member, expected))
+    }
+
+    fn park_warp_delivery_fixture(state: &mut GameState, paused: PendingZoneChangeDelivery) {
+        let object = paused.member.object_id;
+        let group = state.allocate_logical_zone_change_group(&[object]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            return_result_occurrence: None,
+            return_result_process: None,
+            pending_return_result_producer: None,
+            logical_zone_change_group: group,
+            paused_current: Some(paused),
+            remaining: Vec::new(),
+            source_id: object,
+            controller: PlayerId(0),
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZone,
+        });
+    }
+
+    /// CR 400.7j + CR 614.6: keep the original boundary independently of the live successor.
+    #[test]
+    fn retained_zone_delivery_survives_movement_restore_and_direct_child() {
+        let (mut state, mut paused) = paused_warp_delivery_fixture();
+        assert_eq!(
+            state.pending_zone_change_delivery_from_replacement(),
+            Some(paused.clone()),
+            "fresh pre-parking callers keep their original boundary"
+        );
+        let mut events = Vec::new();
+        park_warp_delivery_fixture(&mut state, paused.clone());
+        crate::game::zones::move_to_zone(
+            &mut state,
+            paused.member.object_id,
+            Zone::Exile,
+            &mut events,
+        );
+        paused
+            .record_terminal_completion(ZoneMoveCompletion::Moved)
+            .unwrap();
+        paused.append_delivery_events(&events);
+        paused.count = PausedZoneChangeDeliveryCount::AlreadyCounted;
+        paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        state
+            .active_change_zone_frame_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .paused_current = Some(paused.clone());
+        state
+            .resolution_stack
+            .push_post_replacement(PostReplacementDrainStack::default());
+        assert!(
+            state.active_change_zone_frame().is_none(),
+            "top-only API stays top-only"
+        );
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        for state in [state, restored] {
+            assert!(
+                !paused.member.is_current(&state),
+                "live holder has moved beyond the captured departure"
+            );
+            assert_eq!(
+                state.pending_zone_change_delivery_from_replacement(),
+                Some(paused.clone())
+            );
+            assert_eq!(
+                state.pending_zone_change_delivery_from_replacement_for_member(paused.member),
+                Some(paused.clone())
+            );
+            assert!(state
+                .pending_zone_change_delivery_from_replacement_for_member(ObjectIncarnationRef::of(
+                    paused.member.object_id,
+                    paused.member.incarnation + 1
+                ))
+                .is_none());
+        }
+    }
+
+    /// CR 614.6: a child's movement cannot reclassify an explicitly completed parent.
+    #[test]
+    fn paused_delivery_capture_preserves_parent_terminal_before_child_events() {
+        for completion in [ZoneMoveCompletion::Remained, ZoneMoveCompletion::Prevented] {
+            let (mut state, paused) = paused_warp_delivery_fixture();
+            park_warp_delivery_fixture(&mut state, paused.clone());
+            state
+                .resolution_stack
+                .push_post_replacement(PostReplacementDrainStack::default());
+            let mut child_events = Vec::new();
+            crate::game::zones::move_to_zone(
+                &mut state,
+                paused.member.object_id,
+                Zone::Exile,
+                &mut child_events,
+            );
+            assert!(
+                child_events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+                "real child movement reaches the inference hazard"
+            );
+            assert!(state.capture_paused_zone_change_delivery(
+                paused.member,
+                &paused.expected_event,
+                &child_events,
+                completion
+            ));
+            let captured = state
+                .pending_zone_change_delivery_from_replacement()
+                .unwrap();
+            assert_eq!(captured.terminal_completion, Some(completion));
+            assert_eq!(captured.delivery_events, child_events);
+            assert!(
+                state.capture_paused_zone_change_delivery(
+                    paused.member,
+                    &paused.expected_event,
+                    &[],
+                    completion
+                ),
+                "matching terminal replay remains valid"
+            );
+            let before = state.resolution_stack.clone();
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.capture_paused_zone_change_delivery(
+                    paused.member,
+                    &paused.expected_event,
+                    &child_events,
+                    ZoneMoveCompletion::Moved,
+                );
+            }));
+            assert!(
+                refused.is_err(),
+                "conflicting explicit terminals retain the existing error contract"
+            );
+            assert_eq!(
+                state.resolution_stack, before,
+                "conflict must refuse before appending any event"
+            );
+        }
+    }
+
+    /// CR 608.2c: only the exact instruction's adjacent owner may consume its result.
+    #[test]
+    fn paused_delivery_capture_refuses_foreign_boundary_and_intervening_frame() {
+        let (mut state, paused) = paused_warp_delivery_fixture();
+        park_warp_delivery_fixture(&mut state, paused.clone());
+        for field in ["cause", "actor", "applied", "entry"] {
+            let mut foreign = paused.expected_event.clone();
+            if let ProposedEvent::ZoneChange {
+                cause,
+                performed_by,
+                applied,
+                enter_tapped,
+                ..
+            } = &mut foreign
+            {
+                match field {
+                    "cause" => *cause = Some(ObjectId(99)),
+                    "actor" => *performed_by = Some(PlayerId(1)),
+                    "applied" => {
+                        applied.insert(
+                            crate::types::proposed_event::AppliedReplacementKey::Object {
+                                source: ObjectId(99),
+                                index: 0,
+                            },
+                        );
+                    }
+                    _ => *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped,
+                }
+            }
+            let before = state.resolution_stack.clone();
+            assert!(
+                !state.capture_paused_zone_change_delivery(
+                    paused.member,
+                    &foreign,
+                    &[],
+                    ZoneMoveCompletion::Prevented
+                ),
+                "whole event identity: {field}"
+            );
+            assert_eq!(state.resolution_stack, before);
+        }
+        state.park_ability_continuation(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                paused.member.object_id,
+                PlayerId(0),
+            )),
+            &state,
+        ));
+        state
+            .resolution_stack
+            .push_post_replacement(PostReplacementDrainStack::default());
+        let before = state.resolution_stack.clone();
+        assert!(!state.capture_paused_zone_change_delivery(
+            paused.member,
+            &paused.expected_event,
+            &[],
+            ZoneMoveCompletion::Moved
+        ));
+        assert_eq!(
+            state.resolution_stack, before,
+            "an intervening continuation is never skipped"
+        );
+        state
+            .resolution_stack
+            .take_active_post_replacement()
+            .unwrap();
+        state.take_active_ability_continuation().unwrap();
+        assert!(
+            state.capture_paused_zone_change_delivery(
+                paused.member,
+                &paused.expected_event,
+                &[],
+                ZoneMoveCompletion::Prevented
+            ),
+            "adjacent authentic owner remains reachable"
+        );
+    }
+
     #[test]
     fn paused_zone_change_delivery_derives_a_terminal_outcome_after_resume() {
         let member = ObjectIncarnationRef::of(ObjectId(71), 4);
@@ -39802,6 +40170,35 @@ mod tests {
             })
             .expect("the paused delivery retains its annotated event record");
         assert!(delivered_event.face_down);
+        state
+            .resolution_stack
+            .push_post_replacement(PostReplacementDrainStack::default());
+        assert!(
+            state.capture_paused_zone_change_delivery(
+                member,
+                &expected_event,
+                &[],
+                ZoneMoveCompletion::Moved
+            ),
+            "the exact concealed owner also remains addressable under its direct replacement child"
+        );
+        assert!(state.capture_paused_zone_change_delivery_for_member(object, &[]));
+        assert!(
+            state.zone_changes_this_turn[later_index]
+                .trigger_source_context()
+                .unwrap()
+                .face_down
+        );
+        assert!(
+            !state
+                .zone_changes_this_turn
+                .back()
+                .unwrap()
+                .trigger_source_context()
+                .unwrap()
+                .face_down,
+            "direct-child replay never annotates the same-ID shadow"
+        );
     }
 
     #[test]

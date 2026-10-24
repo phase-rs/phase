@@ -327,7 +327,10 @@ fn handle_replacement_choice_inner(
     // A replacement-paused zone move belongs to its logical owner by both the
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
-    let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    let parked_zone_change_delivery = effects::warp_zone_delivery_from_replacement(state);
+    if let Some(delivery) = parked_zone_change_delivery.as_ref() {
+        effects::normalize_warp_zone_delivery_tail(state, delivery);
+    }
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -450,19 +453,29 @@ fn handle_replacement_choice_inner(
                         }
                     }
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        let delivered = &events[delivery_start..];
+                        let completion = paused.terminal_completion.unwrap_or_else(|| {
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                delivered,
+                            )
+                        });
                         state.capture_paused_zone_change_delivery(
                             paused.member,
                             &paused.expected_event,
-                            &events[delivery_start..],
-                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
-                                paused.member,
-                                &events[delivery_start..],
-                            ),
+                            delivered,
+                            completion,
                         );
+                        let mut completed = paused.clone();
+                        completed
+                            .record_terminal_completion(completion)
+                            .expect("retained parent completion remains authoritative");
+                        completed.append_delivery_events(delivered);
                         effects::settle_replaced_forwarded_zone_delivery(
                             state,
-                            paused.member,
-                            &events[delivery_start..],
+                            paused,
+                            completion,
+                            &completed.delivery_events,
                         );
                     }
                     if let Some(provenance) = parked_sacrifice_provenance {
@@ -1601,13 +1614,21 @@ fn handle_replacement_choice_inner(
                 pending.replacement_queue_tail = None;
             }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                let completion = paused
+                    .terminal_completion
+                    .unwrap_or(crate::types::game_state::ZoneMoveCompletion::Prevented);
                 state.capture_paused_zone_change_delivery(
                     paused.member,
                     &paused.expected_event,
                     &[],
-                    crate::types::game_state::ZoneMoveCompletion::Prevented,
+                    completion,
                 );
-                effects::settle_replaced_forwarded_zone_delivery(state, paused.member, &[]);
+                effects::settle_replaced_forwarded_zone_delivery(
+                    state,
+                    paused,
+                    completion,
+                    &paused.delivery_events,
+                );
             }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive
