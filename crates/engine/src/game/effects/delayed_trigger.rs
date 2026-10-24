@@ -83,15 +83,26 @@ pub fn resolve(
     // nonempty published set. An empty chain id (stale pre-choice publish) must
     // not shadow a later nonempty set (Storm Herald delayed exile).
     let tracked_set_id = if uses_tracked_set {
-        state
-            .chain_tracked_set_id
-            .filter(|id| {
-                state
-                    .tracked_object_sets
-                    .get(id)
-                    .is_some_and(|objects| !objects.is_empty())
-            })
-            .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+        if matches!(
+            &*effect_def.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ) {
+            // CR 400.7j: a payload naming the source finds only what this ability's own move moved, so it binds that publication as is, empty included.
+            state.chain_tracked_set_id
+        } else {
+            state
+                .chain_tracked_set_id
+                .filter(|id| {
+                    state
+                        .tracked_object_sets
+                        .get(id)
+                        .is_some_and(|objects| !objects.is_empty())
+                })
+                .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+        }
     } else {
         None
     };
@@ -261,6 +272,14 @@ pub fn resolve(
                 .find_map(|target| match target {
                     TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
                     TargetRef::Player(_) => None,
+                })
+                // CR 108.3: an untargeted moved object's owner is read from the creation tracked set.
+                .or_else(|| {
+                    tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id))
+                        .and_then(|objects| objects.first())
+                        .and_then(|id| state.objects.get(id))
+                        .map(|obj| obj.owner)
                 })
                 .unwrap_or(ability.controller),
         };
@@ -906,8 +925,21 @@ fn concretize_event_subject_leaves(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
-                if let crate::types::ability::FilterProp::DistinctFrom { reference } = prop {
-                    concretize_event_subject_leaves(reference);
+                match prop {
+                    crate::types::ability::FilterProp::DistinctFrom { reference } => {
+                        concretize_event_subject_leaves(reference);
+                    }
+                    // CR 608.2k + CR 701.3a: the binder counterpart of
+                    // `effects::filter_refs_event_subject`'s Host recursion — a
+                    // mass payload whose host is the trigger event's subject or
+                    // object slot must be rebound to `ParentTarget` too, or it is
+                    // DETECTED (so it takes a creation snapshot) and left
+                    // UNBOUND (so it resolves against the later phase event and
+                    // affects nothing).
+                    crate::types::ability::FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Host { filter },
+                    } => concretize_event_subject_leaves(filter),
+                    _ => {}
                 }
             }
         }
@@ -1754,6 +1786,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
             target,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile,
             ..
@@ -1769,13 +1802,14 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                     bound_target.rebind_tracked_set_sentinel(real_id);
                     bound_target
                 }
-                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
-                    TargetFilter::TrackedSetFiltered {
-                        id: real_id,
-                        filter: Box::new(target.clone()),
-                        caused_by: None,
-                    }
-                }
+                // CR 400.7 + CR 603.7c: keeping `SelfRef` inside the set pins the return to the source incarnation latched at creation, so a card re-exiled meanwhile is a new object.
+                TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::SelfRef => TargetFilter::TrackedSetFiltered {
+                    id: real_id,
+                    filter: Box::new(target.clone()),
+                    caused_by: None,
+                },
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
@@ -1784,7 +1818,8 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 target: bound_target,
                 enters_under: enters_under.clone(),
                 enter_tapped: *enter_tapped,
-                enters_attacking: false,
+                // CR 508.4: a creature returned "attacking" keeps that instruction through the tracked-set upgrade.
+                enters_attacking: *enters_attacking,
                 enter_with_counters: enter_with_counters.clone(),
                 face_down_profile: face_down_profile.clone(),
                 library_position: None,
@@ -1852,6 +1887,29 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
 /// `_ => false` IS CORRECT HERE. `TargetFilter` is a broad, open enum and the
 /// shipped template ends the same way. Do NOT try to exhaust it.
 pub(super) fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
+    filter_refs_parent_object_anaphor_in(filter, HostRelation::Dependency)
+}
+
+/// CR 603.7c: Whether the filter names the referent as the CONDITION'S MOVING
+/// SUBJECT. An attachment host reached through `AttachedTo { to: Host { .. } }`
+/// is a DEPENDENCY of the payload (the set of attachments to move), not the
+/// object whose zone change the condition names: "when the Aura leaves" is the
+/// Aura's own move, while "when the creature it enchants leaves" is a
+/// dependency the payload must still be pinned against.
+pub(super) fn filter_names_parent_object_subject(filter: &TargetFilter) -> bool {
+    filter_refs_parent_object_anaphor_in(filter, HostRelation::Subject)
+}
+
+/// Which question a parent-anaphor walk answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostRelation {
+    /// Does the filter DEPEND on the parent object at all (payload pins)?
+    Dependency,
+    /// Does the filter name the parent as the condition's moving subject?
+    Subject,
+}
+
+fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRelation) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         // CR 608.2h + CR 108.3: these derive a PLAYER, not an object.
@@ -1860,20 +1918,31 @@ pub(super) fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
             // `Typed { controller: ParentTargetController }` selects objects BY
             // the parent's controller; the referent being filtered is not the
             // parent's object, so it is NOT a parent object anaphor.
-            typed.properties.iter().any(|prop| {
-                matches!(
-                    prop,
-                    crate::types::ability::FilterProp::DistinctFrom { reference }
-                        if filter_refs_parent_object_anaphor(reference)
-                )
+            typed.properties.iter().any(|prop| match prop {
+                crate::types::ability::FilterProp::DistinctFrom { reference } => {
+                    filter_refs_parent_object_anaphor_in(reference, relation)
+                }
+                // CR 701.3a: a mass object set defined by attachment to the
+                // parent object ("Auras attached to that creature") names the
+                // parent inside the host filter. `ability_pins_object_anaphor`
+                // reads this function to decide whether the creation snapshot
+                // records `target_incarnations`, so missing this arm loses the
+                // incarnation pin the delayed payload needs at resolution.
+                crate::types::ability::FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Host { filter },
+                } => {
+                    relation == HostRelation::Dependency
+                        && filter_refs_parent_object_anaphor_in(filter, relation)
+                }
+                _ => false,
             })
         }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_refs_parent_object_anaphor)
-        }
-        TargetFilter::Not { filter } => filter_refs_parent_object_anaphor(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|f| filter_refs_parent_object_anaphor_in(f, relation)),
+        TargetFilter::Not { filter } => filter_refs_parent_object_anaphor_in(filter, relation),
         TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_refs_parent_object_anaphor(filter)
+            filter_refs_parent_object_anaphor_in(filter, relation)
         }
         _ => false,
     }
@@ -1898,7 +1967,7 @@ fn trigger_names_referent_zone_change(trigger: &crate::types::ability::TriggerDe
     ]
     .into_iter()
     .flatten()
-    .any(filter_refs_parent_object_anaphor);
+    .any(filter_names_parent_object_subject);
 
     names_referent && !mode_provably_leaves_referent_in_place(&trigger.mode)
 }
@@ -1983,7 +2052,7 @@ fn condition_names_referent_zone_change(condition: &DelayedTriggerCondition) -> 
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenDiesOrExiled { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter } => {
-            filter_refs_parent_object_anaphor(filter)
+            filter_names_parent_object_subject(filter)
         }
 
         // Names a specific object leaving; that object is the referent.
@@ -5924,6 +5993,33 @@ mod tests {
             filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
         }));
 
+        // T-U4b — the attachment HOST is a DEPENDENCY, not the condition's
+        // moving subject. A payload that names the parent only inside
+        // `AttachedTo { to: Host { .. } }` must still be pinned (dependency),
+        // while a condition naming the same filter must not be read as "the
+        // referent moved" (subject), which would suppress the payload pins.
+        let mut host_only_typed = crate::types::ability::TypedFilter::creature();
+        host_only_typed
+            .properties
+            .push(crate::types::ability::FilterProp::AttachedTo {
+                to: crate::types::ability::AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            });
+        let host_only = TargetFilter::Typed(host_only_typed);
+        assert!(
+            filter_refs_parent_object_anaphor(&host_only),
+            "payload pins must still see the host dependency"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&host_only),
+            "a host dependency is not the condition's moving subject"
+        );
+        assert!(
+            filter_names_parent_object_subject(&TargetFilter::ParentTarget),
+            "a direct referent is still the moving subject"
+        );
+
         // ---- The shared function was NOT modified: all four still true. ----
         assert!(filter_refs_parent_target(&TargetFilter::ParentTarget));
         assert!(filter_refs_parent_target(&TargetFilter::ParentTargetSlot {
@@ -6416,5 +6512,149 @@ mod tests {
             event_context_amount(),
             "the else branch's later instruction stays live"
         );
+    }
+}
+
+/// CR 603.7c + CR 608.2k + CR 701.3a: P15(c) — a phase-delayed payload whose
+/// mass population hosts on `TriggeringSource` is DETECTED, SNAPSHOTTED and
+/// REBOUND to `ParentTarget` (R4-002: without the binder arm it was
+/// detected-but-unbound).
+#[cfg(test)]
+mod attached_set_delayed_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AttachmentReferent, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn attacker(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn payload_population() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::TriggeringSource),
+                },
+            }],
+            ..TypedFilter::default()
+        })
+    }
+
+    #[test]
+    fn p15c_delayed_mass_payload_is_detected_snapshotted_and_rebound() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = attacker(&mut state, PlayerId(1));
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![],
+        });
+        // The shape the delayed-trigger creation hands the binder: the CREATED
+        // delayed ability whose effect is the mass payload (its `AtNextPhase`
+        // provenance lives on the `DelayedTrigger` record, not in the effect).
+        let mut ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: payload_population(),
+                cant_regenerate: false,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        );
+
+        // (1) DETECTED: the event-subject walker sees the host's inner anaphor.
+        assert_eq!(
+            super::super::effect_event_subject_anaphor(&ability.effect),
+            Some(&TargetFilter::TriggeringSource)
+        );
+
+        // (2) SNAPSHOTTED + (3) REBOUND by the one binder pass.
+        bind_event_subject_nodes(&mut ability, &state, attacker);
+        assert!(
+            ability.targets.contains(&TargetRef::Object(attacker)),
+            "the creation snapshot records the event subject: {:?}",
+            ability.targets
+        );
+        assert!(
+            !ability.target_incarnations.is_empty(),
+            "the creation snapshot pins the incarnation"
+        );
+        let target = match &ability.effect {
+            Effect::DestroyAll { target, .. } => target,
+            other => panic!("expected DestroyAll, got {other:?}"),
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("the enclosing Typed structure is preserved, got {target:?}");
+        };
+        assert!(
+            matches!(
+                &typed.properties[0],
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Host { filter }
+                } if **filter == TargetFilter::ParentTarget
+            ),
+            "the host leaf is REBOUND to ParentTarget, got {:?}",
+            typed.properties[0]
+        );
+    }
+
+    /// Hostile: an explicit `Host { Typed(Creature) }` payload names no event
+    /// subject, so the detector declines and the binder leaves it untouched.
+    #[test]
+    fn p15c_typed_host_payload_is_not_an_event_subject() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = attacker(&mut state, PlayerId(1));
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![],
+        });
+        let population = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::AttachedTo {
+                to: AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                },
+            }],
+            ..TypedFilter::default()
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: population,
+                cant_regenerate: false,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        );
+        assert_eq!(
+            super::super::effect_event_subject_anaphor(&ability.effect),
+            None
+        );
+        bind_event_subject_nodes(&mut ability, &state, attacker);
+        assert!(ability.targets.is_empty());
     }
 }

@@ -16,8 +16,8 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, CardSelectionMode,
-    CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
+    AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
+    CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
     ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
     RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
@@ -13035,12 +13035,10 @@ fn singular_battlefield_recall_after_chosen_target_exile_keeps_tracked_set() {
     );
 }
 
-/// B6 — hostile, delayed: the rewriter never descends into
-/// CreateDelayedTrigger, so the payload keeps its CR 603.7c ParentTarget
-/// referent with origin pinned to Exile at delayed-trigger creation
-/// (CR 603.7a; Aetherling / Otherworldly Journey shapes).
+/// CR 400.7j + CR 603.7c: a delayed singular recall after a self-exile binds
+/// the source, guarded on the exile it was moved to (Aetherling shape).
 #[test]
-fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
+fn singular_battlefield_recall_delayed_binds_self_with_exile_origin() {
     let def = parse_effect_chain(
         "Exile ~, then return it to the battlefield at the beginning of the next end step.",
         AbilityKind::Spell,
@@ -13070,12 +13068,12 @@ fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
     let Effect::ChangeZone {
         origin: Some(Zone::Exile),
         destination: Zone::Battlefield,
-        target: TargetFilter::ParentTarget,
+        target: TargetFilter::SelfRef,
         ..
     } = &*effect.effect
     else {
         panic!(
-            "delayed payload must keep ParentTarget with origin Exile, got {:?}",
+            "delayed payload must bind SelfRef with origin Exile, got {:?}",
             effect.effect
         );
     };
@@ -24229,6 +24227,102 @@ fn strip_temporal_suffix_your_next_main_phase() {
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         })
     );
+}
+
+/// CR 603.7a + CR 500.1: the player-relative next-step suffix composes the
+/// player axis with any single named step.
+#[test]
+fn strip_temporal_suffix_player_next_step_shapes() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate as G};
+    for (step_text, phase) in [
+        ("declare attackers step", Phase::DeclareAttackers),
+        ("end step", Phase::End),
+        ("upkeep", Phase::Upkeep),
+    ] {
+        for (shape, binding, gate) in [
+            (format!("your next {step_text}"), B::Controller, G::None),
+            (
+                format!("that player's next {step_text}"),
+                B::ParentTargetOwner,
+                G::None,
+            ),
+            (
+                format!("the {step_text} on your next turn"),
+                B::Controller,
+                G::AfterCreationTurn,
+            ),
+        ] {
+            let text = format!("Return it to the battlefield at the beginning of {shape}");
+            let (rest, cond) = strip_temporal_suffix(&text);
+            assert_eq!(rest, "Return it to the battlefield", "{text}");
+            assert_eq!(
+                cond,
+                Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase,
+                    player: crate::types::player::PlayerId(0),
+                    gate,
+                    binding,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    assert_eq!(
+        strip_temporal_suffix("you draw a card at the beginning of their next upkeep").1,
+        None
+    );
+    let quenchable = "it deals an additional 3 damage to that player or planeswalker at the beginning of your next upkeep step";
+    assert_eq!(
+        strip_temporal_suffix(quenchable).1,
+        Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: Phase::Upkeep,
+            player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+        })
+    );
+    assert_eq!(
+        strip_temporal_suffix(&format!(
+            "{quenchable} unless that player or that planeswalker's controller pays {{U}} before that step"
+        ))
+        .1,
+        None
+    );
+}
+
+/// CR 506.1 + CR 608.2c: Noctis's "that combat" rider rides the delayed
+/// declare-attackers return; "this combat" names the current combat and stays
+/// a sibling.
+#[test]
+fn delayed_combat_step_payload_nests_that_combat_continuation() {
+    let text = |combat: &str| {
+        format!(
+            "Exile ~. Return it to the battlefield under its owner's control tapped and attacking at the beginning of that player's next declare attackers step. It can't be blocked {combat} combat."
+        )
+    };
+    let nested = parse_effect_chain(&text("that"), AbilityKind::Activated);
+    let legs = chain_effects(&nested);
+    assert_eq!(legs.len(), 2, "{legs:?}");
+    let Effect::CreateDelayedTrigger { effect, .. } = &legs[1] else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    assert!(
+        matches!(
+            effect.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::GenericEffect { .. })
+        ),
+        "payload must carry the rider: {effect:?}"
+    );
+
+    let sibling = parse_effect_chain(&text("this"), AbilityKind::Activated);
+    let legs = chain_effects(&sibling);
+    assert_eq!(legs.len(), 3, "{legs:?}");
+    let Effect::CreateDelayedTrigger { effect, .. } = &legs[1] else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    assert!(effect.sub_ability.is_none(), "{effect:?}");
+    assert!(matches!(legs[2], Effect::GenericEffect { .. }), "{legs:?}");
 }
 
 #[test]
@@ -58998,9 +59092,14 @@ fn attach_host_timing_stonehewer_giant_is_resolution() {
 /// instead of a `ParentTarget` attach bound to the bounced creature, which
 /// CR 400.7 makes a new object.
 ///
-/// Reach-guards: the bounce in front of it still parses, and the chain reaches
-/// the attach clause behind the (attachment-qualified, fail-closed) gain-control
-/// clause, so the refusal is not a whole-line collapse.
+/// The gain-control clause itself is now modelled: its "that were attached to
+/// it" relation binds the bounced creature's numbered declared slot (CR 601.2c
+/// and CR 608.2c), so it lowers to `GainControlAll{…AttachedTo{DeclaredTarget{0}}}`
+/// — never `Host`, and never the fail-closed `attached_to_qualifier` gap.
+///
+/// Reach-guards: the bounce in front of it still parses, the gain-control clause
+/// lowers, and the chain reaches the attach clause behind it, so the refusal is
+/// not a whole-line collapse.
 #[test]
 fn plural_anaphor_attachment_clause_is_unsupported() {
     let def = parse_effect_chain(
@@ -59016,13 +59115,24 @@ fn plural_anaphor_attachment_clause_is_unsupported() {
         .sub_ability
         .as_deref()
         .expect("the gain-control clause must follow the bounce");
-    // CR 301.5 + CR 303.4: "that were attached to it" is an unmodelled
-    // attachment relation, so the gain-control clause fails closed too; the
-    // reach-guard is that the chain still reaches the attach clause behind it.
+    // CR 601.2c + CR 608.2c + CR 701.3a: the attachment relation binds the
+    // bounced creature's unique numbered declared slot, so the gain-control
+    // instruction lowers with a `DeclaredTarget` prop (the D2 family).
+    let Effect::GainControlAll { target } = &*gain.effect else {
+        panic!(
+            "the gain-control clause must lower to GainControlAll with its declared-slot \
+             attachment prop, got {:?}",
+            gain.effect
+        );
+    };
+    assert_eq!(
+        declared_slots_in_filter(target),
+        vec![0],
+        "the pronoun binds the announced slot"
+    );
     assert!(
-        matches!(&*gain.effect, Effect::Unimplemented { name, .. } if name == "attached_to_qualifier"),
-        "the gain-control clause must fail closed on its attachment qualifier, got {:?}",
-        gain.effect
+        !filter_has_host(target, &TargetFilter::ParentTarget),
+        "a bound slot is DeclaredTarget, never Host: {target:?}"
     );
     let attach_clause = gain
         .sub_ability
@@ -68917,6 +69027,11 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         }
         FilterProp::TargetsOnly { filter } => filter_has_chosen_color(filter),
         FilterProp::Targets { filter } => filter_has_chosen_color(filter),
+        // CR 701.3a: the filter-matched host axis boxes a whole `TargetFilter`,
+        // so a stamped prop can sit inside it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_has_chosen_color(filter),
         // Nested `PlayerFilter`.
         FilterProp::ControllerMatches { player } => player_filter_has_chosen_color(player),
         FilterProp::Token
@@ -84846,21 +84961,152 @@ fn bidirectional_prevent_binds_the_by_half_to_the_chosen_object() {
     }
 }
 
-/// CR 301.5 + CR 303.4: a mass leg qualified by "attached to <object>" names
-/// the attachments of the primary object. No filter expresses that relation, so
-/// it must fail closed for every verb, not widen to every Aura/Equipment on the
-/// battlefield. Paired positive: the same legs without the qualifier lower.
+/// -----------------------------------------------------------------------
+/// "all <filter> attached to <referent>" — the mass attachment qualifier class
+/// -----------------------------------------------------------------------
+///
+/// CR 115.1a + CR 115.1d + CR 115.10a + CR 701.3a + CR 608.2c: helpers shared by
+/// the P rows below.
+fn attached_set_type_list(core: &str) -> Vec<String> {
+    vec![core.to_string()]
+}
+
+/// The mass-population filter of a mass effect (`Effect::target_filter()` hides
+/// it by design).
+fn mass_population_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::DestroyAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::GainControlAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// Does any typed leg of `filter` carry `AttachedTo { Host { expected } }`?
+fn filter_has_host(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo { to: AttachmentReferent::Host { filter } }
+                    if filter.as_ref() == expected
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(|inner| filter_has_host(inner, expected))
+        }
+        TargetFilter::Not { filter } => filter_has_host(filter, expected),
+        _ => false,
+    }
+}
+
+/// Does EVERY typed leg carry the host prop? Used for the `Or` attachment legs
+/// (RF6: "Auras and Equipment" distributes onto both).
+fn all_typed_legs_carry_host(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo { to: AttachmentReferent::Host { filter } }
+                    if filter.as_ref() == expected
+            )
+        }),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(|inner| all_typed_legs_carry_host(inner, expected))
+        }
+        _ => false,
+    }
+}
+
+/// The distinct declared slots referenced by
+/// `AttachedTo { DeclaredTarget { slot } }`. Set semantics: "Auras and
+/// Equipment" distributes the prop onto one `Or` leg per type (Fumble), so the
+/// same slot legitimately appears on several legs.
+fn declared_slots_in_filter(filter: &TargetFilter) -> Vec<usize> {
+    let mut slots = Vec::new();
+    fn walk(filter: &TargetFilter, out: &mut Vec<usize>) {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                for prop in &tf.properties {
+                    if let FilterProp::AttachedTo {
+                        to: AttachmentReferent::DeclaredTarget { slot },
+                    } = prop
+                    {
+                        if !out.contains(slot) {
+                            out.push(*slot);
+                        }
+                    }
+                }
+            }
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().for_each(|inner| walk(inner, out));
+            }
+            _ => {}
+        }
+    }
+    walk(filter, &mut slots);
+    slots
+}
+
+/// CR 115.1a + CR 115.1d + CR 701.3a: every modelled verb lowers a head + mass
+/// child. Revert-failing: deleting `parse_attached_set_clause` leaves the
+/// `attached_to_qualifier` gap for every one of these texts.
 #[test]
-fn attached_to_mass_leg_fails_closed_for_every_verb() {
+fn attached_to_mass_leg_lowers_for_every_modelled_verb() {
     for text in [
+        // Family C (announced primary + same-instruction referent).
         "Destroy target creature and all Equipment attached to it.",
         "Return target creature and all Auras attached to it to their owners' hands.",
         "Return target creature you control and all Auras you control attached to it to their owner's hand.",
         "Return target creature and each Aura attached to it to their owners' hands.",
         "Exile target attacking creature and all Equipment attached to it.",
-        // Single-verb mass forms and the past tense name the same relation.
+        // Family B (announced referent).
         "Return all Auras attached to target permanent you own to their owner's hand.",
         "Exile all Auras attached to target creature.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !chain_has_unimplemented(&def),
+            "{text}: the class must lower, got {def:#?}"
+        );
+        let Effect::TargetOnly { target: head } = &*def.effect else {
+            panic!("{text}: expected a TargetOnly head, got {def:#?}");
+        };
+        assert!(
+            matches!(head, TargetFilter::Typed(_) | TargetFilter::Or { .. }),
+            "{text}: the head announces the object filter, got {head:?}"
+        );
+        let child = def
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: expected the mass child, got {def:#?}"));
+        let population = mass_population_filter(&child.effect)
+            .unwrap_or_else(|| panic!("{text}: expected a mass effect, got {child:#?}"));
+        assert!(
+            filter_has_host(population, &TargetFilter::ParentTarget),
+            "{text}: the mass population must carry AttachedTo{{Host{{ParentTarget}}}}, got {population:?}"
+        );
+        if text.contains("attached to target") {
+            // Family B: every typed leg of the announced filter carries the prop.
+            assert!(
+                all_typed_legs_carry_host(population, &TargetFilter::ParentTarget),
+                "{text}: every leg carries the host prop, got {population:?}"
+            );
+        }
+    }
+}
+
+/// CR 608.2c + CR 601.2c: an UNBOUND "it"/"them" that names no numbered
+/// declared slot and has no trigger context keeps the fail-closed gap (the
+/// RF2 decline), while the same clause after an announced reference binds that
+/// slot and lowers. Paired with the five unqualified reach guards.
+#[test]
+fn attached_to_mass_leg_unbound_referent_fails_closed() {
+    for text in [
         "Gain control of all Equipment that were attached to it.",
         "Gain control of all Equipment that was attached to it.",
     ] {
@@ -84870,16 +85116,35 @@ fn attached_to_mass_leg_fails_closed_for_every_verb() {
                 &*d.effect,
                 Effect::Unimplemented { name, .. } if name == "attached_to_qualifier"
             )),
-            "{text}: must fail closed, got {def:#?}"
+            "{text}: an unbound referent must fail closed, got {def:#?}"
         );
         assert!(
-            !chain_any(&def, &|d| matches!(
-                &*d.effect,
-                Effect::BounceAll { .. } | Effect::ChangeZoneAll { .. } | Effect::DestroyAll { .. }
-            )),
-            "{text}: no unrestricted mass leg: {def:#?}"
+            !chain_any(&def, &|d| mass_population_filter(&d.effect).is_some()),
+            "{text}: no mass leg may be invented: {def:#?}"
         );
     }
+
+    // Paired positive: the same clause after an announced reference binds slot 0.
+    let def = parse_effect_chain(
+        "Destroy target creature. Gain control of all Equipment that were attached to it.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !chain_has_unimplemented(&def),
+        "reach guard: the bound clause lowers, got {def:#?}"
+    );
+    let gain = chain_nodes(&def)
+        .into_iter()
+        .find(|d| matches!(&*d.effect, Effect::GainControlAll { .. }))
+        .unwrap_or_else(|| panic!("expected GainControlAll, got {def:#?}"));
+    let Effect::GainControlAll { target } = &*gain.effect else {
+        unreachable!()
+    };
+    assert_eq!(
+        declared_slots_in_filter(target),
+        vec![0],
+        "the pronoun binds the announced slot"
+    );
 
     for text in [
         "Return target creature and all Auras to their owners' hands.",
@@ -84894,6 +85159,880 @@ fn attached_to_mass_leg_fails_closed_for_every_verb() {
             "{text}: reach guard, the unqualified leg must lower: {def:#?}"
         );
     }
+}
+
+/// P1 (RF6): Strip Bare — head `TargetOnly{Typed(Creature)}`, child
+/// `DestroyAll{AttachedTo{Host{ParentTarget}}}`, and the attachment filter is
+/// `Or[Typed(Aura), Typed(Equipment)]` carrying the prop on BOTH legs (the
+/// Mantle of the Ancients precedent), not a `Typed{AnyOf}`.
+#[test]
+fn p1_strip_bare_lowers_to_or_of_host_attached_aura_equipment() {
+    let def = parse_effect_chain(
+        "Destroy all Auras and Equipment attached to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::TargetOnly { target: head } = &*def.effect else {
+        panic!("expected TargetOnly, got {def:#?}");
+    };
+    assert!(
+        matches!(head, TargetFilter::Typed(_)),
+        "head is the announced creature, got {head:?}"
+    );
+    let child = def.sub_ability.as_deref().expect("mass child");
+    let Effect::DestroyAll { target, .. } = &*child.effect else {
+        panic!("expected DestroyAll, got {child:#?}");
+    };
+    let TargetFilter::Or { filters } = target else {
+        panic!("RF6: the attachment filter is Or of legs, got {target:?}");
+    };
+    assert_eq!(filters.len(), 2, "Auras + Equipment legs, got {filters:?}");
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::ParentTarget),
+        "each Or leg carries the host prop, got {target:?}"
+    );
+    assert_eq!(
+        chain_nodes(&def).len(),
+        2,
+        "one instruction chain: head + mass child"
+    );
+}
+
+/// P3: family A — Treefolk Mystic / Corrosive Ooze / Hakim. No `TargetOnly`
+/// (the cards announce no target); the prop is exactly
+/// `AttachedTo{Host{ParentTarget}}` for the trigger bodies and
+/// `AttachedTo{Source}` for Hakim's `~` referent; Corrosive keeps its delayed
+/// "at end of combat" wrapper.
+#[test]
+fn p3_family_a_trigger_bodies_bind_the_event_or_source_host() {
+    for (text, name) in [
+        (
+            "Whenever this creature blocks or becomes blocked by a creature, destroy all Auras attached to that creature.",
+            "Treefolk Mystic",
+        ),
+        (
+            "Whenever this creature blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
+            "Corrosive Ooze",
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &[],
+            &attached_set_type_list("Creature"),
+        );
+        let body = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: expected a trigger body"));
+        assert!(
+            !chain_has_unimplemented(body),
+            "{name}: must lower, got {body:#?}"
+        );
+        assert!(
+            !chain_any(body, &|d| matches!(&*d.effect, Effect::TargetOnly { .. })),
+            "{name}: must not announce a target the card does not have: {body:#?}"
+        );
+        // `chain_nodes` (not `chain_any`) is the walker that descends a
+        // `CreateDelayedTrigger`'s payload, which is where Corrosive Ooze's
+        // "at end of combat" mass destroy lives.
+        assert!(
+            chain_nodes(body).into_iter().any(|d| match &*d.effect {
+                Effect::DestroyAll { target, .. } => {
+                    all_typed_legs_carry_host(target, &TargetFilter::ParentTarget)
+                }
+                _ => false,
+            }),
+            "{name}: DestroyAll must carry AttachedTo{{Host{{ParentTarget}}}}: {body:#?}"
+        );
+        if name == "Corrosive Ooze" {
+            assert!(
+                chain_any(body, &|d| matches!(
+                    &*d.effect,
+                    Effect::CreateDelayedTrigger { .. }
+                )),
+                "the 'at end of combat' wrapper is preserved: {body:#?}"
+            );
+        }
+    }
+
+    // Hakim's "attached to Hakim" is the SOURCE referent (CR 201.5), not a Host.
+    let hakim = "Flying\n{U}{U}: Return target Aura card from your graveyard to the battlefield attached to Hakim. Activate only during your upkeep and only if Hakim isn't enchanted.\n{U}{U}, {T}: Destroy all Auras attached to Hakim.";
+    let parsed = parse_oracle_text(
+        hakim,
+        "Hakim, Loreweaver",
+        &[],
+        &[],
+        &attached_set_type_list("Creature"),
+    );
+    assert!(
+        parsed.abilities.iter().any(|ability| {
+            chain_any(ability, &|d| match &*d.effect {
+                Effect::DestroyAll { target, .. } => filter_has_source_attached_to(target),
+                _ => false,
+            })
+        }),
+        "Hakim's ~ referent lowers to AttachedTo{{Source}}: {parsed:#?}"
+    );
+}
+
+/// `AttachedTo { Source }` anywhere in `filter`'s typed legs.
+fn filter_has_source_attached_to(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_has_source_attached_to)
+        }
+        _ => false,
+    }
+}
+
+/// P4: family C′ — End Hostilities destroys all creatures and every permanent
+/// attached to a creature: one instruction, one population.
+#[test]
+fn p4_end_hostilities_lowers_to_or_of_primary_and_host_attached() {
+    let def = parse_effect_chain(
+        "Destroy all creatures and all permanents attached to creatures.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::DestroyAll { target, .. } = &*def.effect else {
+        panic!("expected DestroyAll, got {def:#?}");
+    };
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected Or[primary, attached'], got {target:?}");
+    };
+    assert_eq!(filters.len(), 2, "got {filters:?}");
+    assert!(
+        matches!(filters[0], TargetFilter::Typed(_)),
+        "primary mass leg first, got {filters:?}"
+    );
+    assert!(
+        all_typed_legs_carry_host(&filters[1], &TargetFilter::Typed(TypedFilter::creature())),
+        "attached leg hosts 'creatures', got {filters:?}"
+    );
+
+    // Hostile: an announced host referent is not this shape. The modelled
+    // production declines the announced referent (RF3-4), so the pre-existing
+    // compound splitter keeps the second leg as the fail-closed gap and no
+    // `Host` is synthesized. (The splitter's primary `DestroyAll` for "all
+    // creatures" is unrelated to the qualifier, so asserting its absence would
+    // be wrong.)
+    let def = parse_effect_chain(
+        "Destroy all creatures and all permanents attached to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        chain_any(&def, &|d| matches!(
+            &*d.effect,
+            Effect::Unimplemented { name, .. } if name == super::imperative::ATTACHED_TO_QUALIFIER_GAP
+        )),
+        "announced-host variant must keep the attachment gap: {def:#?}"
+    );
+    assert!(
+        !serde_json::to_string(&def).unwrap().contains("\"Host\""),
+        "announced-host variant must not synthesize a Host: {def:#?}"
+    );
+}
+
+/// P5(b): Rhuk's "attacks or dies" must lower to BOTH a `Attacks` leg and a
+/// `ChangesZone` (dies) leg, each carrying the equipped-creature valid-card
+/// filter. Prints the parsed modes for the record.
+#[test]
+fn p5b_rhuk_parses_attack_and_dies_legs() {
+    let text = "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.";
+    let parsed = parse_oracle_text(
+        text,
+        "Rhuk, Hexgold Nabber",
+        &["Trample".to_string(), "Haste".to_string()],
+        &["Legendary".to_string()],
+        &attached_set_type_list("Creature"),
+    );
+    for trigger in &parsed.triggers {
+        eprintln!(
+            "mode={:?} valid_card={:?} valid_target={:?}",
+            trigger.mode, trigger.valid_card, trigger.valid_target
+        );
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.mode == crate::types::triggers::TriggerMode::ChangesZone),
+        "the dies leg must be present as a ChangesZone trigger: {:?}",
+        parsed
+            .triggers
+            .iter()
+            .map(|t| t.mode.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// P5: family D — Rhuk attaches every Equipment attached to the triggering
+/// creature to itself (`Host{TriggeringSource}`, not `ParentTarget`).
+#[test]
+fn p5_rhuk_attaches_triggering_creatures_equipment_to_itself() {
+    let text = "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.";
+    let parsed = parse_oracle_text(
+        text,
+        "Rhuk, Hexgold Nabber",
+        &["Trample".to_string(), "Haste".to_string()],
+        &["Legendary".to_string()],
+        &attached_set_type_list("Creature"),
+    );
+    let bodies: Vec<&AbilityDefinition> = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .collect();
+    assert!(!bodies.is_empty(), "reach guard: Rhuk has trigger bodies");
+    let mut saw_attach = false;
+    for body in bodies {
+        if let Effect::Attach {
+            attachment,
+            target,
+            selection,
+            ..
+        } = &*body.effect
+        {
+            saw_attach = true;
+            assert_eq!(*target, TargetFilter::SelfRef, "Rhuk is the destination");
+            assert_eq!(
+                *selection,
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::All
+                },
+                "all Equipment attached to the creature is a determined set"
+            );
+            assert!(
+                all_typed_legs_carry_host(attachment, &TargetFilter::TriggeringSource),
+                "the host is the triggering creature, got {attachment:?}"
+            );
+        }
+    }
+    assert!(saw_attach, "Rhuk's clause lowers to Attach: {parsed:#?}");
+}
+
+/// P6 (RF2): D2 binds a unique numbered declared slot (Murderous Spoils /
+/// Fumble) and Gauntlets of Chaos declines (no slot, no trigger context).
+#[test]
+fn p6_d2_binds_declared_slot_and_gauntlets_declines() {
+    for (text, name) in [
+        (
+            "Destroy target nonblack creature. It can't be regenerated. You gain control of all Equipment that were attached to it.",
+            "Murderous Spoils",
+        ),
+        (
+            "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.",
+            "Fumble",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let gain = chain_nodes(&def)
+            .into_iter()
+            .find(|d| matches!(&*d.effect, Effect::GainControlAll { .. }))
+            .unwrap_or_else(|| panic!("{name}: expected GainControlAll, got {def:#?}"));
+        let Effect::GainControlAll { target } = &*gain.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            declared_slots_in_filter(target),
+            vec![0],
+            "{name}: the pronoun binds slot 0"
+        );
+        assert!(
+            !filter_has_host(target, &TargetFilter::ParentTarget),
+            "{name}: a bound slot is DeclaredTarget, never Host"
+        );
+    }
+
+    // Gauntlets of Chaos keeps its gap by rule: "them" has no declared slot,
+    // no explicit binding, and the clause is not a trigger body.
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to them",
+            &mut ctx
+        )
+        .is_none(),
+        "Gauntlets' unbound 'them' must decline"
+    );
+    ctx.in_trigger = true;
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to them",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the same clause in a trigger body binds Host{{ParentTarget}}"
+    );
+}
+
+/// P7 (F2): the existing declared-slot destroy authority still owns Turn to
+/// Slag / Blastfire / Fires — `DeclaredTarget`, never `Host`.
+#[test]
+fn p7_declared_slot_destroy_authority_is_not_shadowed() {
+    for (text, name) in [
+        (
+            "Turn to Slag deals 5 damage to target creature. Destroy all Equipment attached to that creature.",
+            "Turn to Slag",
+        ),
+        (
+            "Blastfire Bolt deals 5 damage to target creature. Destroy all Equipment attached to that creature.",
+            "Blastfire Bolt",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !chain_has_unimplemented(&def),
+            "{name}: reach guard, got {def:#?}"
+        );
+        let destroy = chain_nodes(&def)
+            .into_iter()
+            .find(|d| matches!(&*d.effect, Effect::DestroyAll { .. }))
+            .unwrap_or_else(|| panic!("{name}: expected DestroyAll, got {def:#?}"));
+        let Effect::DestroyAll { target, .. } = &*destroy.effect else {
+            unreachable!()
+        };
+        assert_eq!(declared_slots_in_filter(target), vec![0], "{name}");
+        assert!(
+            !filter_has_host(target, &TargetFilter::ParentTarget),
+            "{name}: no Host may be invented: {target:?}"
+        );
+        assert!(
+            !serde_json::to_string(&def).unwrap().contains("\"Host\""),
+            "{name}: serialized AST carries no Host"
+        );
+    }
+}
+
+/// P8 (F5): Mark of Eviction / Flickerform stay out of class — the gap is
+/// retained and no `Host` is produced. Reach guard: the clause is reached and
+/// its primary effect still parses.
+#[test]
+fn p8_enchanted_creature_boundary_keeps_the_gap() {
+    for (text, name, primary) in [
+        (
+            "Enchant creature\nAt the beginning of your upkeep, return enchanted creature and all Auras attached to that creature to their owners' hands.",
+            "Mark of Eviction",
+            "Bounce",
+        ),
+        (
+            "Enchant creature\n{2}{W}{W}: Exile enchanted creature and all Auras attached to it. At the beginning of the next end step, return that card to the battlefield under its owner's control. If you do, return the other cards exiled this way to the battlefield under their owners' control attached to that creature.",
+            "Flickerform",
+            "ChangeZone",
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &[],
+            &attached_set_type_list("Enchantment"),
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            json.contains("attached_to_qualifier"),
+            "{name}: the boundary gap stays: {json}"
+        );
+        assert!(!json.contains("\"Host\""), "{name}: no Host: {json}");
+        let reached = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .any(|def| match primary {
+                "Bounce" => chain_any(def, &|d| matches!(&*d.effect, Effect::Bounce { .. })),
+                _ => chain_any(def, &|d| matches!(&*d.effect, Effect::ChangeZone { .. })),
+            });
+        assert!(reached, "{name}: reach guard, the clause was reached");
+    }
+}
+
+/// P9 (F8): Essence Reliquary's head keeps `FilterProp::Another` — the grammar
+/// gate consumes nothing semantically.
+#[test]
+fn p9_essence_reliquary_head_keeps_another() {
+    let text = "Return another target permanent you control and all Auras you control attached to it to their owner's hand.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(typed),
+    } = &*def.effect
+    else {
+        panic!("expected a typed TargetOnly head, got {def:#?}");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::Another),
+        "the head keeps Another, got {:?}",
+        typed.properties
+    );
+}
+
+/// P10 (F9): the attach-led class is untouched — Balan is a determined set with
+/// NO attachment relation; Autumn-Tail's targeted attach is still `Attach`.
+#[test]
+fn p10_attach_led_class_is_not_claimed() {
+    let balan = parse_effect_chain(
+        "Attach all Equipment you control to Balan.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&balan), "got {balan:#?}");
+    let Effect::Attach {
+        attachment,
+        selection,
+        ..
+    } = &*balan.effect
+    else {
+        panic!("expected Attach, got {balan:#?}");
+    };
+    assert!(
+        matches!(selection, AttachSelection::AtResolution { .. }),
+        "Balan's attachment operand is a described set"
+    );
+    assert!(
+        !filter_has_host(attachment, &TargetFilter::ParentTarget)
+            && !filter_has_host(attachment, &TargetFilter::TriggeringSource),
+        "no attachment relation on Balan: {attachment:?}"
+    );
+
+    let autumn = parse_effect_chain(
+        "Attach target Aura you control to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*autumn.effect, Effect::Attach { .. }),
+        "a targeted attach still lowers: {autumn:#?}"
+    );
+}
+
+/// P11 (F10 reachable half + RF7): an unconsumed control qualifier ahead of the
+/// relation fails closed; the admitted "you control" phrase parses.
+#[test]
+fn p11_unconsumed_control_qualifier_fails_closed() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras controlled by those players attached to target creature",
+            &mut ctx
+        )
+        .is_none(),
+        "an unadmitted control qualifier must fail closed"
+    );
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras you control attached to target creature",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the admitted 'you control' phrase parses"
+    );
+}
+
+/// P12 (F11): a declined clause leaves the parse context untouched.
+#[test]
+fn p12_declined_clause_rolls_back_the_parse_context() {
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::SelfRef),
+        in_trigger: false,
+        ..Default::default()
+    };
+    let before = ctx.clone();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to that creature",
+            &mut ctx
+        )
+        .is_none(),
+        "a non-trigger unbound demonstrative declines"
+    );
+    assert_eq!(ctx, before, "a declined clause must not mutate ctx");
+
+    // Paired positive: the trigger-context twin parses and merges.
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        in_trigger: true,
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to that creature",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the trigger-context demonstrative binds Host{{TriggeringSource}}"
+    );
+}
+
+/// P13 (F7): Silence the Believers — the head carries `unlimited(0)` from the
+/// chunk-level "any number of" strip; the mass child carries none.
+#[test]
+fn p13_silence_carries_the_chunk_level_multi_target() {
+    let def = parse_effect_chain(
+        "Exile any number of target creatures and all Auras attached to them.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let spec = def.multi_target.as_ref().expect("the head's target spec");
+    assert_eq!(spec.min, QuantityExpr::Fixed { value: 0 }, "min 0");
+    assert_eq!(spec.max, None, "unlimited");
+    assert!(
+        def.sub_ability
+            .as_deref()
+            .is_some_and(|child| child.multi_target.is_none()),
+        "the mass child owns no target spec"
+    );
+
+    let bounded = parse_effect_chain(
+        "Exile up to two target creatures and all Auras attached to them.",
+        AbilityKind::Spell,
+    );
+    let spec = bounded.multi_target.as_ref().expect("bounded spec");
+    assert_eq!(
+        spec.max,
+        Some(QuantityExpr::Fixed { value: 2 }),
+        "up to two"
+    );
+}
+
+/// P18 (RF7): `attachment_phrase_admits` directly.
+#[test]
+fn p18_attachment_phrase_admission() {
+    for phrase in [
+        "Auras controlled by those players",
+        "Equipment that player controls",
+        "Auras they own",
+    ] {
+        assert!(
+            !super::imperative::attachment_phrase_admits(phrase),
+            "{phrase}: an unadmitted control/ownership word must be refused"
+        );
+    }
+    for phrase in [
+        "white Auras you own",
+        "Auras an opponent controls",
+        "Equipment you control",
+        "Auras",
+    ] {
+        assert!(
+            super::imperative::attachment_phrase_admits(phrase),
+            "{phrase}: an admitted / unqualified phrase must pass"
+        );
+    }
+}
+
+/// P19 (RF2): the exact gate set — unbound `ParentTarget` gated on trigger
+/// context; a bound pronoun admitted ungated; the demonstrative with a typed
+/// subject binds `TriggeringSource`.
+#[test]
+fn p19_rf2_gate_admits_only_bound_or_trigger_referents() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause("destroy all Auras attached to it", &mut ctx)
+            .is_none(),
+        "unbound pronoun outside a trigger declines"
+    );
+    ctx.in_trigger = true;
+    let clause =
+        super::imperative::parse_attached_set_clause("destroy all Auras attached to it", &mut ctx)
+            .expect("in a trigger the pronoun binds");
+    let Effect::DestroyAll { target, .. } = &clause.effect else {
+        panic!("expected DestroyAll, got {clause:#?}");
+    };
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::ParentTarget),
+        "got {target:?}"
+    );
+
+    let mut bound = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to it",
+            &mut bound
+        )
+        .is_some(),
+        "a parser-bound pronoun is admitted ungated"
+    );
+
+    let mut demonstrative = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..Default::default()
+    };
+    let clause = super::imperative::parse_attached_set_clause(
+        "destroy all Auras attached to that creature",
+        &mut demonstrative,
+    )
+    .expect("the typed-subject demonstrative binds");
+    let Effect::DestroyAll { target, .. } = &clause.effect else {
+        panic!("expected DestroyAll, got {clause:#?}");
+    };
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::TriggeringSource),
+        "the demonstrative binds TriggeringSource, got {target:?}"
+    );
+}
+
+/// P20 (RF4): the pronoun-only declared-slot entry point binds the unique
+/// numbered slot; the shared definite-noun resolver stays pronoun-free.
+#[test]
+fn p20_pronoun_entry_point_is_separate_from_the_shared_resolver() {
+    let entries = vec![crate::parser::oracle_ir::context::DeclaredSlotEntry {
+        index: Some(0),
+        filter: TargetFilter::Typed(TypedFilter::creature()),
+    }];
+    let ctx = ParseContext {
+        chain_declared_slots: crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(
+            entries,
+        ),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::resolve_pronoun_declared_slot_anaphor("them", &ctx),
+        Some((0, "")),
+        "the unique numbered slot binds"
+    );
+    assert!(
+        super::resolve_declared_slot_anaphor("them", &ctx).is_none(),
+        "the shared definite-noun resolver must stay pronoun-free"
+    );
+
+    // Several numbered slots: ambiguous.
+    let mut several = ctx.clone();
+    several.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(1),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &several).is_none());
+
+    // An unnumbered slot and an Indeterminate registry both decline.
+    let mut unnumbered = ctx.clone();
+    unnumbered.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &unnumbered).is_none());
+    let mut indeterminate = ctx.clone();
+    indeterminate.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate;
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &indeterminate).is_none());
+
+    // A MIXED registry is incomplete, not "one numbered slot": the unnumbered
+    // entry means the chain's numbering could not be recorded for that slot, so
+    // the sole numbered entry must not be bound on a guess.
+    let mut mixed = ctx.clone();
+    mixed.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(
+        super::resolve_pronoun_declared_slot_anaphor("them", &mixed).is_none(),
+        "an incomplete registry is not a unique antecedent"
+    );
+}
+
+/// The imperative ParentTarget fallback shares the same incompleteness rule:
+/// `Indeterminate` and a mixed registry both decline a parser-bound pronoun,
+/// while the single numbered slot still binds.
+#[test]
+fn p20b_parent_target_fallback_declines_incomplete_registries() {
+    let clause = "destroy all Auras attached to it";
+    let mut bound = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut bound).is_some(),
+        "positive control: a bound pronoun over a single numbered slot parses"
+    );
+
+    let mut indeterminate = bound.clone();
+    indeterminate.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate;
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut indeterminate).is_none(),
+        "an Indeterminate registry cannot prove the nearest declarer"
+    );
+
+    let mut mixed = bound.clone();
+    mixed.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut mixed).is_none(),
+        "a mixed registry is incomplete, not unambiguous"
+    );
+}
+
+/// P21 (RF5): the promoted demonstrative recognizer keeps the counter helper's
+/// exact subject gate.
+#[test]
+fn p21_demonstrative_target_keeps_the_counter_gate() {
+    use crate::parser::oracle_target::resolve_demonstrative_target;
+    let typed = TargetFilter::Typed(TypedFilter::creature());
+    for (subject, expected) in [
+        (Some(TargetFilter::SelfRef), false),
+        (Some(TargetFilter::Any), false),
+        (None, false),
+        (Some(TargetFilter::CostPaidObject), true),
+        (Some(TargetFilter::AttachedTo), true),
+        (Some(typed.clone()), true),
+    ] {
+        let ctx = ParseContext {
+            subject: subject.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_demonstrative_target("that creature.", &ctx),
+            expected.then_some("."),
+            "subject {subject:?}"
+        );
+    }
+    let ctx = ParseContext {
+        subject: Some(typed),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_demonstrative_target("that permanent.", &ctx),
+        None,
+        "only the exact 'that creature' phrase matches"
+    );
+}
+
+/// P22 (RF3-4): a present announced head at a non-`Announced` site, or a
+/// player-typed announced referent, declines the whole clause — never an
+/// untargeted host. The last negative is the mixed `Or[Typed(Creature),
+/// Player]`: one player leg spoils the whole filter, so no `Host` is built.
+#[test]
+fn p22_announced_host_outside_the_announced_site_declines() {
+    for text in [
+        "Destroy all Curses attached to target player",
+        "Attach all Equipment attached to target creature to ~",
+        "Destroy target creature and all Auras attached to target player",
+        "Destroy all Auras attached to target creature or player",
+    ] {
+        let mut ctx = ParseContext::default();
+        assert!(
+            super::imperative::parse_attached_set_clause(text, &mut ctx).is_none(),
+            "{text}: must decline the whole clause"
+        );
+    }
+    for text in [
+        "Destroy all Curses attached to you",
+        "Destroy all Auras attached to target creature",
+    ] {
+        let mut ctx = ParseContext::default();
+        assert!(
+            super::imperative::parse_attached_set_clause(text, &mut ctx).is_some(),
+            "{text}: paired positive, must parse"
+        );
+    }
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "Attach all Equipment attached to that creature to ~",
+            &mut ctx
+        )
+        .is_some(),
+        "the trigger-context Attach form parses"
+    );
+    // A Context-site "that creature" in a non-trigger still declines (RF2).
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "Attach all Equipment attached to that creature to ~",
+            &mut ctx
+        )
+        .is_none(),
+        "RF2, not Host: a non-trigger demonstrative declines"
+    );
+}
+
+/// P24 (R4-001): the variable-count fixture keeps its gap; `DeclaredTarget`
+/// comes only from step 3's chain-wide registry. The fixed-prefix twin binds
+/// chain slot 1 (the preserved integration contract).
+#[test]
+fn p24_variable_prefix_never_translates_a_local_slot() {
+    let variable = "Tap up to one target land. Choose target creature and target artifact. Destroy all Equipment attached to that creature.";
+    let parsed = parse_oracle_text(
+        variable,
+        "Probe",
+        &[],
+        &attached_set_type_list("Sorcery"),
+        &[],
+    );
+    let json = serde_json::to_string(&parsed).unwrap();
+    assert!(
+        json.contains("attached_to_qualifier"),
+        "the variable fixture keeps its gap: {json}"
+    );
+    assert!(
+        !json.contains("DeclaredTarget"),
+        "no Choose-head-local index may be re-pointed: {json}"
+    );
+    assert!(
+        !json.contains("\"Host\""),
+        "no Host may be synthesized: {json}"
+    );
+
+    let fixed = "Tap target land. Choose target creature and target artifact. Destroy all Equipment attached to that creature.";
+    let parsed = parse_oracle_text(fixed, "Probe", &[], &attached_set_type_list("Sorcery"), &[]);
+    assert!(
+        !serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("attached_to_qualifier"),
+        "the fixed-prefix twin binds through step 3"
+    );
+    let destroy = parsed
+        .abilities
+        .iter()
+        .flat_map(|ability| chain_nodes(ability))
+        .find(|def| matches!(&*def.effect, Effect::DestroyAll { .. }))
+        .expect("the fixed twin lowers to DestroyAll");
+    let Effect::DestroyAll { target, .. } = &*destroy.effect else {
+        unreachable!()
+    };
+    assert_eq!(declared_slots_in_filter(target), vec![1], "chain slot 1");
 }
 
 /// CR 608.2c: an unconditional, mandatory "repeat this process <cap>" re-follows the

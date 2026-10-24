@@ -837,6 +837,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         repeat_until,
         sub_link: _,
         target_reads: _, // TargetReadOrigin tag, no quantity of its own
+        entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
@@ -972,6 +973,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         repeat_until: None,
         sub_link: _,
         target_reads: _, // TargetReadOrigin tag, no quantity of its own
+        entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
@@ -3587,6 +3589,13 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
+        // CR 701.3a: the filter-matched host axis resolves its host set from the
+        // resolving ability's parent targets, the creation snapshot, or the
+        // trigger event — never the per-object recipient of the enclosing
+        // quantity, so its payload is not walked here either.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::Counters { .. }

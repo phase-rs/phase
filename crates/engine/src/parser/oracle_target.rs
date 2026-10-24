@@ -172,6 +172,37 @@ pub(crate) fn parse_anaphoric_target_ref(
     matches!(filter, TargetFilter::ParentTarget).then_some((filter, rest))
 }
 
+/// CR 608.2k + CR 301.5a: Recognize a leading demonstrative "that creature"
+/// whose antecedent is the trigger's own non-source subject.
+///
+/// Returns `Some(remainder)` when `text` begins with "that creature" AND the
+/// parse context is inside a trigger whose subject is a non-self, non-`Any`
+/// filter (e.g. an `AttachedTo` trigger's "Whenever equipped creature attacks").
+/// Mirrors `resolve_it_pronoun`'s gating: a trigger whose subject is
+/// `SelfRef`/`Any` (or no subject) keeps the legacy `ParentTarget` semantics —
+/// used for spells/abilities like Twinflame Strive where "that creature" refers
+/// back to the parent target.
+///
+/// PROMOTED VERBATIM from `oracle_effect::counter::resolve_that_creature_in_trigger`
+/// (the counter parser was its only consumer). The subject gate
+/// (`!matches!(subject, SelfRef | Any)`) is preserved exactly: widening it here
+/// would change the counter parser's binding as well, because it now delegates
+/// to this function.
+pub(crate) fn resolve_demonstrative_target<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<&'a str> {
+    let (rest, _): (&'a str, &'a str) = tag::<_, _, OracleError<'a>>("that creature")
+        .parse(text)
+        .ok()?;
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            Some(rest)
+        }
+        _ => None,
+    }
+}
+
 /// CR 201.5 + CR 109.5: Recognize a leading **source-anaphoric gendered
 /// pronoun** ("him" / "himself" / "her" / "herself") and bind it to
 /// [`TargetFilter::SelfRef`] — the ability's own source object.
@@ -5388,6 +5419,13 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        // CR 701.3a: the filter-matched host axis reads the HOST's identity (and
+        // whatever the host filter asks about that host), never the candidate's
+        // own power/toughness — so it stays distributable onto a noncreature leg
+        // ("Auras and Equipment attached to …").
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

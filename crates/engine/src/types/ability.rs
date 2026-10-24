@@ -6341,8 +6341,9 @@ pub enum DelayedTriggerPlayerBinding {
     /// target artifact or creature. Return that card to the battlefield
     /// under its owner's control at the beginning of that player's next end
     /// step" — the exiled permanent may belong to any player, so "that
-    /// player" (its owner, CR 400.3) is resolved from the parent target at
-    /// delayed-trigger creation, not assumed to be the controller.
+    /// player" (its owner, CR 400.3) is resolved from the parent target, or
+    /// else the object the parent moved, at delayed-trigger creation, not
+    /// assumed to be the controller.
     ParentTargetOwner,
 }
 
@@ -7046,9 +7047,16 @@ pub enum CombatRelationSubject {
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
-/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`) and
-/// the player referent (`Player`) resolve through separate authorities in
-/// `game::filter`; only the relation is shared.
+/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`,
+/// `Host`) and the player referent (`Player`) resolve through separate
+/// authorities in `game::filter`; only the relation is shared.
+///
+/// The enum splits into two grammatical classes: referents BOUND to one object
+/// or player (`Source`, `Recipient`, `Player`, `DeclaredTarget`) and referents
+/// MATCHED against a filter (`Host`). A bound referent names one identity the
+/// resolver already owns; a matched referent names a set the resolver must
+/// evaluate ("attached to any creature", "attached to that creature" resolved
+/// from the event, "attached to the announced host").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttachmentReferent {
@@ -7072,11 +7080,38 @@ pub enum AttachmentReferent {
     /// else the chain root) and is read only through
     /// `targeting::declared_slot_referent`.
     DeclaredTarget { slot: usize },
+    /// CR 701.3a + CR 603.7c + CR 608.2h (+ CR 601.2c for an announced host):
+    /// the filter-matched host axis — "attached to any object in `filter`'s
+    /// referent set". Covers a mass object set defined by attachment to a
+    /// referenced permanent (the player axis lowers to
+    /// [`Self::Player`](AttachmentReferent::Player) or declines): "destroy all
+    /// Auras attached to that
+    /// creature" (Treefolk Mystic, Corrosive Ooze), "… attached to that
+    /// creature to ~" (Rhuk, Hexgold Nabber), "… attached to creatures" (End
+    /// Hostilities), "destroy all Auras and Equipment attached to target
+    /// creature" (Strip Bare). `filter` is the same `TargetFilter` algebra the
+    /// target-slot parser produces, so one variant spans every referent the
+    /// class needs; the at-resolution read is
+    /// `filter::attached_to_host_filter`.
+    ///
+    /// INVARIANT — no declared-slot host: a host phrase whose antecedent is a
+    /// numbered declared slot lowers to `DeclaredTarget` (the chain-wide
+    /// authority `oracle_effect::resolve_declared_slot_anaphor`), and a host
+    /// phrase the step-5 target parse resolves only against the
+    /// Choose-head-local `ctx.declared_target_slots` registry declines the
+    /// whole clause, so `Host { filter: ParentTargetSlot { .. } }` never
+    /// exists. `reads_declared_slot` therefore stays `false` for `Host`; the
+    /// `ParentTargetSlot` population leg of the mass set is handled by
+    /// `filter::concretize_mass_population_parent_legs` instead.
+    Host { filter: Box<TargetFilter> },
 }
 
 impl AttachmentReferent {
     /// Whether evaluating this referent reads a declared target slot of the
     /// resolving chain (and therefore needs a declared-slot view or carrier).
+    ///
+    /// `Host` is `false` by the variant's no-declared-slot invariant: a
+    /// slot-indexed host phrase maps to `DeclaredTarget`, never to `Host`.
     pub fn reads_declared_slot(&self) -> bool {
         matches!(self, AttachmentReferent::DeclaredTarget { .. })
     }
@@ -29239,6 +29274,11 @@ pub struct AbilityDefinition {
     /// CR 115.1 + CR 608.2c: where this instruction's `ObjectScope::Target`
     /// reads take their object from. See [`TargetReadOrigin`].
     pub target_reads: TargetReadOrigin,
+    /// CR 611.2e + CR 608.2c: when this instruction's continuous effect begins to
+    /// apply to a permanent an earlier instruction of the same resolution put onto
+    /// the battlefield. Stamped by the clause parser that recognized the verb form.
+    /// See [`ContinuousEffectOnset`].
+    pub entry_onset: ContinuousEffectOnset,
     /// CR 608.2c + CR 122.1: when this ability is a `ChooseOneOf` branch driven
     /// by a counter-kind iteration (`repeat_for: DistinctCounterKindsAmong`),
     /// `Some(RebindToIteratedKind)` marks the branch whose `PutCounter`
@@ -29348,6 +29388,8 @@ struct AbilityDefinitionRepr<'a> {
     sub_link: SubAbilityLink,
     #[serde(skip_serializing_if = "TargetReadOrigin::is_own")]
     target_reads: TargetReadOrigin,
+    #[serde(skip_serializing_if = "ContinuousEffectOnset::is_when_followed")]
+    entry_onset: ContinuousEffectOnset,
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_kind_binding: &'a Option<IterationKindBinding>,
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
@@ -29409,6 +29451,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link,
             target_reads,
+            entry_onset,
             iteration_kind_binding,
             sibling_condition,
             unlowered_guard,
@@ -29460,6 +29503,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link: *sub_link,
             target_reads: *target_reads,
+            entry_onset: *entry_onset,
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
             unlowered_guard,
@@ -29588,6 +29632,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     target_reads: TargetReadOrigin,
     #[serde(default)]
+    entry_onset: ContinuousEffectOnset,
+    #[serde(default)]
     iteration_kind_binding: Option<IterationKindBinding>,
     #[serde(default)]
     sibling_condition: SiblingCondition,
@@ -29653,6 +29699,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             repeat_until: de.repeat_until,
             sub_link: de.sub_link,
             target_reads: de.target_reads,
+            entry_onset: de.entry_onset,
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
             unlowered_guard: de.unlowered_guard,
@@ -29729,6 +29776,56 @@ impl TargetReadOrigin {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_own(origin: &Self) -> bool {
         matches!(origin, Self::OwnAnnouncement)
+    }
+}
+
+/// CR 611.2e + CR 608.2c: when the continuous effect an instruction creates begins to apply to a
+/// permanent that an earlier instruction of the same resolution put onto the battlefield.
+///
+/// Stamped at parse time by the clause parser that recognized the instruction's verb form and
+/// copied from the `AbilityDefinition` onto its `ResolvedAbility`. Read by the resolution's
+/// entry-observation boundary (`effects::entry_observation_deferred`): a remaining `WithEntry`
+/// instruction holds the enter observation back until it has applied.
+///
+/// Persisted states written before the onset existed are admitted only when they hold no node of
+/// an onset-admitting kind (`types::resolution::admit_entry_onset_record`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ContinuousEffectOnset {
+    /// CR 608.2c: the effect begins when this instruction is followed. For a permanent an earlier
+    /// instruction of this resolution put onto the battlefield, that is after the permanent is on
+    /// the battlefield. CR 611.2e names "becomes" and "gains"; any other wording that is not an
+    /// "is/has" statement (for example "gets") follows CR 608.2c order.
+    #[default]
+    WhenFollowed,
+    /// CR 611.2e: the instruction states the permanent "is"/"has" a characteristic or doesn't
+    /// have one, so the effect applies simultaneously with the entry. For a token entrant the same
+    /// wording defines the token's characteristics (CR 111.3).
+    WithEntry,
+}
+
+impl ContinuousEffectOnset {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_when_followed(onset: &Self) -> bool {
+        matches!(onset, Self::WhenFollowed)
+    }
+
+    /// CR 611.2e: can an instruction of this kind carry `WithEntry`? The parser stamps `WithEntry`
+    /// only on "is/has" continuous instructions, and those lower to these kinds. For every other
+    /// kind the `WhenFollowed` default is the only reachable onset, so an unrecorded node of that
+    /// kind is decided.
+    ///
+    /// BASE parity: before onsets were recorded, the engine deferred the enter observation by
+    /// kind, for exactly these four kinds (`effect_may_apply_with_entry` at fae445c80,
+    /// `game/effects/mod.rs`). A node of any other kind already behaved as `WhenFollowed` there,
+    /// so admitting it unrecorded changes no outcome, and detecting by kind never assigns an onset.
+    pub fn kind_admits_with_entry(kind: EffectKind) -> bool {
+        matches!(
+            kind,
+            EffectKind::GenericEffect
+                | EffectKind::Animate
+                | EffectKind::ReturnAsAura
+                | EffectKind::ApplyPerpetual
+        )
     }
 }
 
@@ -29954,6 +30051,7 @@ impl AbilityDefinition {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             target_reads: TargetReadOrigin::OwnAnnouncement,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
@@ -37454,6 +37552,13 @@ pub struct ResolvedAbility {
     /// `AbilityDefinition`. See [`TargetReadOrigin`].
     #[serde(default, skip_serializing_if = "TargetReadOrigin::is_own")]
     pub target_reads: TargetReadOrigin,
+    /// CR 611.2e + CR 608.2c: Copied through from the originating
+    /// `AbilityDefinition`. See [`ContinuousEffectOnset`].
+    #[serde(
+        default,
+        skip_serializing_if = "ContinuousEffectOnset::is_when_followed"
+    )]
+    pub entry_onset: ContinuousEffectOnset,
     /// CR 702.1c ("the same is true") + CR 608.2c (written order): Copied through
     /// from the originating `AbilityDefinition`. When `ReplicatedOrBranch`, this
     /// `SequentialSibling` is an INDEPENDENT
@@ -37600,6 +37705,7 @@ impl PartialEq for ResolvedAbility {
             replacement_applied: a_replacement_applied,
             sub_link: a_sub_link,
             target_reads: a_target_reads,
+            entry_onset: a_entry_onset,
             sibling_condition: a_sibling_condition,
             modal: a_modal,
             mode_abilities: a_mode_abilities,
@@ -37676,6 +37782,7 @@ impl PartialEq for ResolvedAbility {
             replacement_applied: b_replacement_applied,
             sub_link: b_sub_link,
             target_reads: b_target_reads,
+            entry_onset: b_entry_onset,
             sibling_condition: b_sibling_condition,
             modal: b_modal,
             mode_abilities: b_mode_abilities,
@@ -37754,6 +37861,7 @@ impl PartialEq for ResolvedAbility {
             && a_replacement_applied == b_replacement_applied
             && a_sub_link == b_sub_link
             && a_target_reads == b_target_reads
+            && a_entry_onset == b_entry_onset
             && a_sibling_condition == b_sibling_condition
             && a_modal == b_modal
             && a_mode_abilities == b_mode_abilities
@@ -38145,6 +38253,7 @@ impl ResolvedAbility {
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
             target_reads: TargetReadOrigin::OwnAnnouncement,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
             sibling_condition: SiblingCondition::Dependent,
             source_incarnation: None,
             announced_source_incarnation: None,

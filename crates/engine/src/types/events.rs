@@ -889,6 +889,12 @@ impl EventObjectSnapshot {
             | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
             | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
             | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+            // CR 701.3a: event snapshots carry no host relation, exactly as they
+            // carry none for the other four referents, so a `Host` filter must
+            // fail the reach gate LOUDLY rather than read an unhosted snapshot.
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { .. },
+            }
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
             | FilterProp::MostPrevalentCreatureTypeIn { .. }
