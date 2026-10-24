@@ -24787,10 +24787,12 @@ fn trigger_dreadhound_dies_or_library_to_graveyard_two_clauses() {
 
 /// Regression for issue #311: Undead Alchemist class. "Whenever a creature
 /// card is put into an opponent's graveyard from their library" must:
-///   - set origin = Library (CR 603.6c: from-library zone constraint)
-///   - set valid_card.controller = Opponent (CR 109.5: "their" anaphor
-///     binds back to the previously named opponent; valid_card is the field
-///     match_changes_zone consults).
+///   - set origin = Library (the from-library zone constraint)
+///   - scope valid_card to cards an opponent OWNS
+///     (`FilterProp::Owned { controller: Opponent }`, CR 400.3: a card goes
+///     only to its owner's graveyard; CR 608.2c: "their" binds back to that
+///     opponent), leaving `valid_card.controller` unset; valid_card is the
+///     field match_changes_zone consults.
 ///     Without these, the trigger fires when the controller's own creatures go
 ///     from battlefield to graveyard — the user-reported softlock chain.
 #[test]
@@ -24818,10 +24820,11 @@ fn trigger_put_into_opponent_graveyard_from_their_library() {
     );
 }
 
-/// CR 109.5 + CR 700.4: Bloodchief Ascension class — "an opponent's
+/// CR 400.3 + CR 700.4: Bloodchief Ascension class — "an opponent's
 /// graveyard from anywhere". `origin = None` (no zone restriction) but
-/// `valid_card.controller = Opponent` so the trigger only fires for cards
-/// owned by an opponent.
+/// `valid_card` carries `FilterProp::Owned { controller: Opponent }`
+/// (CR 400.3) so the trigger only fires for cards an opponent owns, whoever
+/// controlled them.
 #[test]
 fn trigger_put_into_opponent_graveyard_from_anywhere() {
     let def = parse_trigger_line(

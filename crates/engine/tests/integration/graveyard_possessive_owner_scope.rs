@@ -1097,24 +1097,42 @@ fn r5_bloodchief_stolen_opponent_card_makes_its_owner_lose_life() {
     assert_life_delta(&runner, before, (2, -2), "R5 stolen card: the OWNER loses");
 }
 
-/// R9a (preservation, intervening "if"): with only two quest counters the condition "if
-/// this enchantment has three or more quest counters on it" is false when the card goes to
-/// the opponent's graveyard, so the ability never triggers (CR 603.4): nothing is put on the
-/// stack, nobody is asked, and neither life total moves. The reach guard is that the
-/// opponent-owned card really died into P1's graveyard under P0's control, so the owner-keyed
-/// head did match the event; the three-counter version of the same board is R5.
+/// R9a (intervening "if", both halves in one board): the owner-keyed head
+/// ("put into an opponent's graveyard") is paired with the condition "if this enchantment
+/// has three or more quest counters on it" (CR 603.4: checked when the ability would
+/// trigger).
+///
+/// First death, two quest counters: a P1-owned card stolen by P0 dies into P1's graveyard.
+/// The condition is false, so nothing is put on the stack, nobody is asked, and neither
+/// life total moves. On its own this half cannot tell the head matching from the head not
+/// matching, because both give zero triggers.
+///
+/// Second death, after a third quest counter is added: a second stolen P1-owned card dies
+/// the same way. Now the condition holds, so exactly one trigger appears, P0 is asked,
+/// and accepting makes the card's OWNER lose 2 life while P0 gains 2. That one trigger
+/// proves the owner-keyed head does match a card P0 controlled when it died, so the row
+/// fails if either the owner scope or the condition path regresses. R5 is the same
+/// three-counter board without the preceding two-counter death.
 #[test]
-fn r9a_bloodchief_with_two_quest_counters_does_not_trigger() {
-    let (mut s, _ascension) = bloodchief_board_with_quest_counters(2);
+fn r9a_bloodchief_two_quest_counters_do_not_trigger_the_third_does() {
+    let (mut s, ascension) = bloodchief_board_with_quest_counters(2);
     let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let stolen_again = s.add_creature(P1, "Bear Stolen Again", 2, 2).id();
     let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let threaten_again = s
         .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
         .id();
     let murder_stolen = s
         .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
         .id();
+    let murder_again = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
     let mut runner = s.build();
 
+    // Two quest counters: the intervening "if" is false.
     steal(&mut runner, threaten, stolen, P0);
     let before = lives(&runner);
     // `murder` asserts the card went to its owner's (P1's) graveyard.
@@ -1132,6 +1150,42 @@ fn r9a_bloodchief_with_two_quest_counters_does_not_trigger() {
     );
     assert_settled(&runner);
     assert_life_delta(&runner, before, (0, 0), "R9a two quest counters");
+
+    // The third quest counter, placed the way `with_counter` places the board's counters.
+    *runner
+        .state_mut()
+        .objects
+        .get_mut(&ascension)
+        .expect("Bloodchief Ascension is on the battlefield")
+        .counters
+        .entry(CounterType::Generic("quest".into()))
+        .or_insert(0) += 1;
+    assert_eq!(
+        runner.state().objects[&ascension].counters[&CounterType::Generic("quest".into())],
+        3,
+        "Bloodchief Ascension now has three quest counters"
+    );
+
+    // Three quest counters: the same route now triggers, so the head did match the owner.
+    steal(&mut runner, threaten_again, stolen_again, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_again, stolen_again, P1);
+    assert_in_graveyard_of(&runner, "Bear Stolen Again", P1);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        1,
+        "three quest counters: Bloodchief triggers for the stolen opponent-owned card"
+    );
+    drain(&mut runner);
+    assert_optional_prompt_for(&runner, P0);
+    accept_optional(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(
+        &runner,
+        before,
+        (2, -2),
+        "R9a three quest counters: the OWNER loses",
+    );
 }
 
 /// R9b (decline, "you may"): with three quest counters the ability triggers and P0 is asked
