@@ -1,6 +1,7 @@
 //! Standalone browser boundary around the Phase Oracle parser and unsupported-node audit.
 //! This reports parser support, not official Oracle legality or intent fidelity.
 use engine::game::coverage::card_face_has_unimplemented_parts;
+use engine::parser::oracle_util::strip_reminder_text;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::Effect;
 use engine::types::card::CardFace;
@@ -24,8 +25,7 @@ fn check(input: Input) -> Value {
     // Phase expects MTGJSON keyword bookkeeping. Derive only whole keyword
     // phrases that round-trip through its own Keyword reader/display; no fuzzy
     // word search and no synthesized parameter defaults enter the metadata.
-    let metadata: Vec<Keyword> = input
-        .oracle_text
+    let metadata: Vec<Keyword> = strip_reminder_text(&input.oracle_text)
         .lines()
         .flat_map(|s| s.split(','))
         .filter_map(|part| {
@@ -150,5 +150,20 @@ mod tests {
             "needs_review"
         );
         assert!(check_oracle_card("{}").contains("invalid_input"));
+    }
+
+    #[test]
+    fn keyword_metadata_ignores_reminder_text() {
+        for text in [
+            "Flying",
+            "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+        ] {
+            let result: Value = serde_json::from_str(&check_oracle_card(
+                &json!({"name":"Probe","oracle_text":text,"types":["Creature"]}).to_string(),
+            ))
+            .unwrap();
+            assert_eq!(result["keyword_metadata"], json!(["flying"]));
+            assert_eq!(result["parse_complete"], true);
+        }
     }
 }
