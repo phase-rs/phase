@@ -3133,6 +3133,62 @@ fn load_minimal_test_card_database() {
     });
 }
 
+/// Shared native/WASM fixture for a serialized legacy Resolve All Ready state.
+#[cfg(test)]
+fn legacy_ready_state() -> GameState {
+    use engine::types::actions::ResolveAllScope;
+    use engine::types::game_state::{
+        ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry,
+        StackEntryKind, StackResolutionBudget,
+    };
+
+    let mut state = GameState::new_two_player(7);
+    const EPOCH: u64 = 70_200;
+    let source = ObjectId(EPOCH);
+    let controller = PlayerId(1);
+    state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
+    state.priority_player = PlayerId(0);
+    state.stack.push_back(StackEntry {
+        id: source,
+        source_id: source,
+        controller,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::NoOp,
+                vec![],
+                source,
+                controller,
+            )),
+        },
+    });
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch: EPOCH,
+        max_resolutions: StackResolutionBudget::default(),
+        scope: ResolveAllScope::Shared,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: PlayerId(0),
+            priority_player: PlayerId(0),
+            priority_pass_count: 0,
+            priority_passes: Default::default(),
+        },
+        participants: vec![
+            ResolveAllConsentParticipant {
+                representative: PlayerId(0),
+                authorized_submitter: PlayerId(0),
+                granted: true,
+            },
+            ResolveAllConsentParticipant {
+                representative: PlayerId(1),
+                authorized_submitter: PlayerId(1),
+                granted: true,
+            },
+        ],
+        auto_pass_baseline: None,
+    });
+    state
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -3208,7 +3264,7 @@ fn resume_loaded_stack_automation(
         let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
         let resumed = resume_restored_stack_automation(&mut state);
         cell.set(Some(state));
-        Ok::<_, String>(resumed)
+        resumed.map_err(|error| error.to_string())
     })?;
     let changed = !matches!(
         resumed.presentation.outcome,
@@ -3306,12 +3362,41 @@ fn resume_multiplayer_host_state_inner(
     // The fresh RNG state is installed before the engine evaluates the saved
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
-    resume_loaded_stack_automation(true)
+    resume_loaded_stack_automation(true).inspect_err(|_| {
+        clear_game_state();
+        set_multiplayer_mode(false);
+    })
 }
 
 #[cfg(test)]
 mod restored_card_db_requirements_tests {
     use super::*;
+
+    fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
+        let mut state = legacy_ready_state();
+        state.players[0].life_gained_this_turn = life_gained_this_turn;
+        let entry = state
+            .stack
+            .front_mut()
+            .expect("legacy Ready has a stack entry");
+        let source = entry.source_id;
+        entry.controller = PlayerId(0);
+        entry.kind = engine::types::game_state::StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::GainLife {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: engine::types::ability::TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+        };
+        state.capture_rng_word_pos();
+        serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("trusted host state serializes")
+    }
 
     #[test]
     fn decoded_restore_requires_a_card_database_before_state_mutation() {
@@ -3425,6 +3510,96 @@ mod restored_card_db_requirements_tests {
         );
         assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn multiplayer_host_resume_clears_failed_automation_install_and_allows_retry() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let cached_state = legacy_ready_state();
+        let cached_before = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: FormatConfig::standard(),
+                match_config: MatchConfig::default(),
+                player_count: 2,
+                first_player: Some(0),
+                seed: 7,
+                deck_data: None,
+            })));
+        });
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+        assert!(has_replay_recording());
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+
+        let overflow = legacy_ready_gain_state_json(u32::MAX);
+        let error = resume_multiplayer_host_state_inner(&overflow)
+            .expect_err("host automation must return the life-counter overflow");
+        assert_eq!(
+            error,
+            "Life change is not representable for player PlayerId(0)"
+        );
+        assert!(
+            !game_state_present(),
+            "failed host state install is cleared"
+        );
+        assert!(!is_multiplayer_mode(), "failed host claim is released");
+        assert!(
+            !has_replay_recording(),
+            "the abandoned recording is cleared"
+        );
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "failed host installation invalidates outstanding proposals"
+        );
+        let cached_after = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        assert!(
+            !std::sync::Arc::ptr_eq(&cached_before, &cached_after),
+            "failed host installation clears the cached AI session"
+        );
+
+        // A second fresh-host attempt must work without an intervening clear/reset.
+        let representable = legacy_ready_gain_state_json(u32::MAX - 1);
+        let presentation = resume_multiplayer_host_state_inner(&representable)
+            .expect("the representable saved automation can retry immediately");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(game_state_present());
+        assert!(is_multiplayer_mode());
+        with_state(|state| {
+            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+            assert_eq!(state.players[0].life, 21);
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        })
+        .expect("successful retry leaves the host game installed");
+
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 }
 
@@ -4833,15 +5008,14 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
-    use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
+    use engine::types::actions::ResolveAllConsentDecision;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, NamedChoiceSource, NamedChoiceSourceBinding,
-        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, ResolveAllConsentParticipant,
-        ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry, StackEntryKind,
-        StackResolutionBudget, WaitingFor,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
+        WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -6075,54 +6249,9 @@ mod tests {
         load_card_database(&json).unwrap();
     }
 
-    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
-            controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
-            },
-        }
-    }
-
     fn legacy_ready_state_json() -> String {
-        let mut state = GameState::new_two_player(7);
+        let state = legacy_ready_state();
         const EPOCH: u64 = 70_200;
-        state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
-        state.priority_player = PlayerId(0);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_200, PlayerId(1)));
-        state.resolve_all_consent_run = Some(ResolveAllConsentRun {
-            epoch: EPOCH,
-            max_resolutions: StackResolutionBudget::default(),
-            // A table-wide run: both seats are participants and both granted.
-            scope: ResolveAllScope::Shared,
-            priority_snapshot: ResolveAllPrioritySnapshot {
-                waiting_player: PlayerId(0),
-                priority_player: PlayerId(0),
-                priority_pass_count: 0,
-                priority_passes: Default::default(),
-            },
-            participants: vec![
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(0),
-                    authorized_submitter: PlayerId(0),
-                    granted: true,
-                },
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(1),
-                    authorized_submitter: PlayerId(1),
-                    granted: true,
-                },
-            ],
-            // `None` and the empty live preference map identify the real
-            // persisted Ready representation, not a contemporary consent run.
-            auto_pass_baseline: None,
-        });
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ResolveAllReady { epoch } if epoch == EPOCH

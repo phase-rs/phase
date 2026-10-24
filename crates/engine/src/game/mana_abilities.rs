@@ -6248,6 +6248,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),
