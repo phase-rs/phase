@@ -131,6 +131,1429 @@ const SWANS_ORACLE: &str = "Flying\nIf a source would deal damage to this creatu
 const MOGG_ORACLE: &str = "Sacrifice this creature: It deals 1 damage to any target.";
 const BLOODFIRE_ORACLE: &str =
     "{R}, Sacrifice this creature: It deals 6 damage to each creature and each player.";
+const GHOST_LIT_RAIDER_ORACLE: &str = "{2}{R}, {T}: This creature deals 2 damage to target creature.\nChannel — {3}{R}, Discard this card: It deals 4 damage to target creature.";
+const COMEUPPANCE_ORACLE: &str = "Prevent all damage that would be dealt to you and planeswalkers you control this turn by sources you don't control. If damage from a creature source is prevented this way, Comeuppance deals that much damage to that creature. If damage from a noncreature source is prevented this way, Comeuppance deals that much damage to the source's controller.";
+const ZURS_WEIRDING_ORACLE: &str = "Players play with their hands revealed.\nIf a player would draw a card, they reveal it instead. Then any other player may pay 2 life. If a player does, put that card into its owner's graveyard. Otherwise, that player draws a card.";
+const NEW_WAY_FORWARD_ORACLE: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
+
+/// CR 608.2c + CR 109.5 + CR 615.5: contextual replacement subjects and
+/// independent printed "you" remain different actors. These explicitly
+/// synthetic admitted sentences expose the actor through CounterAdded.
+#[test]
+fn replacement_subject_actors_are_separate_from_replacer_owner_and_independent_you() {
+    use engine::types::counter::CounterType;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for family in 0..3 {
+        let (oracle, replacer, actor) = match family {
+            0 => ("If a player would gain life, instead that player puts a +1/+1 counter on this creature. You draw a card.", P0, p2),
+            1 => ("If damage would be dealt to a player, prevent that damage and that player puts a +1/+1 counter on this creature. You draw a card.", P0, p2),
+            2 => ("If a source would deal damage to this creature, prevent that damage. The source's controller puts a +1/+1 counter on this creature. You draw a card.", p2, P1),
+            _ => unreachable!(),
+        };
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario
+            .add_creature_from_oracle(p3, "Synthetic actor-sensitive replacement", 2, 10, oracle)
+            .controlled_by(replacer)
+            .id();
+        let source = if family == 2 {
+            scenario
+                .add_creature_from_oracle(P0, "Mogg Fanatic", 1, 1, MOGG_ORACLE)
+                .controlled_by(P1)
+                .id()
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Synthetic event source",
+                    true,
+                    if family == 0 {
+                        "Target player gains 2 life."
+                    } else {
+                        "Synthetic event source deals 1 damage to target player."
+                    },
+                )
+                .id()
+        };
+        for player in [P0, P1, p2, p3] {
+            scenario.with_library_top(player, &["One", "Two", "Three"]);
+        }
+        let mut runner = scenario.build();
+        assert!(
+            runner.state().objects[&host].parse_warnings.is_empty(),
+            "{:?}",
+            runner.state().objects[&host].parse_warnings
+        );
+        assert_eq!(
+            runner.state().objects[&host].replacement_definitions.len(),
+            1
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+        let outcome = if family == 2 {
+            runner.activate(source, 0).target_object(host).resolve()
+        } else {
+            runner.cast(source).target_player(p2).resolve()
+        };
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == host)).count(), 1);
+        assert_eq!(
+            outcome.state().objects[&host]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1)
+        );
+        assert_eq!(outcome.state().objects[&host].owner, p3);
+        for player in [P0, P1, p2, p3] {
+            outcome.assert_hand_drawn(player, i64::from(player == replacer));
+        }
+        assert_eq!(
+            outcome.state().players[p2.0 as usize].life,
+            20,
+            "the original life/damage event was replaced"
+        );
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 615.5 + CR 108.3: the owner who shuffles a prevented combat-damage
+/// recipient is distinct from its controller and the prevention source.
+#[test]
+fn real_weeping_angel_owner_subject_survives_combat_and_performs_the_library_action() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, SubAbilityLink};
+    use engine::types::counter::CounterType;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let oracle = "Flash\nFirst strike, vigilance\nWhenever an opponent casts a creature spell, this creature isn't a creature until end of turn.\nIf this creature would deal combat damage to a creature, prevent that damage and that creature's owner shuffles it into their library.";
+    let parsed = engine::parser::parse_oracle_text(
+        oracle,
+        "Weeping Angel",
+        &[],
+        &["Artifact".into(), "Creature".into()],
+        &["Alien".into(), "Angel".into()],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert_eq!(parsed.replacements.len(), 1);
+    let mut replacement = parsed.replacements[0].clone();
+    let mut printed = *replacement.execute.take().unwrap();
+    let actor = printed
+        .instruction_actor
+        .clone()
+        .expect("the real owner subject has a retained instruction actor");
+    assert_eq!(
+        actor.as_event(),
+        Some(&TargetFilter::PostReplacementDamageTargetOwner)
+    );
+    let mut counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    );
+    counter.instruction_actor = Some(actor);
+    printed.sub_link = SubAbilityLink::SequentialSibling;
+    counter.sub_ability = Some(Box::new(printed));
+    replacement.execute = Some(Box::new(counter));
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic counter then real Weeping Angel body",
+            2,
+            5,
+            "First strike, vigilance",
+        )
+        .with_replacement_definition(replacement)
+        .id();
+    let victim = scenario
+        .add_creature(p3, "Borrowed blocker", 1, 5)
+        .controlled_by(p2)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    let mut events = runner
+        .declare_attackers(&[(angel, AttackTarget::Player(p2))])
+        .unwrap()
+        .events;
+    for _ in 0..20 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == p2)
+    );
+    events.extend(runner.declare_blockers(&[(victim, angel)]).unwrap().events);
+    let combat = runner.combat_damage();
+    events.extend(combat.events().iter().cloned());
+    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actor == p3 && *object_id == angel)).count(), 1);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Library);
+    assert!(runner.state().players[p3.0 as usize]
+        .library
+        .contains(&victim));
+    assert!(!runner.state().players[p2.0 as usize]
+        .library
+        .contains(&victim));
+    assert!(events.iter().any(|event| matches!(event, GameEvent::PlayerPerformedAction { player_id, action: engine::types::events::PlayerActionKind::ShuffledLibrary, .. } if *player_id == p3)));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 603.3 + CR 608.2c + CR 122.6: the event's targeter and the damaged
+/// object's controller perform their own instructions. CounterAdded exposes
+/// the performer independently of source, counter recipient, and card owner.
+#[test]
+fn actual_targeter_and_damage_recipient_triggers_keep_their_distinct_instruction_actors() {
+    use engine::types::counter::CounterType;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for player_target in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = if player_target {
+            scenario.add_enchantment_from_oracle(p3, "Synthetic player-targeter actor",
+                "Whenever you become the target of a spell or ability, that spell or ability's controller puts a +1/+1 counter on this enchantment.")
+                .controlled_by(P0).id()
+        } else {
+            scenario.add_creature_from_oracle(p3, "Synthetic object-targeter actor", 2, 5,
+                "Whenever this creature becomes the target of a spell or ability, that spell or ability's controller puts a +1/+1 counter on this creature.")
+                .controlled_by(P0).id()
+        };
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Synthetic targeter",
+                true,
+                if player_target {
+                    "Target player gains 1 life."
+                } else {
+                    "Put a +1/+1 counter on target creature."
+                },
+            )
+            .id();
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&source].parse_warnings.is_empty());
+        assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+        runner.act(GameAction::PassPriority).unwrap();
+        let cast = runner.cast(spell);
+        let outcome = if player_target {
+            cast.target_player(P0).resolve()
+        } else {
+            cast.target_object(source).resolve()
+        };
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: P1, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *object_id == source)).count(), if player_target { 1 } else { 2 });
+        assert!(!outcome.events().iter().any(|event| matches!(event, GameEvent::CounterAdded { actor, object_id, .. } if *object_id == source && *actor != P1)));
+        assert_eq!(outcome.state().objects[&source].owner, p3);
+        assert_eq!(outcome.state().objects[&source].controller, P0);
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature_from_oracle(P0, "Synthetic damaged-controller actor", 2, 5,
+        "{T}: This creature deals 1 damage to target creature.\nWhenever this creature deals damage to a creature, that creature's controller puts a +1/+1 counter on that creature. That creature's owner puts a +1/+1 counter on that creature. You put a +1/+1 counter on this creature.").id();
+    let victim = scenario
+        .add_creature(p3, "Borrowed damaged object", 2, 5)
+        .controlled_by(p2)
+        .id();
+    let mut runner = scenario.build();
+    assert!(runner.state().objects[&source].parse_warnings.is_empty());
+    assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+    let outcome = runner.activate(source, 0).target_object(victim).resolve();
+    for (actor, object) in [(p2, victim), (p3, victim), (P0, source)] {
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1);
+    }
+    assert_eq!(outcome.state().objects[&victim].damage_marked, 1);
+    assert_eq!(
+        outcome.state().objects[&victim]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&2)
+    );
+    assert_eq!(
+        outcome.state().objects[&source]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 510.2 + CR 702.15e + CR 615.5: Phase A's source identities survive
+/// the real lifelink replacement pause before Phase D dispatches a fresh rider.
+#[test]
+fn combat_lifelink_saved_choice_keeps_the_chosen_source_for_the_fresh_aggregate_rider() {
+    use engine::game::combat::AttackTarget;
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    let p3 = PlayerId(3);
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let chosen = scenario
+            .add_creature(p3, "Borrowed chosen damage source", 3, 5)
+            .controlled_by(P0)
+            .id();
+        let lifelinker = scenario
+            .add_creature(P0, "Independent lifelink dealer", 1, 5)
+            .lifelink()
+            .id();
+        scenario
+            .add_enchantment_from_oracle(P0, "Synthetic optional lifelink replacement", "")
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::GainLife)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            );
+        let shield_spell = scenario
+            .add_spell_to_hand_from_oracle(P1, "New Way Forward", true, NEW_WAY_FORWARD_ORACLE)
+            .id();
+        scenario.with_library_top(P1, &["One", "Two", "Three", "Four"]);
+        let mut runner = scenario.build();
+        let chosen_pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&chosen]),
+            Zone::Battlefield,
+        );
+        let lifelink_pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&lifelinker]),
+            Zone::Battlefield,
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        let cast = runner.cast(shield_spell).resolve();
+        assert!(matches!(
+            cast.final_waiting_for(),
+            WaitingFor::DamageSourceChoice { player: P1, .. }
+        ));
+        runner
+            .act(GameAction::ChooseDamageSource { source: chosen })
+            .unwrap();
+        assert!(runner.state().stack.is_empty());
+        let installed = runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .find(|shield| shield.runtime_execute.is_some())
+            .unwrap();
+        assert_eq!(
+            installed.damage_source_filter,
+            Some(TargetFilter::SpecificObject { id: chosen })
+        );
+        assert!(
+            installed
+                .runtime_execute
+                .as_ref()
+                .unwrap()
+                .context
+                .replacement_event
+                .is_none(),
+            "future installed work is unbound"
+        );
+        runner.advance_to_combat();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P0, .. }
+        ));
+        let mut events = runner
+            .declare_attackers(&[
+                (chosen, AttackTarget::Player(P1)),
+                (lifelinker, AttackTarget::Player(P1)),
+            ])
+            .unwrap()
+            .events;
+        let combat = runner.combat_damage();
+        events.extend(combat.events().iter().cloned());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert!(matches!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .proposed,
+            engine::types::proposed_event::ProposedEvent::LifeGain {
+                player_id: P0,
+                amount: 1,
+                ..
+            }
+        ));
+        let tail = runner
+            .state()
+            .pending_combat_lifelink
+            .as_ref()
+            .expect("actual combat tail is parked before Phase D");
+        assert_eq!(tail.source_identities.get(&chosen), Some(&chosen_pin));
+        assert_eq!(tail.source_identities.get(&lifelinker), Some(&lifelink_pin));
+        assert!(!tail.prevention_tally.is_empty());
+        assert!(
+            runner.state().players[1].hand.is_empty(),
+            "the prevention rider has not fired before the lifelink answer"
+        );
+        let saved = serde_json::to_string(runner.state()).unwrap();
+        let restored: GameState = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored, *runner.state());
+        for viewer in [P0, P1, PlayerId(2), p3] {
+            let view = engine::game::visibility::filter_state_for_viewer(&restored, viewer);
+            assert!(
+                view.pending_combat_lifelink.is_none(),
+                "the private combat continuation is not a viewer authority"
+            );
+        }
+        runner = GameRunner::from_state(restored);
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement {
+                    index: usize::from(!accept),
+                })
+                .unwrap()
+                .events,
+        );
+        for _ in 0..20 {
+            if runner.state().pending_combat_lifelink.is_none()
+                && runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                runner.state().waiting_for
+            );
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(runner.state().players[0].life, if accept { 17 } else { 18 });
+        assert_eq!(runner.state().players[1].life, 19);
+        assert_eq!(
+            runner.state().players[1].hand.len(),
+            3,
+            "printed-you draws for P1, separately from the P0 source-controller recipient"
+        );
+        assert_eq!(runner.state().players[p3.0 as usize].life, 20);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(P0), amount: 3, is_combat: false, .. } if *source_id == shield_spell)).count(), 1);
+        assert!(runner.state().pending_combat_lifelink.is_none());
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 113.7a + CR 608.2h: DamageEachPlayer is an independent production
+/// dispatcher. Its sacrificed own source must reach the same exact-LKI authority.
+#[test]
+fn each_player_damage_keeps_the_pre_cost_source_through_a_real_prevention_followup() {
+    use engine::types::ability::{
+        DamageTargetFilter, DamageTargetPlayerScope, PlayerFilter, PreventionAmount,
+        ReplacementDefinition,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let mogg = engine::parser::parse_oracle_text(
+        MOGG_ORACLE,
+        "Mogg Fanatic",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    let swans = engine::parser::parse_oracle_text(
+        SWANS_ORACLE,
+        "Swans of Bryn Argoll",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert!(mogg.parse_warnings.is_empty() && swans.parse_warnings.is_empty());
+    let mut activation = mogg.abilities[0].clone();
+    activation.effect = Box::new(Effect::DamageEachPlayer {
+        amount: QuantityExpr::Fixed { value: 1 },
+        player_filter: PlayerFilter::All,
+    });
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synthetic EachPlayer Mogg activation", 1, 1)
+        .controlled_by(P1)
+        .with_ability_definition(activation)
+        .id();
+    scenario
+        .add_enchantment_from_oracle(p2, "Synthetic player shield with real Swans body", "")
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(PreventionAmount::All)
+                .damage_target_filter(DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::Specific(p2),
+                })
+                .execute(*swans.replacements[0].execute.clone().unwrap()),
+        );
+    for player in [P0, P1, p2, p3] {
+        scenario.with_library_top(player, &["One", "Two"]);
+    }
+    let mut runner = scenario.build();
+    let original = ObjectIdentityBinding::new(
+        ObjectIncarnationRef::from_object(&runner.state().objects[&source]),
+        Zone::Battlefield,
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    let outcome = runner.activate(source, 0).resolve();
+    outcome.assert_hand_drawn(P1, 1);
+    for player in [P0, p2, p3] {
+        outcome.assert_hand_drawn(player, 0);
+    }
+    for player in [P0, P1, p3] {
+        outcome.assert_life_delta(player, -1);
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, source_incarnation, target: TargetRef::Player(target), amount: 1, .. } if *source_id == source && *source_incarnation == Some(original.reference.incarnation) && *target == player)).count(), 1);
+    }
+    outcome.assert_life_delta(p2, 0);
+    assert_eq!(outcome.state().objects[&source].zone, Zone::Graveyard);
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::DamagePrevented { source_id, target: TargetRef::Player(target), amount: 1 } if *source_id == source && *target == p2)).count(), 1);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 608.2c + CR 615.5: recipient absence is independent of a valid actor.
+/// Both ordinary damage dispatches must skip their dependent body and else,
+/// retaining the independently sequenced tail exactly once.
+#[test]
+fn owned_missing_damage_recipients_skip_nonempty_decoys_after_nested_saved_dispatch() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, DamageTargetFilter, DamageTargetPlayerScope,
+        DrawReplacementScope, EachDamageRecipient, PreventionAmount, ReplacementDefinition,
+        ReplacementEventContext, ReplacementMode, SubAbilityLink,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for shared in [false, true] {
+        for filter in [
+            TargetFilter::PostReplacementSourceController,
+            TargetFilter::PostReplacementDamageTargetOwner,
+            TargetFilter::PostReplacementDamageSource,
+            TargetFilter::PostReplacementDamageTarget,
+        ] {
+            for missing in [false, true] {
+                let damage = |target| Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target,
+                    damage_source: None,
+                    excess: None,
+                };
+                let mut scenario = GameScenario::new_n_player(4, 42);
+                scenario.at_phase(Phase::PreCombatMain);
+                let outer = scenario
+                    .add_creature(P1, "Synthetic original event dealer", 2, 10)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        damage(TargetFilter::Any),
+                    ))
+                    .id();
+                let shared_source = scenario
+                    .add_creature(P0, "The eligible shared source", 2, 10)
+                    .id();
+                let decoy = scenario
+                    .add_creature(p3, "Inherited object decoy", 2, 10)
+                    .id();
+                let host = scenario
+                    .add_enchantment_from_oracle(P0, "Synthetic one-event prevention host", "")
+                    .id();
+                scenario.with_library_top(p3, &["Nested card", "Second"]);
+                scenario
+                    .add_enchantment_from_oracle(p3, "Synthetic nested draw choice", "")
+                    .with_replacement_definition(
+                        ReplacementDefinition::new(ReplacementEvent::Draw)
+                            .draw_scope(DrawReplacementScope::IndividualDraw)
+                            .mode(ReplacementMode::Optional { decline: None })
+                            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                    );
+                let mut runner = scenario.build();
+                let pin = ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&runner.state().objects[&outer]),
+                    Zone::Battlefield,
+                );
+                assert!(runner.state().battlefield.contains(&shared_source));
+                assert!(runner.state().objects[&shared_source]
+                    .card_types
+                    .core_types
+                    .contains(&engine::types::card_type::CoreType::Creature));
+                let effect = if shared {
+                    Effect::EachSourceDealsDamage {
+                        sources: TargetFilter::SpecificObject { id: shared_source },
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        recipient: EachDamageRecipient::Shared(filter.clone()),
+                    }
+                } else {
+                    damage(filter.clone())
+                };
+                let mut future = ResolvedAbility::new(
+                    effect,
+                    vec![TargetRef::Object(decoy), TargetRef::Player(p3)],
+                    host,
+                    P0,
+                );
+                future.instruction_actor = Some(ControllerRef::SpecificPlayer { id: P0 }.into());
+                future.sub_link = SubAbilityLink::SequentialSibling;
+                if missing {
+                    future.context.replacement_event = Some(ReplacementEventContext {
+                        source_id: (!matches!(filter, TargetFilter::PostReplacementDamageSource))
+                            .then_some(outer),
+                        source_identity: None,
+                        event_target: matches!(
+                            filter,
+                            TargetFilter::PostReplacementSourceController
+                                | TargetFilter::PostReplacementDamageSource
+                        )
+                        .then_some(TargetRef::Player(p2)),
+                    });
+                }
+                let life = |value| {
+                    ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        host,
+                        P0,
+                    )
+                };
+                future.else_ability = Some(Box::new(life(100)));
+                let mut dependent = life(10);
+                let mut tail = life(3);
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                dependent.sub_ability = Some(Box::new(tail));
+                future.sub_ability = Some(Box::new(dependent));
+                let mut head = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SpecificPlayer { id: p3 },
+                    },
+                    vec![],
+                    host,
+                    P0,
+                );
+                head.sub_ability = Some(Box::new(future));
+                let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .damage_target_filter(DamageTargetFilter::Player {
+                        player: DamageTargetPlayerScope::Specific(p2),
+                    })
+                    .runtime_execute(head);
+                shield.consume_on_apply = true;
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&host)
+                    .unwrap()
+                    .replacement_definitions
+                    .push(shield.clone());
+                std::sync::Arc::make_mut(
+                    &mut runner
+                        .state_mut()
+                        .objects
+                        .get_mut(&host)
+                        .unwrap()
+                        .base_replacement_definitions,
+                )
+                .push(shield);
+                runner.act(GameAction::PassPriority).unwrap();
+                let outcome = runner.activate(outer, 0).target_player(p2).resolve();
+                assert!(
+                    matches!(outcome.final_waiting_for(), WaitingFor::ReplacementChoice { player, .. } if *player == p3)
+                );
+                let continued = runner
+                    .state()
+                    .resolution_stack
+                    .iter()
+                    .find_map(|frame| match frame {
+                        engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) => {
+                            Some(&frame.pending.chain)
+                        }
+                        _ => None,
+                    })
+                    .expect("future recipient instruction is genuinely parked");
+                assert_eq!(
+                    continued.instruction_actor,
+                    Some(ControllerRef::SpecificPlayer { id: P0 }.into())
+                );
+                assert!(!continued.targets.is_empty());
+                assert_eq!(
+                    continued
+                        .context
+                        .replacement_event
+                        .as_ref()
+                        .unwrap()
+                        .source_identity,
+                    if missing { None } else { Some(pin) }
+                );
+                let saved = serde_json::to_string(runner.state()).unwrap();
+                let restored: GameState = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored, *runner.state());
+                runner = GameRunner::from_state(restored);
+                let mut events = outcome.events().to_vec();
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 1 })
+                        .unwrap()
+                        .events,
+                );
+                for _ in 0..16 {
+                    if runner.state().stack.is_empty()
+                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    assert!(
+                        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                        "{:?}",
+                        runner.state().waiting_for
+                    );
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                let recipient = match filter {
+                    TargetFilter::PostReplacementSourceController => TargetRef::Player(P1),
+                    TargetFilter::PostReplacementDamageTargetOwner
+                    | TargetFilter::PostReplacementDamageTarget => TargetRef::Player(p2),
+                    TargetFilter::PostReplacementDamageSource => TargetRef::Object(outer),
+                    _ => unreachable!(),
+                };
+                let dealer = if shared { shared_source } else { host };
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, target, amount: 2, .. } if *source_id == dealer && *target == recipient)).count(), usize::from(!missing));
+                assert!(!events.iter().any(|event| matches!(event, GameEvent::DamageDealt { target: TargetRef::Object(id), .. } if *id == decoy)));
+                assert_eq!(
+                    runner.state().players[0].life,
+                    if missing { 23 } else { 33 }
+                );
+                assert_eq!(
+                    runner.state().players[1].life,
+                    20 - if !missing && recipient == TargetRef::Player(P1) {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    runner.state().players[p2.0 as usize].life,
+                    20 - if !missing && recipient == TargetRef::Player(p2) {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(runner.state().players[p3.0 as usize].life, 20);
+                assert_eq!(
+                    runner.state().objects[&outer].damage_marked,
+                    if !missing && recipient == TargetRef::Object(outer) {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(runner.state().objects[&decoy].damage_marked, 0);
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+}
+
+/// CR 101.4 + CR 608.2d + CR 614.6: the original drawer is excluded from
+/// Zur's payer population even after a nested draw choice owns the resident
+/// event. The parsed reveal/payment/owner/draw body remains intact.
+#[test]
+fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_nested_draw() {
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DrawReplacementScope, ReplacementDefinition,
+        ReplacementEventContext, ReplacementMode, SubAbilityLink,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for target_case in 0..3 {
+        for pay in [false, true] {
+            let parsed = engine::parser::parse_oracle_text(
+                ZURS_WEIRDING_ORACLE,
+                "Zur's Weirding",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            assert!(parsed.parse_warnings.is_empty());
+            assert_eq!(parsed.replacements.len(), 1);
+            let mut replacement = parsed.replacements[0].clone();
+            let mut body = *replacement.execute.take().unwrap();
+            assert!(matches!(
+                *body.effect,
+                Effect::RevealTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: 1
+                }
+            ));
+            let mut pay_body = *body.sub_ability.take().unwrap();
+            assert_eq!(
+                pay_body.optional_for,
+                Some(engine::types::ability::OpponentMayScope::AnyOtherPlayer)
+            );
+            pay_body.sub_link = SubAbilityLink::SequentialSibling;
+            let mut nested = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SpecificPlayer { id: P1 },
+                },
+            );
+            nested.sub_ability = Some(Box::new(pay_body));
+            body.sub_ability = Some(Box::new(nested));
+            let mut scenario = GameScenario::new_n_player(4, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let host = scenario
+                .add_enchantment_from_oracle(P0, "Synthetic nested Zur body", "")
+                .id();
+            let decoy = scenario
+                .add_creature(p3, "Object is not a drawing player", 1, 5)
+                .id();
+            scenario
+                .add_enchantment_from_oracle(P1, "Synthetic nested individual draw choice", "")
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::Draw)
+                        .draw_scope(DrawReplacementScope::IndividualDraw)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                );
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic draw source",
+                    true,
+                    "Target player draws a card.",
+                )
+                .id();
+            scenario.with_library_top(P1, &["Nested card", "Nested second"]);
+            let revealed = scenario.add_card_to_library_top(p2, "Outer revealed card");
+            let mut runner = scenario.build();
+            let mut runtime = build_resolved_from_def(&body, host, P0);
+            let future = runtime
+                .sub_ability
+                .as_deref_mut()
+                .unwrap()
+                .sub_ability
+                .as_deref_mut()
+                .unwrap();
+            if target_case != 0 {
+                future.context.replacement_event = Some(ReplacementEventContext {
+                    source_id: None,
+                    source_identity: None,
+                    event_target: (target_case == 2).then_some(TargetRef::Object(decoy)),
+                });
+            }
+            let mut tail = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            let mut last = future;
+            while let Some(ref mut sub) = last.sub_ability {
+                last = sub;
+            }
+            last.sub_ability = Some(Box::new(tail));
+            replacement.runtime_execute = Some(Box::new(runtime));
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .replacement_definitions
+                .push(replacement.clone());
+            std::sync::Arc::make_mut(
+                &mut runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&host)
+                    .unwrap()
+                    .base_replacement_definitions,
+            )
+            .push(replacement);
+            let outcome = runner.cast(spell).target_player(p2).resolve();
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::ReplacementChoice { player: P1, .. }
+            ));
+            assert!(matches!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed,
+                engine::types::proposed_event::ProposedEvent::Draw { player_id: P1, .. }
+            ));
+            let saved = serde_json::to_string(runner.state()).unwrap();
+            let restored: GameState = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored, *runner.state());
+            runner = GameRunner::from_state(restored);
+            let mut events = outcome.events().to_vec();
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap()
+                    .events,
+            );
+            let mut offered = Vec::new();
+            if target_case == 0 {
+                let WaitingFor::OpponentMayChoice {
+                    player, remaining, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!(
+                        "the original Zur instruction must offer the actual payer population: {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                let mut population = vec![*player];
+                population.extend(remaining);
+                assert_eq!(
+                    population,
+                    vec![P0, P1, p3],
+                    "exclude outer drawer P2; nested drawer P1 is eligible"
+                );
+                let pending = &runner
+                    .state()
+                    .active_optional_effect_frame()
+                    .unwrap()
+                    .ability;
+                assert!(pending.targets.contains(&TargetRef::Object(revealed)));
+                assert!(pending.targets.contains(&TargetRef::Player(p2)));
+                assert!(
+                    !pending.targets.contains(&TargetRef::Player(P1)),
+                    "hydration must not append the resident nested drawer"
+                );
+                assert_eq!(
+                    pending
+                        .context
+                        .replacement_event
+                        .as_ref()
+                        .unwrap()
+                        .event_target,
+                    Some(TargetRef::Player(p2))
+                );
+                loop {
+                    let WaitingFor::OpponentMayChoice { player, .. } = runner.state().waiting_for
+                    else {
+                        break;
+                    };
+                    offered.push(player);
+                    events.extend(
+                        runner
+                            .act(GameAction::DecideOptionalEffect {
+                                accept: pay && player == p3,
+                            })
+                            .unwrap()
+                            .events,
+                    );
+                }
+                assert_eq!(offered, vec![P0, P1, p3]);
+            } else {
+                assert!(
+                    !matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::OpponentMayChoice { .. }
+                    ),
+                    "missing/nonplayer owned drawer cannot borrow nested P1"
+                );
+            }
+            for _ in 0..16 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "{:?}",
+                    runner.state().waiting_for
+                );
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert_eq!(runner.state().players[0].life, 23);
+            assert_eq!(runner.state().players[1].life, 20);
+            assert_eq!(runner.state().players[p2.0 as usize].life, 20);
+            assert_eq!(
+                runner.state().players[p3.0 as usize].life,
+                20 - if pay && target_case == 0 { 2 } else { 0 }
+            );
+            assert_eq!(runner.state().players[1].hand.len(), 1);
+            let destination = if target_case != 0 {
+                Zone::Library
+            } else if pay {
+                Zone::Graveyard
+            } else {
+                Zone::Hand
+            };
+            assert_eq!(runner.state().objects[&revealed].zone, destination);
+            assert_eq!(runner.state().objects[&revealed].owner, p2);
+            assert_eq!(
+                runner.state().players[p2.0 as usize]
+                    .hand
+                    .contains(&revealed),
+                target_case == 0 && !pay
+            );
+            assert_eq!(
+                runner.state().players[p2.0 as usize]
+                    .graveyard
+                    .contains(&revealed),
+                target_case == 0 && pay
+            );
+            assert!(runner.state().players[0]
+                .graveyard
+                .iter()
+                .all(|id| *id != revealed));
+            assert!(runner.state().players[p3.0 as usize]
+                .graveyard
+                .iter()
+                .all(|id| *id != revealed));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                1
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+}
+
+/// CR 615.5 + CR 608.2h: Comeuppance's parsed source-type predicates and
+/// reflection recipients read the original occurrence after a genuinely nested
+/// damage replacement. The surrounding head and final life gain are synthetic.
+#[test]
+fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_damage_choice() {
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, DamageTargetFilter, DamageTargetPlayerScope,
+        PreventionAmount, ReplacementDefinition, ReplacementEventContext, ReplacementMode,
+        SubAbilityLink,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for creature_outer in [false, true] {
+        for (missing_outer, reenter) in [(false, false), (true, false), (false, true)] {
+            for accept in [false, true] {
+                let parsed = engine::parser::parse_oracle_text(
+                    COMEUPPANCE_ORACLE,
+                    "Comeuppance",
+                    &[],
+                    &["Instant".into()],
+                    &[],
+                );
+                assert!(parsed.parse_warnings.is_empty());
+                let rider = parsed.abilities[0].sub_ability.as_ref().unwrap();
+                assert!(matches!(rider.condition, Some(engine::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })));
+                let damage = || Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                };
+                let mut scenario = GameScenario::new_n_player(4, 42);
+                scenario.at_phase(Phase::PreCombatMain);
+                let outer = if creature_outer {
+                    scenario
+                        .add_creature(p3, "Synthetic creature outer dealer", 2, 5)
+                        .controlled_by(P1)
+                        .with_ability_definition(AbilityDefinition::new(
+                            AbilityKind::Activated,
+                            damage(),
+                        ))
+                        .id()
+                } else {
+                    scenario
+                        .add_artifact_from_oracle(p3, "Synthetic noncreature outer dealer", "")
+                        .controlled_by(P1)
+                        .with_ability_definition(AbilityDefinition::new(
+                            AbilityKind::Activated,
+                            damage(),
+                        ))
+                        .id()
+                };
+                let child = if creature_outer {
+                    scenario
+                        .add_artifact_from_oracle(p2, "Synthetic noncreature child dealer", "")
+                        .id()
+                } else {
+                    scenario
+                        .add_creature(p2, "Synthetic creature child dealer", 2, 5)
+                        .id()
+                };
+                let host = scenario
+                    .add_enchantment_from_oracle(P0, "Synthetic Comeuppance rider host", "")
+                    .id();
+                scenario
+                    .add_enchantment_from_oracle(p3, "Synthetic nested damage choice", "")
+                    .with_replacement_definition(
+                        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                            .prevention_shield(PreventionAmount::All)
+                            .damage_target_filter(DamageTargetFilter::Player {
+                                player: DamageTargetPlayerScope::Specific(p3),
+                            })
+                            .mode(ReplacementMode::Optional { decline: None })
+                            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                    );
+                let mut runner = scenario.build();
+                let original = ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&runner.state().objects[&outer]),
+                    Zone::Battlefield,
+                );
+                let child_pin = ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&runner.state().objects[&child]),
+                    Zone::Battlefield,
+                );
+                let mut future = build_resolved_from_def(rider, host, P0);
+                if missing_outer {
+                    future.context.replacement_event = Some(ReplacementEventContext {
+                        source_id: None,
+                        source_identity: None,
+                        event_target: Some(TargetRef::Player(P0)),
+                    });
+                }
+                let mut tail = ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    host,
+                    P0,
+                );
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                let mut last = &mut future;
+                while let Some(ref mut sub) = last.sub_ability {
+                    last = sub;
+                }
+                last.sub_ability = Some(Box::new(tail));
+                let mut head =
+                    ResolvedAbility::new(damage(), vec![TargetRef::Player(p3)], child, p2);
+                head.context.source_identity = Some(child_pin);
+                head.source_incarnation = Some(child_pin.reference.incarnation);
+                head.instruction_actor = Some(ControllerRef::You.into());
+                head.sub_ability = Some(Box::new(future));
+                if reenter {
+                    // CR 400.7 + CR 608.2h: real zone moves produce a new
+                    // incarnation, then a copy effect gives that new object
+                    // the opposite type. Exact original LKI still governs.
+                    let move_effect = |origin, destination| Effect::ChangeZone {
+                        origin: Some(origin),
+                        destination,
+                        target: TargetFilter::SpecificObject { id: outer },
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    };
+                    let mut copy = ResolvedAbility::new(
+                        Effect::BecomeCopy {
+                            target: TargetFilter::SpecificObject { id: child },
+                            recipient: engine::types::ability::CopyRecipient::Untargeted(
+                                TargetFilter::SpecificObject { id: outer },
+                            ),
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: vec![],
+                        },
+                        vec![TargetRef::Object(child)],
+                        host,
+                        P0,
+                    );
+                    copy.sub_ability = Some(Box::new(head));
+                    let mut arrive = ResolvedAbility::new(
+                        move_effect(Zone::Exile, Zone::Battlefield),
+                        vec![TargetRef::Object(outer)],
+                        host,
+                        P0,
+                    );
+                    arrive.sub_ability = Some(Box::new(copy));
+                    head = ResolvedAbility::new(
+                        move_effect(Zone::Battlefield, Zone::Exile),
+                        vec![TargetRef::Object(outer)],
+                        host,
+                        P0,
+                    );
+                    head.sub_ability = Some(Box::new(arrive));
+                }
+                let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .damage_target_filter(DamageTargetFilter::Player {
+                        player: DamageTargetPlayerScope::Specific(P0),
+                    })
+                    .runtime_execute(head);
+                // Fixture construction installs a typed surrounding replacement;
+                // the reflected body and both source-type gates are the real
+                // Comeuppance parser/owner output, not recreated conditions.
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&host)
+                    .unwrap()
+                    .replacement_definitions
+                    .push(shield.clone());
+                std::sync::Arc::make_mut(
+                    &mut runner
+                        .state_mut()
+                        .objects
+                        .get_mut(&host)
+                        .unwrap()
+                        .base_replacement_definitions,
+                )
+                .push(shield);
+                runner.act(GameAction::PassPriority).unwrap();
+                let outcome = runner.activate(outer, 0).target_player(P0).resolve();
+                assert!(
+                    matches!(outcome.final_waiting_for(), WaitingFor::ReplacementChoice { player, .. } if *player == p3)
+                );
+                let pending = runner.state().pending_replacement.as_ref().unwrap();
+                assert!(
+                    matches!(&pending.proposed, engine::types::proposed_event::ProposedEvent::Damage { source_id, source_identity, target: TargetRef::Player(player), amount: 1, .. } if *source_id == child && *source_identity == Some(child_pin) && *player == p3)
+                );
+                let continued = runner
+                    .state()
+                    .resolution_stack
+                    .iter()
+                    .find_map(|frame| match frame {
+                        engine::types::resolution::ResolutionFrame::AbilityContinuation(frame) => {
+                            Some(&frame.pending.chain)
+                        }
+                        _ => None,
+                    })
+                    .expect("outer conditional rider is genuinely parked");
+                if reenter {
+                    let returned = &runner.state().objects[&outer];
+                    assert_eq!(returned.zone, Zone::Battlefield);
+                    assert_ne!(returned.incarnation, original.reference.incarnation);
+                    assert_eq!(returned.controller, p3);
+                    assert_eq!(
+                        returned
+                            .card_types
+                            .core_types
+                            .contains(&engine::types::card_type::CoreType::Creature),
+                        !creature_outer
+                    );
+                    let lki =
+                        &runner.state().lki_by_incarnation[&outer][&original.reference.incarnation];
+                    assert_eq!(lki.controller, P1);
+                    assert_eq!(
+                        lki.card_types
+                            .contains(&engine::types::card_type::CoreType::Creature),
+                        creature_outer
+                    );
+                }
+                let owned = continued.context.replacement_event.as_ref().unwrap();
+                assert_eq!(
+                    owned.source_identity,
+                    if missing_outer { None } else { Some(original) }
+                );
+                let saved = serde_json::to_string(runner.state()).unwrap();
+                let restored: GameState = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored, *runner.state());
+                runner = GameRunner::from_state(restored);
+                let mut events = outcome.events().to_vec();
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement {
+                            index: usize::from(!accept),
+                        })
+                        .unwrap()
+                        .events,
+                );
+                for _ in 0..16 {
+                    if runner.state().stack.is_empty()
+                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    assert!(
+                        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                        "{:?}",
+                        runner.state().waiting_for
+                    );
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                assert_eq!(
+                    runner.state().players[0].life,
+                    23,
+                    "outer damage is prevented; independent tail runs exactly once"
+                );
+                assert_eq!(
+                    runner.state().players[1].life,
+                    20 - i32::from(!creature_outer && !missing_outer)
+                );
+                assert_eq!(
+                    runner.state().players[p2.0 as usize].life,
+                    20,
+                    "child controller never receives outer reflection"
+                );
+                assert_eq!(
+                    runner.state().players[p3.0 as usize].life,
+                    20 - i32::from(!accept)
+                );
+                if creature_outer {
+                    assert_eq!(
+                        runner.state().objects[&outer].damage_marked,
+                        u32::from(!missing_outer && !reenter)
+                    );
+                }
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, amount: 1, target, .. }
+                    if *source_id == host && *target == if creature_outer { TargetRef::Object(outer) } else { TargetRef::Player(P1) }
+                )).count(), usize::from(!missing_outer && !(creature_outer && reenter)));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                        .count(),
+                    1
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+}
+
+/// CR 109.4 + CR 113.7a + CR 615.5: a discarded Channel source remains
+/// the dealer and its owner draws. This is a real hand activation, rather
+/// than a battlefield-source shortcut or a fabricated replacement drain.
+#[test]
+fn channel_damage_to_swans_uses_the_discarded_hand_occurrences_owner() {
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let swans = scenario
+        .add_creature_from_oracle(p3, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+        .controlled_by(p2)
+        .id();
+    let source = scenario
+        .add_creature_to_hand_from_oracle(P1, "Ghost-Lit Raider", 2, 1, GHOST_LIT_RAIDER_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]); 4],
+    );
+    for player in [P0, P1, p2, p3] {
+        scenario.with_library_top(player, &["First", "Second", "Third", "Fourth", "Fifth"]);
+    }
+    let mut runner = scenario.build();
+    let original = ObjectIdentityBinding::new(
+        ObjectIncarnationRef::from_object(&runner.state().objects[&source]),
+        Zone::Hand,
+    );
+    assert!(runner.state().objects[&source].parse_warnings.is_empty());
+    assert_eq!(runner.state().objects[&source].abilities.len(), 2);
+    assert_eq!(
+        runner.state().objects[&source].abilities[1].activation_zone,
+        Some(Zone::Hand)
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let outcome = runner.activate(source, 1).target_object(swans).resolve();
+    outcome.assert_hand_drawn(P1, 4);
+    for player in [P0, p2, p3] {
+        outcome.assert_hand_drawn(player, 0);
+    }
+    assert_eq!(outcome.state().objects[&source].zone, Zone::Graveyard);
+    assert_ne!(
+        outcome.state().objects[&source].incarnation,
+        original.reference.incarnation
+    );
+    let departure = outcome
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .find_map(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .filter(|context| context.identity == original)
+        })
+        .expect("the discard cost records the original hand occurrence");
+    assert_eq!(departure.lki.owner, P1);
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event,
+        GameEvent::DamagePrevented { source_id, target: TargetRef::Object(target), amount: 4 }
+            if *source_id == source && *target == swans
+    )).count(), 1);
+    assert_eq!(outcome.state().objects[&swans].damage_marked, 0);
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
 
 /// CR 113.7a + CR 608.2h + CR 615.5: the source already left the battlefield
 /// when Swans prevents its damage; the borrowed source's last controller draws.
@@ -145,7 +1568,8 @@ fn printed_sacrificed_mogg_and_bloodfire_swans_draw_for_the_battlefield_controll
         let mut scenario = GameScenario::new_n_player(4, 42);
         scenario.at_phase(Phase::PreCombatMain);
         let swans = scenario
-            .add_creature_from_oracle(p2, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+            .add_creature_from_oracle(p3, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+            .controlled_by(p2)
             .id();
         let source = scenario
             .add_creature_from_oracle(P0, name, amount as i32, amount as i32, oracle)

@@ -457,21 +457,10 @@ impl DamageContext {
             context.source_identity = Some(identity);
             return Some(context);
         }
-        let lki = match identity.expected_zone {
-            crate::types::zones::Zone::Battlefield => state
-                .lki_by_incarnation
-                .get(&reference.object_id)
-                .and_then(|history| history.get(&reference.incarnation))
-                .cloned(),
-            crate::types::zones::Zone::Stack => state
-                .departed_stack_spells
-                .get(&reference.object_id)
-                .and_then(|history| history.get(&reference.incarnation))
-                .map(|spell| spell.object.snapshot_public_characteristics()),
-            _ => None,
-        }?;
+        let lki = crate::game::targeting::source_lki_at_identity(state, identity)?;
         let has = |kind| lki.keywords.iter().any(|keyword| keyword.kind() == kind);
-        let mut context = Self::fallback(reference.object_id, lki.controller);
+        let controller = crate::game::targeting::source_controller_at_identity(state, identity)?;
+        let mut context = Self::fallback(reference.object_id, controller);
         context.source_identity = Some(identity);
         context.source_incarnation = Some(reference.incarnation);
         context.source_is_creature = lki.card_types.contains(&CoreType::Creature);

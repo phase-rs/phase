@@ -14273,7 +14273,7 @@ mod tests {
     /// subject is untouched in both. The authoritative state keeps all of it.
     #[test]
     fn hidden_instruction_source_and_event_pins_are_redacted_as_whole_values() {
-        use crate::types::ability::{InstructionActorRef, ReplacementEventContext};
+        use crate::types::ability::{InstructionActorRef, ReplacementEventContext, TargetRef};
         use crate::types::identifiers::ObjectIdentityBinding;
         let hidden = ObjectId(91);
         let visible = ObjectId(92);

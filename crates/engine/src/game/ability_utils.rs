@@ -290,6 +290,13 @@ pub(crate) fn apply_instead_swap(
     let mut overridden = parent.clone();
     overridden.effect = sub.effect.clone();
     overridden.instruction_actor = sub.instruction_actor.clone();
+    // CR 615.5: the selected instruction retains its own event, even when
+    // that owned event has missing members. Its own-source remains the parent.
+    overridden.context.replacement_event = sub
+        .context
+        .replacement_event
+        .clone()
+        .or_else(|| parent.context.replacement_event.clone());
     overridden.declares_chosen_group = sub.declares_chosen_group;
     overridden.reads_chosen_group = sub.reads_chosen_group;
     overridden.declares_return_result = sub.declares_return_result;
@@ -16834,6 +16841,45 @@ mod tests {
     /// chosen_x, …). Pre-fix the swap site in `effects/mod.rs` hand-rolled a
     /// partial clone that silently dropped `sub.player_scope` — same shape
     /// as the casting-path bug fixed by commit 4475b1939.
+    #[test]
+    fn instead_keeps_the_selected_nodes_owned_event_without_changing_own_source() {
+        use crate::types::ability::ReplacementEventContext;
+        use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+        let mut parent = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(10), PlayerId(0));
+        let pin =
+            ObjectIdentityBinding::new(ObjectIncarnationRef::of(ObjectId(10), 2), Zone::Stack);
+        parent.context.source_identity = Some(pin);
+        parent.context.replacement_event = Some(ReplacementEventContext {
+            source_id: None,
+            source_identity: None,
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        });
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            for owned in [
+                None,
+                Some(ReplacementEventContext::default()),
+                Some(ReplacementEventContext {
+                    source_id: None,
+                    source_identity: None,
+                    event_target: Some(TargetRef::Player(PlayerId(2))),
+                }),
+            ] {
+                let mut sub = parent.clone();
+                sub.instruction_actor = Some(actor.clone());
+                sub.context.replacement_event = owned.clone();
+                let swapped = apply_instead_swap(&parent, &sub);
+                assert_eq!(swapped.instruction_actor, Some(actor.clone()));
+                assert_eq!(
+                    swapped.context.replacement_event,
+                    owned.or_else(|| parent.context.replacement_event.clone())
+                );
+                assert_eq!(swapped.context.source_identity, Some(pin));
+                assert_eq!(swapped.source_id, parent.source_id);
+                assert_eq!(swapped.controller, parent.controller);
+            }
+        }
+    }
+
     #[test]
     fn apply_instead_swap_preserves_sub_player_scope_and_optional() {
         let parent = ResolvedAbility::new(

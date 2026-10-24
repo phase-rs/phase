@@ -2114,35 +2114,64 @@ pub(crate) fn event_referent_controller(state: &GameState, event: &GameEvent) ->
     crate::game::ability_utils::last_known_permanent_controller(state, id)
 }
 
-/// CR 608.2h + CR 400.7: inspect only the captured occurrence in its expected
-/// zone, or that occurrence's exact last known information. A reused storage
-/// id never supplies the original source's controller.
-pub(crate) fn source_controller_at_identity(
+/// CR 608.2h + CR 400.7: retrieve only the departed captured occurrence's
+/// last known information; a reused storage id is never a substitute.
+pub(crate) fn source_lki_at_identity(
     state: &GameState,
     identity: ObjectIdentityBinding,
-) -> Option<PlayerId> {
+) -> Option<std::borrow::Cow<'_, crate::types::game_state::LKISnapshot>> {
+    use std::borrow::Cow;
     let reference = identity.reference;
-    if let Some(source) = state.objects.get(&reference.object_id).filter(|source| {
-        source.incarnation == reference.incarnation && source.zone == identity.expected_zone
-    }) {
-        return Some(match identity.expected_zone {
-            Zone::Battlefield | Zone::Stack => source.controller,
-            _ => source.owner,
-        });
-    }
     match identity.expected_zone {
         Zone::Battlefield => state
             .lki_by_incarnation
             .get(&reference.object_id)
             .and_then(|history| history.get(&reference.incarnation))
-            .map(|lki| lki.controller),
+            .map(Cow::Borrowed),
         Zone::Stack => state
             .departed_stack_spells
             .get(&reference.object_id)
             .and_then(|history| history.get(&reference.incarnation))
-            .map(|spell| spell.object.controller),
-        _ => None,
+            .map(|spell| Cow::Owned(spell.object.snapshot_public_characteristics())),
+        // CR 113.7a + CR 400.7: Channel's discard cost moves the card out of
+        // its announcement zone. The departure's complete identity, rather
+        // than its reusable storage id, selects its last known information.
+        // This ledger lasts through the current turn; no later-turn identity
+        // is reconstructed when a historical record is no longer retained.
+        _ => state.zone_changes_this_turn.iter().find_map(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .filter(|source| source.identity == identity)
+                .map(|source| Cow::Borrowed(&source.lki))
+        }),
     }
+}
+
+/// CR 109.4 + CR 608.2h: cards outside the battlefield and stack have no
+/// controller; their owner supplies the source-relative player authority.
+pub(crate) fn source_controller_at_identity(
+    state: &GameState,
+    identity: ObjectIdentityBinding,
+) -> Option<PlayerId> {
+    if let Some(source) = state
+        .objects
+        .get(&identity.reference.object_id)
+        .filter(|source| {
+            source.incarnation == identity.reference.incarnation
+                && source.zone == identity.expected_zone
+        })
+    {
+        return Some(match identity.expected_zone {
+            Zone::Battlefield | Zone::Stack => source.controller,
+            _ => source.owner,
+        });
+    }
+    let lki = source_lki_at_identity(state, identity)?;
+    Some(match identity.expected_zone {
+        Zone::Battlefield | Zone::Stack => lki.controller,
+        _ => lki.owner,
+    })
 }
 
 pub(crate) fn resident_replacement_event(state: &GameState) -> ReplacementEventContext {
@@ -2178,7 +2207,22 @@ pub(crate) fn replacement_context_target(
         TargetFilter::PostReplacementSourceController => {
             source_controller_at_identity(state, event.source_identity?).map(TargetRef::Player)
         }
-        TargetFilter::PostReplacementDamageSource => event.source_id.map(TargetRef::Object),
+        TargetFilter::PostReplacementDamageSource => event
+            .source_id
+            // CR 400.7: a source-relative object recipient is the
+            // original object, not a new occurrence using its storage id.
+            // Legacy unpinned object references retain their existing role.
+            .filter(|id| {
+                event.source_identity.is_none_or(|identity| {
+                    identity.reference.object_id == *id
+                        && identity.reference.is_current(state)
+                        && state
+                            .objects
+                            .get(id)
+                            .is_some_and(|object| object.zone == identity.expected_zone)
+                })
+            })
+            .map(TargetRef::Object),
         TargetFilter::PostReplacementDamageTarget => event.event_target.clone(),
         TargetFilter::PostReplacementDamageTargetOwner => match event.event_target.as_ref()? {
             TargetRef::Player(player) => Some(TargetRef::Player(*player)),

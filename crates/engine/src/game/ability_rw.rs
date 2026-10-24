@@ -7559,12 +7559,41 @@ mod tests {
             let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
             definition.instruction_actor = Some(actor.clone());
             let mut nested = base.clone();
-            nested.mode_abilities.push(definition);
+            nested.mode_abilities.push(definition.clone());
             assert_eq!(
                 ability_rw_profile(&nested),
                 expected,
                 "nested definition {actor:?}"
             );
+            for branch in 0..4 {
+                let mut enclosing = base.clone();
+                match branch {
+                    0 => enclosing.sub_ability = Some(Box::new(resolved.clone())),
+                    1 => enclosing.else_ability = Some(Box::new(resolved.clone())),
+                    2 => {
+                        let mut mode = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                        mode.sub_ability = Some(Box::new(definition.clone()));
+                        enclosing.mode_abilities.push(mode);
+                    }
+                    3 => {
+                        let mut mode = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                        mode.else_ability = Some(Box::new(definition.clone()));
+                        enclosing.mode_abilities.push(mode);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    ability_rw_profile(&enclosing),
+                    expected,
+                    "branch {branch}: {actor:?}"
+                );
+            }
+            if actor.as_event().is_some() {
+                assert!(
+                    expected.reads_event_live,
+                    "Event actor is never a read-free selector"
+                );
+            }
         }
         assert!(rw_controller_ref(&ControllerRef::EventTargetController).reads_event_live);
         assert!(rw_controller_ref(&ControllerRef::SourceChosenPlayer).reads_member_bound);

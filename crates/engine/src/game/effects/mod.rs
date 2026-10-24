@@ -1013,6 +1013,19 @@ fn rebind_child_to_forwarded_objects(
     // forwarded-result context at delayed-trigger creation.
     if !matches!(child.effect, Effect::CreateDelayedTrigger { .. }) {
         child.source_id = moved[0];
+        // CR 400.7j: this forwarded instruction names the moved object in its
+        // new zone. Its own-source pin must agree with that changed source,
+        // while the creating trigger and owning replacement event stay separate.
+        child.context.source_identity = state.objects.get(&moved[0]).map(|object| {
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+                object.zone,
+            )
+        });
+        child.source_incarnation = child
+            .context
+            .source_identity
+            .map(|identity| identity.reference.incarnation);
     }
     if let Effect::Attach { target, .. } = &child.effect {
         let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
@@ -21494,31 +21507,18 @@ pub(crate) fn evaluate_condition(
                     }) {
                         filter::matches_target_filter(state, source_id, filter, &context)
                     } else {
-                        match identity.expected_zone {
-                            Zone::Battlefield => state
-                                .lki_by_incarnation
-                                .get(&source_id)
-                                .and_then(|history| history.get(&reference.incarnation))
-                                .is_some_and(|lki| {
+                        crate::game::targeting::source_lki_at_identity(state, identity).is_some_and(
+                            |lki| match identity.expected_zone {
+                                Zone::Battlefield => {
                                     filter::matches_target_filter_on_departed_battlefield_lki(
-                                        state, source_id, lki, filter, &context,
+                                        state, source_id, &lki, filter, &context,
                                     )
-                                }),
-                            Zone::Stack => state
-                                .departed_stack_spells
-                                .get(&source_id)
-                                .and_then(|history| history.get(&reference.incarnation))
-                                .is_some_and(|spell| {
-                                    filter::matches_target_filter_on_lki_snapshot(
-                                        state,
-                                        source_id,
-                                        &spell.object.snapshot_public_characteristics(),
-                                        filter,
-                                        &context,
-                                    )
-                                }),
-                            _ => false,
-                        }
+                                }
+                                _ => filter::matches_target_filter_on_lki_snapshot(
+                                    state, source_id, &lki, filter, &context,
+                                ),
+                            },
+                        )
                     }
                 }
                 // Historical context-free saves retain their object-reference

@@ -7638,6 +7638,52 @@ mod tests {
                 ),
                 "definition {actor:?}"
             );
+            for branch in 0..3 {
+                let mut enclosing = base.clone();
+                let mut enclosing_definition =
+                    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                match branch {
+                    0 => {
+                        enclosing.sub_ability = Some(Box::new(resolved.clone()));
+                        enclosing_definition.sub_ability = Some(Box::new(definition.clone()));
+                    }
+                    1 => {
+                        enclosing.else_ability = Some(Box::new(resolved.clone()));
+                        enclosing_definition.else_ability = Some(Box::new(definition.clone()));
+                    }
+                    2 => {
+                        enclosing.mode_abilities.push(definition.clone());
+                        enclosing_definition.mode_abilities.push(definition.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                for actual in [
+                    resolved_ability_axes(&enclosing, ScanMode::Conservative),
+                    ability_definition_axes(&enclosing_definition, ScanMode::Conservative),
+                ] {
+                    assert_eq!(
+                        (
+                            actual.event,
+                            actual.sibling,
+                            actual.projected,
+                            actual.history
+                        ),
+                        (
+                            expected.event,
+                            expected.sibling,
+                            expected.projected,
+                            expected.history
+                        ),
+                        "branch {branch}: {actor:?}"
+                    );
+                }
+            }
+            if actor.as_event().is_some() {
+                assert!(
+                    expected.event,
+                    "every closed Event actor reads event authority"
+                );
+            }
         }
         assert!(scan_controller_ref(&ControllerRef::EventTargetController).event);
     }

@@ -38097,11 +38097,12 @@ impl ResolvedAbility {
 
     pub fn set_context_recursive(&mut self, context: SpellContext) {
         self.inherit_context(&context);
+        let selected = self.context.clone();
         if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_context_recursive(context.clone());
+            sub.set_context_recursive(selected.clone());
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_context_recursive(context);
+            else_branch.set_context_recursive(selected);
         }
     }
 
@@ -38555,6 +38556,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unstarted, independently_owned);
+
+        // A recursive hand-off uses the selected owning event at each node,
+        // rather than stamping the original incoming nested event onto children.
+        root.sub_ability.as_mut().unwrap().context.replacement_event = None;
+        root.set_context_recursive(SpellContext {
+            replacement_event: Some(nested.clone()),
+            ..Default::default()
+        });
+        assert_eq!(root.context.replacement_event.as_ref(), Some(&outer));
+        assert_eq!(
+            root.sub_ability
+                .as_ref()
+                .unwrap()
+                .context
+                .replacement_event
+                .as_ref(),
+            Some(&outer)
+        );
+        assert_eq!(
+            root.else_ability
+                .as_ref()
+                .unwrap()
+                .context
+                .replacement_event,
+            Some(ReplacementEventContext::default())
+        );
     }
 
     #[test]

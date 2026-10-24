@@ -198,7 +198,7 @@ fn instruction_actor_aggregate_admits_one_bound_instruction_and_one_terminal_bat
             assert_eq!(bound.instruction_actor, None);
             assert_eq!(
                 bound.sub_ability.as_ref().unwrap().instruction_actor,
-                Some(ControllerRef::You),
+                Some(ControllerRef::You.into()),
                 "an unstarted independent instruction keeps its own actor"
             );
             assert_eq!(
@@ -595,6 +595,41 @@ fn instruction_actor_aggregate_keeps_a_real_outer_seat_or_prior_player_choice() 
             }),
             false,
         );
+        let scope = if outer_scope {
+            let marker = engine::game::zones::create_object(
+                runner.state_mut(),
+                engine::types::identifiers::CardId(90_201),
+                P2,
+                "Synthetic aggregate scope seat".into(),
+                Zone::Battlefield,
+            );
+            let object = runner.state_mut().objects.get_mut(&marker).unwrap();
+            object.card_types.core_types = vec![engine::types::card_type::CoreType::Enchantment];
+            object.base_card_types = object.card_types.clone();
+            assert!(!object
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature));
+            assert!(
+                object.abilities.is_empty()
+                    && object.trigger_definitions.is_empty()
+                    && object.replacement_definitions.is_empty()
+            );
+            Some(PlayerFilter::ControlsCount {
+                relation: engine::types::ability::PlayerRelation::All,
+                filter: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::default().properties(vec![
+                        engine::types::ability::FilterProp::Named {
+                            name: "Synthetic aggregate scope seat".into(),
+                        },
+                    ]),
+                ),
+                comparator: engine::types::ability::Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            })
+        } else {
+            None
+        };
         let object = runner.state_mut().objects.get_mut(&spell).unwrap();
         let mut aggregate = object.abilities[0].clone();
         aggregate.player_scope = Some(PlayerFilter::All);
@@ -606,7 +641,7 @@ fn instruction_actor_aggregate_keeps_a_real_outer_seat_or_prior_player_choice() 
                     player: TargetFilter::Controller,
                 },
             );
-            definition.player_scope = Some(PlayerFilter::SpecificPlayer { id: P2 });
+            definition.player_scope = scope;
             definition
         } else {
             AbilityDefinition::new(
@@ -695,7 +730,7 @@ fn instruction_actor_aggregate_repeats_the_whole_poll_without_consuming_its_futu
     assert_eq!(runner.life(P0), 22);
     assert_eq!(
         runner.state().objects[&spell].abilities[0].instruction_actor,
-        Some(ControllerRef::You)
+        Some(ControllerRef::You.into())
     );
     assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Token, source_id, .. } if *source_id == spell)).count(), 2);
     expect_aggregate_payment_finished(&runner);

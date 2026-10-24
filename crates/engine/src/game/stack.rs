@@ -6536,6 +6536,108 @@ mod tests {
     }
 
     #[test]
+    fn source_only_batch_projection_preserves_recursive_owned_events_and_every_actor() {
+        use crate::types::ability::{ReplacementEventContext, SpellContext};
+        use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+        fn selected(ability: &mut ResolvedAbility, branch: usize) -> &mut ResolvedAbility {
+            match branch {
+                0 => ability,
+                1 => ability.sub_ability.as_deref_mut().unwrap(),
+                2 => ability.else_ability.as_deref_mut().unwrap(),
+                _ => unreachable!(),
+            }
+        }
+        let pin = |id, incarnation, zone| {
+            ObjectIdentityBinding::new(ObjectIncarnationRef::of(ObjectId(id), incarnation), zone)
+        };
+        let base = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        for branch in 0..3 {
+            let mut left = base.clone();
+            if branch == 1 {
+                left.sub_ability = Some(Box::new(base.clone()));
+            }
+            if branch == 2 {
+                left.else_ability = Some(Box::new(base.clone()));
+            }
+            let mut right = left.clone();
+            selected(&mut left, branch).context.source_identity =
+                Some(pin(1, 3, Zone::Battlefield));
+            selected(&mut right, branch).context.source_identity =
+                Some(pin(2, 4, Zone::Battlefield));
+            assert_ne!(left, right, "canonical equality retains the source pin");
+            assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                &left, &right
+            ));
+            assert!(abilities_equal_ignoring_source(&left, &right));
+            for event in [
+                ReplacementEventContext {
+                    source_id: None,
+                    source_identity: None,
+                    event_target: None,
+                },
+                ReplacementEventContext {
+                    source_id: Some(ObjectId(3)),
+                    source_identity: Some(pin(3, 2, Zone::Battlefield)),
+                    event_target: Some(TargetRef::Player(PlayerId(1))),
+                },
+                ReplacementEventContext {
+                    source_id: Some(ObjectId(3)),
+                    source_identity: Some(pin(3, 3, Zone::Stack)),
+                    event_target: Some(TargetRef::Object(ObjectId(4))),
+                },
+            ] {
+                selected(&mut right, branch).context.replacement_event = Some(event.clone());
+                assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                    &left, &right
+                ));
+                assert!(!abilities_equal_ignoring_source(&left, &right));
+                selected(&mut left, branch).context.replacement_event = Some(event);
+                assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                    &left, &right
+                ));
+                assert!(abilities_equal_ignoring_source(&left, &right));
+                selected(&mut left, branch).context.replacement_event = None;
+                selected(&mut right, branch).context.replacement_event = None;
+            }
+            selected(&mut right, branch).context.granting_object =
+                Some(ObjectIncarnationRef::of(ObjectId(8), 1));
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &left, &right
+            ));
+            assert!(!abilities_equal_ignoring_source(&left, &right));
+            selected(&mut left, branch).context.granting_object =
+                selected(&mut right, branch).context.granting_object;
+            assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                &left, &right
+            ));
+            assert!(abilities_equal_ignoring_source(&left, &right));
+            for actor in crate::types::ability::instruction_actor_test_refs() {
+                selected(&mut right, branch).instruction_actor = Some(actor.clone());
+                assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                    &left, &right
+                ));
+                assert!(!abilities_equal_ignoring_source(&left, &right));
+                selected(&mut left, branch).instruction_actor = Some(actor);
+                assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                    &left, &right
+                ));
+                assert!(abilities_equal_ignoring_source(&left, &right));
+                selected(&mut left, branch).instruction_actor = None;
+                selected(&mut right, branch).instruction_actor = None;
+            }
+            assert_ne!(selected(&mut left, branch).context, SpellContext::default());
+        }
+    }
+
+    #[test]
     fn chosen_group_identity_prevents_inert_trigger_batch_equivalence() {
         let mut first = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
         first.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(1));
@@ -9250,10 +9352,11 @@ mod tests {
     mod batch_resolve {
         // Driver internals under test (the stack module).
         use super::super::{
-            batch_run_len, effects, fixed_controller_gain_life_run_len,
-            fixed_opponent_effect_run_len, priority_checkpoint_is_settled, resolve_next,
-            resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
-            resolve_top, run_member_abilities, self_counter_run_len,
+            batch_contexts_eq_ignoring_own_source, batch_run_len, effects,
+            fixed_controller_gain_life_run_len, fixed_opponent_effect_run_len,
+            priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit,
+            resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, run_member_abilities,
+            self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
@@ -10519,6 +10622,243 @@ mod tests {
         }
 
         #[test]
+        fn real_land_entry_batches_keep_distinct_source_pins_and_a_saved_optional_barrier() {
+            use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+            use crate::types::ability::{AbilityKind, SpellContext};
+            use crate::types::actions::GameAction;
+            use crate::types::game_state::{AutoPassRequest, WaitingFor};
+            use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+            use crate::types::phase::Phase;
+
+            // CR 603.3b + CR 608.2d: a real ordered trigger group leaves an
+            // independently sourced optional instruction below the inert run.
+            for family in 0..4 {
+                crate::game::perf_counters::reset();
+                let count = if family == 3 { 7 } else { 3 };
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.with_library_top(P1, &["One", "Two", "Three", "Four"]);
+                let land_trigger = |body| {
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .destination(Zone::Battlefield)
+                        .valid_card(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Land],
+                            ..Default::default()
+                        }))
+                        .execute(body)
+                };
+                let barrier = scenario
+                    .add_creature(P0, "Synthetic optional land observer", 1, 1)
+                    .with_trigger_definition(land_trigger(
+                        AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 2 },
+                                player: TargetFilter::Controller,
+                            },
+                        )
+                        .optional(),
+                    ))
+                    .id();
+                let mut sources = Vec::new();
+                for index in 0..count {
+                    let effect = match family {
+                        0 => fixed_controller_gain_life_effect(),
+                        1 => Effect::LoseLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: None,
+                        },
+                        2 => fixed_opponent_mill_effect(),
+                        3 => insect_token_effect(),
+                        _ => unreachable!(),
+                    };
+                    let mut body = AbilityDefinition::new(AbilityKind::Database, effect);
+                    if matches!(family, 1 | 2) {
+                        body.player_scope = Some(PlayerFilter::Opponent);
+                    }
+                    let source = scenario
+                        .add_creature(P0, &format!("Synthetic land observer {index}"), 1, 1)
+                        .with_trigger_definition(land_trigger(body))
+                        .id();
+                    sources.push(source);
+                }
+                let land = scenario.add_land_to_hand(P0, "Forest").id();
+                let mut runner = scenario.build();
+                let mut events = runner
+                    .act(GameAction::PlayLand {
+                        object_id: land,
+                        card_id: runner.state().objects[&land].card_id,
+                    })
+                    .unwrap()
+                    .events;
+                let WaitingFor::OrderTriggers {
+                    player: P0,
+                    triggers,
+                } = &runner.state().waiting_for
+                else {
+                    panic!(
+                        "real land entry must produce the simultaneous ordering prompt: {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(triggers.len(), count + 1);
+                let bottom = triggers
+                    .iter()
+                    .position(|trigger| trigger.source_id == barrier)
+                    .unwrap();
+                let mut order = vec![bottom];
+                order.extend((0..triggers.len()).rev().filter(|index| *index != bottom));
+                events.extend(
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .unwrap()
+                        .events,
+                );
+                assert_eq!(runner.state().stack.len(), count + 1);
+                let canonical = runner.state().stack.clone();
+                for entry in &canonical {
+                    let ability = entry.ability().unwrap();
+                    let source = &runner.state().objects[&entry.source_id];
+                    let expected = ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::from_object(source),
+                        Zone::Battlefield,
+                    );
+                    assert_eq!(ability.context.source_identity, Some(expected));
+                    assert_eq!(ability.trigger_source.as_ref().unwrap().identity, expected);
+                    assert!(batch_contexts_eq_ignoring_own_source(
+                        &ability.context,
+                        &SpellContext::default()
+                    ));
+                }
+                assert_ne!(
+                    canonical[1].ability().unwrap().context.source_identity,
+                    canonical[2].ability().unwrap().context.source_identity
+                );
+                let captured = super::super::capture_batch_members(runner.state(), count as u32);
+                assert!(super::super::top_matches_captured_member(
+                    runner.state(),
+                    &captured[0]
+                ));
+                let mut hostile = runner.state().clone();
+                hostile
+                    .stack
+                    .back_mut()
+                    .unwrap()
+                    .ability_mut()
+                    .unwrap()
+                    .context
+                    .source_identity = None;
+                assert!(!super::super::top_matches_captured_member(
+                    &hostile,
+                    &captured[0]
+                ));
+                match family {
+                    0 => assert_eq!(
+                        fixed_controller_gain_life_run_len(runner.state()),
+                        Some(count as u32)
+                    ),
+                    1 | 2 => assert_eq!(
+                        fixed_opponent_effect_run_len(runner.state()),
+                        Some(count as u32)
+                    ),
+                    3 => assert_eq!(batch_run_len(runner.state()), Some(count as u32)),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    runner.state().stack,
+                    canonical,
+                    "comparison cannot mutate canonical pins"
+                );
+                events.extend(
+                    runner
+                        .act(GameAction::SetAutoPass {
+                            mode: AutoPassRequest::UntilStackEmpty,
+                        })
+                        .unwrap()
+                        .events,
+                );
+                for _ in 0..12 {
+                    if matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::OptionalEffectChoice { .. }
+                    ) {
+                        break;
+                    }
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == barrier)
+                );
+                assert_eq!(
+                    crate::game::perf_counters::snapshot().stack_batched_entries,
+                    count as u64
+                );
+                if family == 3 {
+                    assert_eq!(
+                        crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                        7
+                    );
+                    let tokens = token_ids(runner.state());
+                    assert_eq!(tokens.len(), 7);
+                    assert!(tokens
+                        .iter()
+                        .all(|id| runner.state().objects[id].owner == P0));
+                }
+                for source in &sources {
+                    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { source_id, .. } if source_id == source)).count(), 1);
+                }
+                let optional = runner
+                    .state()
+                    .resolution_stack
+                    .iter()
+                    .find_map(|frame| match frame {
+                        crate::types::resolution::ResolutionFrame::OptionalEffect(frame) => {
+                            Some(&frame.ability)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    optional.context.source_identity,
+                    canonical[0].ability().unwrap().context.source_identity
+                );
+                let saved = serde_json::to_string(runner.state()).unwrap();
+                let restored: GameState = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored, *runner.state());
+                runner = GameRunner::from_state(restored);
+                events.extend(
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap()
+                        .events,
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert_eq!(
+                    runner.state().players[0].life,
+                    if family == 0 { 25 } else { 22 }
+                );
+                assert_eq!(
+                    runner.state().players[1].life,
+                    if family == 1 { 17 } else { 20 }
+                );
+                if family == 2 {
+                    assert_eq!(runner.state().players[1].graveyard.len(), 3);
+                    assert_eq!(runner.state().players[1].library.len(), 1);
+                }
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { source_id, .. } if *source_id == barrier)).count(), 1);
+                assert_eq!(captured[0].entry, canonical.back().unwrap().clone());
+            }
+        }
+
+        #[test]
         fn fixed_controller_gain_life_triggers_batch_with_production_stamps() {
             crate::game::perf_counters::reset();
             let mut state = setup();
@@ -10548,10 +10888,9 @@ mod tests {
             );
         }
 
-        /// CR 607.1: a triggered ability's provenance is derived from
-        /// its definition occurrence when read, never latched into its
-        /// `SpellContext` — so printed gain-life triggers carrying a definition
-        /// ref, put on the stack through the production authority, still batch.
+        /// Definition provenance is derived from its occurrence.
+        /// CR 113.7a: own-source identity is captured separately; this source-independent
+        /// gain-life batch may project only that pin from its comparison.
         #[test]
         fn fixed_controller_gain_life_printed_triggers_with_definition_ref_still_batch() {
             use crate::types::ability::{
@@ -10619,7 +10958,18 @@ mod tests {
                 assert!(ability.trigger_definition_ref.is_some());
                 assert!(ability.source_incarnation.is_some());
                 assert!(ability.source_ability_provenance().is_some());
-                assert_eq!(ability.context, SpellContext::default(), "no latch");
+                let source = &state.objects[&entry.source_id];
+                assert_eq!(
+                    ability.context.source_identity,
+                    Some(crate::types::identifiers::ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::from_object(source),
+                        Zone::Battlefield,
+                    ))
+                );
+                assert!(batch_contexts_eq_ignoring_own_source(
+                    &ability.context,
+                    &SpellContext::default(),
+                ));
             }
             assert_eq!(fixed_controller_gain_life_run_len(&state), Some(3));
 
