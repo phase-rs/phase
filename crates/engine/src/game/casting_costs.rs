@@ -16021,7 +16021,116 @@ pub fn max_x_value(
     max_x_value_excluding(state, player, cost, object_id, &HashSet::new())
 }
 
-pub(super) fn max_x_value_excluding(
+/// Every mana method `permanent` could pay with toward the spell `object_id`,
+/// each with its net yield and typed penalty — the per-method form of the
+/// capacity [`max_x_value`] sums per permanent. CR 106.6: restricted mana is
+/// judged against the spell being announced, exactly as `max_x_value` does.
+pub fn feasible_mana_methods_for_spell(
+    state: &GameState,
+    player: PlayerId,
+    permanent: ObjectId,
+    object_id: Option<ObjectId>,
+) -> Vec<mana_sources::FeasibleManaMethod> {
+    let spell_meta = object_id.and_then(|oid| super::casting::build_spell_meta(state, player, oid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    mana_sources::x_ceiling_mana_methods(state, permanent, player, spell_ctx.as_ref())
+}
+
+/// What the automatic payer does to a permanent while paying a mana cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPaymentFate {
+    /// CR 605.1a + CR 106.12: the permanent was tapped for mana.
+    Tapped,
+    /// CR 701.21a: the permanent was sacrificed as part of a mana ability's cost.
+    Sacrificed,
+}
+
+/// The side effects of the production automatic payer, observed without
+/// committing them. See [`preview_auto_payment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoPaymentPreview {
+    /// Every permanent the payer tapped or sacrificed, in battlefield order.
+    pub consumed: Vec<(ObjectId, AutoPaymentFate)>,
+    /// Life the paying player lost to the mana abilities' own costs and
+    /// effects (CR 119.3 life payment, CR 120.3a damage to a player).
+    pub life_lost: u32,
+}
+
+/// CR 601.2g-h + CR 605.3b: Run the production automatic payer for `cost` on a
+/// clone of `state` and report which permanents it consumed and what it cost
+/// the player in life, or `None` when the payer cannot cover `cost`.
+///
+/// `cost` is the concrete mana cost (X already substituted). `source_id` is the
+/// spell or ability source being paid for, and `activation_cost` its ability
+/// cost when it is an activation, so a `{T}` cost keeps the source out of the
+/// payment exactly as live payment does. This is the engine's own plan, not a
+/// model of it: callers that price a payment (the Momir AI) read what the
+/// payer would actually tap rather than predicting it.
+pub fn preview_auto_payment(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    source_id: ObjectId,
+    activation_cost: Option<&AbilityCost>,
+) -> Option<AutoPaymentPreview> {
+    let spell_meta = super::casting::build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let excluded_sources = activation_cost
+        .map(|cost| super::casting::ability_mana_payment_excluded_sources(cost, source_id))
+        .unwrap_or_default();
+    let life_before = state.players.iter().find(|p| p.id == player)?.life;
+    let untapped_before: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.controller == player && !object.tapped)
+        })
+        .collect();
+
+    let mut simulated = state.clone();
+    auto_tap_mana_sources_with_context_excluding(
+        &mut simulated,
+        player,
+        cost,
+        &mut Vec::new(),
+        Some(source_id),
+        spell_ctx.as_ref(),
+        &excluded_sources,
+    );
+    if !spell_cost_is_payable_from_pool(&simulated, player, source_id, cost) {
+        return None;
+    }
+
+    let consumed = untapped_before
+        .into_iter()
+        .filter_map(|id| {
+            if !simulated.battlefield.contains(&id) {
+                Some((id, AutoPaymentFate::Sacrificed))
+            } else {
+                simulated
+                    .objects
+                    .get(&id)
+                    .is_some_and(|object| object.tapped)
+                    .then_some((id, AutoPaymentFate::Tapped))
+            }
+        })
+        .collect();
+    let life_after = simulated.players.iter().find(|p| p.id == player)?.life;
+    Some(AutoPaymentPreview {
+        consumed,
+        life_lost: u32::try_from(life_before - life_after).unwrap_or(0),
+    })
+}
+
+/// [`max_x_value`] with `excluded_sources` withheld from the permanent-capacity
+/// sweep: the largest X payable without activating any mana ability of those
+/// objects. Lets a caller price how much of its X budget depends on particular
+/// sources (the Momir AI asks "how much X without tapping my creatures?").
+pub fn max_x_value_excluding(
     state: &GameState,
     player: PlayerId,
     cost: &ManaCost,
