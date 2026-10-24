@@ -6669,7 +6669,7 @@ mod tests {
     /// NOT `None`. Regression discriminator for #546 (the original
     /// report) and #560 (Suture Priest), where the wildcard arm's
     /// `None` fallback caused `LoseLife { target: TriggeringPlayer }`
-    /// to revert to the Suture Priest / Bloodchief controller via
+    /// to revert to the ability controller (Suture Priest's controller) via
     /// `resolve_player_for_context_ref`'s ability-controller fallback,
     /// damaging the wrong player.
     ///

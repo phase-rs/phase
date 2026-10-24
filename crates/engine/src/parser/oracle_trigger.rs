@@ -1551,8 +1551,8 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
 /// graveyard's possessor ("put into an opponent's / a player's / their graveyard").
 /// An object only ever goes to its owner's graveyard, so that player is the moving
 /// card's OWNER, and by the rules of English a later "that player" names them, never
-/// the controller the card had when it moved. Same verb and possessive combinators as
-/// the header builders; the origin tail is the disjunctive-clause tail
+/// the controller the card had when it moved. Same possessive combinator as the header
+/// builders (the "is/are put into" verb tags are repeated); the origin tail is the disjunctive-clause tail
 /// ([`parse_put_into_graveyard_origin`]), so a union origin ("from your library or
 /// hand") is not proven here and keeps no scope. An empty tail is required, like
 /// [`trigger_head_dies_zone_change`]. "Your graveyard" names the controller, never the

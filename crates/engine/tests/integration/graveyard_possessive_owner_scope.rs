@@ -10,13 +10,14 @@
 //! separate axis that stays on the controller.
 //!
 //! Every ownership/control split below is made real before the death: stolen cards
-//! by casting Metallic Mastery / Hijack (CR 613.1b), and cards an opponent controls
+//! by casting Metallic Mastery / Hijack / Threaten (CR 613.1b), and cards an opponent controls
 //! through `CardBuilder::controlled_by` (which also sets `base_controller`, so Layer
 //! 2 does not hand control back before the death). The controller is asserted
 //! immediately before each death. Test cards use their real Oracle text; the
-//! vanilla artifacts and creatures that merely die carry no text. Two fixtures are
+//! vanilla artifacts and creatures that merely die carry no text. Three fixtures are
 //! labelled: Volrath is a Vanguard card with no battlefield form, so its verbatim
-//! ability is hosted on an enchantment; tokens are made with `is_token`.
+//! ability is hosted on an enchantment; tokens are made with `is_token`; Bloodchief
+//! Ascension's three quest counters are placed with `with_counter`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::Effect;
