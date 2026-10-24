@@ -96,7 +96,7 @@ impl Coverage {
                 self.changed |= self.first_hash.is_some_and(|first| first != hash);
                 self.first_hash.get_or_insert(hash);
             }
-            let baseline = if self.states % 2 == 0 {
+            let baseline = if self.states.is_multiple_of(2) {
                 None
             } else {
                 self.baselines[index].as_ref()
