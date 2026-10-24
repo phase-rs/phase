@@ -11596,7 +11596,7 @@ fn parse_effect_clause_inner_with_damage_context(
         .strip_prefix("for each of them, ")
         .or_else(|| tp.strip_prefix("for each of them "))
     {
-        return parse_effect_clause(rest.original, ctx);
+        return parse_effect_clause_with_damage_context(rest.original, ctx, damage_context);
     }
 
     // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>" —
@@ -11953,7 +11953,7 @@ fn parse_effect_clause_inner_with_damage_context(
     // CR 115.1d: "Two target creatures" / "Three target artifacts" — numeric target prefix.
     // Strip the count, recursively parse the remainder, and attach MultiTargetSpec.
     if let Some((count, rest)) = strip_exact_target_prefix(tp.lower) {
-        let mut clause = parse_effect_clause(rest, ctx);
+        let mut clause = parse_effect_clause_with_damage_context(rest, ctx, damage_context);
         clause.multi_target = Some(MultiTargetSpec::exact(count));
         return clause;
     }
@@ -12035,7 +12035,7 @@ fn parse_effect_clause_inner_with_damage_context(
         // dispatch recurses, and a nested clause that states its own duration must not
         // leave it standing for the enclosing one.
         let restore = ctx.stated_clause_duration.replace(duration.clone());
-        let body = parse_effect_clause(rest, ctx);
+        let body = parse_effect_clause_with_damage_context(rest, ctx, damage_context);
         ctx.stated_clause_duration = restore;
         return with_clause_chain_duration(body, duration);
     }
@@ -12337,7 +12337,7 @@ fn parse_effect_clause_inner_with_damage_context(
     // (e.g., "creatures you control have flying"), which is a subject-predicate pattern with
     // a plural subject before "have". Here, "have" is the first word, followed by a target/
     // anaphoric reference and a predicate.
-    if let Some(redirected) = try_parse_have_redirection(text, ctx) {
+    if let Some(redirected) = try_parse_have_redirection(text, ctx, damage_context) {
         return redirected;
     }
 
@@ -14472,7 +14472,11 @@ fn parse_conjure_zone(
 ///
 /// Distinguished from static "have" (e.g., "creatures you control have flying") by position:
 /// imperative "have" starts the clause; static "have" follows a subject.
-fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_redirection(
+    text: &str,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let (after_have, _) = tag::<_, _, OracleError<'_>>("have ")
         .parse(lower.as_str())
@@ -14485,7 +14489,7 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // Warrior). At resolution, the redirected effect's player-scoped filter
     // auto-resolves via `TargetFilter::TriggeringSource` (see
     // `extract_event_context_filter` + `resolve_token_owner`).
-    if let Some(clause) = try_parse_have_its_controller(text, after_have, ctx) {
+    if let Some(clause) = try_parse_have_its_controller(text, after_have, ctx, damage_context) {
         return Some(clause);
     }
 
@@ -14500,7 +14504,12 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
                 if let Some(ast) =
                     subject::try_parse_subject_predicate_ast(&self_named_redirected, ctx)
                 {
-                    return Some(lower_clause_ast(ast, ctx, text));
+                    return Some(lower_clause_ast_with_damage_context(
+                        ast,
+                        ctx,
+                        text,
+                        damage_context,
+                    ));
                 }
             }
         }
@@ -14523,7 +14532,12 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // the prior allowlist (`target | it | that | each | all | them | another
     // | this | ~ | enchanted | equipped`) rejected.
     if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text, ctx) {
-        return Some(lower_clause_ast(ast, ctx, text));
+        return Some(lower_clause_ast_with_damage_context(
+            ast,
+            ctx,
+            text,
+            damage_context,
+        ));
     }
 
     // Guard: for the recursive `parse_effect_clause` fallback below (handles
@@ -14555,7 +14569,7 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // Fallback: if subject-predicate doesn't match, try parsing the redirected text
     // through the full parse_effect_clause pipeline (handles fight, damage, etc.).
     // This recursion is safe because "have" has been stripped — no infinite loop.
-    let clause = parse_effect_clause(redirected_text, ctx);
+    let clause = parse_effect_clause_with_damage_context(redirected_text, ctx, damage_context);
     if !matches!(clause.effect, Effect::Unimplemented { .. }) {
         return Some(clause);
     }
@@ -14578,6 +14592,7 @@ fn try_parse_have_its_controller(
     original: &str,
     after_have_lower: &str,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     // Nom dispatch: must match "its controller " exactly.
     let (rest_lower, _) = tag::<_, _, OracleError<'_>>("its controller ")
@@ -14592,7 +14607,7 @@ fn try_parse_have_its_controller(
     let redirected_text = original[offset..].trim();
 
     // Parse the sub-effect through the full effect pipeline.
-    let clause = parse_effect_clause(redirected_text, ctx);
+    let clause = parse_effect_clause_with_damage_context(redirected_text, ctx, damage_context);
     if matches!(clause.effect, Effect::Unimplemented { .. }) {
         return None;
     }
@@ -23479,11 +23494,12 @@ fn try_parse_multi_target_damage_chain_inner(
     // `lower_imperative_clause`, ahead of the `take()` + DealDamage fixup, so
     // the count has to be captured here and attached below or a chain headed by
     // "each of ⟨N⟩ target ⟨type⟩" silently degrades to one mandatory target.
+    // Damage's pending count also carries "up to N"; the generic optional-target
+    // detector deliberately excludes DealDamage.
     let primary_damage_multi_target = ctx.pending_damage_multi_target.take();
     // CR 608.2c + CR 608.2h: only an unambiguous, mandatory object head can
     // supply the immediate population's referent. A target-subject source is
     // already an additional declaration, even before its wrapper is lowered.
-    let primary_text = &text[..text.len() - remainder.len()];
     let source_span = nom_primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((tag::<_, _, OracleError<'_>>("deals "), tag("deal "))).parse(input)?;
         Ok((rest, &lower[..lower.len() - input.len()]))
@@ -23503,7 +23519,6 @@ fn try_parse_multi_target_damage_chain_inner(
         } if damage_context == DamageTargetContext::FreshClause
             && source_has_no_target
             && primary_damage_multi_target.is_none()
-            && extract_optional_target_multi_target(primary_text, &primary_effect).is_none()
             && lower::target_filter_is_single_object_target(target)
             && super::oracle_target::resolve_pronoun_target(ctx, "it")
                 == TargetFilter::ParentTarget
@@ -46021,6 +46036,27 @@ fn parse_effect_chain_ir_body(
             let prior = builder.clauses().last().map(|c| &c.parsed.effect);
             entry_counter_rider_clause(&text_no_qty, condition.as_ref(), prior)
         };
+        // CR 608.2c: coordinated chunks of one sentence retain earlier target
+        // declarations, just like a recursively parsed damage continuation.
+        let damage_context = if builder
+            .clauses()
+            .iter()
+            .rev()
+            .take_while(|clause| clause.boundary != Some(ClauseBoundary::Sentence))
+            .any(|clause| {
+                std::iter::once(&clause.parsed.effect)
+                    .chain(
+                        std::iter::successors(clause.parsed.sub_ability.as_deref(), |ability| {
+                            ability.sub_ability.as_deref()
+                        })
+                        .map(|ability| ability.effect.as_ref()),
+                    )
+                    .any(|effect| triggers::extract_target_filter_from_effect(effect).is_some())
+            }) {
+            DamageTargetContext::InheritedTargets
+        } else {
+            DamageTargetContext::FreshClause
+        };
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -46033,7 +46069,8 @@ fn parse_effect_chain_ir_body(
         } else {
             let (suffix_repeat_for, stripped_text_no_qty) =
                 strip_for_each_repeat_suffix(&text_no_qty);
-            let mut stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            let mut stripped_clause =
+                parse_effect_clause_with_damage_context(&stripped_text_no_qty, ctx, damage_context);
             // CR 701.16a + CR 608.2c: a fieldless Investigate (no count slot) drops a
             // trailing "[once] for each <set>" multiplier. Precompute the lift,
             // gated to Investigate + no prior repeat_for, so ONLY the repeatable-for-each
@@ -46083,9 +46120,15 @@ fn parse_effect_chain_ir_body(
                 // (clause + ctx byte-identical), attaching ONLY the lifted repeat_for.
                 // The gate guaranteed `repeat_for.is_none()`, so `Some(lifted_qty)`
                 // cannot clobber a prior count.
-                (parse_effect_clause(&text_no_qty, ctx), Some(lifted_qty))
+                (
+                    parse_effect_clause_with_damage_context(&text_no_qty, ctx, damage_context),
+                    Some(lifted_qty),
+                )
             } else {
-                (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+                (
+                    parse_effect_clause_with_damage_context(&text_no_qty, ctx, damage_context),
+                    repeat_for,
+                )
             }
         };
         let (clause, multi_target) = lift_untargeted_declared_slot_destroy(
@@ -46153,7 +46196,8 @@ fn parse_effect_chain_ir_body(
                 .and_then(|prev| extract_effect_verb(&prev.parsed.effect))
             {
                 let reparsed_text = format!("{verb} {text_no_qty}");
-                let reparsed = parse_effect_clause(&reparsed_text, ctx);
+                let reparsed =
+                    parse_effect_clause_with_damage_context(&reparsed_text, ctx, damage_context);
                 if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                     reparsed
                 } else {
@@ -53290,5 +53334,118 @@ mod parent_controller_population_tests {
             generic_probe.is_none(),
             "generic path must detect the earlier target subject"
         );
+    }
+
+    fn assert_same_clause_population_context(text: &str) {
+        for damage_context in [
+            DamageTargetContext::FreshClause,
+            DamageTargetContext::InheritedTargets,
+        ] {
+            let context = ParseContext {
+                card_name: Some("Boundary Probe".into()),
+                ..ParseContext::default()
+            };
+            let clauses = [
+                (
+                    "clause shell",
+                    parse_effect_clause_with_damage_context(
+                        text,
+                        &mut context.clone(),
+                        damage_context,
+                    ),
+                ),
+                (
+                    "inner prefix dispatch",
+                    parse_effect_clause_inner_with_damage_context(
+                        text,
+                        &mut context.clone(),
+                        damage_context,
+                    ),
+                ),
+            ];
+            for (entry, clause) in clauses {
+                assert_reaches_uniform_population(&clause);
+                let filter = population_filter(
+                    clause
+                        .sub_ability
+                        .as_deref()
+                        .expect("population continuation"),
+                );
+                // CR 608.2c: rewriting a clause prefix does not erase its earlier targets.
+                match damage_context {
+                    DamageTargetContext::FreshClause => {
+                        assert_eq!(
+                            filter.controller,
+                            Some(ControllerRef::ParentTargetController),
+                            "{entry}: {text}"
+                        );
+                        assert!(filter.properties.iter().any(|property| matches!(
+                            property,
+                            FilterProp::DistinctFrom { reference }
+                                if reference.as_ref() == &TargetFilter::ParentTarget
+                        )));
+                    }
+                    DamageTargetContext::InheritedTargets => {
+                        assert!(
+                            !has_parent_population_binding(filter),
+                            "{entry} forgot inherited targets: {text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn have_redirection_preserves_population_context() {
+        for text in [
+            "have ~ deal 2 damage to target creature and 1 damage to each other creature with the same controller",
+            "have Boundary Probe deal 2 damage to target creature and 1 damage to each other creature with the same controller",
+        ] {
+            assert_same_clause_population_context(text);
+        }
+    }
+
+    #[test]
+    fn for_each_them_prefix_preserves_population_context() {
+        assert_same_clause_population_context(
+            "for each of them, ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller",
+        );
+    }
+
+    #[test]
+    fn leading_duration_preserves_population_context() {
+        assert_same_clause_population_context(
+            "until end of turn, ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller",
+        );
+    }
+
+    #[test]
+    fn have_redirection_compound_tail_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "Card deals 3 damage to target creature and have ~ deal 2 damage to target creature",
+        );
+    }
+
+    #[test]
+    fn have_redirection_after_untargeted_head_keeps_permission_fresh() {
+        let text = "Draw a card and have ~ deal 2 damage to target creature and 1 damage to each other creature with the same controller.";
+        let parsed = parse_oracle_text(text, "Boundary Probe", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        for definition in [
+            &parse_effect_chain(text, AbilityKind::Spell),
+            &parsed.abilities[0],
+        ] {
+            let filter = population_filter(definition);
+            assert_eq!(
+                filter.controller,
+                Some(ControllerRef::ParentTargetController)
+            );
+            assert!(filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::DistinctFrom { reference }
+                    if reference.as_ref() == &TargetFilter::ParentTarget
+            )));
+        }
     }
 }
