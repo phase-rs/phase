@@ -45,7 +45,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -6604,10 +6604,7 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     // of functioning state — we're computing coverage, not game behavior.
     for entry in obj.trigger_definitions.iter_all() {
         let trig = entry.definition();
-        if matches!(&trig.mode, TriggerMode::Unknown(_))
-            || (!trigger_registry.contains_key(&trig.mode)
-                && !matches!(&trig.mode, TriggerMode::StateCondition))
-        {
+        if !trigger_mode_is_supported(&trig.mode, trigger_registry) {
             missing.push(format!("Trigger: {}", trig.mode));
         }
     }
@@ -7854,7 +7851,28 @@ fn trigger_mode_is_supported(
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
     !matches!(mode, TriggerMode::Unknown(_))
+        && !trigger_mode_has_unpublished_event_source(mode)
         && (trigger_registry.contains_key(mode) || matches!(mode, TriggerMode::StateCondition))
+}
+
+/// CR 603.2 + CR 613.1b: a trigger mode whose matcher is registered but whose
+/// triggering event is not published for every way the game can produce it, so
+/// the printed ability would silently miss real occurrences. `Gains` of a
+/// `ChangesController` trigger fires on `GameEvent::ControllerChanged`, which
+/// spell/effect control changes publish but layer-2 control-changing effects
+/// (CR 613.1b: Confiscate's "You control enchanted permanent", Control Magic)
+/// do not: `layers.rs` only assigns `obj.controller`. Tracked upstream as
+/// phase-rs/phase#9903; lift this when static/layer control changes publish
+/// `ControllerChanged`. The `Loses` side is not charged here. The runtime
+/// matcher stays registered so the effect-driven control changes still fire it.
+fn trigger_mode_has_unpublished_event_source(mode: &TriggerMode) -> bool {
+    match mode {
+        TriggerMode::ChangesController { side } => match side {
+            ControlChangeSide::Gains => true,
+            ControlChangeSide::Loses => false,
+        },
+        _ => false,
+    }
 }
 
 /// CR 603.7 + CR 603.8: a delayed trigger fires only through an event matcher
@@ -7866,7 +7884,9 @@ fn delayed_trigger_mode_is_supported(
     mode: &TriggerMode,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
-    !matches!(mode, TriggerMode::Unknown(_)) && trigger_registry.contains_key(mode)
+    !matches!(mode, TriggerMode::Unknown(_))
+        && !trigger_mode_has_unpublished_event_source(mode)
+        && trigger_registry.contains_key(mode)
 }
 
 /// CR 603.7: the trigger definitions a delayed trigger this effect creates is
@@ -24760,5 +24780,51 @@ mod attacked_referent_coverage_tests {
             fmt_target(&TargetFilter::AttackedPlayerOrPlaneswalker),
             "the player or planeswalker it's attacking"
         );
+    }
+}
+
+#[cfg(test)]
+mod unpublished_event_source_tests {
+    use super::*;
+
+    /// CR 603.2 + CR 613.1b: the gain side of `ChangesController` has a
+    /// registered matcher but no emitter for layer-2 control changes (#9903), so
+    /// the support authority must report it unsupported while the registered
+    /// `Loses` side and unrelated modes stay supported — for both the printed
+    /// and the delayed variant.
+    #[test]
+    fn gain_side_control_trigger_is_unsupported_until_layer_changes_publish_events() {
+        let registry = trigger_registry();
+        let gains = TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains,
+        };
+        let loses = TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        };
+
+        // Reach guard: the registry carries every key, so the `false` below is
+        // owed to the unpublished-event-source predicate, not a missing entry.
+        assert!(
+            registry.contains_key(&gains),
+            "Gains matcher stays registered"
+        );
+        assert!(registry.contains_key(&loses));
+        assert!(registry.contains_key(&TriggerMode::ChangesZone));
+        assert!(trigger_mode_has_unpublished_event_source(&gains));
+        assert!(!trigger_mode_has_unpublished_event_source(&loses));
+
+        assert!(!trigger_mode_is_supported(&gains, registry));
+        assert!(!delayed_trigger_mode_is_supported(&gains, registry));
+
+        for supported in [&loses, &TriggerMode::ChangesZone] {
+            assert!(
+                trigger_mode_is_supported(supported, registry),
+                "{supported:?}"
+            );
+            assert!(
+                delayed_trigger_mode_is_supported(supported, registry),
+                "{supported:?}"
+            );
+        }
     }
 }

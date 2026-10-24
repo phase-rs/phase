@@ -34889,15 +34889,16 @@ fn ir_facade_demotes_a_refused_granter_name() {
     )));
 }
 
-/// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move, verbatim, is a fully
-/// supported card. The second ability ("When you gain control of this
+/// CR 603.2 + CR 603.10 + CR 603.3a + CR 613.1b: Risky Move, verbatim, parses
+/// to the right shape: the second ability ("When you gain control of this
 /// enchantment from another player, ...") is the gain-side
-/// `ChangesController`; `card_face_gaps` runs `trigger_mode_is_supported`, so a
-/// dropped registry insert for `{ side: Gains }` makes this fail. The first
-/// ability is the upkeep `GiveControl` of the enchantment to the scoped
-/// (active) player.
+/// `ChangesController`, and the first is the upkeep `GiveControl` of the
+/// enchantment to the scoped (active) player. The card nevertheless stays
+/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
+/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
+/// reports exactly the gain-side trigger until that emitter lands.
 #[test]
-fn risky_move_full_card_supported_with_gain_side_control_trigger() {
+fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
     use crate::types::triggers::{ControlChangeSide, TriggerMode};
     let face = oracle_face_for(
         "Risky Move",
@@ -34906,9 +34907,9 @@ fn risky_move_full_card_supported_with_gain_side_control_trigger() {
         &[],
     );
     let gaps = crate::game::coverage::card_face_gaps(&face);
-    assert!(
-        gaps.is_empty(),
-        "Risky Move must be fully supported, gaps: {gaps:?}"
+    assert_eq!(
+        gaps,
+        vec![String::from("Trigger:ChangesController { side: Gains }")]
     );
     assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
     let upkeep = &face.triggers[0];
