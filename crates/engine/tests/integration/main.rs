@@ -1824,6 +1824,7 @@ mod loop_shortcut_ranking;
 mod loop_shortcut_seat_pin_census;
 mod loop_shortcut_shortening;
 mod lose_control_this_turn_delayed_trigger;
+mod lose_hexproof_family;
 mod lost_mine_fungi_cavern_duration_runtime;
 mod lost_mine_storeroom_targeting_runtime;
 mod love_on_the_battlefield_combat_counters;
