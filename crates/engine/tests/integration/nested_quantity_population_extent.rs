@@ -13,6 +13,513 @@ const COLLISION: &str = "Choose one —\n• Collision Course deals X damage to 
 // Pinned MTGJSON 2026-10-04, Oracle aceea999-90ab-472c-86a7-48af1542cbcf.
 const VESTIGE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
 
+/// CR 608.2c + CR 608.2d + CR 608.2h: a labeled typed synthetic spell pauses
+/// before its optional exact selection, then resumes with the live population.
+/// Genuine current and historical parent continuations must make the same choice.
+#[test]
+fn private_exact_selection_public_insufficiency_enough_zero_up_to_and_mandatory_restore() {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityCondition, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect,
+        EffectOutcomeSignal, FilterProp, MultiTargetSpec, QuantityExpr, QuantityRef,
+        SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use engine::types::zones::EtbTapState;
+    for actor in [P0, P1] {
+        // 0 exact2/one, 1 exact2/three, 2 exact0, 3 up-to2,
+        // 4 mandatory2/one, 5 mandatory2/three, 6 live-land exact2/one,
+        // 7 live-land exact2/three. All begin with a paid mandatory Draw.
+        for branch in 0..8 {
+            let enough = matches!(branch, 1 | 3 | 5 | 7);
+            let mandatory = matches!(branch, 4 | 5);
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_land(actor, "Live exact count land one");
+            scenario.add_land(actor, "Live exact count land two");
+            let independent = scenario
+                .add_spell_to_library_top(actor, "Private independent tail draw", true)
+                .id();
+            let drawn = scenario
+                .add_spell_to_library_top(actor, "Private preceding mandatory draw", true)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            let first = scenario
+                .add_artifact_to_hand_from_oracle(actor, "Private first legal permanent", "")
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            let second = scenario
+                .add_artifact_to_hand_from_oracle(actor, "Private nondefault legal permanent", "")
+                .with_mana_cost(ManaCost::generic(if enough { 1 } else { 5 }))
+                .id();
+            let foreign_actor = if actor == P0 { P1 } else { P0 };
+            let foreign = scenario
+                .add_artifact_to_hand_from_oracle(foreign_actor, "Foreign private decoy", "")
+                .id();
+            scenario.with_mana_pool(
+                actor,
+                vec![ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )],
+            );
+            let mut tail = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            let gain = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .condition(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+            .sub_ability(tail.clone());
+            let mut put = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent)
+                            .controller(ControllerRef::You)
+                            .properties(vec![
+                                FilterProp::InZone { zone: Zone::Hand },
+                                FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Fixed { value: 2 },
+                                },
+                            ]),
+                    ),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: Some(ControllerRef::You),
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(if mandatory { tail } else { gain });
+            put.optional = !mandatory;
+            put.target_choice_timing = TargetChoiceTiming::Resolution;
+            let exact = if branch >= 6 {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You),
+                        ),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed {
+                    value: if branch == 2 { 0 } else { 2 },
+                }
+            };
+            put.multi_target = Some(if branch == 3 {
+                MultiTargetSpec::up_to(exact)
+            } else {
+                MultiTargetSpec::exact(exact)
+            });
+            let draw = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(put);
+            let root = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(draw);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    actor,
+                    "Synthetic typed private exact selection",
+                    true,
+                    "",
+                )
+                .with_mana_cost(ManaCost::generic(1))
+                .with_ability_definition(root)
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = actor;
+            runner.state_mut().priority_player = actor;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: actor };
+            if enough {
+                let object = runner.state_mut().objects.get_mut(&drawn).unwrap();
+                object.card_types.core_types = vec![engine::types::card_type::CoreType::Artifact];
+                object.base_card_types = object.card_types.clone();
+            }
+            // A public cast pays the cost; two real priority passes reach Scry,
+            // a genuine pending parent boundary before the now-immediate child.
+            runner.cast(spell).commit();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::ScryChoice { player, cards } if *player == actor && cards == &vec![drawn])
+            );
+            assert_eq!(runner.state().players[actor.0 as usize].library.len(), 2);
+            assert_eq!(
+                runner.state().players[actor.0 as usize].mana_pool.total(),
+                0
+            );
+            assert!(!runner.state().resolution_stack.is_empty());
+            for restored in warp_restore_forms(runner.state()) {
+                let mut resumed = GameRunner::from_state(restored);
+                resumed
+                    .act(GameAction::SelectCards { cards: vec![drawn] })
+                    .unwrap();
+                assert_eq!(resumed.state().objects[&drawn].zone, Zone::Hand);
+                let impossible = matches!(branch, 0 | 6);
+                if impossible || (mandatory && !enough) {
+                    assert!(
+                        matches!(resumed.state().waiting_for, WaitingFor::Priority { .. }),
+                        "branch {branch}: {:?}",
+                        resumed.state().waiting_for
+                    );
+                } else {
+                    if !mandatory {
+                        assert!(
+                            matches!(resumed.state().waiting_for, WaitingFor::OptionalEffectChoice { player, source_id, .. } if player == actor && source_id == spell)
+                        );
+                        let accept = engine::ai_support::legal_actions(resumed.state())
+                            .into_iter()
+                            .find(|action| {
+                                matches!(action, GameAction::DecideOptionalEffect { accept: true })
+                            })
+                            .unwrap();
+                        resumed.act(accept).unwrap();
+                    }
+                    if branch != 2 {
+                        let WaitingFor::EffectZoneChoice {
+                            player,
+                            cards,
+                            min_count,
+                            count,
+                            ..
+                        } = &resumed.state().waiting_for
+                        else {
+                            panic!("real exact/up-to selection branch {branch}")
+                        };
+                        assert_eq!(*player, actor);
+                        assert_eq!((*min_count, *count), (if branch == 3 { 0 } else { 2 }, 2));
+                        assert_eq!(
+                            cards
+                                .iter()
+                                .copied()
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            [first, second, drawn].into_iter().collect()
+                        );
+                        // CR 402.3: BOTH real envelopes hide private names and
+                        // selectable identities from opponents and unseated viewers.
+                        let before = serde_json::to_value(resumed.state()).unwrap();
+                        for viewer in [Some(actor), Some(foreign_actor), None] {
+                            let projected = match viewer {
+                                Some(player) => engine::game::visibility::filter_state_for_viewer(
+                                    resumed.state(),
+                                    player,
+                                ),
+                                None => engine::game::visibility::filter_state_for_unseated_viewer(
+                                    resumed.state(),
+                                ),
+                            };
+                            let direct = serde_json::to_value(ClientGameStateRef::wrap(
+                                resumed.state(),
+                                viewer,
+                            ))
+                            .unwrap();
+                            let filtered = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                                resumed.state(),
+                                &projected,
+                                viewer,
+                            ))
+                            .unwrap();
+                            assert_eq!(direct, filtered);
+                            let WaitingFor::EffectZoneChoice {
+                                cards: projected_cards,
+                                ..
+                            } = &projected.waiting_for
+                            else {
+                                panic!("projected selection")
+                            };
+                            assert_eq!(
+                                projected_cards,
+                                &if viewer == Some(actor) {
+                                    cards.clone()
+                                } else {
+                                    vec![ObjectId(0); cards.len()]
+                                }
+                            );
+                            if viewer != Some(actor) {
+                                assert!(!direct
+                                    .to_string()
+                                    .contains("Private preceding mandatory draw"));
+                                assert_eq!(
+                                    projected.objects[&drawn].card_id,
+                                    engine::types::identifiers::CardId(0)
+                                );
+                                assert!(projected.objects[&drawn].abilities.is_empty());
+                            }
+                        }
+                        assert_eq!(serde_json::to_value(resumed.state()).unwrap(), before);
+                        let selected = if branch == 3 {
+                            vec![]
+                        } else {
+                            vec![second, drawn]
+                        };
+                        let action = engine::ai_support::legal_actions(resumed.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards.iter().copied().collect::<std::collections::BTreeSet<_>>() == selected.iter().copied().collect())).unwrap();
+                        resumed.act(action).unwrap();
+                    }
+                }
+                resumed.advance_until_stack_empty();
+                let moved = enough && branch != 3;
+                assert_eq!(
+                    resumed.state().objects[&drawn].zone,
+                    if moved { Zone::Battlefield } else { Zone::Hand }
+                );
+                if moved {
+                    assert!(resumed.state().objects[&drawn].tapped);
+                    assert_eq!(resumed.state().objects[&drawn].controller, actor);
+                }
+                assert_eq!(resumed.state().objects[&first].zone, Zone::Hand);
+                assert_eq!(resumed.state().objects[&foreign].zone, Zone::Hand);
+                assert_eq!(resumed.state().objects[&independent].zone, Zone::Hand);
+                assert_eq!(resumed.state().players[actor.0 as usize].library.len(), 0);
+                assert_eq!(
+                    resumed.state().players[actor.0 as usize].life,
+                    if !mandatory && !impossible { 25 } else { 20 }
+                );
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(resumed.state().active_optional_effect_frame().is_none());
+                assert!(
+                    resumed.state().stack.is_empty()
+                        && resumed.state().trigger_stack.is_empty()
+                        && resumed.state().resolution_stack.is_empty()
+                );
+                let completed = serde_json::to_value(resumed.state()).unwrap();
+                for viewer in [Some(actor), Some(foreign_actor), None] {
+                    let projected = match viewer {
+                        Some(player) => engine::game::visibility::filter_state_for_viewer(
+                            resumed.state(),
+                            player,
+                        ),
+                        None => engine::game::visibility::filter_state_for_unseated_viewer(
+                            resumed.state(),
+                        ),
+                    };
+                    let direct =
+                        serde_json::to_value(ClientGameStateRef::wrap(resumed.state(), viewer))
+                            .unwrap();
+                    assert_eq!(
+                        direct,
+                        serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                            resumed.state(),
+                            &projected,
+                            viewer
+                        ))
+                        .unwrap()
+                    );
+                    assert!(matches!(projected.waiting_for, WaitingFor::Priority { .. }));
+                    if viewer != Some(actor) && !moved {
+                        assert_eq!(
+                            projected.objects[&drawn].card_id,
+                            engine::types::identifiers::CardId(0)
+                        );
+                        assert!(!direct
+                            .to_string()
+                            .contains("Private preceding mandatory draw"));
+                    }
+                }
+                assert_eq!(serde_json::to_value(resumed.state()).unwrap(), completed);
+                resumed.advance_until_stack_empty();
+                assert_eq!(
+                    resumed.state().players[actor.0 as usize].library.len(),
+                    0,
+                    "independent tail once"
+                );
+            }
+        }
+    }
+}
+
+/// CR 109.5 + CR 608.2d: the scoped player's Hand supplies the required
+/// population, independently of the controller/source owner and their cards.
+#[test]
+fn private_exact_selection_public_scoped_owner_and_controller_are_distinct() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, MultiTargetSpec,
+        PlayerFilter, QuantityExpr, SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use engine::types::zones::EtbTapState;
+    for controller in [P0, P1] {
+        let selected_owner = if controller == P0 { P1 } else { P0 };
+        for enough in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(
+                controller,
+                &["Scoped first Draw", "Scoped independent Draw", "Reserve"],
+            );
+            let first = scenario
+                .add_artifact_to_hand_from_oracle(selected_owner, "Scoped selected first", "")
+                .id();
+            let second = scenario
+                .add_spell_to_hand_from_oracle(selected_owner, "Scoped selected second", true, "")
+                .id();
+            for index in 0..3 {
+                scenario.add_land_to_hand(controller, &format!("Controller decoy {index}"));
+            }
+            let mut tail = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            let mut put = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent)
+                            .controller(ControllerRef::ScopedPlayer)
+                            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                    ),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: Some(ControllerRef::ScopedPlayer),
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(tail);
+            put.optional = true;
+            put.player_scope = Some(PlayerFilter::Opponent);
+            put.target_choice_timing = TargetChoiceTiming::Resolution;
+            put.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }));
+            let root = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(put);
+            let source = scenario
+                .add_creature(controller, "Synthetic scoped-selection producer", 2, 2)
+                .with_ability_definition(root)
+                .id();
+            let mut runner = scenario.build();
+            // Initial battlefield fixture: owner, current controller and scoped
+            // selected owner are separate authorities, without a casting shortcut.
+            runner.state_mut().objects.get_mut(&source).unwrap().owner = selected_owner;
+            if enough {
+                let object = runner.state_mut().objects.get_mut(&second).unwrap();
+                object.card_types.core_types = vec![engine::types::card_type::CoreType::Artifact];
+                object.base_card_types = object.card_types.clone();
+            }
+            runner.state_mut().active_player = controller;
+            runner.state_mut().priority_player = controller;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: controller };
+            let before = runner.state().players[controller.0 as usize].library.len();
+            runner.activate(source, 0).stop_at_optional().resolve();
+            if enough {
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, source_id, .. } if player == selected_owner && source_id == source)
+                );
+                assert_eq!(
+                    runner.state().players[controller.0 as usize].library.len(),
+                    before - 1
+                );
+                let frame = runner.state().active_optional_effect_frame().unwrap();
+                assert_eq!(frame.ability.controller, selected_owner);
+                assert_eq!(frame.ability.original_controller, Some(controller));
+                assert_eq!(frame.ability.scoped_player, Some(selected_owner));
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+                let WaitingFor::EffectZoneChoice {
+                    player,
+                    cards,
+                    count: 2,
+                    min_count: 2,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("scoped exact2")
+                };
+                assert_eq!(*player, selected_owner);
+                assert_eq!(
+                    cards
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [first, second].into_iter().collect()
+                );
+                let action = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards.iter().copied().collect::<std::collections::BTreeSet<_>>() == [first, second].into_iter().collect())).unwrap();
+                runner.act(action).unwrap();
+            }
+            runner.advance_until_stack_empty();
+            for id in [first, second] {
+                assert_eq!(
+                    runner.state().objects[&id].zone,
+                    if enough {
+                        Zone::Battlefield
+                    } else {
+                        Zone::Hand
+                    }
+                );
+                if enough {
+                    assert_eq!(runner.state().objects[&id].controller, selected_owner);
+                    assert!(runner.state().objects[&id].tapped);
+                }
+            }
+            assert_eq!(
+                runner.state().players[controller.0 as usize].library.len(),
+                before - 2
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+        }
+    }
+}
+
 /// CR 608.2c: a synthetic complete grammar control proves the independent
 /// post-choice Draw survives accept and decline exactly once.
 #[test]

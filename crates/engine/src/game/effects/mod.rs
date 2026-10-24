@@ -17206,6 +17206,13 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::ParentTarget,
             ..
         } => ability.parent_target_missing_reason.is_some(),
+        // CR 608.2d: use the same hydrated invocation and exact private-zone
+        // candidate/cardinality authority as actual ChangeZone application.
+        Effect::ChangeZone { .. } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_private_zone_selection_is_infeasible(state, effective.as_ref())
+                .unwrap_or(false)
+        }
         // CR 608.2d: "The player can’t choose an option that’s illegal or impossible".
         // An optional placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
         // "You may put a card from your hand on the bottom of your library. If
@@ -59826,6 +59833,218 @@ mod tests {
                 ability.targets
             );
         }
+    }
+
+    /// CR 608.2d: the shared optional gate, stored-answer reader and entry
+    /// publication all ask the same current private-selection authority.
+    #[test]
+    fn optional_private_change_zone_probe_known_store_and_entry_publication_agree() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Selection source".into(),
+            Zone::Battlefield,
+        );
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "You may put a permanent card from your hand onto the battlefield tapped.",
+            AbilityKind::Spell,
+        );
+        let mut ability = build_resolved_from_def(&definition, source, PlayerId(0));
+        assert!(ability.optional);
+        assert_eq!(ability.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert!(matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ));
+        let entry = |ability: ResolvedAbility| StackEntry {
+            id: ObjectId(901),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Selection source".into(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        ability.may_trigger_origin = Some(origin.clone());
+        assert!(optional_effect_is_infeasible(&state, &ability));
+        for mode in [OptionalFeasibility::Probe, OptionalFeasibility::Known(true)] {
+            assert!(upfront_optional_gate(&state, &ability, mode).is_none());
+        }
+        assert!(crate::game::engine::entry_publishes_pin_slots(
+            &state,
+            &entry(ability.clone()),
+            PlayerId(0)
+        )
+        .is_none());
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: source,
+                origin: origin.clone(),
+            },
+            AutoMayChoice::Accept,
+        );
+        assert_eq!(stored_may_answer(&state, &ability), None);
+        let legal = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legal private permanent".into(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&legal)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(!optional_effect_is_infeasible(&state, &ability));
+        assert_eq!(
+            stored_may_answer(&state, &ability),
+            Some(AutoMayChoice::Accept)
+        );
+        // A different source/occurrence cannot borrow this source's stored answer.
+        let mut unrelated = ability.clone();
+        unrelated.source_id = ObjectId(999);
+        assert_eq!(stored_may_answer(&state, &unrelated), None);
+        ability.may_trigger_origin = None;
+        for mode in [
+            OptionalFeasibility::Probe,
+            OptionalFeasibility::Known(false),
+        ] {
+            assert_eq!(
+                upfront_optional_gate(&state, &ability, mode)
+                    .unwrap()
+                    .prompt_player,
+                Some(PlayerId(0))
+            );
+        }
+        let published = crate::game::engine::entry_publishes_pin_slots(
+            &state,
+            &entry(ability.clone()),
+            PlayerId(0),
+        )
+        .expect("matched legal twin reaches actual publication");
+        assert!(published.may.is_some());
+        assert!(published.target.is_none());
+        // Known facts are used once, never re-probed against changed state.
+        assert!(
+            upfront_optional_gate(&state, &ability, OptionalFeasibility::Known(true)).is_none()
+        );
+        let mut other_actor = ability.clone();
+        other_actor.controller = PlayerId(1);
+        assert!(optional_effect_is_infeasible(&state, &other_actor));
+        let mut mandatory = other_actor.clone();
+        mandatory.optional = false;
+        assert!(!optional_effect_is_infeasible(&state, &mandatory));
+        let mut up_to = other_actor.clone();
+        up_to.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Fixed { value: 2 },
+        ));
+        assert!(!optional_effect_is_infeasible(&state, &up_to));
+        let mut parent = other_actor;
+        if let Effect::ChangeZone { target, .. } = &mut parent.effect {
+            *target = TargetFilter::ParentTarget;
+        }
+        parent.parent_target_missing_reason =
+            Some(crate::types::ability::ParentTargetMissingReason::ExileTop);
+        assert!(optional_effect_is_infeasible(&state, &parent));
+        parent.parent_target_missing_reason = None;
+        assert!(!optional_effect_is_infeasible(&state, &parent));
+    }
+
+    /// CR 608.2c + CR 608.2d: automatic decline leaves a fresh empty result,
+    /// skips IfYouDo and executes the independent public tail exactly once.
+    #[test]
+    fn impossible_private_change_zone_public_decline_skips_if_you_do_and_draws_tail() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic impossible placement with independent tail", true,
+            "You may gain 1 life. You may put a creature card from your hand onto the battlefield. If you do, gain 5 life. Draw a card.").id();
+        scenario.with_library_top(P0, &["Independent tail card", "Reserve"]);
+        let mut runner = scenario.build();
+        let outcome = runner.cast(source).commit().stop_at_optional().resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::OptionalEffectChoice { player, .. } if *player == P0)
+        );
+        assert_eq!(runner.state().players[0].life, 20);
+        let library_before = runner.state().players[0].library.len();
+        runner
+            .act(crate::types::actions::GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[0].life, 21, "the earlier accepted optional cannot lend its performed result to the impossible placement's IfYouDo");
+        assert_eq!(runner.state().players[0].library.len(), library_before - 1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().active_optional_effect_frame().is_none());
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().trigger_stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+        );
+        let library = runner.state().players[0].library.len();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[0].library.len(), library);
+    }
+
+    /// CR 608.2c + CR 608.2d: the existing instruction-entry and decline
+    /// authorities publish this producer's completed-empty named result.
+    #[test]
+    fn impossible_private_change_zone_publishes_its_own_empty_named_result() {
+        use crate::types::ability::{InstructionResultEntry, ReturnResultId};
+        use crate::types::game_state::InstructionResult;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            P0,
+            "Named selection source".into(),
+            Zone::Battlefield,
+        );
+        let drawn = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Named selection tail draw".into(),
+            Zone::Library,
+        );
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "You may put a creature card from your hand onto the battlefield. Draw a card.",
+            AbilityKind::Spell,
+        );
+        let mut ability = build_resolved_from_def(&definition, source, P0);
+        ability.declares_return_result = Some(ReturnResultId(17));
+        with_instruction_result_entry(&mut state, &ability, InstructionResultEntry::Independent, |state, body| {
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            assert!(!state.return_result_frames[&occurrence].results.contains_key(&ReturnResultId(17)));
+            assert!(optional_effect_is_infeasible(state, body));
+            resolve_chain_body(state, body, &mut Vec::new(), 1, None)?;
+            assert!(matches!(state.return_result_frames[&occurrence].results.get(&ReturnResultId(17)), Some(InstructionResult::ZoneChanges(records)) if records.is_empty()));
+            assert_eq!(state.objects[&drawn].zone, Zone::Hand);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_optional_effect_frame().is_none());
+            Ok(())
+        }).unwrap();
     }
 
     /// CR 608.2d + CR 609.3 (issue #8798): "you may put that card into your

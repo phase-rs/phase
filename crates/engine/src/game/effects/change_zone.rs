@@ -407,9 +407,9 @@ fn resolution_choice_cardinality(
     ability: &ResolvedAbility,
     eligible_count: usize,
     up_to: bool,
-) -> (usize, usize, bool) {
+) -> Result<(usize, usize, bool), crate::game::engine::EngineError> {
     let Some(spec) = ability.multi_target.as_ref() else {
-        return (1, 0, up_to);
+        return Ok((1, 0, up_to));
     };
 
     match crate::game::ability_utils::resolve_multi_target_bounds(
@@ -422,13 +422,13 @@ fn resolution_choice_cardinality(
             if bounds.max == 0
                 || matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution) =>
         {
-            (bounds.max, bounds.min, bounds.min != bounds.max)
+            Ok((bounds.max, bounds.min, bounds.min != bounds.max))
         }
-        Ok(_) => (1, 0, up_to),
-        Err(_) if matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution) => {
-            (0, 0, up_to)
+        Ok(_) => Ok((1, 0, up_to)),
+        Err(error) if matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution) => {
+            Err(error)
         }
-        Err(_) => (1, 0, up_to),
+        Err(_) => Ok((1, 0, up_to)),
     }
 }
 
@@ -437,14 +437,30 @@ fn resolution_zone_candidates(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     filter_controller: PlayerId,
-    scan_zones: &[Zone],
+    origin: Option<Zone>,
     destination: Zone,
-) -> Vec<ObjectId> {
+) -> (Vec<Zone>, Vec<ObjectId>) {
+    // CR 608.2c: an explicit origin owns the domain; otherwise preserve the
+    // typed zone order, tracked members' zones, then the ordinary BF default.
+    let scan_zones = if let Some(origin) = origin {
+        vec![origin]
+    } else {
+        let extracted = target_filter.extract_zones();
+        if !extracted.is_empty() {
+            extracted
+        } else if let Some(zone) = target_filter.extract_in_zone() {
+            vec![zone]
+        } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+            zones
+        } else {
+            vec![Zone::Battlefield]
+        }
+    };
     let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
         ability,
         filter_controller,
     );
-    state
+    let candidates = state
         .objects
         .iter()
         .filter(|(id, object)| {
@@ -471,7 +487,75 @@ fn resolution_zone_candidates(
                 )
         })
         .map(|(id, _)| *id)
-        .collect()
+        .collect();
+    (scan_zones, candidates)
+}
+
+/// CR 608.2d: an optional positive exact choice from a private zone is
+/// impossible without its full legal population. `None` leaves adjacent
+/// targeting, repeat, search and optional-for protocols with their own owners.
+pub(crate) fn optional_private_zone_selection_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<bool> {
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target: target @ TargetFilter::Typed(TypedFilter { properties, .. }),
+        up_to,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !ability.optional
+        || ability.optional_for.is_some()
+        || properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::InTrackedSet { .. }))
+        || ability.target_choice_timing != TargetChoiceTiming::Resolution
+        || super::optionality_is_per_iteration(state, ability)
+        || ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
+        || !super::resolved_effect_object_ids(state, ability, target).is_empty()
+    {
+        return None;
+    }
+    match ability.multi_target.as_ref() {
+        Some(spec) => {
+            if spec.max.as_ref() != Some(&spec.min)
+                || crate::game::ability_utils::multi_target_needs_quantity_choice(
+                    state, ability, spec,
+                )
+            {
+                return None;
+            }
+        }
+        None if *up_to => return None,
+        None => {}
+    }
+    let filter_controller = super::controller_for_relative_filter(state, ability, target);
+    let (zones, candidates) = resolution_zone_candidates(
+        state,
+        ability,
+        target,
+        filter_controller,
+        *origin,
+        *destination,
+    );
+    if !matches!(zones.as_slice(), [Zone::Hand] | [Zone::Library]) {
+        return None;
+    }
+    Some(
+        match resolution_choice_cardinality(state, ability, candidates.len(), *up_to) {
+            Ok((count, _, _)) => candidates.len() < count,
+            // Unresolved quantities were excluded above. The shared bounds
+            // authority's remaining error is an insufficient required population.
+            Err(_) => true,
+        },
+    )
 }
 
 /// CR 608.2d + CR 701.13a: report whether this exact optional-for-any-player
@@ -527,12 +611,12 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
     };
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
-    let candidates = resolution_zone_candidates(
+    let (_, candidates) = resolution_zone_candidates(
         state,
         ability,
         target_filter,
         filter_controller,
-        &[Zone::Graveyard],
+        Some(Zone::Graveyard),
         Zone::Exile,
     );
     Some(
@@ -1040,41 +1124,30 @@ pub fn resolve(
         // there is no fixed `InZone` constraint to extract — so derive the scan
         // zone from the members' actual zone rather than defaulting to the
         // battlefield.
-        let scan_zones = if exile_tracked_set_library_only {
-            vec![Zone::Library]
-        } else if let Some(origin) = origin {
-            vec![origin]
-        } else {
-            let extracted = target_filter.extract_zones();
-            if !extracted.is_empty() {
-                extracted
-            } else if let Some(zone) = target_filter.extract_in_zone() {
-                vec![zone]
-            } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
-                zones
-            } else {
-                vec![Zone::Battlefield]
-            }
-        };
-        let scan_zone = scan_zones[0];
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player
         // (not the caster), we pass `filter_controller` explicitly. Include the
         // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
-        let eligible = resolution_zone_candidates(
+        let (scan_zones, eligible) = resolution_zone_candidates(
             state,
             ability,
             target_filter,
             filter_controller,
-            &scan_zones,
+            if exile_tracked_set_library_only {
+                Some(Zone::Library)
+            } else {
+                origin
+            },
             dest_zone,
         );
+        let scan_zone = scan_zones[0];
         // CR 701.24d-e: retain an explicitly designated typed player even when
         // the source zone supplies zero eligible cards.
         publish_finalized_owner_library_subjects(state, ability, &[]);
 
         let (choice_count, min_count, choice_up_to) =
-            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
+            resolution_choice_cardinality(state, ability, eligible.len(), up_to)
+                .unwrap_or((0, 0, up_to));
 
         // CR 115.6 + CR 107.3: an exact-X zone choice with X = 0 affects no
         // cards and must complete without surfacing a one-card choice (Shigeki,
@@ -2848,6 +2921,457 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    fn optional_private_choice(zone: Zone, explicit_origin: bool) -> ResolvedAbility {
+        let mut ability = make_hand_choice_ability(false);
+        if let Effect::ChangeZone { origin, target, .. } = &mut ability.effect {
+            *origin = explicit_origin.then_some(zone);
+            *target = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent)
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::InZone { zone },
+                        FilterProp::Cmc {
+                            comparator: crate::types::ability::Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 },
+                        },
+                    ]),
+            );
+        }
+        ability.optional = true;
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    // CR 608.2d: an exact positive choice needs the full legal population;
+    // exact zero succeeds, including when the source zone is empty.
+    #[test]
+    fn optional_private_exact_selection_candidates_and_cardinality_agree() {
+        for zone in [Zone::Hand, Zone::Library] {
+            for explicit_origin in [false, true] {
+                for effect_up_to in [false, true] {
+                    let mut state = GameState::new_two_player(42);
+                    let mut ability = optional_private_choice(zone, explicit_origin);
+                    if let Effect::ChangeZone { up_to, .. } = &mut ability.effect {
+                        *up_to = effect_up_to;
+                    }
+                    ability.multi_target =
+                        Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }));
+                    assert_eq!(
+                        optional_private_zone_selection_is_infeasible(&state, &ability),
+                        Some(true)
+                    );
+                    let first = create_object(
+                        &mut state,
+                        CardId(1),
+                        PlayerId(0),
+                        "First legal".into(),
+                        zone,
+                    );
+                    state
+                        .objects
+                        .get_mut(&first)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Artifact);
+                    let foreign = create_object(
+                        &mut state,
+                        CardId(2),
+                        PlayerId(1),
+                        "Foreign owner".into(),
+                        zone,
+                    );
+                    state
+                        .objects
+                        .get_mut(&foreign)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Artifact);
+                    let nonpermanent = create_object(
+                        &mut state,
+                        CardId(3),
+                        PlayerId(0),
+                        "Nonpermanent".into(),
+                        zone,
+                    );
+                    state
+                        .objects
+                        .get_mut(&nonpermanent)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Sorcery);
+                    let offzone = create_object(
+                        &mut state,
+                        CardId(4),
+                        PlayerId(0),
+                        "Offzone".into(),
+                        Zone::Graveyard,
+                    );
+                    state
+                        .objects
+                        .get_mut(&offzone)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Artifact);
+                    let high = create_object(
+                        &mut state,
+                        CardId(6),
+                        PlayerId(0),
+                        "Above mana value".into(),
+                        zone,
+                    );
+                    let high_object = state.objects.get_mut(&high).unwrap();
+                    high_object.card_types.core_types.push(CoreType::Artifact);
+                    high_object.mana_cost = crate::types::mana::ManaCost::generic(3);
+                    let emblem = create_object(
+                        &mut state,
+                        CardId(7),
+                        PlayerId(0),
+                        "Emblem decoy".into(),
+                        zone,
+                    );
+                    let emblem_object = state.objects.get_mut(&emblem).unwrap();
+                    emblem_object.card_types.core_types.push(CoreType::Artifact);
+                    emblem_object.is_emblem = true;
+                    let target = ability.effect.target_filter().unwrap();
+                    let (zones, candidates) = resolution_zone_candidates(
+                        &state,
+                        &ability,
+                        target,
+                        PlayerId(0),
+                        explicit_origin.then_some(zone),
+                        Zone::Battlefield,
+                    );
+                    assert_eq!(zones, vec![zone]);
+                    assert_eq!(candidates, vec![first]);
+                    assert!(resolution_choice_cardinality(
+                        &state,
+                        &ability,
+                        candidates.len(),
+                        effect_up_to
+                    )
+                    .is_err());
+                    assert_eq!(
+                        optional_private_zone_selection_is_infeasible(&state, &ability),
+                        Some(true)
+                    );
+                    let second = create_object(
+                        &mut state,
+                        CardId(5),
+                        PlayerId(0),
+                        "Second legal".into(),
+                        zone,
+                    );
+                    state
+                        .objects
+                        .get_mut(&second)
+                        .unwrap()
+                        .card_types
+                        .core_types
+                        .push(CoreType::Creature);
+                    let (_, candidates) = resolution_zone_candidates(
+                        &state,
+                        &ability,
+                        target,
+                        PlayerId(0),
+                        explicit_origin.then_some(zone),
+                        Zone::Battlefield,
+                    );
+                    assert_eq!(
+                        candidates
+                            .into_iter()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        [first, second].into_iter().collect()
+                    );
+                    assert_eq!(
+                        resolution_choice_cardinality(&state, &ability, 2, effect_up_to).unwrap(),
+                        (2, 2, false)
+                    );
+                    assert_eq!(
+                        optional_private_zone_selection_is_infeasible(&state, &ability),
+                        Some(false)
+                    );
+                    ability.multi_target =
+                        Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 0 }));
+                    assert_eq!(
+                        optional_private_zone_selection_is_infeasible(&state, &ability),
+                        Some(false)
+                    );
+                    assert_eq!(
+                        optional_private_zone_selection_is_infeasible(
+                            &GameState::new_two_player(42),
+                            &ability
+                        ),
+                        Some(false)
+                    );
+                }
+                let state = GameState::new_two_player(42);
+                let ability = optional_private_choice(zone, explicit_origin);
+                assert_eq!(
+                    optional_private_zone_selection_is_infeasible(&state, &ability),
+                    Some(true)
+                );
+                let mut singleton_state = state;
+                let legal = create_object(
+                    &mut singleton_state,
+                    CardId(8),
+                    PlayerId(0),
+                    "Singleton legal".into(),
+                    zone,
+                );
+                singleton_state
+                    .objects
+                    .get_mut(&legal)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Artifact);
+                assert_eq!(
+                    optional_private_zone_selection_is_infeasible(&singleton_state, &ability),
+                    Some(false)
+                );
+            }
+        }
+    }
+
+    // CR 109.5 + CR 608.2h: query the current invocation's bound player and X,
+    // not another source's owner, a previous named choice or a stale occurrence.
+    #[test]
+    fn optional_private_selection_uses_bound_quantity_and_player_authorities() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Player(PlayerId(1)));
+        let chosen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Chosen player's card".into(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&chosen)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        // Owner and current controller intentionally disagree outside the battlefield.
+        state.objects.get_mut(&chosen).unwrap().controller = PlayerId(0);
+        let mut ability = optional_private_choice(Zone::Hand, false);
+        ability.source_id = source;
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = &mut ability.effect
+        {
+            typed.controller = Some(ControllerRef::SourceChosenPlayer);
+        }
+        let target = ability.effect.target_filter().unwrap();
+        let (_, candidates) = resolution_zone_candidates(
+            &state,
+            &ability,
+            target,
+            PlayerId(0),
+            None,
+            Zone::Battlefield,
+        );
+        assert_eq!(candidates, vec![chosen]);
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(false)
+        );
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = &mut ability.effect
+        {
+            typed.controller = Some(ControllerRef::ScopedPlayer);
+        }
+        ability.set_scoped_player_recursive(PlayerId(1));
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(false)
+        );
+        ability.set_scoped_player_recursive(PlayerId(0));
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(true)
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+        ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        }));
+        state.last_named_choice = Some("0".into());
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            None
+        );
+        ability.chosen_x = Some(0);
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(false)
+        );
+        ability.chosen_x = Some(2);
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(true)
+        );
+        ability.chosen_x = Some(1);
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            Some(false)
+        );
+        state.last_named_choice = None;
+        ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "N".into() },
+        }));
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &ability),
+            None
+        );
+    }
+
+    // CR 608.2d: adjacent optional protocols retain their existing authorities.
+    #[test]
+    fn optional_private_selection_leaves_unowned_shapes_and_origin_precedence_intact() {
+        let state = GameState::new_two_player(42);
+        let baseline = optional_private_choice(Zone::Hand, true);
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &baseline),
+            Some(true)
+        );
+        let mut siblings = Vec::new();
+        let mut mandatory = baseline.clone();
+        mandatory.optional = false;
+        siblings.push(mandatory);
+        let mut fanned = baseline.clone();
+        fanned.optional_for = Some(OpponentMayScope::AnyPlayer);
+        siblings.push(fanned);
+        let mut stack = baseline.clone();
+        stack.target_choice_timing = TargetChoiceTiming::Stack;
+        siblings.push(stack);
+        let mut prebound = baseline.clone();
+        prebound.targets = vec![TargetRef::Object(ObjectId(7))];
+        siblings.push(prebound);
+        let mut parent_controller = baseline.clone();
+        parent_controller.targets = vec![TargetRef::Object(ObjectId(7))];
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = &mut parent_controller.effect
+        {
+            typed.controller = Some(ControllerRef::ParentTargetController);
+        }
+        siblings.push(parent_controller);
+        let mut tracked_property = baseline.clone();
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = &mut tracked_property.effect
+        {
+            typed.properties.push(FilterProp::InTrackedSet {
+                id: TrackedSetId(7),
+            });
+        }
+        siblings.push(tracked_property);
+        let mut repeated = baseline.clone();
+        repeated.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        });
+        siblings.push(repeated);
+        for filter in [
+            TargetFilter::Any,
+            TargetFilter::ParentTarget,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+        ] {
+            let mut sibling = baseline.clone();
+            if let Effect::ChangeZone { target, .. } = &mut sibling.effect {
+                *target = filter;
+            }
+            siblings.push(sibling);
+        }
+        for spec in [
+            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }),
+            MultiTargetSpec::unlimited(0),
+        ] {
+            let mut sibling = baseline.clone();
+            sibling.multi_target = Some(spec);
+            siblings.push(sibling);
+        }
+        let mut range = baseline.clone();
+        let mut range_spec = MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 });
+        range_spec.max = Some(QuantityExpr::Fixed { value: 2 });
+        range.multi_target = Some(range_spec);
+        siblings.push(range);
+        let mut up_to = baseline.clone();
+        if let Effect::ChangeZone { up_to, .. } = &mut up_to.effect {
+            *up_to = true;
+        }
+        siblings.push(up_to);
+        for zones in [vec![Zone::Graveyard], vec![Zone::Hand, Zone::Library]] {
+            let mut sibling = baseline.clone();
+            if let Effect::ChangeZone {
+                origin,
+                target: TargetFilter::Typed(typed),
+                ..
+            } = &mut sibling.effect
+            {
+                *origin = None;
+                typed.properties = vec![FilterProp::InAnyZone { zones }];
+            }
+            siblings.push(sibling);
+        }
+        for sibling in siblings {
+            assert_eq!(
+                optional_private_zone_selection_is_infeasible(&state, &sibling),
+                None,
+                "{sibling:?}"
+            );
+        }
+        let mut origin_wins = baseline;
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(typed),
+            ..
+        } = &mut origin_wins.effect
+        {
+            typed.properties = vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }];
+        }
+        let (zones, ids) = resolution_zone_candidates(
+            &state,
+            &origin_wins,
+            origin_wins.effect.target_filter().unwrap(),
+            PlayerId(0),
+            Some(Zone::Hand),
+            Zone::Battlefield,
+        );
+        assert_eq!(zones, vec![Zone::Hand]);
+        assert!(ids.is_empty());
+        assert_eq!(
+            optional_private_zone_selection_is_infeasible(&state, &origin_wins),
+            Some(true)
+        );
     }
 
     fn exact_scoped_graveyard_exile_ability() -> ResolvedAbility {
