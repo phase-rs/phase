@@ -19,6 +19,7 @@ mod contextual_hand_publication {
     use crate::types::replacements::ReplacementEvent;
 
     const DURESS: &str = "Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+    const ADDLE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
     const LAY: &str = "Target opponent reveals their hand. You choose a nonlegendary, nonland card from it. That player discards that card.";
     const THOUGHT: &str = "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.";
     const DREAD: &str = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.";
@@ -41,6 +42,18 @@ mod contextual_hand_publication {
     }
     fn pinned_legalities(name: &str) -> serde_json::Value {
         let formats: &[&str] = match name {
+            "Addle" => &[
+                "commander",
+                "duel",
+                "legacy",
+                "oathbreaker",
+                "pauper",
+                "paupercommander",
+                "penny",
+                "predh",
+                "premodern",
+                "vintage",
+            ],
             "Duress" => &[
                 "alchemy",
                 "brawl",
@@ -320,6 +333,78 @@ mod contextual_hand_publication {
     }
 
     fn assert_chain_geometry(chain: &EffectChainIr, body: &str, filter: Option<TypedFilter>) {
+        if body == ADDLE {
+            let fragments = [
+                "Choose a color",
+                "Target player reveals their hand and you choose a card of that color from it",
+                "That player discards that card",
+            ];
+            let effects = [
+                Effect::Choose {
+                    choice_type: ChoiceType::color(),
+                    persist: false,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
+                },
+                Effect::RevealHand {
+                    target: TargetFilter::Player,
+                    card_filter: TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenColor]),
+                    ),
+                    count: None,
+                    selection: CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                Effect::DiscardCard {
+                    target: TargetFilter::ParentTarget,
+                    count: 1,
+                },
+            ];
+            assert_eq!(chain.clauses.len(), 3);
+            let mut start = 0;
+            for (index, ((clause, fragment), effect)) in
+                chain.clauses.iter().zip(fragments).zip(effects).enumerate()
+            {
+                let end = start + fragment.len();
+                assert_eq!(clause.id, ClauseId(index as u32));
+                assert_eq!(
+                    clause.source.id(),
+                    OracleUnitId {
+                        item: OracleItemId(0),
+                        ordinal: index as u32 + 1
+                    }
+                );
+                assert_eq!(clause.source.fragment(), Some(fragment));
+                assert_eq!(
+                    clause.source.span(),
+                    &OracleSourceSpan::chain_relative(0, 0, start, end, index as u32)
+                );
+                assert_eq!(clause.parsed.effect, effect);
+                assert_eq!(
+                    clause.disposition,
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None
+                    }
+                );
+                assert_eq!(clause.printed_color_choice, None);
+                assert_eq!(clause.declares_chosen_clause, None);
+                assert_eq!(clause.reads_chosen_clause, None);
+                assert_eq!(clause.declares_instruction_result, None);
+                assert_eq!(clause.reads_return_result, None);
+                assert_eq!(clause.token_definition_owner, None);
+                assert_eq!(
+                    clause.target_reads,
+                    crate::types::ability::TargetReadOrigin::OwnAnnouncement
+                );
+                assert_eq!(
+                    clause.declared_player_group,
+                    (index == 1).then_some(ChosenGroupId(0x8000_0000))
+                );
+                start = end + 2;
+            }
+            return;
+        }
         let fragments: Vec<&str> = if filter.is_some() {
             if body == THOUGHT {
                 vec!["Target player reveals their hand", "You choose a nonland card from it", "That player discards that card", "You lose 2 life"]
@@ -459,6 +544,18 @@ mod contextual_hand_publication {
             shards: vec![ManaCostShard::Black],
         };
         let duress = hand_body(opponent(), restrictive(), false, false).description(DURESS.into());
+        let addle = ability(Effect::Choose {
+            choice_type: ChoiceType::color(),
+            persist: false,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
+        })
+        .sub_ability(sibling(hand_body(
+            TargetFilter::Player,
+            TypedFilter::card().properties(vec![FilterProp::IsChosenColor]),
+            false,
+            false,
+        )))
+        .description(ADDLE.into());
         let lay = hand_body(
             opponent(),
             nonland().properties(vec![FilterProp::NotSupertype {
@@ -537,6 +634,23 @@ mod contextual_hand_publication {
         let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::ParentTarget).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }])], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
         let modal = ModalChoice { min_choices: 1, max_choices: 1, mode_count: 3, mode_descriptions: vec!["~ deals 4 damage to target creature.".into(), "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into(), DURESS.into()], ..Default::default() };
         let records = [
+            (
+                "Addle",
+                ADDLE,
+                "3745aea4-4455-4859-9772-bcfd14e4067b",
+                "{1}{B}",
+                black(1),
+                "Sorcery",
+                vec![],
+                None,
+                None,
+                vec![addle],
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None,
+            ),
             (
                 "Duress",
                 DURESS,
@@ -676,7 +790,7 @@ mod contextual_hand_publication {
             let types = match kind { "Sorcery" => CoreType::Sorcery, "Creature" => CoreType::Creature, "Enchantment" => CoreType::Enchantment, "Instant" => CoreType::Instant, _ => unreachable!() };
             let expected = CardFace { name: name.into(), mana_cost: cost, card_type: CardType { core_types: vec![types], subtypes: subtypes.iter().map(|s| (*s).into()).collect(), supertypes: vec![] }, power: power.map(PtValue::Fixed), toughness: toughness.map(PtValue::Fixed), oracle_text: Some(text.into()), color_override: (name == "Mardu Charm").then(|| colors.clone()), color_identity: colors, scryfall_oracle_id: Some(id.into()), abilities, triggers, replacements, keywords, modal, cleave_variant, ..Default::default() };
             let type_line = match name { "Kitesail Freebooter" => "Creature — Human Pirate", "Elspeth's Nightmare" => "Enchantment — Saga", _ => kind };
-            let mana_value = match name { "Duress" | "Thoughtseize" | "Dread Fugue" => 1, "Lay Bare the Heart" | "Kitesail Freebooter" => 2, _ => 3 };
+            let mana_value = match name { "Duress" | "Thoughtseize" | "Dread Fugue" => 1, "Addle" | "Lay Bare the Heart" | "Kitesail Freebooter" => 2, _ => 3 };
             let card = serde_json::from_value(serde_json::json!({"name":name,"text":text,"manaCost":cost_text,"manaValue":mana_value,"types":[kind],"type":type_line,"subtypes":subtypes,"supertypes":[],"colors":if name=="Mardu Charm" {vec!["B","R","W"]} else {vec!["B"]},"colorIdentity":if name=="Mardu Charm" {vec!["B","R","W"]} else {vec!["B"]},"keywords":if name=="Dread Fugue" {vec!["Cleave"]} else if name=="Kitesail Freebooter" {vec!["Flying"]} else {vec![]},"power":power.map(|n|n.to_string()),"toughness":toughness.map(|n|n.to_string()),"layout":if name=="Elspeth's Nightmare" {"saga"} else {"normal"},"identifiers":{"scryfallOracleId":id},"legalities":pinned_legalities(name),"rulings":pinned_rulings(name)})).unwrap();
             (card, expected)
         }).collect()

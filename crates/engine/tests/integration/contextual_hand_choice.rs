@@ -2,7 +2,10 @@
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
-use engine::types::ability::{EffectKind, TargetRef};
+use engine::types::ability::{
+    ChoiceType, ChosenAttribute, Effect, EffectKind, FilterProp, TargetFilter, TargetRef,
+    TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
@@ -10,7 +13,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionStateWire;
@@ -21,6 +24,7 @@ use engine::types::zones::Zone;
 use serde_json::{json, Value};
 
 const DURESS: &str = "Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+const ADDLE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
 const LAY_BARE: &str = "Target opponent reveals their hand. You choose a nonlegendary, nonland card from it. That player discards that card.";
 const THOUGHTSEIZE: &str = "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.";
 const DREAD: &str = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.";
@@ -178,6 +182,918 @@ fn unchanged_hand(runner: &GameRunner, ids: &[ObjectId]) {
     for id in ids {
         assert_eq!(runner.state().objects[id].zone, Zone::Hand, "decoy {id:?}");
     }
+}
+
+// SHAPE objects have printed colors/types, no remembered choice or resolution state.
+fn color_hand(scene: &mut GameScenario) -> (Vec<(ObjectId, Vec<ManaColor>)>, ObjectId) {
+    let mut cards = vec![];
+    for color in [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ] {
+        let first = scene
+            .add_spell_to_hand(P1, &format!("Printed {color:?} first"), false)
+            .with_color(vec![color])
+            .id();
+        let land_colors = if color == ManaColor::White {
+            vec![color]
+        } else {
+            vec![color, ManaColor::White]
+        };
+        let second = scene
+            .add_land_to_hand(P1, &format!("Printed {color:?} land"))
+            .with_color(land_colors.clone())
+            .id();
+        cards.push((first, vec![color]));
+        cards.push((second, land_colors));
+    }
+    let colorless = scene.add_land_to_hand(P1, "Colorless decoy").id();
+    cards.push((colorless, vec![]));
+    let foreign = scene
+        .add_spell_to_hand(PlayerId(2), "Foreign blue secret", true)
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    (cards, foreign)
+}
+
+fn color_prompt(runner: &GameRunner) -> engine::types::game_state::TriggerSourceContext {
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source: Some(source),
+        persist_player,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual color prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*choice_type, ChoiceType::color());
+    assert_eq!(options, &["White", "Blue", "Black", "Red", "Green"]);
+    assert_eq!(*persist_player, None);
+    assert_eq!(
+        source.binding,
+        engine::types::game_state::NamedChoiceSourceBinding::ResolutionContext
+    );
+    assert!(source.has_matching_context());
+    source.context.clone().unwrap()
+}
+
+fn addle_envelopes(runner: &GameRunner, offered: Option<&[ObjectId]>) {
+    let before = serde_json::to_value(runner.state()).unwrap();
+    for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
+        for wire in envelopes(runner.state(), viewer) {
+            assert!(wire["state"].is_object());
+            assert!(serde_json::from_value::<PersistedGameState>(wire["state"].clone()).is_err());
+            let prompt = &wire["state"]["waiting_for"];
+            if let Some(ids) = offered {
+                assert_eq!(prompt["type"], "RevealChoice");
+                assert_eq!(prompt["data"]["cards"], json!(ids));
+                assert_eq!(prompt["data"]["player"], json!(P0));
+                assert_eq!(
+                    wire["derived"]["unique_authorized_submitter"],
+                    json!(runner.state().turn_decision_controller.unwrap_or(P0))
+                );
+                assert!(wire.to_string().contains("Printed Blue first"));
+                assert!(wire.to_string().contains("Colorless decoy"));
+            } else if matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }) {
+                assert_eq!(prompt["type"], "NamedChoice");
+                assert_eq!(prompt["data"]["player"], json!(P0));
+                assert_eq!(
+                    prompt["data"]["options"],
+                    json!(["White", "Blue", "Black", "Red", "Green"])
+                );
+                assert!(prompt["data"]["source"]["prompt"].is_object());
+                assert!(prompt["data"]["source"].get("context").is_none());
+                assert_eq!(
+                    wire.to_string().contains("Printed Blue first"),
+                    viewer == Some(P1)
+                );
+            } else {
+                assert_eq!(prompt["type"], "Priority");
+            }
+            assert_eq!(
+                wire.to_string().contains("Foreign blue secret"),
+                viewer == Some(PlayerId(2))
+            );
+            assert!(!wire.to_string().contains("Private library one"));
+            assert!(wire["state"].get("private_look_ids").is_none());
+            assert!(wire["state"].get("private_look_player").is_none());
+            assert!(!wire["state"]["resolution_stack"]
+                .to_string()
+                .contains("trigger_source"));
+        }
+    }
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+}
+
+fn addle_disposal_capture(
+    runner: &GameRunner,
+    source: ObjectId,
+    expected: &engine::types::game_state::TriggerSourceContext,
+) {
+    let pending = runner
+        .state()
+        .active_ability_continuation()
+        .expect("real top disposal owner");
+    assert_eq!(
+        pending.chain.effect,
+        Effect::DiscardCard {
+            target: TargetFilter::ParentTarget,
+            count: 1
+        }
+    );
+    assert_eq!(pending.chain.source_id, source);
+    assert_eq!(expected.identity.reference.object_id, source);
+    assert_eq!(
+        pending.chain.source_incarnation,
+        Some(expected.identity.reference.incarnation)
+    );
+    assert_eq!(pending.chain.controller, P0);
+    assert!(pending.chain.cast_occurrence.is_some());
+    assert_eq!(pending.chain.trigger_definition_ref, None);
+    assert_eq!(pending.chain.scoped_player, None);
+    assert_eq!(pending.chain.trigger_source.as_ref(), Some(expected));
+    assert!(runner.state().objects[&source].chosen_attributes.is_empty());
+}
+
+#[test]
+fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
+    // CR 105.4 + CR 608.2c + CR 608.2d + CR 701.9a + CR 701.9b: the answer qualifies a Card, including a colored land.
+    let mut scene = scenario();
+    let (cards, foreign) = color_hand(&mut scene);
+    let source = spell(&mut scene, "Addle", ADDLE, black_cost(1));
+    let mut runner = scene.build();
+    let libraries: Vec<_> = runner
+        .state()
+        .players
+        .iter()
+        .map(|player| player.library.clone())
+        .collect();
+    let paid = runner.cast(source).target_player(P1).resolve();
+    let before_capture = color_prompt(&runner);
+    assert_eq!(before_capture.identity.reference.object_id, source);
+    assert_eq!(before_capture.identity.expected_zone, Zone::Stack);
+    let original_tail = runner
+        .state()
+        .active_ability_continuation()
+        .unwrap()
+        .chain
+        .clone();
+    assert!(matches!(original_tail.effect, Effect::RevealHand { .. }));
+    let mut expected = before_capture.clone();
+    expected
+        .lki
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Blue));
+    let offered: Vec<_> = cards
+        .iter()
+        .filter(|(_, colors)| colors.contains(&ManaColor::Blue))
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(offered.len(), 2);
+    assert_ne!(offered[0], offered[1]);
+    let selected = offered[1];
+    assert!(runner.state().objects[&selected]
+        .chosen_attributes
+        .is_empty());
+    addle_envelopes(&runner, None);
+    let first_pause = restored_forms(runner.state());
+    for invalid in [
+        GameAction::ChooseOption {
+            choice: "Colorless".into(),
+        },
+        GameAction::ChooseOption {
+            choice: "Multicolored".into(),
+        },
+    ] {
+        let mut state = runner.state().clone();
+        assert!(engine::apply(&mut state, P0, invalid).is_err());
+    }
+    let mut wrong_actor = runner.state().clone();
+    assert!(engine::apply(
+        &mut wrong_actor,
+        P1,
+        GameAction::ChooseOption {
+            choice: "Blue".into()
+        }
+    )
+    .is_err());
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Blue".into(),
+        })
+        .unwrap();
+    prompt(&runner, &offered, false);
+    addle_disposal_capture(&runner, source, &expected);
+    let chain = &runner.state().active_ability_continuation().unwrap().chain;
+    assert_eq!(chain.original_controller, original_tail.original_controller);
+    assert_eq!(chain.cast_occurrence, original_tail.cast_occurrence);
+    assert_eq!(
+        chain.trigger_definition_ref,
+        original_tail.trigger_definition_ref
+    );
+    assert_eq!(chain.scoped_player, original_tail.scoped_player);
+    let filter =
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::IsChosenColor]));
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::RevealChoice { filter: actual, .. } if actual == &filter)
+    );
+    assert!(engine::game::filter::matches_target_filter(
+        runner.state(),
+        selected,
+        &filter,
+        &engine::game::filter::FilterContext::from_ability(chain)
+    ));
+    addle_envelopes(&runner, Some(&offered));
+    for state in first_pause {
+        let mut restored = GameRunner::from_state(state);
+        color_prompt(&restored);
+        restored
+            .act(GameAction::ChooseOption {
+                choice: "Blue".into(),
+            })
+            .unwrap();
+        prompt(&restored, &offered, false);
+        addle_disposal_capture(&restored, source, &expected);
+        answer(&mut restored, selected);
+        assert_eq!(restored.state().objects[&selected].zone, Zone::Graveyard);
+        assert_eq!(restored.state().objects[&selected].owner, P1);
+        assert_eq!(
+            restored
+                .state()
+                .players
+                .iter()
+                .map(|player| player.library.clone())
+                .collect::<Vec<_>>(),
+            libraries
+        );
+        unchanged_hand(
+            &restored,
+            &cards
+                .iter()
+                .filter(|(id, _)| *id != selected)
+                .map(|(id, _)| *id)
+                .chain([foreign])
+                .collect::<Vec<_>>(),
+        );
+        terminal(&restored);
+    }
+    for state in restored_forms(runner.state()) {
+        let mut restored = GameRunner::from_state(state);
+        addle_disposal_capture(&restored, source, &expected);
+        answer(&mut restored, selected);
+        assert_eq!(restored.state().objects[&selected].zone, Zone::Graveyard);
+        assert_eq!(restored.state().objects[&selected].owner, P1);
+        assert_eq!(
+            restored
+                .state()
+                .players
+                .iter()
+                .map(|player| player.library.clone())
+                .collect::<Vec<_>>(),
+            libraries
+        );
+        unchanged_hand(
+            &restored,
+            &cards
+                .iter()
+                .filter(|(id, _)| *id != selected)
+                .map(|(id, _)| *id)
+                .chain([foreign])
+                .collect::<Vec<_>>(),
+        );
+        terminal(&restored);
+    }
+    for invalid in [
+        vec![],
+        vec![offered[0], selected],
+        vec![foreign],
+        vec![cards.last().unwrap().0],
+    ] {
+        let mut state = runner.state().clone();
+        assert!(engine::apply(&mut state, P0, GameAction::SelectCards { cards: invalid }).is_err());
+    }
+    for corrupt in 0..5 {
+        let mut state = runner.state().clone();
+        // A matching global value and live candidate cannot replace this owner.
+        state.named_color_this_resolution = Some(ManaColor::Blue);
+        let chain = &mut state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain;
+        match corrupt {
+            0 => chain.trigger_source = None,
+            1 => chain
+                .trigger_source
+                .as_mut()
+                .unwrap()
+                .lki
+                .chosen_attributes
+                .clear(),
+            2 => {
+                chain
+                    .trigger_source
+                    .as_mut()
+                    .unwrap()
+                    .identity
+                    .reference
+                    .object_id = foreign
+            }
+            3 => chain.source_incarnation = Some(u64::MAX),
+            4 => chain.original_controller = Some(P1),
+            _ => unreachable!(),
+        }
+        assert!(engine::apply(
+            &mut state,
+            P0,
+            GameAction::SelectCards {
+                cards: vec![selected]
+            }
+        )
+        .is_err());
+        assert_eq!(state.objects[&selected].zone, Zone::Hand);
+    }
+    let mut wrong_actor = runner.state().clone();
+    assert!(engine::apply(
+        &mut wrong_actor,
+        P1,
+        GameAction::SelectCards {
+            cards: vec![selected]
+        }
+    )
+    .is_err());
+    let events = answer(&mut runner, selected);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::DiscardCard,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(paid.events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Choose,
+            ..
+        }
+    )));
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&selected].owner, P1);
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .map(|player| player.library.clone())
+            .collect::<Vec<_>>(),
+        libraries
+    );
+    unchanged_hand(
+        &runner,
+        &cards
+            .iter()
+            .filter(|(id, _)| *id != selected)
+            .map(|(id, _)| *id)
+            .chain([foreign])
+            .collect::<Vec<_>>(),
+    );
+    terminal(&runner);
+    addle_envelopes(&runner, None);
+    for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
+        for wire in envelopes(runner.state(), viewer) {
+            assert!(
+                wire.to_string().contains("Printed Blue land"),
+                "the selected owner-graveyard face is public"
+            );
+            assert_eq!(wire["state"]["waiting_for"]["type"], "Priority");
+        }
+    }
+}
+
+#[test]
+fn contextual_hand_random_color_uses_owned_resolution_context() {
+    // SHAPE, paid 1B. Keep the period and actual SequentialSibling edge.
+    const RANDOM: &str = "Choose a color at random. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
+    let parsed = engine::parser::oracle_effect::parse_effect_chain(
+        RANDOM,
+        engine::types::ability::AbilityKind::Spell,
+    );
+    let reader = parsed.sub_ability.as_deref().unwrap();
+    assert_eq!(
+        reader.sub_link,
+        engine::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert!(matches!(reader.effect.as_ref(), Effect::RevealHand { .. }));
+    let mut scene = scenario();
+    let (cards, foreign) = color_hand(&mut scene);
+    let source = spell(&mut scene, "Random hand SHAPE", RANDOM, black_cost(1));
+    let mut runner = scene.build();
+    let events = runner.cast(source).target_player(P1).resolve().events;
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::NamedChoice { .. }
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Choose,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    let capture = runner
+        .state()
+        .active_ability_continuation()
+        .unwrap()
+        .chain
+        .trigger_source
+        .clone()
+        .unwrap();
+    let color = capture
+        .lki
+        .chosen_attributes
+        .iter()
+        .rev()
+        .find_map(|attribute| match attribute {
+            ChosenAttribute::Color(color) => Some(*color),
+            _ => None,
+        })
+        .unwrap();
+    let offered: Vec<_> = cards
+        .iter()
+        .filter(|(_, colors)| colors.contains(&color))
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(offered.len() >= 2);
+    prompt(&runner, &offered, false);
+    addle_disposal_capture(&runner, source, &capture);
+    let chosen = offered[1];
+    assert!(runner.state().objects[&chosen].chosen_attributes.is_empty());
+    let events = answer(&mut runner, chosen);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::DiscardCard,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(runner.state().objects[&chosen].zone, Zone::Graveyard);
+    unchanged_hand(
+        &runner,
+        &cards
+            .iter()
+            .filter(|(id, _)| *id != chosen)
+            .map(|(id, _)| *id)
+            .chain([foreign])
+            .collect::<Vec<_>>(),
+    );
+    terminal(&runner);
+}
+
+#[test]
+fn contextual_hand_color_anaphor_crosses_draw_only_in_its_own_body() {
+    // SHAPEs: the independent Draw neither carries nor consumes the answer.
+    for random in [false, true] {
+        let text = if random {
+            "Choose a color at random. Draw a card. Target player reveals their hand and you choose a card of that color from it. That player discards that card."
+        } else {
+            "Choose a color. Draw a card. Target player reveals their hand and you choose a card of that color from it. That player discards that card."
+        };
+        let mut scene = scenario();
+        let (cards, foreign) = color_hand(&mut scene);
+        let source = spell(&mut scene, "Draw hand SHAPE", text, black_cost(1));
+        let mut runner = scene.build();
+        let library = runner.state().players[0].library.clone();
+        let mut events = runner.cast(source).target_player(P1).resolve().events;
+        if !random {
+            color_prompt(&runner);
+            let before = runner
+                .state()
+                .active_ability_continuation()
+                .unwrap()
+                .chain
+                .clone();
+            assert!(matches!(before.effect, Effect::Draw { .. }));
+            events.extend(
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Blue".into(),
+                    })
+                    .unwrap()
+                    .events,
+            );
+            // The Draw finished once, while only the downstream hand producer
+            // supplied the actual source authority now retained by DiscardCard.
+            assert!(before.trigger_source.as_ref().is_none_or(|capture| !capture
+                .lki
+                .chosen_attributes
+                .iter()
+                .any(|attribute| matches!(attribute, ChosenAttribute::Color(_)))));
+        } else {
+            assert!(!matches!(
+                runner.state().waiting_for,
+                WaitingFor::NamedChoice { .. }
+            ));
+        }
+        let capture = runner
+            .state()
+            .active_ability_continuation()
+            .unwrap()
+            .chain
+            .trigger_source
+            .clone()
+            .unwrap();
+        let color = capture
+            .lki
+            .chosen_attributes
+            .iter()
+            .rev()
+            .find_map(|attribute| match attribute {
+                ChosenAttribute::Color(color) => Some(*color),
+                _ => None,
+            })
+            .unwrap();
+        let offered: Vec<_> = cards
+            .iter()
+            .filter(|(_, colors)| colors.contains(&color))
+            .map(|(id, _)| *id)
+            .collect();
+        prompt(&runner, &offered, false);
+        addle_disposal_capture(&runner, source, &capture);
+        assert_eq!(runner.state().players[0].library.len(), library.len() - 1);
+        assert_eq!(runner.state().players[0].library.as_slice(), &library[1..]);
+        assert_eq!(runner.state().objects[&library[0]].zone, Zone::Hand);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Draw,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        let selected = offered[1];
+        events.extend(answer(&mut runner, selected));
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::DiscardCard,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        unchanged_hand(
+            &runner,
+            &cards
+                .iter()
+                .filter(|(id, _)| *id != selected)
+                .map(|(id, _)| *id)
+                .chain([foreign])
+                .collect::<Vec<_>>(),
+        );
+        terminal(&runner);
+    }
+    for initial_random in [false, true] {
+        let text = if initial_random {
+            "Choose a color at random. Draw a card. Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card."
+        } else {
+            "Choose a color. Draw a card. Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card."
+        };
+        let mut scene = scenario();
+        let (cards, _) = color_hand(&mut scene);
+        let source = spell(&mut scene, "Two choices SHAPE", text, black_cost(1));
+        let mut runner = scene.build();
+        runner.cast(source).target_player(P1).resolve();
+        if !initial_random {
+            color_prompt(&runner);
+            let tail = &runner.state().active_ability_continuation().unwrap().chain;
+            assert!(matches!(tail.effect, Effect::Draw { .. }));
+            assert!(matches!(
+                tail.sub_ability.as_ref().unwrap().effect,
+                Effect::Choose { .. }
+            ));
+            runner
+                .act(GameAction::ChooseOption {
+                    choice: "Blue".into(),
+                })
+                .unwrap();
+        }
+        let second = color_prompt(&runner);
+        assert!(!second
+            .lki
+            .chosen_attributes
+            .iter()
+            .any(|attribute| matches!(attribute, ChosenAttribute::Color(_))));
+        let reader = &runner.state().active_ability_continuation().unwrap().chain;
+        assert!(reader.trigger_source.as_ref().is_none_or(|capture| !capture
+            .lki
+            .chosen_attributes
+            .iter()
+            .any(|attribute| matches!(attribute, ChosenAttribute::Color(_)))));
+        runner
+            .act(GameAction::ChooseOption {
+                choice: "Red".into(),
+            })
+            .unwrap();
+        let offered: Vec<_> = cards
+            .iter()
+            .filter(|(_, colors)| colors.contains(&ManaColor::Red))
+            .map(|(id, _)| *id)
+            .collect();
+        prompt(&runner, &offered, false);
+        answer(&mut runner, offered[1]);
+        assert_eq!(runner.state().objects[&offered[1]].zone, Zone::Graveyard);
+        terminal(&runner);
+    }
+}
+
+#[test]
+fn contextual_hand_addle_ai_both_actions_authorized_controller_and_empty_cohorts() {
+    for diverted in [false, true] {
+        let mut scene = scenario();
+        let (cards, _) = color_hand(&mut scene);
+        let source = spell(&mut scene, "Addle", ADDLE, black_cost(1));
+        let mut runner = scene.build();
+        runner.cast(source).target_player(P1).resolve();
+        color_prompt(&runner);
+        if diverted {
+            runner.state_mut().turn_decision_controller = Some(PlayerId(2));
+        }
+        let actor = if diverted { PlayerId(2) } else { P0 };
+        let selected = cards
+            .iter()
+            .filter(|(_, colors)| colors.contains(&ManaColor::Blue))
+            .nth(1)
+            .unwrap()
+            .0;
+        let mut events = vec![];
+        for card_stage in [false, true] {
+            let selected = cards
+                .iter()
+                .filter(|(_, colors)| colors.contains(&ManaColor::Blue))
+                .nth(1)
+                .unwrap()
+                .0;
+            let action = engine::ai_support::legal_actions_for_viewer(runner.state(), actor).0.into_iter().find(|action| if card_stage {matches!(action, GameAction::SelectCards {cards} if cards == &vec![selected])} else {matches!(action, GameAction::ChooseOption {choice} if choice == "Blue")}).expect("actual nondefault AI action");
+            assert!(
+                engine::ai_support::legal_actions_for_viewer(runner.state(), P1)
+                    .0
+                    .is_empty()
+            );
+            let mut wrong = runner.state().clone();
+            assert!(engine::apply(&mut wrong, P1, action.clone()).is_err());
+            events.extend(
+                engine::apply(runner.state_mut(), actor, action)
+                    .unwrap()
+                    .events,
+            );
+            if !card_stage {
+                prompt(
+                    &runner,
+                    &cards
+                        .iter()
+                        .filter(|(_, colors)| colors.contains(&ManaColor::Blue))
+                        .map(|(id, _)| *id)
+                        .collect::<Vec<_>>(),
+                    false,
+                );
+            }
+        }
+        settle(&mut runner, &mut events);
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&selected].owner, P1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::DiscardCard,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        unchanged_hand(
+            &runner,
+            &cards
+                .iter()
+                .filter(|(id, _)| *id != selected)
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+        );
+        assert!(runner.state().objects[&source].chosen_attributes.is_empty());
+        terminal(&runner);
+    }
+    for empty in [false, true] {
+        let mut scene = scenario();
+        let decoy = (!empty).then(|| {
+            scene
+                .add_spell_to_hand(P1, "Red only", false)
+                .with_color(vec![ManaColor::Red])
+                .id()
+        });
+        let source = spell(&mut scene, "Addle", ADDLE, black_cost(1));
+        let mut runner = scene.build();
+        runner.cast(source).target_player(P1).resolve();
+        color_prompt(&runner);
+        runner
+            .act(GameAction::ChooseOption {
+                choice: "Blue".into(),
+            })
+            .unwrap();
+        let mut events = vec![];
+        settle(&mut runner, &mut events);
+        if let Some(decoy) = decoy {
+            unchanged_hand(&runner, &[decoy]);
+        }
+        terminal(&runner);
+    }
+}
+
+#[test]
+fn contextual_hand_optional_empty_color_custody_public_decline() {
+    // SHAPE with explicit 1B cost; the contextual optional-empty route still parks its owner.
+    let mut scene = scenario();
+    let decoy = scene
+        .add_spell_to_hand(P1, "Red optional decoy", true)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let source = spell(&mut scene, "Optional color SHAPE", "Choose a color. Target player reveals their hand and you may choose a card of that color from it. That player discards that card.", black_cost(1));
+    let mut runner = scene.build();
+    runner.cast(source).target_player(P1).resolve();
+    let mut expected = color_prompt(&runner);
+    expected
+        .lki
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Blue));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Blue".into(),
+        })
+        .unwrap();
+    prompt(&runner, &[], true);
+    addle_disposal_capture(&runner, source, &expected);
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .unwrap();
+    let mut events = vec![];
+    settle(&mut runner, &mut events);
+    unchanged_hand(&runner, &[decoy]);
+    terminal(&runner);
+}
+
+#[test]
+fn contextual_hand_two_paid_addles_keep_source_controller_hand_and_color_separate() {
+    let mut scene = scenario();
+    let (first_hand, _) = color_hand(&mut scene);
+    let red_first = scene
+        .add_spell_to_hand(PlayerId(2), "Second hand red first", true)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let red_second = scene
+        .add_land_to_hand(PlayerId(2), "Second hand red land")
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let red_decoy = scene
+        .add_land_to_hand(PlayerId(2), "Second hand colorless")
+        .id();
+    let first_source = spell(&mut scene, "Addle", ADDLE, black_cost(1));
+    let second_source = scene
+        .add_spell_to_hand_from_oracle(P1, "Addle", false, ADDLE)
+        .with_mana_cost(black_cost(1))
+        .id();
+    let mana_one = scene.add_basic_land(P1, ManaColor::Black);
+    let mana_two = scene.add_basic_land(P1, ManaColor::Black);
+    let mut runner = scene.build();
+    runner.cast(first_source).target_player(P1).resolve();
+    color_prompt(&runner);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Blue".into(),
+        })
+        .unwrap();
+    let blue: Vec<_> = first_hand
+        .iter()
+        .filter(|(_, colors)| colors.contains(&ManaColor::Blue))
+        .map(|(id, _)| *id)
+        .collect();
+    prompt(&runner, &blue, false);
+    let first_capture = runner
+        .state()
+        .active_ability_continuation()
+        .unwrap()
+        .chain
+        .trigger_source
+        .clone()
+        .unwrap();
+    answer(&mut runner, blue[1]);
+    terminal(&runner);
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).unwrap();
+    runner.advance_to_end_step();
+    runner.advance_to_upkeep();
+    runner.auto_advance_to_main_phase();
+    assert_eq!(runner.state().active_player, P1);
+    runner.activate(mana_one, 0).resolve();
+    runner.activate(mana_two, 0).resolve();
+    runner
+        .cast(second_source)
+        .target_player(PlayerId(2))
+        .resolve();
+    let WaitingFor::NamedChoice {
+        player,
+        options,
+        source: Some(source),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("second paid color prompt");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(options, &["White", "Blue", "Black", "Red", "Green"]);
+    assert_eq!(source.prompt.identity.reference.object_id, second_source);
+    assert_ne!(source.context.as_ref(), Some(&first_capture));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Red".into(),
+        })
+        .unwrap();
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("second real hand prompt");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(cards, &[red_first, red_second]);
+    let pending = runner.state().active_ability_continuation().unwrap();
+    assert_eq!(pending.chain.source_id, second_source);
+    assert_eq!(pending.chain.controller, P1);
+    assert!(pending
+        .chain
+        .trigger_source
+        .as_ref()
+        .unwrap()
+        .lki
+        .chosen_attributes
+        .iter()
+        .any(|a| *a == ChosenAttribute::Color(ManaColor::Red)));
+    assert!(runner.state().objects[&red_second]
+        .chosen_attributes
+        .is_empty());
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![red_second],
+        })
+        .unwrap();
+    let mut events = vec![];
+    settle(&mut runner, &mut events);
+    assert_eq!(runner.state().objects[&red_second].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&red_second].owner, PlayerId(2));
+    assert_eq!(runner.state().objects[&blue[1]].zone, Zone::Graveyard);
+    unchanged_hand(&runner, &[blue[0], red_first, red_decoy]);
+    assert!(
+        runner.state().stack.is_empty()
+            && runner.state().trigger_stack.is_empty()
+            && runner.state().resolution_stack.is_empty()
+    );
+    assert!(runner.state().owed_spell_final_part().is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]
@@ -541,6 +1457,7 @@ fn contextual_hand_both_envelopes_public_reveal_private_look_and_private_decoys(
             .collect();
         for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
             for wire in envelopes(runner.state(), viewer) {
+                assert!(wire["state"].is_object());
                 let printed = wire.to_string();
                 assert_eq!(printed.contains("Hand second MV3"), viewer == Some(P1));
                 assert_eq!(
@@ -559,17 +1476,21 @@ fn contextual_hand_both_envelopes_public_reveal_private_look_and_private_decoys(
         let authority = serde_json::to_value(runner.state()).unwrap();
         for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
             for wire in envelopes(runner.state(), viewer) {
+                assert!(wire["state"].is_object());
                 let visible_options = if !private || matches!(viewer, Some(P0) | Some(P1)) {
                     offered.clone()
                 } else {
                     vec![]
                 };
-                assert_eq!(wire["waiting_for"]["data"]["cards"], json!(visible_options));
-                assert_eq!(wire["waiting_for"]["data"]["player"], json!(P0));
+                assert_eq!(
+                    wire["state"]["waiting_for"]["data"]["cards"],
+                    json!(visible_options)
+                );
+                assert_eq!(wire["state"]["waiting_for"]["data"]["player"], json!(P0));
                 assert_eq!(wire["derived"]["unique_authorized_submitter"], json!(P0));
                 if private && viewer != Some(P0) {
-                    assert!(wire.get("private_look_ids").is_none());
-                    assert!(wire.get("private_look_player").is_none());
+                    assert!(wire["state"].get("private_look_ids").is_none());
+                    assert!(wire["state"].get("private_look_player").is_none());
                 }
                 let printed = wire.to_string();
                 assert_eq!(
@@ -586,7 +1507,7 @@ fn contextual_hand_both_envelopes_public_reveal_private_look_and_private_decoys(
                 );
                 assert!(!printed.contains("Private library one"));
                 assert!(
-                    serde_json::from_value::<PersistedGameState>(wire).is_err(),
+                    serde_json::from_value::<PersistedGameState>(wire["state"].clone()).is_err(),
                     "viewer envelope cannot become authoritative persistence"
                 );
             }
@@ -628,7 +1549,8 @@ fn contextual_hand_both_envelopes_public_reveal_private_look_and_private_decoys(
         terminal(&runner);
         for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
             for wire in envelopes(runner.state(), viewer) {
-                assert_eq!(wire["waiting_for"]["type"], json!("Priority"));
+                assert!(wire["state"].is_object());
+                assert_eq!(wire["state"]["waiting_for"]["type"], json!("Priority"));
                 let printed = wire.to_string();
                 assert!(
                     printed.contains("Hand second MV3"),
@@ -707,6 +1629,7 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                         .collect();
                     for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
                         for wire in envelopes(runner.state(), viewer) {
+                            assert!(wire["state"].is_object());
                             let entitled = matches!(viewer, Some(P0) | Some(P1))
                                 || (controlled && viewer == Some(PlayerId(2)));
                             let expected = if entitled {
@@ -716,15 +1639,18 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                             } else {
                                 vec![]
                             };
-                            assert_eq!(wire["waiting_for"]["data"]["cards"], json!(expected));
-                            assert_eq!(wire["waiting_for"]["data"]["player"], json!(P0));
+                            assert_eq!(
+                                wire["state"]["waiting_for"]["data"]["cards"],
+                                json!(expected)
+                            );
+                            assert_eq!(wire["state"]["waiting_for"]["data"]["player"], json!(P0));
                             assert_eq!(
                                 wire["derived"]["unique_authorized_submitter"],
                                 json!(submitter)
                             );
                             if viewer != Some(P0) && !(controlled && viewer == Some(PlayerId(2))) {
-                                assert!(wire.get("private_look_ids").is_none());
-                                assert!(wire.get("private_look_player").is_none());
+                                assert!(wire["state"].get("private_look_ids").is_none());
+                                assert!(wire["state"].get("private_look_player").is_none());
                             }
                             let printed = wire.to_string();
                             for (index, id) in all.iter().enumerate() {
@@ -791,7 +1717,8 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                     terminal(&runner);
                     for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
                         for wire in envelopes(runner.state(), viewer) {
-                            assert_eq!(wire["waiting_for"]["type"], json!("Priority"));
+                            assert!(wire["state"].is_object());
+                            assert_eq!(wire["state"]["waiting_for"]["type"], json!("Priority"));
                             let printed = wire.to_string();
                             for (index, id) in all.iter().enumerate() {
                                 let visible = selected.contains(id)

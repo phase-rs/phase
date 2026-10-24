@@ -572,20 +572,52 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
 /// `oracle_target.rs` does, so an upstream suffix arm that already consumed
 /// the space cannot silently defeat this one.
 ///
-/// The ANAPHOR forms ("of the chosen color", "of that color") are
-/// deliberately NOT recognized here. Their referent is a colour chosen by an
-/// EARLIER clause, and no in-chain "Choose a color." currently persists that
-/// colour onto its source (`ChoiceType::Color` is absent from the `persist:`
-/// match in `oracle_effect/imperative.rs`), so `FilterProp::IsChosenColor`
-/// would be a fail-closed match-NOTHING filter. They stay with the existing
-/// count-phrase recognizer `parse_pre_controller_chosen_filter_suffix`
-/// (`oracle_nom/quantity.rs`), unchanged, until that gap is fixed.
+/// Anaphors use the separate leaf below and require an earlier owned answer;
+/// they never declare a new printed choice.
 pub(crate) fn parse_printed_color_choice_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
     value(
         FilterProp::IsChosenColor,
         tag("of the color of your choice"),
     )
     .parse(input)
+}
+
+/// CR 608.2c + CR 608.2d: a hand reader refers to an earlier resolution color answer.
+pub(crate) fn parse_chosen_color_anaphor_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::IsChosenColor,
+        terminated(
+            alt((tag("of the chosen color"), tag("of that color"))),
+            not(alphanumeric1),
+        ),
+    )
+    .parse(input)
+}
+
+#[test]
+fn contextual_hand_anaphor_leaf_has_exact_boundary_and_remainder() {
+    for phrase in ["of the chosen color", "of that color"] {
+        assert_eq!(
+            parse_chosen_color_anaphor_qualifier(phrase).unwrap(),
+            ("", FilterProp::IsChosenColor)
+        );
+        let extended = format!("{phrase} from your hand");
+        assert_eq!(
+            parse_chosen_color_anaphor_qualifier(&extended).unwrap(),
+            (" from your hand", FilterProp::IsChosenColor)
+        );
+        assert!(parse_chosen_color_anaphor_qualifier(&format!("{phrase}less")).is_err());
+        assert!(parse_printed_color_choice_qualifier(phrase).is_err());
+    }
+    for wrong in [
+        "of the same color",
+        "of that colors",
+        "of the chosen type",
+        "of the color of your choice",
+        "of that col",
+    ] {
+        assert!(parse_chosen_color_anaphor_qualifier(wrong).is_err());
+    }
 }
 
 /// CR 607.2d + CR 608.2d: which KIND of chosen-colour reference a
@@ -1433,11 +1465,7 @@ mod tests {
     /// V-FORMS (SHAPE) — CR 105.4. The printed chosen-colour qualifier must
     /// CHOMP (not peek) its text and must reject every adjacent form.
     ///
-    /// The anaphor rejections are load-bearing, not incidental: the anaphor
-    /// referent is a colour chosen by an EARLIER clause, and no in-chain
-    /// "Choose a color." persists that colour onto its source today, so
-    /// stamping `IsChosenColor` for them would produce a fail-closed
-    /// match-NOTHING filter.
+    /// Anaphors belong to a separate leaf and never declare a fresh chooser.
     #[test]
     fn printed_color_choice_qualifier_chomps_and_rejects_adjacent_forms() {
         // Positive reach-guards, in this same test, so the negatives below

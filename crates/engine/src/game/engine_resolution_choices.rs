@@ -5116,13 +5116,39 @@ fn handle_resolution_choice_in_occurrence(
                     "Selected card not in revealed hand".to_string(),
                 ));
             }
+            // CR 608.2c + CR 608.2d: recheck with the creating resolution's retained answer.
+            let requires_color = super::filter::filter_contains_filter_prop(&filter, &|prop| {
+                matches!(prop, crate::types::ability::FilterProp::IsChosenColor)
+            });
+            let pending = state.active_ability_continuation();
+            if requires_color
+                && !pending.is_some_and(|pending| {
+                    let chain = &pending.chain;
+                    chain.trigger_source.as_ref().is_some_and(|capture| {
+                        capture.identity.reference.object_id == chain.source_id
+                            && chain
+                                .source_incarnation
+                                .is_none_or(|value| value == capture.identity.reference.incarnation)
+                            && capture.lki.chosen_attributes.iter().any(|attribute| {
+                                matches!(
+                                    attribute,
+                                    crate::types::ability::ChosenAttribute::Color(_)
+                                )
+                            })
+                            && player == chain.original_controller.unwrap_or(chain.controller)
+                    })
+                })
+            {
+                return Err(EngineError::InvalidAction(
+                    "Missing owning hand-choice color authority".to_string(),
+                ));
+            }
+            let context = pending.map_or_else(
+                || super::filter::FilterContext::from_source(state, chosen_id),
+                |pending| super::filter::FilterContext::from_ability(&pending.chain),
+            );
             if !matches!(filter, crate::types::ability::TargetFilter::Any)
-                && !super::filter::matches_target_filter(
-                    state,
-                    chosen_id,
-                    &filter,
-                    &super::filter::FilterContext::from_source(state, chosen_id),
-                )
+                && !super::filter::matches_target_filter(state, chosen_id, &filter, &context)
             {
                 return Err(EngineError::InvalidAction(
                     "Selected card does not match the required filter".to_string(),
@@ -8000,10 +8026,13 @@ fn handle_resolution_choice_in_occurrence(
             effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .update_trigger_source_context_in_resolution_segment(context);
+                    if matches!(choice_type, crate::types::ability::ChoiceType::Color { .. })
+                        && source.as_ref().is_some_and(|source| source.binding == crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext)
+                    {
+                        effects::choose::bind_resolution_color_to_hand_readers(&mut frame.pending.chain, &choice_type, &choice, source.as_ref().unwrap(), player);
+                    } else {
+                        frame.pending.chain.update_trigger_source_context_in_resolution_segment(context);
+                    }
                 }
             }
             if choice_type.is_card_predicate_guess() {

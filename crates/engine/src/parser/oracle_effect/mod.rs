@@ -35986,7 +35986,8 @@ fn parse_hand_card_descriptor<'a>(
         )));
     }
     let combined = combine_choose_filter_parts(body, suffix);
-    let (filter, remainder) = parse_type_phrase_folding_with_ctx(&combined, &mut trial);
+    let (filter, remainder) =
+        super::oracle_target::parse_hand_card_type_phrase_folding_with_ctx(&combined, &mut trial);
     if matches!(filter, TargetFilter::Any | TargetFilter::None)
         || all_consuming(space0::<_, OracleError<'_>>)
             .parse(remainder)

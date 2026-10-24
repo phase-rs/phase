@@ -12898,35 +12898,24 @@ pub(super) fn parse_imperative_family_ast<'a>(
     ctx: &mut ParseContext,
 ) -> Result<Option<ImperativeFamilyAst>, OracleError<'a>> {
     let mut trial = ctx.clone();
-    let hand = parse_hand_reveal_ast(text, lower, &mut trial)?;
-    let ast = if let Some(hand) = hand {
-        Some(ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
-            hand,
-        )))
-    } else if let Some(choice) = parse_choose_ast(text, lower, &mut trial)? {
-        Some(ImperativeFamilyAst::Structured(ImperativeAst::Choose(
-            choice,
-        )))
-    } else {
-        parse_imperative_family_ast_inner(text, lower, &mut trial)
-    };
+    let ast = parse_imperative_family_ast_inner(text, lower, &mut trial)?;
     if ast.is_some() {
         *ctx = trial;
     }
     Ok(ast)
 }
 
-fn parse_imperative_family_ast_inner(
-    text: &str,
+fn parse_imperative_family_ast_inner<'a>(
+    text: &'a str,
     lower: &str,
     ctx: &mut ParseContext,
-) -> Option<ImperativeFamilyAst> {
+) -> Result<Option<ImperativeFamilyAst>, OracleError<'a>> {
     let text = text.trim_start();
     let lower = lower.trim_start();
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
     if mass_verb_clause_opens_attachment_qualifier(text, lower, ctx) {
-        return Some(
+        return Ok(Some(
             match parse_mass_destroy_attached_to_declared_slot(text, lower, ctx) {
                 Some(Ok(ast)) => ImperativeFamilyAst::ZoneCounter(ast),
                 Some(Err(fragment)) => ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented {
@@ -12938,7 +12927,7 @@ fn parse_imperative_family_ast_inner(
                     text,
                 )),
             },
-        );
+        ));
     }
 
     // CR 701.60a: "[subject] no longer suspected" — the un-designation
@@ -12947,15 +12936,15 @@ fn parse_imperative_family_ast_inner(
     // keyword. Intercept it as an anchored whole-clause production before the
     // first-word dispatch, alongside the other non-verb-led effects below.
     if let Some(effect) = parse_no_longer_suspected_ast(lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(effect));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
     }
 
     if let Some(ast) = parse_assemble_contraption_imperative(lower) {
-        return Some(ast);
+        return Ok(Some(ast));
     }
 
     if let Some(ast) = parse_reassemble_contraption_imperative(text, lower, ctx) {
-        return Some(ast);
+        return Ok(Some(ast));
     }
 
     // CR 701.70a + CR 608.2c: Recruit is a standalone keyword action. Keep this
@@ -12968,7 +12957,7 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::Recruit);
+        return Ok(Some(ImperativeFamilyAst::Recruit));
     }
 
     // CR 205.1a + CR 205.1b + CR 613.1d: `assimilate <target phrase>` is a
@@ -12978,14 +12967,14 @@ fn parse_imperative_family_ast_inner(
     // match arm is exactly what `scripts/check-parser-combinators.sh` family (B)
     // forbids.
     if let Some(target) = parse_assimilate_target(lower, ctx) {
-        return Some(ImperativeFamilyAst::Assimilate { target });
+        return Ok(Some(ImperativeFamilyAst::Assimilate { target }));
     }
 
     // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
     // production beside `recruit` / `assimilate` for the same family (B)
     // reason: no new string-literal `match first_word` arm.
     if let Some(effect) = parse_empower_jace(lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(effect));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
     }
 
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
@@ -12999,7 +12988,7 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)));
     }
 
     // CR 724.2: "end the combat phase" (Mandate of Peace). Whole-phrase
@@ -13012,7 +13001,9 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
+            Effect::EndCombatPhase,
+        )));
     }
 
     // CR 311.7 / CR 901.9b: "chaos ensues" as a standalone resolving instruction
@@ -13029,7 +13020,7 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(Effect::ChaosEnsues)));
     }
 
     // CR 103.1 + CR 101.4: "reverse the game's turn order" / "reverse the turn
@@ -13049,7 +13040,9 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::ReverseTurnOrder));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
+            Effect::ReverseTurnOrder,
+        )));
     }
 
     // CR 701.12a: "two target players exchange life totals" (Soul Conduit, Axis
@@ -13072,10 +13065,10 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::ExchangeLifeTotals {
+        return Ok(Some(ImperativeFamilyAst::ExchangeLifeTotals {
             player_a: TargetFilter::Player,
             player_b: TargetFilter::Player,
-        });
+        }));
     }
 
     // CR 119.7 + CR 119.8: "redistribute any number of players' life totals" (Reverse the
@@ -13101,7 +13094,7 @@ fn parse_imperative_family_ast_inner(
     .parse(lower.trim())
     .is_ok()
     {
-        return Some(ImperativeFamilyAst::RedistributeLifeTotals);
+        return Ok(Some(ImperativeFamilyAst::RedistributeLifeTotals));
     }
 
     // CR 500.8 + CR 500.9 + CR 500.10: intercept the family before verb
@@ -13111,8 +13104,8 @@ fn parse_imperative_family_ast_inner(
         || nom_primitives::scan_at_word_boundaries(lower, parse_additional_step).is_some()
         || nom_primitives::scan_contains(lower, "additional beginning phase")
     {
-        return Some(ImperativeFamilyAst::GainKeyword(additional_phase_effect(
-            text, lower,
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
+            additional_phase_effect(text, lower),
         )));
     }
 
@@ -13130,9 +13123,9 @@ fn parse_imperative_family_ast_inner(
     // Count axes accepted: "an additional time" / "one more time" → +1, and
     // "<number> more times" → +N.
     if let Some((amount, target)) = parse_grant_extra_loyalty_activations(lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
             Effect::GrantExtraLoyaltyActivations { amount, target },
-        ));
+        )));
     }
 
     // CR 107.7: "[+2]" / "[−1]" as an instruction of its own — put or remove loyalty
@@ -13140,7 +13133,7 @@ fn parse_imperative_family_ast_inner(
     // whole-clause production, like the extra-activation grant above, so a symbol
     // inside other text never matches and the verb dispatch below is untouched.
     if let Some(ast) = parse_loyalty_symbol_effect(lower) {
-        return Some(ast);
+        return Ok(Some(ast));
     }
 
     // CR 723.1: "You control target player during that player's next turn"
@@ -13153,8 +13146,8 @@ fn parse_imperative_family_ast_inner(
         .is_ok()
     {
         if let Some(ast) = parse_targeted_action_ast(text, lower, ctx) {
-            return Some(ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
-                ast,
+            return Ok(Some(ImperativeFamilyAst::Structured(
+                ImperativeAst::Targeted(ast),
             )));
         }
     }
@@ -13170,7 +13163,7 @@ fn parse_imperative_family_ast_inner(
     if let Some(effect) =
         crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower, &*ctx)
     {
-        return Some(ImperativeFamilyAst::GainKeyword(effect));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
     }
 
     // CR 614.1a + CR 614.12 + CR 707.2: One-shot "the next time one or more
@@ -13181,7 +13174,7 @@ fn parse_imperative_family_ast_inner(
     if let Some(effect) =
         crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(lower)
     {
-        return Some(ImperativeFamilyAst::GainKeyword(effect));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
     }
 
     // CR 708.5: "[Until end of turn,] you may look at face-down [permanents] you
@@ -13199,39 +13192,46 @@ fn parse_imperative_family_ast_inner(
     // the `GenericEffect` resolution path defaults to `UntilEndOfTurn` when no
     // duration is supplied.
     if let Some(filter) = parse_may_look_at_face_down_filter(text, lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MayLookAtFaceDown)
-                .affected(filter)
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown,
-                }])],
-            duration: None,
-            target: None,
-            end_cost: None,
-        }));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::MayLookAtFaceDown)
+                    .affected(filter)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MayLookAtFaceDown,
+                    }])],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+        )));
     }
 
     if nom_on_lower(first_word, first_word, |i| value((), tag("put")).parse(i)).is_some() {
-        return if nom_primitives::scan_contains(lower, "that many")
-            && nom_primitives::scan_contains(lower, "counter")
-        {
-            try_parse_that_many_counters(lower, ctx)
-                .map(ImperativeFamilyAst::GainKeyword)
-                .or_else(|| {
-                    try_parse_put_sticker_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword)
-                })
-                .or_else(|| {
-                    parse_zone_counter_family_ast(text, lower, ctx)
-                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
-                })
-        } else {
-            try_parse_put_sticker_effect(lower, ctx)
-                .map(ImperativeFamilyAst::GainKeyword)
-                .or_else(|| {
-                    parse_zone_counter_family_ast(text, lower, ctx)
-                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
-                })
-        };
+        return Ok(
+            if nom_primitives::scan_contains(lower, "that many")
+                && nom_primitives::scan_contains(lower, "counter")
+            {
+                try_parse_that_many_counters(lower, ctx)
+                    .map(ImperativeFamilyAst::GainKeyword)
+                    .or_else(|| {
+                        try_parse_put_sticker_effect(lower, ctx)
+                            .map(ImperativeFamilyAst::GainKeyword)
+                    })
+                    .or_else(|| {
+                        parse_zone_counter_family_ast(text, lower, ctx).or_else(|| {
+                            parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put)
+                        })
+                    })
+            } else {
+                try_parse_put_sticker_effect(lower, ctx)
+                    .map(ImperativeFamilyAst::GainKeyword)
+                    .or_else(|| {
+                        parse_zone_counter_family_ast(text, lower, ctx).or_else(|| {
+                            parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put)
+                        })
+                    })
+            },
+        );
     }
 
     // CR 614.11 + CR 614.6: One-shot "the next time you would draw a card this
@@ -13240,7 +13240,7 @@ fn parse_imperative_family_ast_inner(
     // first-word verb dispatch. The detector is the prefix combinator inside
     // `parse_oneshot_draw_replacement`; on failure it returns `None`.
     if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_draw_replacement(lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(effect));
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
     }
 
     // CR 615.1 + CR 615.1a: An each-time prevention formula is a continuous,
@@ -13248,8 +13248,8 @@ fn parse_imperative_family_ast_inner(
     // that watcher or its event-relative amount, so fail at the outer clause
     // rather than lowering its inner `prevent X` to the Next(1) fallback.
     if has_each_time_event_relative_prevention(lower) {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::unimplemented(
-            "prevent", text,
+        return Ok(Some(ImperativeFamilyAst::GainKeyword(
+            Effect::unimplemented("prevent", text),
         )));
     }
 
@@ -13257,7 +13257,7 @@ fn parse_imperative_family_ast_inner(
         .parse(lower.trim())
         .is_ok()
     {
-        return Some(ImperativeFamilyAst::NoteManaSpent);
+        return Ok(Some(ImperativeFamilyAst::NoteManaSpent));
     }
 
     // Digital-only Alchemy (no CR entry): "note <quantity>" — record a
@@ -13266,13 +13266,13 @@ fn parse_imperative_family_ast_inner(
     // damage"). Runs after the mana-spent pre-check: disjoint surfaces
     // ("note the type of mana …" never parses as a quantity).
     if let Some(ast) = parse_note_number_clause(lower.trim(), ctx) {
-        return Some(ast);
+        return Ok(Some(ast));
     }
 
     // NOTE: when adding verbs here, also add them to CLAUSE_HEAD_VERBS in
     // oracle_effect/gap_diagnosis.rs, which mirrors this dispatch table. `diagnose_clause_gap`
     // reads it, so a verb missing there diagnoses its argument gaps as unrecognized heads.
-    match first_word {
+    Ok(match first_word {
         // ── Unambiguous single-category verbs ──
 
         // Cost/resource verbs (CR 117-118)
@@ -13325,9 +13325,9 @@ fn parse_imperative_family_ast_inner(
             .parse(lower.trim())
             .is_ok();
             if matched {
-                return Some(ImperativeFamilyAst::TurnFaceUp {
+                return Ok(Some(ImperativeFamilyAst::TurnFaceUp {
                     target: TargetFilter::ExiledBySource,
-                });
+                }));
             }
 
             // CR 708.7 + CR 708.8: General "turn <target> face up" resolving
@@ -13379,9 +13379,9 @@ fn parse_imperative_family_ast_inner(
                 .parse(lower_trim)
                 .is_ok()
             {
-                return Some(ImperativeFamilyAst::TurnFaceUp {
+                return Ok(Some(ImperativeFamilyAst::TurnFaceUp {
                     target: TargetFilter::SelfRef,
-                });
+                }));
             }
             // The all-consuming clause extracts the target phrase between the
             // verb prefix and " face up"; any trailing sentence (Hauntwoods's
@@ -13562,20 +13562,25 @@ fn parse_imperative_family_ast_inner(
         "shuffle" | "shuffles" => parse_shuffle_ast(text, lower).map(ImperativeFamilyAst::Shuffle),
 
         // Reveal: "reveal the top N" → Dig (via search path), else hand reveal (CR 701.16, CR 701.20)
-        "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
-            .or_else(|| {
-                parse_hand_reveal_ast_inner(text, lower, ctx)
+        "reveal" | "reveals" => {
+            if let Some(ast) = parse_search_and_creation_ast(text, lower, ctx) {
+                Some(ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
+            } else {
+                parse_hand_reveal_ast(text, lower, ctx)?
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
-            }),
+            }
+        },
 
         // Choose (CR 608.2d)
-        "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
-            .or_else(|| {
-                parse_choose_ast_inner(text, lower, ctx)
+        _ if super::parse_hand_choice_command(lower).is_ok()
+            || tag::<_, _, OracleError<'_>>("secretly ").parse(lower).is_ok() => {
+            if let Some(ast) = parse_choose_discard_rest_of_hand(text, lower) {
+                Some(ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            } else {
+                parse_choose_ast(text, lower, ctx)?
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast)))
-            }),
+            }
+        },
 
         // ── Exact-match keyword actions ──
         "explore" if lower == "explore" || lower == "explore again" => {
@@ -13622,8 +13627,8 @@ fn parse_imperative_family_ast_inner(
                 .parse(lower)
                 .is_ok()
             {
-                let (_, (target, count, enters_under)) =
-                    parse_direct_manifest_clause(lower, ctx).ok()?;
+                let Ok((_, (target, count, enters_under))) =
+                    parse_direct_manifest_clause(lower, ctx) else { return Ok(None); };
                 Some(ImperativeFamilyAst::Manifest {
                     target,
                     count,
@@ -13899,17 +13904,15 @@ fn parse_imperative_family_ast_inner(
         "bolster" => try_parse_bolster(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.41a: "support N"
         "support" => {
-            let (rest, _) = tag::<_, _, OracleError<'_>>("support ")
-                .parse(lower)
-                .ok()?;
+            let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("support ")
+                .parse(lower) else { return Ok(None); };
             let rest = rest.trim().trim_end_matches('.');
             // CR 107.3a: `support X` (Blitzball Stadium, The Crowd Goes Wild)
             // carries the announced X forward as a `QuantityExpr`; a literal N
             // becomes `Fixed`. A bare `parse_number` would silently answer 1 for
             // the X form, since "x" is not a number.
-            let (_, count) = nom_quantity::parse_quantity_expr_number
-                .parse(rest)
-                .ok()?;
+            let Ok((_, count)) = nom_quantity::parse_quantity_expr_number
+                .parse(rest) else { return Ok(None); };
             // CR 701.41a: the expansion says "other target creatures" on a
             // PERMANENT and "target creatures" on an instant or sorcery spell.
             // Read the card's printed types rather than inferring from the
@@ -13965,11 +13968,11 @@ fn parse_imperative_family_ast_inner(
             )
             .parse(lower)
             {
-                return Some(ast);
+                return Ok(Some(ast));
             }
             // CR 705.1 + CR 107.1: "flip N coins" / "flip X coins" — N-coin form.
             if let Some(ast) = try_parse_flip_n_coins(lower) {
-                return Some(ast);
+                return Ok(Some(ast));
             }
             value::<_, _, OracleError<'_>, _>(
                 ImperativeFamilyAst::FlipCoins {
@@ -14140,9 +14143,9 @@ fn parse_imperative_family_ast_inner(
                 .parse(rest)
                 {
                     let (target, _) = parse_target_with_ctx(mass_rest, ctx);
-                    return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
+                    return Ok(Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
                         target,
-                    }));
+                    })));
                 }
                 let (target, _) = parse_target_with_ctx(rest, ctx);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
@@ -14165,17 +14168,16 @@ fn parse_imperative_family_ast_inner(
             // Axis of Mortality, Magus of the Mirror, Mirror Universe) — checked
             // before the life-with-stat shape since both begin "exchange life".
             if let Some((player_a, player_b)) = try_parse_exchange_life_totals(lower) {
-                return Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b });
+                return Ok(Some(ImperativeFamilyAst::ExchangeLifeTotals { player_a, player_b }));
             }
             // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
             // (Tree of Perdition, Tree of Redemption, Evra) — checked before
             // "exchange control of" since the two shapes share only the verb.
             if let Some((player, stat)) = try_parse_exchange_life_with_stat(lower) {
-                return Some(ImperativeFamilyAst::ExchangeLifeWithStat { player, stat });
+                return Ok(Some(ImperativeFamilyAst::ExchangeLifeWithStat { player, stat }));
             }
-            let (rest, _) = tag::<_, _, OracleError<'_>>("exchange control of ")
-                .parse(lower)
-                .ok()?;
+            let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exchange control of ")
+                .parse(lower) else { return Ok(None); };
             // Strip trailing terminator from the candidate target span so per-slot
             // parse_target sees clean input (parse_target is whitespace-tolerant
             // but stops on punctuation only via its own grammar).
@@ -14203,7 +14205,7 @@ fn parse_imperative_family_ast_inner(
                     || rest == "if able"
                     || rest == "this turn"
                 {
-                    return Some(ImperativeFamilyAst::MustBeBlocked);
+                    return Ok(Some(ImperativeFamilyAst::MustBeBlocked));
                 }
             }
             None
@@ -14299,12 +14301,14 @@ fn parse_imperative_family_ast_inner(
         }
 
         // "look" → exiled/hand targets (step 4) → "look at the top" (step 5)
-        "look" => parse_hand_reveal_ast_inner(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch; exiled-card look must precede library-top search
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
-            .or_else(|| {
+        "look" => { // allow-noncombinator: pre-existing match dispatch; exiled-card look must precede library-top search
+            if let Some(ast) = parse_hand_reveal_ast(text, lower, ctx)? {
+                Some(ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
+            } else {
                 parse_search_and_creation_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
-            }),
+            }
+        },
 
         // "gets"/"get" → try player counter first, then the subjectless
         // pump+keyword coalescer (CR 611.2c: keeps "gain haste" attached to the
@@ -14345,26 +14349,26 @@ fn parse_imperative_family_ast_inner(
         _ => {
             // Damage: try_parse_damage uses lower.find("deals ") — matches anywhere
             if let Some(ast) = parse_cost_resource_ast(text, lower, ctx) {
-                return Some(ImperativeFamilyAst::CostResource(ast));
+                return Ok(Some(ImperativeFamilyAst::CostResource(ast)));
             }
             // CR 611.2c: subjectless pump+keyword body ("get +2/+0 and gain
             // haste ...") — coalesce into one GenericEffect so the keyword grant
             // is not dropped by the bare-Pump numeric arm. Pure pump → None.
             if let Some(effect) = coalesce_pump_with_modifications(text) {
-                return Some(ImperativeFamilyAst::GainKeyword(effect));
+                return Ok(Some(ImperativeFamilyAst::GainKeyword(effect)));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
             if let Some(ast) = parse_numeric_imperative_ast_with_context(text, lower, ctx) {
-                return Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)));
+                return Ok(Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))));
             }
             // Shuffle: "that player shuffles" / "target player shuffles" have
             // non-verb first words but are exact-match shuffle patterns
             if let Some(ast) = parse_shuffle_ast(text, lower) {
-                return Some(ImperativeFamilyAst::Shuffle(ast));
+                return Ok(Some(ImperativeFamilyAst::Shuffle(ast)));
             }
             None
         }
-    }
+    })
 }
 
 /// CR 701.12a: Parse "exchange <player>'s life total with ~'s power/toughness"

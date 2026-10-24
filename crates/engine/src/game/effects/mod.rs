@@ -5724,6 +5724,70 @@ fn inherit_missing_parent_referent(child: &mut ResolvedAbility, parent: &Resolve
     }
 }
 
+// CR 608.2c + CR 608.2d: preserve the creating reader's answer on its actual parked tail.
+fn retain_reveal_choice_source_on_continuation(
+    parent: &ResolvedAbility,
+    child: &mut ResolvedAbility,
+    waiting: &WaitingFor,
+) -> Result<(), EffectError> {
+    let Effect::RevealHand {
+        card_filter,
+        choice_optional,
+        ..
+    } = &parent.effect
+    else {
+        return Ok(());
+    };
+    if !crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| {
+        matches!(prop, crate::types::ability::FilterProp::IsChosenColor)
+    }) {
+        return Ok(());
+    }
+    let WaitingFor::RevealChoice {
+        player,
+        filter,
+        optional,
+        decline_runs_continuation,
+        ..
+    } = waiting
+    else {
+        return Ok(());
+    };
+    let coherent = parent.trigger_source.as_ref().is_some_and(|capture| {
+        filter == card_filter
+            && optional == choice_optional
+            && !decline_runs_continuation
+            && *player == parent.original_controller.unwrap_or(parent.controller)
+            && capture.identity.reference.object_id == parent.source_id
+            && capture.lki.chosen_attributes.iter().any(|attribute| {
+                matches!(attribute, crate::types::ability::ChosenAttribute::Color(_))
+            })
+            && parent
+                .source_incarnation
+                .is_none_or(|value| value == capture.identity.reference.incarnation)
+            && child
+                .source_incarnation
+                .is_none_or(|value| value == capture.identity.reference.incarnation)
+            && child.source_id == parent.source_id
+            && child.controller == parent.controller
+            && child.original_controller == parent.original_controller
+            && child.cast_occurrence == parent.cast_occurrence
+            && child.trigger_definition_ref == parent.trigger_definition_ref
+            && child.scoped_player == parent.scoped_player
+            && child
+                .trigger_source
+                .as_ref()
+                .is_none_or(|old| old.identity == capture.identity)
+    });
+    if !coherent {
+        return Err(EffectError::InvalidParam(
+            "incoherent hand-choice continuation source".to_string(),
+        ));
+    }
+    child.trigger_source = parent.trigger_source.clone();
+    Ok(())
+}
+
 pub(crate) fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -25718,6 +25782,11 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            retain_reveal_choice_source_on_continuation(
+                ability,
+                &mut sub_clone,
+                &state.waiting_for,
+            )?;
             if forwards_battlefield_move(ability) {
                 bind_forwarded_generic_self_ref(&mut sub_clone);
                 let marker = pending_forwarded_zone_result(state, ability.source_id);
@@ -64723,6 +64792,249 @@ mod untargeted_target_only_choice_tests {
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn contextual_hand_source_independent_no_frame_reveal_accepts_and_declines() {
+        for decline in [false, true] {
+            let mut scene = GameScenario::new();
+            let source = scene.add_creature(P0, "Reveal source SHAPE", 1, 1).id();
+            let first = scene.add_land_to_hand(P0, "First land").id();
+            let second = scene.add_land_to_hand(P0, "Second land").id();
+            let mut runner = scene.build();
+            let ability = ResolvedAbility::new(
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Typed(TypedFilter::land()),
+                    on_decline: None,
+                },
+                vec![],
+                source,
+                P0,
+            );
+            reveal_from_hand::resolve(runner.state_mut(), &ability, &mut vec![]).unwrap();
+            assert!(runner.state().active_ability_continuation().is_none());
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::RevealChoice {player: P0, cards, optional: true, ..} if cards == &[first, second])
+            );
+            runner
+                .act(GameAction::SelectCards {
+                    cards: if decline { vec![] } else { vec![second] },
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+            assert!(runner.state().owed_spell_final_part().is_none());
+            assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+        }
+    }
+
+    #[test]
+    fn contextual_hand_custody_keeps_complete_creating_capture_and_rejects_incoherent_edges() {
+        use crate::types::ability::{
+            ChoiceType, ChosenAttribute, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+        };
+        use crate::types::game_state::{CastOccurrence, NamedChoiceSourceBinding};
+        let mut state = GameState::new_two_player(43);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Choice source SHAPE".into(),
+            Zone::Battlefield,
+        );
+        let hand = create_object(
+            &mut state,
+            CardId(2),
+            P1,
+            "Printed blue SHAPE".into(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand).unwrap().color = vec![ManaColor::Blue];
+        state.objects.get_mut(&hand).unwrap().base_color = vec![ManaColor::Blue];
+        let def = crate::parser::oracle_effect::parse_effect_chain("Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.", AbilityKind::Spell);
+        let root = crate::game::ability_utils::build_resolved_from_def(&def, source, P0);
+        let (mut named, _) =
+            choose::named_choice_authority(&state, &root, false, &ChoiceType::color());
+        assert_eq!(
+            named.as_ref().unwrap().binding,
+            NamedChoiceSourceBinding::ResolutionContext
+        );
+        named
+            .as_mut()
+            .unwrap()
+            .context
+            .as_mut()
+            .unwrap()
+            .lki
+            .chosen_attributes
+            .push(ChosenAttribute::Number(7));
+        choose::bind_named_choice(
+            &mut state,
+            &ChoiceType::color(),
+            "Blue",
+            named.as_mut(),
+            None,
+        )
+        .unwrap();
+        let mut parent = root.sub_ability.as_deref().unwrap().clone();
+        choose::bind_resolution_color_to_hand_readers(
+            &mut parent,
+            &ChoiceType::color(),
+            "Blue",
+            named.as_ref().unwrap(),
+            P0,
+        );
+        parent.set_unpinned_targets(vec![TargetRef::Player(P1)]);
+        reveal_hand::resolve(&mut state, &parent, &mut vec![]).unwrap();
+        let waiting = state.waiting_for.clone();
+        assert!(matches!(&waiting, WaitingFor::RevealChoice {cards, ..} if cards == &[hand]));
+        let child = parent.sub_ability.as_deref().unwrap().clone();
+        assert!(matches!(child.effect, Effect::DiscardCard { .. }));
+        let mut coherent = child.clone();
+        retain_reveal_choice_source_on_continuation(&parent, &mut coherent, &waiting).unwrap();
+        assert_eq!(coherent.trigger_source, parent.trigger_source);
+        let mut expected = child.clone();
+        expected.trigger_source = parent.trigger_source.clone();
+        assert_eq!(coherent, expected, "the capture is the ONLY child mutation");
+        assert_eq!(
+            coherent
+                .trigger_source
+                .as_ref()
+                .unwrap()
+                .lki
+                .chosen_attributes,
+            vec![
+                ChosenAttribute::Number(7),
+                ChosenAttribute::Color(ManaColor::Blue)
+            ]
+        );
+        for mismatch in 0..16 {
+            let mut parent = parent.clone();
+            let mut child = child.clone();
+            let mut waiting = waiting.clone();
+            match mismatch {
+                0 => parent.trigger_source = None,
+                1 => parent
+                    .trigger_source
+                    .as_mut()
+                    .unwrap()
+                    .lki
+                    .chosen_attributes
+                    .clear(),
+                2 => {
+                    if let WaitingFor::RevealChoice { filter, .. } = &mut waiting {
+                        *filter = TargetFilter::Any;
+                    }
+                }
+                3 => {
+                    if let WaitingFor::RevealChoice { player, .. } = &mut waiting {
+                        *player = P1;
+                    }
+                }
+                4 => {
+                    if let WaitingFor::RevealChoice { optional, .. } = &mut waiting {
+                        *optional = true;
+                    }
+                }
+                5 => {
+                    if let WaitingFor::RevealChoice {
+                        decline_runs_continuation,
+                        ..
+                    } = &mut waiting
+                    {
+                        *decline_runs_continuation = true;
+                    }
+                }
+                6 => parent.source_id = ObjectId(source.0 + 10),
+                7 => child.source_id = ObjectId(source.0 + 10),
+                8 => parent.source_incarnation = Some(u64::MAX),
+                9 => child.source_incarnation = Some(u64::MAX),
+                10 => {
+                    child.trigger_source = parent.trigger_source.clone();
+                    child
+                        .trigger_source
+                        .as_mut()
+                        .unwrap()
+                        .identity
+                        .expected_zone = Zone::Exile;
+                }
+                11 => child.controller = P1,
+                12 => child.original_controller = Some(P1),
+                13 => {
+                    child.cast_occurrence = Some(CastOccurrence {
+                        caster: P0,
+                        turn_journal_index: 1,
+                    })
+                }
+                14 => {
+                    child.trigger_definition_ref = Some(TriggerDefinitionRef {
+                        source: parent.trigger_source.as_ref().unwrap().identity.reference,
+                        occurrence: TriggerDefinitionOccurrenceRef::Unmaterialized,
+                    })
+                }
+                15 => child.scoped_player = Some(P1),
+                _ => unreachable!(),
+            }
+            let before = child.clone();
+            assert!(
+                retain_reveal_choice_source_on_continuation(&parent, &mut child, &waiting).is_err(),
+                "mismatch {mismatch}"
+            );
+            assert_eq!(child, before, "rejection must not mutate custody");
+        }
+        for unrelated in 0..3 {
+            let mut parent = parent.clone();
+            let mut waiting = waiting.clone();
+            match unrelated {
+                0 => {
+                    parent.effect = Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    }
+                }
+                1 => {
+                    if let Effect::RevealHand { card_filter, .. } = &mut parent.effect {
+                        *card_filter = TargetFilter::Any;
+                    }
+                }
+                2 => waiting = WaitingFor::Priority { player: P0 },
+                _ => unreachable!(),
+            }
+            let mut child = child.clone();
+            let before = child.clone();
+            retain_reveal_choice_source_on_continuation(&parent, &mut child, &waiting).unwrap();
+            assert_eq!(child, before);
+        }
+        // The real optional-empty producer has the same custody contract.
+        let mut optional_parent = parent;
+        if let Effect::RevealHand {
+            choice_optional, ..
+        } = &mut optional_parent.effect
+        {
+            *choice_optional = true;
+        }
+        state.objects.get_mut(&hand).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&hand).unwrap().base_color = vec![ManaColor::Red];
+        reveal_hand::resolve(&mut state, &optional_parent, &mut vec![]).unwrap();
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::RevealChoice {cards, optional: true, ..} if cards.is_empty())
+        );
+        let mut child = child;
+        retain_reveal_choice_source_on_continuation(
+            &optional_parent,
+            &mut child,
+            &state.waiting_for,
+        )
+        .unwrap();
+        assert_eq!(child.trigger_source, optional_parent.trigger_source);
+    }
 
     /// "Choose a creature you control" as the parser lowers it for a Resolution
     /// choice: a `TargetOnly` over the controller's creatures.

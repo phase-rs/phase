@@ -3076,6 +3076,51 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
+    parse_type_phrase_folding_core(text, ctx, None)
+}
+
+pub(crate) fn parse_hand_card_type_phrase_folding_with_ctx<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let domain = ctx
+        .pending_choice_type
+        .clone()
+        .filter(|kind| matches!(kind, ChoiceType::Color { .. }));
+    parse_type_phrase_folding_core(text, ctx, domain)
+}
+
+#[test]
+fn contextual_hand_anaphor_admission_does_not_change_ordinary_target_api() {
+    for phrase in ["of that color", "of the chosen color"] {
+        let text = format!("card {phrase}");
+        let mut ctx = ParseContext::default();
+        ctx.pending_choice_type = Some(ChoiceType::color());
+        let before = format!("{ctx:?}");
+        let (ordinary, remainder) = parse_type_phrase_folding_with_ctx(&text, &mut ctx);
+        assert_eq!(ordinary, TargetFilter::Typed(TypedFilter::card()));
+        assert_eq!(remainder.trim_start(), phrase);
+        assert_eq!(format!("{ctx:?}"), before);
+        let (hand, remainder) = parse_hand_card_type_phrase_folding_with_ctx(&text, &mut ctx);
+        assert_eq!(
+            hand,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::IsChosenColor]))
+        );
+        assert_eq!(remainder, "");
+        assert_eq!(ctx.pending_printed_color_choice, None);
+        assert_eq!(format!("{ctx:?}"), before);
+        ctx.pending_choice_type = None;
+        let (unbound, remainder) = parse_hand_card_type_phrase_folding_with_ctx(&text, &mut ctx);
+        assert_eq!(unbound, ordinary);
+        assert_eq!(remainder.trim_start(), phrase);
+    }
+}
+
+fn parse_type_phrase_folding_core<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+    hand_resolution_domain: Option<ChoiceType>,
+) -> (TargetFilter, &'a str) {
     if let Some(population) = parse_prior_controller_population(text, ctx) {
         return population;
     }
@@ -3560,7 +3605,8 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             };
             if can_recurse {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
-                let (other_filter, final_rest) = parse_type_phrase_folding_with_ctx(sep_text, ctx);
+                let (other_filter, final_rest) =
+                    parse_type_phrase_folding_core(sep_text, ctx, hand_resolution_domain.clone());
                 // A recognized adjective lead does not prove a complete RHS.
                 // Recursive failure preserves its input; do not publish either
                 // leg until this same owner has established a noun there.
@@ -4112,6 +4158,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             // Declared per-clause provenance for the assembly-time injector —
             // never a shape scan of the lowered tree.
             ctx.pending_printed_color_choice = Some(ChoiceType::color());
+        }
+    }
+
+    // CR 608.2c + CR 608.2d: only the hand adapter supplies an earlier owned Color domain.
+    if matches!(hand_resolution_domain, Some(ChoiceType::Color { .. })) {
+        let remaining = lower[pos..].trim_start();
+        let offset = lower[pos..].len() - remaining.len();
+        if let Ok((rest, prop)) = nom_filter::parse_chosen_color_anaphor_qualifier(remaining) {
+            properties.push(prop);
+            pos += offset + remaining.len() - rest.len();
         }
     }
 

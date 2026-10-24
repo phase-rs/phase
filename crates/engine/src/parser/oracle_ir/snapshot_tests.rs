@@ -7,6 +7,134 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn contextual_hand_addle_complete_ir_geometry_and_lowered_before_snapshot() {
+    const SOURCE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
+    let filter = crate::types::ability::TargetFilter::Typed(
+        crate::types::ability::TypedFilter::card()
+            .properties(vec![crate::types::ability::FilterProp::IsChosenColor]),
+    );
+    let mut discard = crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::DiscardCard {
+            count: 1,
+            target: crate::types::ability::TargetFilter::ParentTarget,
+        },
+    );
+    discard.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+    let mut reveal = crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::RevealHand {
+            target: crate::types::ability::TargetFilter::Player,
+            card_filter: filter.clone(),
+            count: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: true,
+        },
+    )
+    .sub_ability(discard);
+    reveal.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(0x8000_0000));
+    reveal.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+    let choose = crate::types::ability::AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Spell,
+        crate::types::ability::Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::color(),
+            persist: false,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
+        },
+    )
+    .sub_ability(reveal)
+    .description(SOURCE.into());
+    let expected = crate::parser::oracle::ParsedAbilities {
+        abilities: vec![choose],
+        ..Default::default()
+    };
+    let source = SOURCE;
+    let mut doc = parse_oracle_ir(source, "Addle", &[], &["Sorcery".into()], &[]);
+    assert_eq!(doc.source_text, SOURCE);
+    assert_eq!(doc.items.len(), 1);
+    let item = &doc.items[0];
+    assert_eq!(item.id, crate::parser::oracle_ir::doc::OracleItemId(0));
+    assert_eq!(
+        item.source.id(),
+        crate::parser::oracle_ir::doc::OracleUnitId {
+            item: crate::parser::oracle_ir::doc::OracleItemId(0),
+            ordinal: 0
+        }
+    );
+    assert_eq!(item.source.fragment(), Some(SOURCE));
+    assert_eq!(
+        item.source.span(),
+        &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(0, 0, 0, SOURCE.len(), 0)
+    );
+    let crate::parser::oracle_ir::doc::OracleNodeIr::Spell(spell) = &item.node else {
+        panic!("full Addle spell IR");
+    };
+    assert_eq!(spell.source_text, SOURCE);
+    let fragments = [
+        "Choose a color",
+        "Target player reveals their hand and you choose a card of that color from it",
+        "That player discards that card",
+    ];
+    assert_eq!(spell.body.clauses.len(), 3);
+    let mut start = 0;
+    for (index, (clause, fragment)) in spell.body.clauses.iter().zip(fragments).enumerate() {
+        let end = start + fragment.len();
+        assert_eq!(
+            clause.id,
+            crate::parser::oracle_ir::effect_chain::ClauseId(index as u32)
+        );
+        assert_eq!(
+            clause.source.id(),
+            crate::parser::oracle_ir::doc::OracleUnitId {
+                item: crate::parser::oracle_ir::doc::OracleItemId(0),
+                ordinal: index as u32 + 1
+            }
+        );
+        assert_eq!(clause.source.fragment(), Some(fragment));
+        assert_eq!(
+            clause.source.span(),
+            &crate::parser::oracle_ir::doc::OracleSourceSpan::chain_relative(
+                0,
+                0,
+                start,
+                end,
+                index as u32
+            )
+        );
+        assert_eq!(
+            clause.disposition,
+            crate::parser::oracle_ir::effect_chain::ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        );
+        assert_eq!(clause.declares_chosen_clause, None);
+        assert_eq!(clause.reads_chosen_clause, None);
+        assert_eq!(clause.declares_instruction_result, None);
+        assert_eq!(clause.reads_return_result, None);
+        assert_eq!(clause.token_definition_owner, None);
+        assert_eq!(clause.printed_color_choice, None);
+        assert_eq!(
+            clause.declared_player_group,
+            (index == 1).then_some(crate::types::ability::ChosenGroupId(0x8000_0000))
+        );
+        assert_eq!(
+            clause.target_reads,
+            crate::types::ability::TargetReadOrigin::OwnAnnouncement
+        );
+        start = end + 2;
+    }
+    let actual = lower_oracle_ir(&mut doc);
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    insta::assert_json_snapshot!("contextual_hand_addle_ir", doc);
+    insta::assert_json_snapshot!("contextual_hand_addle_lowered", actual);
+}
+
+#[test]
 fn contextual_hand_complete_ir_and_lowered_semantics_before_snapshot() {
     use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
     use crate::types::ability::{

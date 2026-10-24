@@ -144,25 +144,30 @@ fn contextual_hand_refusal_is_transactional_in_each_real_client() {
             );
         }
     }
-    let complete = parse_effect_chain("Target player reveals their hand. You choose a nonland card of the color of your choice from it. That player discards that card.", AbilityKind::Spell);
-    assert!(!has_unimplemented_ability(&complete));
-    assert!(
-        matches!(complete.effect.as_ref(), Effect::Choose { choice_type, .. } if choice_type == &ChoiceType::color())
+    let source = "Target player reveals their hand. You choose a nonland card of the color of your choice from it. That player discards that card.";
+    let ir = parse_effect_chain_ir(source, AbilityKind::Spell, &mut ParseContext::default());
+    let surviving: Vec<_> = ir
+        .clauses
+        .iter()
+        .filter(|c| !matches!(c.parsed.effect, Effect::Unimplemented { .. }))
+        .collect();
+    let carriers: Vec<_> = surviving
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.printed_color_choice == Some(ChoiceType::color()))
+        .collect();
+    assert_eq!(carriers.len(), 1);
+    assert_eq!(carriers[0].0, 1);
+    assert!(effect_filter_has_chosen_color(&carriers[0].1.parsed.effect));
+    let complete = parse_effect_chain(source, AbilityKind::Spell);
+    assert_eq!(
+        unimplemented_name(&complete),
+        Some("later_clause_printed_color_choice")
     );
-    let reveal = complete
-        .sub_ability
-        .as_deref()
-        .expect("color chooser precedes the reveal consumer");
-    assert!(
-        matches!(reveal.effect.as_ref(), Effect::RevealHand { card_filter, .. } if card_filter == &expected_filter)
-    );
-    assert!(matches!(
-        reveal.sub_ability.as_deref().unwrap().effect.as_ref(),
-        Effect::DiscardCard {
-            target: TargetFilter::ParentTarget,
-            count: 1
-        }
-    ));
+    let mut nodes = Vec::new();
+    collect_defs(&complete, &mut nodes);
+    assert_eq!(nodes.iter().filter(|d| is_color_choice(d)).count(), 0);
+    assert!(!tree_has_is_chosen_color(&complete));
     for bad in [
         "choose a nonland from it",
         "choose a noncreature, unknowable card from it",
@@ -206,6 +211,157 @@ fn contextual_hand_refusal_is_transactional_in_each_real_client() {
         .unwrap()
         .is_some());
     }
+}
+
+#[test]
+fn contextual_hand_addle_explicit_color_and_strict_anaphor_clients() {
+    const ADDLE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
+    let expected =
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::IsChosenColor]));
+    let complete = parse_effect_chain(ADDLE, AbilityKind::Spell);
+    assert!(!has_unimplemented_ability(&complete));
+    assert!(
+        matches!(complete.effect.as_ref(), Effect::Choose { choice_type, persist: false, .. } if choice_type == &ChoiceType::color())
+    );
+    let reveal = complete.sub_ability.as_deref().unwrap();
+    assert!(
+        matches!(reveal.effect.as_ref(), Effect::RevealHand { target: TargetFilter::Player, card_filter, reveal: true, choice_optional: false, .. } if card_filter == &expected)
+    );
+    assert!(matches!(
+        reveal.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::DiscardCard {
+            target: TargetFilter::ParentTarget,
+            count: 1
+        }
+    ));
+    assert!(reveal.sub_ability.as_deref().unwrap().sub_ability.is_none());
+    let previous = Effect::RevealHand {
+        target: TargetFilter::Player,
+        card_filter: TargetFilter::None,
+        count: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        choice_optional: false,
+        reveal: true,
+    };
+    for suffix in ["of that color", "of the chosen color"] {
+        for client in 0..3 {
+            let mut ctx = ParseContext::default();
+            ctx.pending_choice_type = Some(ChoiceType::color());
+            let command = format!("you choose a card {suffix} from it");
+            let fused = format!("reveals their hand and {command}");
+            let actual = match client {
+                0 => match parse_imperative_family_ast(&command, &command, &mut ctx)
+                    .unwrap()
+                    .unwrap()
+                {
+                    ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+                        ChooseImperativeAst::RevealHandFilter { card_filter, .. },
+                    )) => card_filter,
+                    other => panic!("{other:?}"),
+                },
+                1 => match parse_imperative_family_ast(&fused, &fused, &mut ctx)
+                    .unwrap()
+                    .unwrap()
+                {
+                    ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+                        HandRevealImperativeAst::RevealAll { card_filter, .. },
+                    )) => card_filter,
+                    other => panic!("{other:?}"),
+                },
+                _ => match parse_followup_continuation_ast(&command, &previous, &mut ctx)
+                    .unwrap()
+                    .unwrap()
+                {
+                    ContinuationAst::RevealHandFilter {
+                        card_filter: Some(filter),
+                        ..
+                    } => filter,
+                    other => panic!("{other:?}"),
+                },
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(ctx.pending_printed_color_choice, None);
+            for malformed in [
+                format!("{command} inexplicably"),
+                format!("you choose a {suffix} from it"),
+            ] {
+                let before = format!("{ctx:?}");
+                let fused_bad = format!("reveals their hand and {malformed}");
+                let refused = match client {
+                    0 => parse_imperative_family_ast(&malformed, &malformed, &mut ctx).is_err(),
+                    1 => parse_imperative_family_ast(&fused_bad, &fused_bad, &mut ctx).is_err(),
+                    _ => parse_followup_continuation_ast(&malformed, &previous, &mut ctx).is_err(),
+                };
+                assert!(refused);
+                assert_eq!(format!("{ctx:?}"), before);
+            }
+        }
+        for domain in [
+            None,
+            Some(ChoiceType::NumberRange {
+                min: 0,
+                max: Some(10),
+                distinctness: crate::types::ability::NumberDistinctness::Repeatable,
+            }),
+        ] {
+            let mut ctx = ParseContext::default();
+            ctx.pending_choice_type = domain;
+            let command = format!("you choose a card {suffix} from it");
+            let before = format!("{ctx:?}");
+            assert!(parse_choose_filter(&command, &mut ctx).is_err());
+            assert_eq!(format!("{ctx:?}"), before);
+            assert!(parse_imperative_family_ast(&command, &command, &mut ctx).is_err());
+            assert_eq!(format!("{ctx:?}"), before);
+            let fused = format!("reveals their hand and {command}");
+            assert!(parse_imperative_family_ast(&fused, &fused, &mut ctx).is_err());
+            assert_eq!(format!("{ctx:?}"), before);
+            assert!(parse_followup_continuation_ast(&command, &previous, &mut ctx).is_err());
+            assert_eq!(format!("{ctx:?}"), before);
+        }
+    }
+    for command in [
+        "you choose a nonland card of that color from it",
+        "you choose a card from it of that color",
+        "you choose a creature or land card of the chosen color from it",
+    ] {
+        let mut ctx = ParseContext::default();
+        ctx.pending_choice_type = Some(ChoiceType::color());
+        let (rest, filter) = parse_choose_filter(command, &mut ctx).unwrap();
+        assert_eq!(rest, "");
+        assert!(crate::game::filter::filter_contains_filter_prop(
+            &filter,
+            &|prop| matches!(prop, FilterProp::IsChosenColor)
+        ));
+        assert_eq!(ctx.pending_printed_color_choice, None);
+    }
+    let newer_number = parse_effect_chain("Choose a color. Draw a card. Choose a number between 1 and 5. Target player reveals their hand and you choose a card of that color from it. That player discards that card.", AbilityKind::Spell);
+    assert!(has_unimplemented_ability(&newer_number));
+    let mut nodes = vec![];
+    collect_defs(&newer_number, &mut nodes);
+    assert!(nodes.iter().any(|node| matches!(
+        node.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::NumberRange { .. },
+            ..
+        }
+    )));
+    assert!(nodes
+        .iter()
+        .any(|node| matches!(node.effect.as_ref(), Effect::Draw { .. })));
+    assert!(!tree_has_is_chosen_color(&newer_number));
+    let separate = crate::parser::oracle::parse_oracle_text("Choose a color.\nTarget player reveals their hand and you choose a card of that color from it. That player discards that card.", "Separate bodies SHAPE", &[], &["Sorcery".into()], &[]);
+    assert!(separate.abilities.iter().any(|ability| matches!(
+        ability.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    )));
+    assert!(separate.abilities.iter().any(has_unimplemented_ability));
+    assert!(separate
+        .abilities
+        .iter()
+        .all(|ability| !tree_has_is_chosen_color(ability)));
 }
 
 #[test]

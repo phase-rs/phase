@@ -176,7 +176,24 @@ pub(crate) fn resolve_random_in_chain(
         source.as_mut(),
         persist_player,
     ) {
-        ability.update_trigger_source_context_in_resolution_segment(context);
+        if matches!(choice_type, ChoiceType::Color { .. })
+            && source
+                .as_ref()
+                .is_some_and(|source| source.binding == NamedChoiceSourceBinding::ResolutionContext)
+        {
+            ability.trigger_source = Some(context);
+            if let Some(tail) = ability.sub_ability.as_deref_mut() {
+                bind_resolution_color_to_hand_readers(
+                    tail,
+                    &choice_type,
+                    &chosen,
+                    source.as_ref().unwrap(),
+                    ability.controller,
+                );
+            }
+        } else {
+            ability.update_trigger_source_context_in_resolution_segment(context);
+        }
     }
     // CR 101.4 + CR 608.2d: mirror the interactive answer handler so a
     // game-selected number is readable per-player too (CR 608.2d override — the
@@ -592,6 +609,62 @@ pub(crate) fn chosen_attributes_for_choice(
     }
 }
 
+/// CR 608.2c + CR 608.2d: an earlier answer belongs only to readers in this owned body.
+pub(crate) fn bind_resolution_color_to_hand_readers(
+    tail: &mut ResolvedAbility,
+    choice_type: &ChoiceType,
+    choice: &str,
+    source: &NamedChoiceSource,
+    chooser: PlayerId,
+) {
+    if !matches!(choice_type, ChoiceType::Color { .. })
+        || source.binding != NamedChoiceSourceBinding::ResolutionContext
+        || !source.has_matching_context()
+        || !matches!(
+            ChoiceValue::from_choice(choice_type, choice),
+            Some(ChoiceValue::Color(_))
+        )
+    {
+        return;
+    }
+    let context = source.context.as_ref().unwrap();
+    let original_controller = tail.original_controller;
+    let cast_occurrence = tail.cast_occurrence;
+    let definition = tail.trigger_definition_ref.clone();
+    let scoped_player = tail.scoped_player;
+    let mut cursor = Some(tail);
+    while let Some(node) = cursor {
+        if matches!(node.effect, Effect::Choose { .. })
+            || node.source_id != context.identity.reference.object_id
+            || node.controller != chooser
+            || node
+                .source_incarnation
+                .is_some_and(|value| value != context.identity.reference.incarnation)
+            || node
+                .trigger_source
+                .as_ref()
+                .is_some_and(|capture| capture.identity != context.identity)
+            || node.original_controller != original_controller
+            || node.cast_occurrence != cast_occurrence
+            || node.trigger_definition_ref != definition
+            || node.scoped_player != scoped_player
+        {
+            break;
+        }
+        if matches!(&node.effect, Effect::RevealHand { card_filter, .. }
+            if crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, crate::types::ability::FilterProp::IsChosenColor)))
+        {
+            node.trigger_source = Some(if let Some(mut capture) = node.trigger_source.clone() {
+                apply_choice_attributes(&mut capture.lki.chosen_attributes, choice_type, choice);
+                capture
+            } else {
+                context.clone()
+            });
+        }
+        cursor = node.sub_ability.as_deref_mut();
+    }
+}
+
 fn apply_choice_attributes(
     destination: &mut Vec<ChosenAttribute>,
     choice_type: &ChoiceType,
@@ -995,6 +1068,218 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
+
+    #[test]
+    fn contextual_hand_random_writer_selectively_crosses_draw_and_stops_at_authority_boundaries() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::{
+            AbilityKind, FilterProp, TargetFilter, TriggerDefinitionOccurrenceRef,
+            TriggerDefinitionRef,
+        };
+        use crate::types::game_state::CastOccurrence;
+        const BODY: &str = "Choose a color at random. Draw a card. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
+        let mut state = GameState::new_two_player(42);
+        let id = seed_source(&mut state);
+        let def = crate::parser::oracle_effect::parse_effect_chain(BODY, AbilityKind::Spell);
+        let mut original = build_resolved_from_def(&def, id, PlayerId(0));
+        let draw_before = original.sub_ability.as_deref().unwrap().clone();
+        assert!(matches!(draw_before.effect, Effect::Draw { .. }));
+        assert_eq!(
+            draw_before.sub_link,
+            crate::types::ability::SubAbilityLink::SequentialSibling
+        );
+        assert!(original.trigger_source.is_none());
+        let mut events = vec![];
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut original,
+            &mut events
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Choose,
+                ..
+            }
+        )));
+        assert!(!matches!(state.waiting_for, WaitingFor::NamedChoice { .. }));
+        let draw = original.sub_ability.as_deref().unwrap();
+        let mut unchanged_draw = draw.clone();
+        unchanged_draw.sub_ability = draw_before.sub_ability.clone();
+        assert_eq!(unchanged_draw, draw_before, "only the hand reader changes");
+        let reader = draw.sub_ability.as_deref().unwrap();
+        assert!(
+            matches!(&reader.effect, Effect::RevealHand {card_filter, ..} if crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, FilterProp::IsChosenColor)))
+        );
+        assert_eq!(reader.trigger_source, original.trigger_source);
+        assert!(state.objects[&id].chosen_attributes.is_empty());
+        let context = original.trigger_source.clone().unwrap();
+        let mut source = NamedChoiceSource::from_trigger_source(
+            context,
+            NamedChoiceSourceBinding::ResolutionContext,
+        );
+        let context = bind_named_choice(
+            &mut state,
+            &ChoiceType::color(),
+            "Blue",
+            Some(&mut source),
+            None,
+        )
+        .unwrap();
+        for boundary in 0..10 {
+            let mut tail = draw_before.clone();
+            let node = tail.sub_ability.as_deref_mut().unwrap();
+            match boundary {
+                0 => node.source_id = ObjectId(id.0 + 1),
+                1 => node.source_incarnation = Some(context.identity.reference.incarnation + 1),
+                2 => {
+                    let mut other = context.clone();
+                    other.identity.expected_zone = crate::types::zones::Zone::Exile;
+                    node.trigger_source = Some(other);
+                }
+                3 => node.controller = PlayerId(1),
+                4 => node.original_controller = Some(PlayerId(1)),
+                5 => {
+                    node.cast_occurrence = Some(CastOccurrence {
+                        caster: PlayerId(0),
+                        turn_journal_index: 1,
+                    })
+                }
+                6 => {
+                    node.trigger_definition_ref = Some(TriggerDefinitionRef {
+                        source: context.identity.reference,
+                        occurrence: TriggerDefinitionOccurrenceRef::Unmaterialized,
+                    })
+                }
+                7 => node.scoped_player = Some(PlayerId(1)),
+                8 => {
+                    node.effect = Effect::Choose {
+                        choice_type: ChoiceType::color(),
+                        persist: false,
+                        selection: TargetSelectionMode::Chosen,
+                    }
+                }
+                9 => {
+                    node.effect = Effect::Choose {
+                        choice_type: ChoiceType::CardName,
+                        persist: true,
+                        selection: TargetSelectionMode::Chosen,
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let before = tail.clone();
+            bind_resolution_color_to_hand_readers(
+                &mut tail,
+                &ChoiceType::color(),
+                "Blue",
+                &source,
+                PlayerId(0),
+            );
+            assert_eq!(
+                tail, before,
+                "boundary {boundary} must stop without mutation"
+            );
+        }
+        let mut tail = draw_before;
+        tail.else_ability = tail.sub_ability.clone();
+        let else_before = tail.else_ability.clone();
+        bind_resolution_color_to_hand_readers(
+            &mut tail,
+            &ChoiceType::color(),
+            "Blue",
+            &source,
+            PlayerId(0),
+        );
+        assert_eq!(tail.else_ability, else_before);
+        assert_eq!(tail.trigger_source, None);
+        let reader = tail.sub_ability.as_deref().unwrap();
+        assert_eq!(reader.trigger_source, Some(context.clone()));
+        // Existing coherent captures preserve non-Color attributes and append once.
+        let mut existing = reader.clone();
+        existing
+            .trigger_source
+            .as_mut()
+            .unwrap()
+            .lki
+            .chosen_attributes = vec![ChosenAttribute::Number(7)];
+        bind_resolution_color_to_hand_readers(
+            &mut existing,
+            &ChoiceType::color(),
+            "Blue",
+            &source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            existing
+                .trigger_source
+                .as_ref()
+                .unwrap()
+                .lki
+                .chosen_attributes,
+            vec![
+                ChosenAttribute::Number(7),
+                ChosenAttribute::Color(ManaColor::Blue)
+            ]
+        );
+        let mut plain = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            id,
+            PlayerId(0),
+        );
+        let before = plain.clone();
+        bind_resolution_color_to_hand_readers(
+            &mut plain,
+            &ChoiceType::color(),
+            "Blue",
+            &source,
+            PlayerId(0),
+        );
+        assert_eq!(plain, before);
+        plain.effect = Effect::ChooseOneOf {
+            chooser: crate::types::ability::PlayerFilter::Controller,
+            branches: vec![def
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .clone()],
+            kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+        };
+        let embedded_before = plain.clone();
+        bind_resolution_color_to_hand_readers(
+            &mut plain,
+            &ChoiceType::color(),
+            "Blue",
+            &source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            plain, embedded_before,
+            "embedded bodies are not the owned sub spine"
+        );
+        let mut exact = source.clone();
+        exact.binding = NamedChoiceSourceBinding::ExactObjectAndResolution;
+        let before = existing.clone();
+        bind_resolution_color_to_hand_readers(
+            &mut existing,
+            &ChoiceType::color(),
+            "Red",
+            &exact,
+            PlayerId(0),
+        );
+        assert_eq!(
+            existing, before,
+            "persisting choices retain their existing writer path"
+        );
+    }
 
     fn make_choose_ability(choice_type: ChoiceType) -> ResolvedAbility {
         ResolvedAbility::new(
