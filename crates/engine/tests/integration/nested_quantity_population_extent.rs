@@ -144,6 +144,228 @@ fn warp_restore_forms(
     restored
 }
 
+/// CR 400.7j + CR 608.2c + CR 701.3a: a return of another object keeps its
+/// result and original producer through replacement and legacy restoration.
+#[test]
+fn nonself_battlefield_result_restores_ungrouped_grant_and_attach_once() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, AttachSelection, ContinuousModification, ControllerRef,
+        Effect, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+        SubAbilityLink, TargetFilter,
+    };
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::keywords::Keyword;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+
+    // Honest synthetic composition: public activation returns Equipment, then
+    // optionally grants it haste or attaches it to the producing creature.
+    for caster in [P0, P1] {
+        for attach in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let returned = scenario
+                .add_artifact_from_oracle(caster, "Synthetic returned Equipment", "")
+                .with_subtypes(vec!["Equipment"])
+                .id();
+            let mut draw = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            let mut rider = AbilityDefinition::new(
+                AbilityKind::Database,
+                if attach {
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::ParentTarget,
+                        selection: AttachSelection::Targeted,
+                    }
+                } else {
+                    Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::SelfRef)
+                            .modifications(vec![ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste,
+                            }])],
+                        duration: None,
+                        target: Some(TargetFilter::SelfRef),
+                        end_cost: None,
+                    }
+                },
+            )
+            .sub_ability(draw);
+            rider.optional = true;
+            let mut root = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SpecificObject { id: returned },
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: Some(ControllerRef::You),
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(rider);
+            root.forward_result = true;
+            let producer = scenario
+                .add_creature(caster, "Synthetic returning producer", 2, 2)
+                .with_ability_definition(root)
+                .id();
+            scenario
+                .add_enchantment_from_oracle(caster, "Synthetic optional entry replacement", "")
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SpecificObject { id: returned })
+                        .destination_zone(Zone::Battlefield)
+                        .mode(ReplacementMode::Optional { decline: None }),
+                );
+            scenario.with_library_top(caster, &["Independent return sibling Draw", "Reserve"]);
+            let mut runner = scenario.build();
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                returned,
+                Zone::Graveyard,
+                &mut Vec::new(),
+            );
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            runner.activate(producer, 0).stop_at_optional().resolve();
+            assert!(matches!(runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player, candidate_count: 2, .. } if player == caster));
+            let delivery = runner
+                .state()
+                .pending_zone_change_delivery_from_replacement()
+                .unwrap();
+            assert_eq!(delivery.member.object_id, returned);
+            assert_ne!(producer, returned);
+            assert!(delivery.terminal_completion.is_none() && delivery.delivery_events.is_empty());
+
+            for grouped in [true, false] {
+                let mut paused = runner.state().clone();
+                if !grouped {
+                    // Encode the supported old ungrouped owner using this real
+                    // pending replacement's captured member; invent no prompt,
+                    // completion or delivery event. v1 uses independent slots.
+                    paused.take_active_change_zone_frame().unwrap().unwrap();
+                    let marker = paused
+                        .active_ability_continuation_frame_mut()
+                        .unwrap()
+                        .pending
+                        .chain
+                        .context
+                        .pending_forwarded_zone_result
+                        .as_mut()
+                        .unwrap();
+                    marker.group = None;
+                    marker.selected = Some(vec![delivery.member]);
+                }
+                let marker = paused
+                    .active_ability_continuation()
+                    .unwrap()
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(marker.producer, producer);
+                if !grouped {
+                    assert_eq!(marker.selected.as_deref(), Some(&[delivery.member][..]));
+                    assert!(marker.group.is_none());
+                }
+                for restored in warp_restore_forms(&paused) {
+                    let mut resumed = engine::game::scenario::GameRunner::from_state(restored);
+                    resumed
+                        .act(GameAction::ChooseReplacement { index: 1 })
+                        .unwrap();
+                    resumed.advance_until_stack_empty();
+                    assert!(matches!(resumed.state().waiting_for,
+                        WaitingFor::OptionalEffectChoice { player, source_id, .. }
+                        if player == caster && source_id == returned));
+                    let child = &resumed
+                        .state()
+                        .active_optional_effect_frame()
+                        .unwrap()
+                        .ability;
+                    assert!(child.context.pending_forwarded_zone_result.is_none());
+                    let result = child.context.forwarded_result_context.as_deref().unwrap();
+                    let pin =
+                        ObjectIncarnationRef::from_object(&resumed.state().objects[&returned]);
+                    assert_eq!(
+                        Some(pin.incarnation),
+                        delivery.member.incarnation.checked_add(1)
+                    );
+                    assert_eq!(result.targets, vec![TargetRef::Object(returned)]);
+                    assert_eq!(result.object_incarnations, vec![pin]);
+                    assert!(pin.is_current(resumed.state()));
+                    if attach {
+                        assert_eq!(
+                            child.targets,
+                            vec![TargetRef::Object(producer)],
+                            "Attach retains the original producer as its host"
+                        );
+                    }
+                    resumed
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                    resumed.advance_until_stack_empty();
+                    assert_eq!(resumed.state().objects[&returned].zone, Zone::Battlefield);
+                    if attach {
+                        assert_eq!(
+                            resumed.state().objects[&returned].attached_to,
+                            Some(engine::game::game_object::AttachTarget::Object(producer))
+                        );
+                    } else {
+                        assert_eq!(
+                            resumed
+                                .state()
+                                .transient_continuous_effects
+                                .iter()
+                                .filter(|effect| effect.affected
+                                    == (TargetFilter::SpecificObject { id: returned })
+                                    && effect.modifications.contains(
+                                        &ContinuousModification::AddKeyword {
+                                            keyword: Keyword::Haste,
+                                        }
+                                    ))
+                                .count(),
+                            1
+                        );
+                    }
+                    assert_eq!(resumed.state().players[caster.0 as usize].hand.len(), 1);
+                    resumed.advance_until_stack_empty();
+                    assert_eq!(
+                        resumed.state().players[caster.0 as usize].hand.len(),
+                        1,
+                        "independent sibling and returned rider complete exactly once"
+                    );
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        resumed.state().stack.is_empty()
+                            && resumed.state().trigger_stack.is_empty()
+                            && resumed.state().resolution_stack.is_empty()
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// CR 400.2: inspect the actual Hand object and printed-card identifier in
 /// both client envelopes, while preserving the authoritative private state.
 fn assert_warp_draw_privacy(

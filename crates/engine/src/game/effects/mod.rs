@@ -1491,23 +1491,23 @@ pub(crate) fn settle_replaced_forwarded_zone_delivery(
     {
         return;
     }
-    let owns_delivery = state
+    let Some(marker) = state
         .active_ability_continuation()
         .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
-        .is_some_and(|marker| {
-            marker.producer == member.object_id
-                && marker.group.is_none()
-                && marker.selected.as_deref() == Some(&[member][..])
-        });
+    else {
+        return;
+    };
+    let owns_delivery = marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..]);
     if owns_delivery {
         let result = if state
             .active_ability_continuation()
             .is_some_and(|pending| is_warp_exile_grant(&pending.chain))
         {
-            if state
-                .active_ability_continuation()
-                .and_then(|pending| warp_grant_member(&pending.chain))
-                != Some(member)
+            if marker.producer != member.object_id
+                || state
+                    .active_ability_continuation()
+                    .and_then(|pending| warp_grant_member(&pending.chain))
+                    != Some(member)
                 || !matches!(delivery.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange {
                     object_id, from: Zone::Battlefield, to: Zone::Exile, ..
                 } if object_id == member.object_id)
@@ -40707,6 +40707,191 @@ mod tests {
         .sub_ability(sub_ability);
         ability.forward_result = true;
         ability
+    }
+
+    /// CR 400.7j + CR 608.2c: ordinary forwarding selects the moved member
+    /// separately from its producing source, which remains the Attach host.
+    #[test]
+    fn ungrouped_battlefield_settlement_keeps_nonself_producer_and_exact_pin() {
+        use crate::types::ability::PendingForwardedZoneResult;
+        use crate::types::game_state::{PendingZoneChangeDelivery, ZoneMoveCompletion};
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::proposed_event::ProposedEvent;
+
+        let (mut state, producer, returned, other) = forwarded_test_objects();
+        let member = ObjectIncarnationRef::from_object(&state.objects[&returned]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, returned, Zone::Battlefield, &mut events);
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&returned]);
+        let mut delivery = PendingZoneChangeDelivery::new(
+            member,
+            ProposedEvent::zone_change(
+                returned,
+                Zone::Graveyard,
+                Zone::Battlefield,
+                Some(producer),
+            ),
+        );
+        delivery
+            .record_terminal_completion(ZoneMoveCompletion::Moved)
+            .unwrap();
+        delivery.append_delivery_events(&events);
+        assert_ne!(producer, member.object_id);
+        for attach in [false, true] {
+            let mut child = if attach {
+                ResolvedAbility::new(
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::ParentTarget,
+                        selection: crate::types::ability::AttachSelection::Targeted,
+                    },
+                    vec![],
+                    producer,
+                    P0,
+                )
+            } else {
+                forwarded_test_grant(producer, Keyword::Haste)
+            };
+            child.context.pending_forwarded_zone_result = Some(PendingForwardedZoneResult {
+                producer,
+                selected: Some(vec![member]),
+                group: None,
+            });
+            let mut paused = state.clone();
+            paused.park_ability_continuation(PendingContinuation::new(Box::new(child), &paused));
+            for wrong in ["member", "group"] {
+                let mut foreign = paused.clone();
+                let marker = foreign
+                    .active_ability_continuation_frame_mut()
+                    .unwrap()
+                    .pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .as_mut()
+                    .unwrap();
+                if wrong == "member" {
+                    marker.selected = Some(vec![ObjectIncarnationRef::from_object(
+                        &state.objects[&other],
+                    )]);
+                } else {
+                    marker.group = Some(crate::types::identifiers::LogicalZoneChangeGroupId(999));
+                }
+                let before = foreign.resolution_stack.clone();
+                settle_replaced_forwarded_zone_delivery(
+                    &mut foreign,
+                    &delivery,
+                    ZoneMoveCompletion::Moved,
+                    &delivery.delivery_events,
+                );
+                assert_eq!(
+                    foreign.resolution_stack, before,
+                    "foreign {wrong} cannot settle"
+                );
+            }
+            settle_replaced_forwarded_zone_delivery(
+                &mut paused,
+                &delivery,
+                ZoneMoveCompletion::Moved,
+                &delivery.delivery_events,
+            );
+            let child = &paused.active_ability_continuation().unwrap().chain;
+            assert!(child.context.pending_forwarded_zone_result.is_none());
+            let result = child.context.forwarded_result_context.as_deref().unwrap();
+            assert_eq!(result.targets, vec![TargetRef::Object(returned)]);
+            assert_eq!(result.object_incarnations, vec![pin]);
+            if attach {
+                assert_eq!(
+                    child.targets,
+                    vec![TargetRef::Object(producer)],
+                    "rebinding uses the original producer, not the moved member"
+                );
+            }
+            let before = paused.resolution_stack.clone();
+            settle_replaced_forwarded_zone_delivery(
+                &mut paused,
+                &delivery,
+                ZoneMoveCompletion::Moved,
+                &delivery.delivery_events,
+            );
+            assert_eq!(
+                paused.resolution_stack, before,
+                "completed result binds once"
+            );
+        }
+    }
+
+    /// CR 702.185a + CR 400.7j: Warp still requires producer/member equality.
+    #[test]
+    fn ungrouped_warp_settlement_refuses_a_foreign_producer_before_binding() {
+        use crate::types::ability::PendingForwardedZoneResult;
+        use crate::types::game_state::{PendingZoneChangeDelivery, ZoneMoveCompletion};
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::proposed_event::ProposedEvent;
+
+        let (mut state, source, other, _) = forwarded_test_objects();
+        crate::game::stack::create_warp_delayed_trigger(&mut state, source, P0, &mut Vec::new());
+        let mut grant = state.delayed_triggers[0]
+            .ability
+            .sub_ability
+            .as_deref()
+            .unwrap()
+            .clone();
+        let member = grant.trigger_source.as_ref().unwrap().identity.reference;
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+        let mut delivery = PendingZoneChangeDelivery::new(
+            member,
+            ProposedEvent::zone_change(source, Zone::Battlefield, Zone::Exile, Some(source)),
+        );
+        delivery
+            .record_terminal_completion(ZoneMoveCompletion::Moved)
+            .unwrap();
+        delivery.append_delivery_events(&events);
+        grant.context.pending_forwarded_zone_result = Some(PendingForwardedZoneResult {
+            producer: other,
+            selected: Some(vec![member]),
+            group: None,
+        });
+        state.park_ability_continuation(PendingContinuation::new(Box::new(grant), &state));
+        let before = state.resolution_stack.clone();
+        settle_replaced_forwarded_zone_delivery(
+            &mut state,
+            &delivery,
+            ZoneMoveCompletion::Moved,
+            &delivery.delivery_events,
+        );
+        assert_eq!(
+            state.resolution_stack, before,
+            "foreign Warp producer remains pending"
+        );
+        state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain
+            .context
+            .pending_forwarded_zone_result
+            .as_mut()
+            .unwrap()
+            .producer = source;
+        settle_replaced_forwarded_zone_delivery(
+            &mut state,
+            &delivery,
+            ZoneMoveCompletion::Moved,
+            &delivery.delivery_events,
+        );
+        let child = &state.active_ability_continuation().unwrap().chain;
+        assert!(child.context.pending_forwarded_zone_result.is_none());
+        assert_eq!(
+            child
+                .context
+                .forwarded_result_context
+                .as_deref()
+                .unwrap()
+                .object_incarnations,
+            vec![ObjectIncarnationRef::from_object(&state.objects[&source])]
+        );
     }
 
     fn forwarded_test_grant(source: ObjectId, keyword: Keyword) -> ResolvedAbility {
