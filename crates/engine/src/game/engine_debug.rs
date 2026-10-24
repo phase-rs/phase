@@ -646,12 +646,17 @@ pub fn apply_debug_action(
                 copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count,
+                appended: Vec::new(),
                 applied: HashSet::new(),
             };
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
-                    super::effects::token::apply_create_token_after_replacement(
-                        state, event, events,
+                    let delivery = super::effects::token::deliver_create_token_event(
+                        state,
+                        event,
+                        Vec::new(),
+                        crate::types::game_state::PendingEffectResolutionEvent::Emit,
+                        events,
                     );
                     // CR 111.4 + CR 707.2a: Preset spawns must install catalog
                     // `rules_text` abilities (SOS Pest attack-life trigger, etc.)
@@ -659,8 +664,15 @@ pub fn apply_debug_action(
                     // `inject_catalog_token_abilities` during creation when
                     // `token_image_ref` is already set; debug preset creation
                     // deferred the ref until here, so inject + reindex now.
+                    //
+                    // CR 111.4 + CR 614.1a: the preset describes the requested
+                    // token only. A replacement-appended batch (Chatterfang's
+                    // Squirrels) is a different token and keeps its own identity —
+                    // the Squirrels "won't have any abilities the other tokens
+                    // were created with" — so only the event's own batch is
+                    // stamped.
                     if let Some(image_ref) = preset_image_ref {
-                        let created_ids = state.last_created_token_ids.clone();
+                        let created_ids = delivery.primary_ids().to_vec();
                         for token_id in created_ids {
                             if let Some(obj) = state.objects.get_mut(&token_id) {
                                 obj.token_image_ref = Some(image_ref.clone());
@@ -1922,6 +1934,75 @@ mod tests {
                 .values()
                 .any(|bucket| bucket.contains(&token_id)),
             "catalog trigger must be registered in the trigger index"
+        );
+    }
+
+    /// CR 111.4 + CR 614.1a: a debug preset describes the requested token only.
+    /// Chatterfang's replacement adds a Squirrel batch to the same CreateToken
+    /// event; the preset's image ref and catalog abilities are stamped on the
+    /// Pest alone, and the Squirrel keeps its own identity (Chatterfang ruling:
+    /// the Squirrels "won't have any abilities the other tokens were created
+    /// with").
+    #[test]
+    fn debug_preset_token_stamps_only_the_requested_batch() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+
+        const CHATTERFANG: &str = "Forestwalk (This creature can't be blocked as long as defending player controls a Forest.)\nIf one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.\n{B}, Sacrifice X Squirrels: Target creature gets +X/-X until end of turn.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Chatterfang, Squirrel General", 3, 3, CHATTERFANG);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config = FormatConfig::standard().with_sandbox();
+        runner.state_mut().debug_mode = true;
+
+        let sos_pest_preset_id = "00a0801d-0212-5890-8957-3cde30f382f9";
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: sos_pest_preset_id.to_string(),
+                owner: PlayerId(0),
+                power_override: None,
+                toughness_override: None,
+                enter_with_counters: Vec::new(),
+            },
+            count: 1,
+            run_etb: true,
+        });
+        crate::game::engine::apply(runner.state_mut(), PlayerId(0), action)
+            .expect("debug CreateToken preset should succeed");
+
+        let state = runner.state();
+        let token_with_subtype = |subtype: &str| {
+            state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|obj| obj.is_token && obj.card_types.subtypes.iter().any(|s| s == subtype))
+                .collect::<Vec<_>>()
+        };
+        let pests = token_with_subtype("Pest");
+        let squirrels = token_with_subtype("Squirrel");
+        assert_eq!(pests.len(), 1, "the requested Pest is created");
+        // Reach guard: Chatterfang's appended batch was created.
+        assert_eq!(squirrels.len(), 1, "Chatterfang adds one Squirrel");
+        let (pest, squirrel) = (pests[0], squirrels[0]);
+        assert!(
+            pest.token_image_ref.is_some(),
+            "the Pest carries its preset"
+        );
+        assert_eq!(
+            pest.trigger_definitions.len(),
+            1,
+            "the Pest's catalog trigger"
+        );
+        assert_ne!(
+            squirrel.token_image_ref, pest.token_image_ref,
+            "the Squirrel is not stamped with the Pest preset"
+        );
+        assert!(
+            squirrel.trigger_definitions.is_empty(),
+            "the Squirrel gains none of the Pest's abilities"
         );
     }
 

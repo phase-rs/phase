@@ -52,6 +52,7 @@ mod announced_x_effect_counts;
 mod announcement_trigger_collection;
 mod another_round_repeat;
 mod anya_merciless_angel_5920;
+mod appended_token_batch_replacement_order;
 mod april_oneil_card_types_among_spells_cast;
 mod arashin_sovereign_self_tuck;
 mod archdruids_charm_search_destination;

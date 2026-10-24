@@ -22,7 +22,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
-use crate::types::resolution::FrameGate;
+use crate::types::resolution::{ChildStackDepth, FrameGate, ResolutionFrame};
 use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError,
@@ -369,6 +369,63 @@ pub(crate) fn stash_pending_counter_post_actions(
         Vec::new(),
         PendingEffectResolved::with_post_actions_without_effect(kind, source_id, post_actions),
     );
+}
+
+/// CR 608.2c: park `completion` as the parent of the complete child stack a
+/// producer raised after recording `child_stack_start`, or as the active frame
+/// when it raised none. Whatever the producer's pause installed — a
+/// direct-choice owner, a post-replacement drain, a counter queue — keeps the
+/// top and finishes first; the completion runs once that child stack drains.
+pub(crate) fn park_pending_counter_completion_at_child_boundary(
+    state: &mut GameState,
+    completion: PendingEffectResolved,
+    child_stack_start: ChildStackDepth,
+) {
+    let queue = PendingCounterAdditionQueue {
+        remaining: Vec::new(),
+        completion: Some(completion),
+    };
+    match state
+        .resolution_stack
+        .capture_child_boundary()
+        .cmp(&child_stack_start)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("a paused producer removed a parent frame before its completion was parked")
+        }
+        std::cmp::Ordering::Equal => state.push_counter_additions(queue),
+        std::cmp::Ordering::Greater => state
+            .resolution_stack
+            .insert_parent_at_child_boundary(
+                ResolutionFrame::CounterAdditions(queue),
+                child_stack_start,
+            )
+            .expect("a counter completion must be inserted below its complete child stack"),
+    }
+}
+
+/// CR 614.1a + CR 608.2c: when the active queue is the rest of a compound
+/// CreateToken event, parked over a copy batch's pause
+/// (`token::drive_token_event_delivery`), that batch has now finished: deliver
+/// the rest of the event. Returns `false` when that delivery paused.
+pub(crate) fn resume_parked_token_event_delivery(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let parked = state.active_counter_additions().is_some_and(|queue| {
+        queue.remaining.is_empty()
+            && queue.completion.as_ref().is_some_and(|completion| {
+                matches!(
+                    completion.post_actions.first(),
+                    Some(PendingCounterPostAction::ContinueTokenEventDelivery { .. })
+                )
+            })
+    });
+    if !parked {
+        return true;
+    }
+    drain_pending_counter_additions(state, events);
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
 pub(crate) fn append_pending_counter_post_actions(
@@ -944,6 +1001,7 @@ fn apply_pending_counter_post_action(
                 copy: None,
                 enter_tapped,
                 count: remaining_count,
+                appended: Vec::new(),
                 applied: HashSet::new(),
             };
             let created_ids = state.last_created_token_ids.clone();
@@ -954,6 +1012,12 @@ fn apply_pending_counter_post_action(
                 PendingEffectResolutionEvent::Suppress,
                 events,
             )
+        }
+        // CR 614.1a + CR 616.1f: the rest of a compound CreateToken event — the
+        // batches still to deliver after the one that paused — and the single
+        // publication of its created referent.
+        PendingCounterPostAction::ContinueTokenEventDelivery { delivery } => {
+            super::token::continue_token_event_delivery(state, *delivery, events)
         }
         PendingCounterPostAction::FinalizeCopyTokenEntry {
             object_id,
@@ -1001,10 +1065,9 @@ fn apply_pending_counter_post_action(
             enter_with_counters,
             remaining_count,
         } => {
-            if remaining_count == 0 {
-                return true;
-            }
-            let status = super::token_copy::apply_copy_token_after_replacement(
+            // CR 707.2 + CR 608.2c: the rest of the paused copy batch, published
+            // after the referent so far.
+            super::token_copy::resume_copy_token_batch_remainder(
                 state,
                 owner,
                 *copy,
@@ -1012,13 +1075,7 @@ fn apply_pending_counter_post_action(
                 enter_with_counters,
                 remaining_count,
                 events,
-            );
-            let completion = status.completion;
-            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
-            match completion {
-                super::token_copy::CopyTokenApplyCompletion::Completed => true,
-                super::token_copy::CopyTokenApplyCompletion::Paused => false,
-            }
+            )
         }
         PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost { object_id, tail } => {
             // CR 303.4f: the host choice is answered and the attach is applied;
