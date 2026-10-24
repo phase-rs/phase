@@ -24,7 +24,7 @@
 //! Opt-in full games: `cargo test -p state-codec self_play::full_ -- --ignored --nocapture`.
 //! This crate's native tests do not claim independent native/WASM parity (B2b).
 
-use std::{fmt, sync::Arc};
+use std::{borrow::Cow, fmt, sync::Arc};
 
 use engine::types::game_state::GameState;
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,7 @@ impl fmt::Display for StateHash {
     }
 }
 
-/// Invalid JSON, malformed frames, or unsupported tags retain serde's error source.
+/// JSON errors retain their serde source; malformed framing and unsupported tags carry a codec diagnostic.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodecError {
@@ -122,8 +122,10 @@ enum FrameTag {
 
 #[derive(Deserialize)]
 struct Envelope<'a> {
-    #[serde(rename = "type")]
-    tag: &'a str,
+    // `Cow` so a JSON-escaped spelling such as "\u0046ull" (decoded into scratch
+    // storage, never borrowed) is accepted like the plain tag.
+    #[serde(rename = "type", borrow)]
+    tag: Cow<'a, str>,
     #[serde(borrow)]
     data: &'a RawValue,
 }
@@ -157,7 +159,7 @@ impl Frame {
             ));
         }
         let envelope: Envelope<'_> = serde_json::from_str(text)?;
-        match envelope.tag {
+        match envelope.tag.as_ref() {
             "Full" => {
                 if !envelope.data.get().starts_with('{') {
                     return Err(CodecError::Malformed("frame payload must be a JSON object"));

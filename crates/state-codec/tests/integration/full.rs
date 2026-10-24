@@ -200,6 +200,20 @@ fn envelope_rejects_positional_and_non_object_forms() {
     ] {
         rejects_with_valid_control(invalid);
     }
+    // A JSON-escaped spelling of the tag is the same string and stays accepted, in either
+    // key order; an escaped unknown tag and an object-valued tag are still rejected.
+    for valid in [
+        br#"{"type":"\u0046ull","data":{"state": [1, 2]}}"#.as_slice(),
+        br#"{"data":{"state": [1, 2]},"type":"Fu\u006cl"}"#,
+    ] {
+        assert_eq!(
+            decode(None, &Frame::from_bytes(valid).unwrap())
+                .unwrap()
+                .as_json(),
+            "[1, 2]"
+        );
+    }
+    rejects_with_valid_control(br#"{"type":"\u0044elta","data":{"state":null}}"#);
     // Unknown valid fields stay tolerated, in either key order.
     for valid in [
         br#"{"type":"Full","data":{"state":null,"x":1},"extra":[1]}"#.as_slice(),
