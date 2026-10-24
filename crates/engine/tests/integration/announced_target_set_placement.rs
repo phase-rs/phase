@@ -913,6 +913,7 @@ fn scroll_rack_places_exactly_the_cards_it_exiled() {
         .act(GameAction::ActivateAbility {
             source_id: rack,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin Scroll Rack activation");
 

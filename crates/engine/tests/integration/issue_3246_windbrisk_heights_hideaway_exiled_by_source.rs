@@ -211,6 +211,7 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
         .act(GameAction::ActivateAbility {
             source_id: windbrisk,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Windbrisk's second ability must be legal after attacking with three creatures");
 

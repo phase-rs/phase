@@ -53,6 +53,7 @@ fn soul_conduit_swaps_two_target_players_life_totals() {
         .act(GameAction::ActivateAbility {
             source_id: conduit,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("begin Soul Conduit activation");
 

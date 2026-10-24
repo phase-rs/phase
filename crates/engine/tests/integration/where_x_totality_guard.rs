@@ -339,12 +339,12 @@ fn newly_enumerated_quantity_carriers_bind_their_where_x_slot() {
     }
 }
 
-/// CR 122.1 — the enters-with-counters rider is its own where-X slot, BESIDE the token's
-/// count and P/T. G'raha Tia creates a *fixed* 1/1 Hero, so `count`, `power` and
-/// `toughness` are all concrete and X lives only in the rider: an arm that bound the other
-/// three still left the Hero entering with 0 counters.
+/// CR 608.2c + CR 122.1 — the post-creation counter placement is its own where-X slot,
+/// BESIDE the token's count and P/T. G'raha Tia creates a *fixed* 1/1 Hero, so `count`,
+/// `power` and `toughness` are all concrete and X lives only in the placement: an arm that
+/// bound the other three still left the Hero receiving 0 counters.
 #[test]
-fn token_enter_with_counters_rider_binds_where_x() {
+fn created_token_counter_placement_binds_where_x() {
     let parsed = parse(
         "Lifelink\nThrow Wide the Gates — Whenever you cast a noncreature spell, you may pay X \
          life, where X is that spell's mana value. If you do, create a 1/1 colorless Hero \
@@ -355,14 +355,14 @@ fn token_enter_with_counters_rider_binds_where_x() {
 
     assert!(
         !parsed.has_where_x_gap,
-        "CR 122.1: 'that spell's mana value' is representable, so the enters-with rider's counter \
+        "CR 122.1: 'that spell's mana value' is representable, so the counter placement's \
          COUNT must bind. Tree: {:?}",
         parsed.tree
     );
     assert!(
         !retains_variable_x(&parsed.tree),
-        "the rider's count kept a bare Variable(\"X\") — the Hero enters with 0 counters while the \
-         face reads as supported. Tree: {:?}",
+        "the placement's count kept a bare Variable(\"X\") — the Hero receives 0 counters while \
+         the face reads as supported. Tree: {:?}",
         parsed.tree
     );
 }

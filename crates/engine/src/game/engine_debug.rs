@@ -964,10 +964,10 @@ fn route_debug_token_to_battlefield(
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
     let copy = CopyTokenSpec {
         values: Box::new(values.clone()),
-        display_source: staged.display_source,
-        printed_ref: staged.printed_ref.clone(),
-        token_image_ref: staged.token_image_ref.clone(),
-        token_art: None,
+        display: super::game_object::DisplayIdentity {
+            token_art: None,
+            ..staged.display_identity()
+        },
         extra_keywords: Vec::new(),
         additional_modifications: Vec::new(),
         tapped: false,
@@ -975,6 +975,8 @@ fn route_debug_token_to_battlefield(
         sacrifice_at: None,
         source_id: object_id,
         controller: staged.controller,
+        // Debug-token route stages no donor; empty mods are stamp-proof.
+        donor: None,
     };
     let mut token = super::game_object::GameObject::new(
         object_id,
@@ -1019,6 +1021,7 @@ fn route_debug_token_to_battlefield(
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_with_counters: Vec::new(),
+        enter_with_choices: None,
         applied: HashSet::new(),
     };
     match replacement::replace_event(state, proposed, &mut events) {

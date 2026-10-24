@@ -989,6 +989,7 @@ fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) 
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = candidate.action
     else {
         return false;
@@ -1565,6 +1566,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: *source_id,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(player),

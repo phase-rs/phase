@@ -75,6 +75,22 @@ pub(crate) fn source_saddled_filter() -> TargetFilter {
     })
 }
 
+/// CR 722.3a: The runtime filter matching the prepared designation. Shared by
+/// the `parse_source_is_prepared` leaf (oracle_nom/condition.rs) and the
+/// trigger-side bridge, so both compose the same `SourceMatchesFilter {
+/// Typed([Prepared]) }` shape.
+///
+/// Property-only (empty `type_filters`): the designation is a permanent
+/// property, not a card-type fact. A prepared source that lost its creature
+/// type (One with the Stars) stays bound to "this creature" (CR 700.7), so a
+/// creature-type gate would misfire the negated intervening-if.
+pub(crate) fn prepared_source_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::Prepared],
+        ..Default::default()
+    })
+}
+
 fn parse_creature_subtype_or_list_prefix(lower: &str) -> Option<(TargetFilter, &str)> {
     crate::parser::oracle_static::parse_subtype_or_list_insensitive_prefix(lower)
 }
@@ -978,6 +994,16 @@ pub(super) fn strip_if_you_do_conditional_with_head(
     String,
 ) {
     let lower = text.to_lowercase();
+
+    // CR 701.17c + CR 608.2c: "If two cards that share a card type were milled
+    // this way, <effect>" (The Tale of Tamiyo) gates on the cards the preceding
+    // mill moved. Delegates to the existing nom stripper so the gate is
+    // recognized in the general clause cascade, not only in the repeat
+    // directive's own chunk.
+    let (milled, milled_rest) = strip_milled_shared_quality_conditional(text);
+    if milled.is_some() {
+        return (milled, None, milled_rest);
+    }
 
     // CR 603.12 + CR 608.2c: strip a leading reflexive-conditional connector
     // ("if you do, ", "when you do, ", "if that player doesn't, ", ...) and
@@ -4836,6 +4862,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaid { .. }
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::QuantityCheck { .. }
+        | AbilityCondition::QuantityQuality { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -5193,14 +5220,15 @@ fn parse_cast_during_phase_condition(
 
 /// CR 500.1 + CR 505.1 + CR 505.1a: Map a phase/step *name phrase* to the
 /// concrete `Phase` set it denotes. Shared by the casting-time
-/// `parse_cast_during_phase_condition` and the resolution-time
-/// `parse_current_phase_condition`. NON-`all_consuming` by design — callers
+/// `parse_cast_during_phase_condition`, the resolution-time
+/// `parse_current_phase_condition`, and the activation during-gate in
+/// `oracle.rs` (`parse_activation_during_gate`). NON-`all_consuming` by design — callers
 /// wrap with `all_consuming` (or `preceded`) and own any trailing text. The
 /// `alt` ordering is load-bearing: the grouped "main phase" (both main phases,
 /// CR 505.1/505.1a) is tried before the "precombat"/"postcombat" refinements,
 /// and "end of combat step" before "end step", so the longest/grouped phrase
-/// wins.
-fn parse_phase_name_set(
+/// wins; likewise "upkeep step" is tried before the bare "upkeep" spelling.
+pub(crate) fn parse_phase_name_set(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
     alt((
@@ -5210,7 +5238,10 @@ fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
-        value(vec![Phase::Upkeep], tag("upkeep")),
+        value(
+            vec![Phase::Upkeep],
+            alt((tag("upkeep step"), tag("upkeep"))),
+        ),
         value(vec![Phase::Draw], tag("draw step")),
         value(vec![Phase::BeginCombat], tag("beginning of combat step")),
         value(vec![Phase::DeclareAttackers], tag("declare attackers step")),
@@ -6061,6 +6092,17 @@ pub(crate) fn static_condition_to_ability_condition(
             comparator: *comparator,
             rhs: rhs.clone(),
         }),
+        // CR 608.2h: 1:1 bridge, never None — a caller that drops a None lowers
+        // the effect to unconditional (see
+        // delayed_trigger_intervening_if_retains_the_commander_control_gate).
+        // `Not` over this variant goes through the generic `other =>` arm of the
+        // `Not` sub-match, giving `AbilityCondition::Not { QuantityQuality }`.
+        StaticCondition::QuantityQuality { quantity, quality } => {
+            Some(AbilityCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
+            })
+        }
         StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
         // CR 103.1: Starting-player status — 1:1 bridge (same `controller` field).
         StaticCondition::WasStartingPlayer { controller } => {
@@ -6387,6 +6429,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not
         // an effect-resolution gate — no `AbilityCondition` equivalent.
@@ -6489,6 +6532,12 @@ pub(crate) fn ability_condition_to_static_condition(
                 lhs: lhs.clone(),
                 comparator: *comparator,
                 rhs: rhs.clone(),
+            })
+        }
+        AbilityCondition::QuantityQuality { quantity, quality } => {
+            Some(StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: *quality,
             })
         }
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
@@ -9247,6 +9296,63 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
 
+    /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
+    /// returns `None` for it — a dropped `None` would lower the effect to
+    /// unconditional. Negation and conjunction ride the generic arms.
+    #[test]
+    fn quantity_quality_bridges_to_ability_condition_and_back() {
+        use crate::types::ability::NumberQuality;
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            },
+        };
+        let affirmative = StaticCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        let ability_affirmative = AbilityCondition::QuantityQuality {
+            quantity: quantity.clone(),
+            quality: NumberQuality::Prime,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&affirmative, &mut ParseContext::default()),
+            Some(ability_affirmative.clone())
+        );
+
+        let negated = StaticCondition::Not {
+            condition: Box::new(affirmative.clone()),
+        };
+        let ability_negated = AbilityCondition::Not {
+            condition: Box::new(ability_affirmative.clone()),
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&negated, &mut ParseContext::default()),
+            Some(ability_negated.clone()),
+            "Not(QuantityQuality) bridges structurally, never to None"
+        );
+
+        let conjunction = StaticCondition::And {
+            conditions: vec![affirmative.clone(), StaticCondition::DuringYourTurn],
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&conjunction, &mut ParseContext::default()),
+            Some(AbilityCondition::And {
+                conditions: vec![ability_affirmative.clone(), AbilityCondition::IsYourTurn],
+            })
+        );
+
+        // Reverse bridge round-trips both forms back to the static input.
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_affirmative),
+            Some(affirmative)
+        );
+        assert_eq!(
+            ability_condition_to_static_condition(&ability_negated),
+            Some(negated)
+        );
+    }
+
     /// SHAPE: both adapters preserve the complete owner-relative negative predicate.
     /// CR 109.5 + CR 400.3: an owner's private zone must belong to the live controller.
     #[test]
@@ -9878,6 +9984,13 @@ mod tests {
             parse("it's your end step"),
             Some(your_phase(vec![Phase::End])),
         );
+        // The "upkeep step" spelling (shared with the activation during-gate)
+        // denotes the same step as the bare "upkeep" spelling (CR 503.1).
+        assert_eq!(
+            parse("it isn't your upkeep step"),
+            parse("it isn't your upkeep"),
+        );
+        assert!(parse("it isn't your upkeep step").is_some());
 
         // Negative: an unrelated condition must NOT be captured by this arm.
         assert_ne!(

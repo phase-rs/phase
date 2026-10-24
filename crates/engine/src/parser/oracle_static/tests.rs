@@ -35321,6 +35321,7 @@ fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
                 scope: CountScope::All,
             },
             exclude: SubtypeExclusion::CreatureTypes,
+            restrict: None,
         },
     };
 
@@ -40360,6 +40361,409 @@ fn for_each_creature_assign_damage_as_though_unblocked_declines_unmodeled_forms(
     }
 }
 
+// ---------------------------------------------------------------------------
+// CR 113.6c: a negated source-zone condition declares the complement zones.
+// ---------------------------------------------------------------------------
+
+const GRIST_STATIC_LINE: &str = "As long as ~ isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.";
+
+const NON_BATTLEFIELD_ZONES: [Zone; 6] = [
+    Zone::Library,
+    Zone::Hand,
+    Zone::Graveyard,
+    Zone::Stack,
+    Zone::Exile,
+    Zone::Command,
+];
+
+fn zones_derived_from(condition: StaticCondition) -> Vec<Zone> {
+    let mut def = crate::types::ability::StaticDefinition::continuous();
+    def.condition = Some(condition);
+    shared::populate_active_zones_from_condition(&mut def);
+    def.active_zones
+}
+
+fn in_zone(zone: Zone) -> StaticCondition {
+    StaticCondition::SourceInZone { zone }
+}
+
+fn negated(condition: StaticCondition) -> StaticCondition {
+    StaticCondition::Not {
+        condition: Box::new(condition),
+    }
+}
+
+fn non_zone_leaf() -> StaticCondition {
+    StaticCondition::IsPresent { filter: None }
+}
+
+/// CR 113.6c: Grist, the Hunger Tide's static declares every zone but the
+/// battlefield, and keeps its condition for runtime evaluation.
+#[test]
+fn grist_negated_battlefield_static_declares_every_other_zone() {
+    let def = parse_static_line(GRIST_STATIC_LINE).expect("Grist static must parse");
+    assert_eq!(def.active_zones, NON_BATTLEFIELD_ZONES.to_vec());
+    assert_eq!(def.condition, Some(negated(in_zone(Zone::Battlefield))));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    for expected in [
+        ContinuousModification::SetPower { value: 1 },
+        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Insect".to_string(),
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+
+    // Full-card dispatch: the same static, from the verbatim Oracle line.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as Grist isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
+        "Grist, the Hunger Tide",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Grist".to_string()],
+    );
+    assert_eq!(
+        parsed.statics[0].active_zones,
+        NON_BATTLEFIELD_ZONES.to_vec()
+    );
+
+    // Paired affirmative sibling: the legacy derivation is untouched.
+    let sibling = parse_static_line(
+        "As long as ~ is in your graveyard, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("affirmative sibling must parse");
+    assert_eq!(sibling.active_zones, vec![Zone::Graveyard]);
+    assert_eq!(sibling.condition, Some(in_zone(Zone::Graveyard)));
+}
+
+#[test]
+fn single_zone_condition_derivation_and_its_negation() {
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Graveyard)),
+        vec![Zone::Graveyard]
+    );
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Battlefield)),
+        Vec::<Zone>::new()
+    );
+    // Battlefield stays listed when the complement has more than one zone.
+    assert_eq!(
+        zones_derived_from(negated(in_zone(Zone::Graveyard))),
+        vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+}
+
+#[test]
+fn negated_disjunction_declares_the_complement() {
+    let expected = vec![
+        Zone::Library,
+        Zone::Hand,
+        Zone::Stack,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    let from_text = parse_static_line(
+        "As long as ~ isn't in your graveyard or on the battlefield, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("negated disjunction must parse");
+    assert_eq!(from_text.active_zones, expected);
+    let typed = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Graveyard), in_zone(Zone::Battlefield)],
+    };
+    assert_eq!(zones_derived_from(negated(typed)), expected);
+    // Paired: the unnegated disjunction keeps the legacy union, in written order.
+    let eminence = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Command), in_zone(Zone::Battlefield)],
+    };
+    assert_eq!(
+        zones_derived_from(eminence),
+        vec![Zone::Command, Zone::Battlefield]
+    );
+}
+
+#[test]
+fn double_negation_declares_the_inner_zone() {
+    let inner = in_zone(Zone::Hand);
+    assert_eq!(zones_derived_from(inner.clone()), vec![Zone::Hand]);
+    assert_eq!(
+        zones_derived_from(negated(negated(inner.clone()))),
+        vec![Zone::Hand]
+    );
+    assert_eq!(
+        zones_derived_from(negated(negated(negated(inner)))),
+        vec![
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+}
+
+/// CR 113.6c: a negation that also tests a non-zone leaf declares every zone the
+/// source's zone alone does not rule out (a conservative superset); the runtime
+/// condition decides each one. A zone-independent negation states no zones.
+#[test]
+fn mixed_negation_declares_every_zone_it_can_hold_in() {
+    // not (in graveyard and P): true in every other zone, and in the graveyard
+    // whenever P is false — so it can hold in every zone.
+    let non_pure = negated(StaticCondition::And {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    });
+    assert_eq!(
+        zones_derived_from(non_pure),
+        vec![
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // not (in graveyard or P): false in the graveyard; elsewhere it holds when
+    // P is false.
+    let negated_disjunction = negated(StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    });
+    assert_eq!(
+        zones_derived_from(negated_disjunction),
+        vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // not (in graveyard and in hand): no source is in both, so it always holds.
+    let contradiction = negated(StaticCondition::And {
+        conditions: vec![
+            in_zone(Zone::Graveyard),
+            in_zone(Zone::Hand),
+            non_zone_leaf(),
+        ],
+    });
+    assert_eq!(
+        zones_derived_from(contradiction),
+        vec![
+            Zone::Graveyard,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    // A negation that tests no zone keeps the battlefield default.
+    assert_eq!(
+        zones_derived_from(negated(non_zone_leaf())),
+        Vec::<Zone>::new()
+    );
+    let zone_free_compound = negated(StaticCondition::And {
+        conditions: vec![non_zone_leaf(), StaticCondition::DuringYourTurn],
+    });
+    assert_eq!(zones_derived_from(zone_free_compound), Vec::<Zone>::new());
+
+    // Paired positives: the unnegated Anger shape still derives [Graveyard], and a pure
+    // Not inside a mixed And is still complemented.
+    let anger = StaticCondition::And {
+        conditions: vec![in_zone(Zone::Graveyard), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(anger), vec![Zone::Graveyard]);
+    let mixed = StaticCondition::And {
+        conditions: vec![negated(in_zone(Zone::Battlefield)), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(mixed), NON_BATTLEFIELD_ZONES.to_vec());
+    let from_text = parse_static_line(
+        "As long as ~ isn't on the battlefield and you control a Forest, it's a 1/1 Insect creature in addition to its other types.",
+    )
+    .expect("mixed negation must parse");
+    assert_eq!(from_text.active_zones, NON_BATTLEFIELD_ZONES.to_vec());
+}
+
+/// CR 113.6b + CR 113.6c: a source filter carrying a zone property is a test of
+/// the source's zone. Affirmed, it declares the zones it allows; negated, every
+/// zone it doesn't rule out. A source filter with no zone property tests no zone.
+#[test]
+fn zone_bearing_source_filter_is_a_zone_test() {
+    use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+    let source_filter = |properties: Vec<FilterProp>| StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(properties)),
+    };
+    let in_graveyard = source_filter(vec![FilterProp::InZone {
+        zone: Zone::Graveyard,
+    }]);
+    assert_eq!(
+        zones_derived_from(in_graveyard.clone()),
+        vec![Zone::Graveyard]
+    );
+    // Negated, it holds in every other zone, and in the graveyard whenever the
+    // source isn't a creature: it is zone-dependent, so it declares every zone
+    // (unlike a zone-free negation, below) and the runtime condition decides.
+    assert_eq!(
+        zones_derived_from(negated(in_graveyard)),
+        vec![
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    let in_graveyard_or_exile = source_filter(vec![FilterProp::InAnyZone {
+        zones: vec![Zone::Graveyard, Zone::Exile],
+    }]);
+    assert_eq!(
+        zones_derived_from(in_graveyard_or_exile),
+        vec![Zone::Graveyard, Zone::Exile]
+    );
+    // A filter's own connectives compose: "a creature card in your graveyard or
+    // a spell" rules out every zone but those two.
+    let graveyard_or_spell = StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                TargetFilter::StackSpell,
+            ],
+        },
+    };
+    assert_eq!(
+        zones_derived_from(graveyard_or_spell),
+        vec![Zone::Graveyard, Zone::Stack]
+    );
+    // No zone property: no zone stated, affirmed or negated.
+    let zone_free = source_filter(vec![]);
+    assert_eq!(zones_derived_from(zone_free.clone()), Vec::<Zone>::new());
+    assert_eq!(zones_derived_from(negated(zone_free)), Vec::<Zone>::new());
+}
+
+/// CR 113.6b + CR 113.6c: a source filter's zone properties nested under
+/// `FilterProp::Not` / `FilterProp::AnyOf` are zone tests too.
+#[test]
+fn nested_zone_props_of_a_source_filter_are_zone_tests() {
+    use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+    let source_filter = |properties: Vec<FilterProp>| StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(properties)),
+    };
+    let not_on_battlefield = source_filter(vec![FilterProp::Not {
+        prop: Box::new(FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }),
+    }]);
+    assert_eq!(
+        zones_derived_from(not_on_battlefield),
+        NON_BATTLEFIELD_ZONES.to_vec()
+    );
+    let graveyard_or_exile = source_filter(vec![FilterProp::AnyOf {
+        props: vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::InZone { zone: Zone::Exile },
+        ],
+    }]);
+    assert_eq!(
+        zones_derived_from(graveyard_or_exile),
+        vec![Zone::Graveyard, Zone::Exile]
+    );
+}
+
+/// CR 113.6c: a disjunction of a source-zone test and a non-zone leaf can hold
+/// in every zone (the non-zone leaf may be true anywhere), so it declares them
+/// all, the named zone first; a conjunction still declares only its zone.
+#[test]
+fn disjunction_with_a_non_zone_leaf_declares_every_zone() {
+    let in_hand_or_present = StaticCondition::Or {
+        conditions: vec![in_zone(Zone::Hand), non_zone_leaf()],
+    };
+    assert_eq!(
+        zones_derived_from(in_hand_or_present),
+        vec![
+            Zone::Hand,
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command
+        ]
+    );
+    let in_hand_and_present = StaticCondition::And {
+        conditions: vec![in_zone(Zone::Hand), non_zone_leaf()],
+    };
+    assert_eq!(zones_derived_from(in_hand_and_present), vec![Zone::Hand]);
+    // No node depends on the source's zone: the battlefield default.
+    let zone_free = StaticCondition::Or {
+        conditions: vec![non_zone_leaf(), StaticCondition::DuringYourTurn],
+    };
+    assert_eq!(zones_derived_from(zone_free), Vec::<Zone>::new());
+}
+
+#[test]
+fn complement_collapsing_to_battlefield_stays_default() {
+    let everything_else = StaticCondition::Or {
+        conditions: NON_BATTLEFIELD_ZONES.iter().copied().map(in_zone).collect(),
+    };
+    assert_eq!(
+        zones_derived_from(negated(everything_else)),
+        Vec::<Zone>::new()
+    );
+    assert_eq!(
+        zones_derived_from(in_zone(Zone::Battlefield)),
+        Vec::<Zone>::new()
+    );
+    // Identities of the set algebra (vacuous shapes, unreachable from text).
+    let empty_or = StaticCondition::Or { conditions: vec![] };
+    assert_eq!(zones_derived_from(empty_or.clone()), Vec::<Zone>::new());
+    assert_eq!(zones_derived_from(negated(empty_or)), Zone::ALL.to_vec());
+}
+
+#[test]
+fn zone_derivation_is_idempotent_and_never_clobbers() {
+    let mut def = parse_static_line(GRIST_STATIC_LINE).expect("Grist static must parse");
+    let once = def.active_zones.clone();
+    assert_eq!(once, NON_BATTLEFIELD_ZONES.to_vec());
+    shared::populate_active_zones_from_condition(&mut def);
+    assert_eq!(def.active_zones, once);
+
+    // The Class level-section path lowers a second time.
+    let relowered = lower_static_ir(&StaticIr::from_definition(GRIST_STATIC_LINE, def));
+    assert_eq!(relowered.active_zones, once);
+
+    // A pre-set active_zones is never replaced by the derivation.
+    let mut preset = crate::types::ability::StaticDefinition::continuous();
+    preset.condition = Some(negated(in_zone(Zone::Battlefield)));
+    preset.active_zones = vec![Zone::Hand];
+    shared::populate_active_zones_from_condition(&mut preset);
+    assert_eq!(preset.active_zones, vec![Zone::Hand]);
+}
 // ── Cost-modifier gates fail closed (CR 601.2f) ─────────────────────────────
 
 fn parse_card(
@@ -40799,4 +41203,30 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
         def.activation_restrictions
     );
     assert!(crate::game::mana_abilities::is_mana_ability(def));
+}
+
+/// CR 702.16i + CR 903.4: Commander's Plate — "Equipped creature gets +3/+3 and
+/// has protection from each color that's not in your commander's color
+/// identity." The protection quality is a typed `EachColor` set, not an
+/// untyped `CardType` string that no source could ever match.
+#[test]
+fn commanders_plate_static_line_parses_to_each_color_protection_set() {
+    use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
+
+    let def = parse_static_line(
+        "Equipped creature gets +3/+3 and has protection from each color that's not in your commander's color identity.",
+    )
+    .expect("Commander's Plate static line must parse");
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 3 },
+            ContinuousModification::AddToughness { value: 3 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                    ProtectionColorSet::OutsideCommanderColorIdentity
+                )),
+            },
+        ]
+    );
 }

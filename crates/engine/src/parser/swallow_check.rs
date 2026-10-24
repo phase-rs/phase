@@ -30,17 +30,18 @@ use super::oracle_ir::feature::{
     audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
-use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
+use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    ChooseFromZoneConstraint, CoinFlipRun, Comparator, ContinuousModification,
+    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -1127,16 +1128,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
         // "you may choose new targets for the copy" on the win branch (Krark)
         // lives in `win_effect`, not at `def.optional`.
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        } => win_effect
-            .as_ref()
-            .is_some_and(|def| def_tree_has_optional(def))
-            || lose_effect
-                .as_ref()
-                .is_some_and(|def| def_tree_has_optional(def)),
         Effect::FlipCoins {
             win_effect,
             lose_effect,
@@ -1147,7 +1138,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             || lose_effect
                 .as_ref()
                 .is_some_and(|def| def_tree_has_optional(def)),
-        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -1159,7 +1149,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 /// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
 /// Condition_If, and Duration_ThisTurn detectors when the original text matches
 /// the "die this turn, exile instead" rider grammar. Flip-coin branches
-/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// (Desperate Gambit) nest these under `Effect::FlipCoins`, so recurse there too.
 /// Flip-coin branch payloads may carry one-shot damage replacements.
 fn flip_branch_has_target_replacement(
     win_effect: &Option<Box<AbilityDefinition>>,
@@ -1178,12 +1168,8 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
         Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
             return true
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -2797,7 +2783,7 @@ fn ward_power_life_payments(cost: &WardCost) -> usize {
         WardCost::PayLifeEqualToPower => 1,
         WardCost::Mana(_)
         | WardCost::PayLife(_)
-        | WardCost::DiscardCard
+        | WardCost::Discard { .. }
         | WardCost::Sacrifice { .. }
         | WardCost::Waterbend(_)
         | WardCost::GetPlayerCounters { .. }
@@ -4637,6 +4623,36 @@ fn cast_this_way_alt_cost_is_only_if_marker(stripped: &str, evidence: &UnitEvide
     !has_other_if
 }
 
+/// CR 603.4 + CR 603.2: the distributed `{X}`-in-cost intervening-if of a split
+/// cast-or-activate trigger ("Whenever you cast an instant or sorcery spell or
+/// activate an ability, if that spell's mana cost or that ability's activation
+/// cost contains {X}, …" — Unbound Flourishing). The trigger parser answers
+/// each disjunct once, in its own half's event filter
+/// (`FilterProp::HasXInManaCost` on the spell half, CR 202.1;
+/// `FilterProp::HasXInActivationCost` on the activation half, CR 602.1a), so
+/// no condition slot is populated although the condition is represented.
+///
+/// Recognition and lowering cannot disagree: the clause is located with the
+/// combinator that folds it (`oracle_trigger::parse_distributed_x_cost_condition`),
+/// and both folded properties must be present in the unit's evidence. It is
+/// text-scoped: only the recognized clause is removed before the residual scan,
+/// so any other bare " if " in the unit still flags.
+fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let folded = |prop: FilterProp| evidence.any::<FilterProp>(|found| *found == prop);
+    if !(folded(FilterProp::HasXInManaCost) && folded(FilterProp::HasXInActivationCost)) {
+        return false;
+    }
+    let Some((before, (), after)) = scan_preceded(stripped, parse_distributed_x_cost_condition)
+    else {
+        return false;
+    };
+    let residual = format!("{before}{after}");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -4780,6 +4796,13 @@ fn detect_condition_if(
     if play_from_exile_alt_ability_cost_is_only_if_marker(&stripped, parsed) {
         return;
     }
+    // CR 603.4: the distributed `{X}`-in-cost intervening-if of a split
+    // cast-or-activate trigger (Unbound Flourishing) is answered in each half's
+    // event filter. Text-scoped: suppresses only when that clause is the
+    // unit's only bare " if ".
+    if distributed_x_cost_if_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
     // independent condition; prevention replacements encode it by storing the
     // follow-up in `execute`, which the replacement pipeline only fires from
@@ -4890,8 +4913,14 @@ fn detect_condition_if(
     }) {
         return;
     }
-    // CR 603.4: an explicit quantity comparison IS the conditional gate.
-    if evidence.any::<AbilityCondition>(|c| matches!(c, AbilityCondition::QuantityCheck { .. })) {
+    // CR 603.4: an explicit quantity comparison or arithmetic-quality predicate IS the
+    // conditional gate.
+    if evidence.any::<AbilityCondition>(|c| {
+        matches!(
+            c,
+            AbilityCondition::QuantityCheck { .. } | AbilityCondition::QuantityQuality { .. }
+        )
+    }) {
         return;
     }
     // CR 614.1a: replacement riders whose carried event/destination IS the "if X would Y"
@@ -4904,8 +4933,10 @@ fn detect_condition_if(
             e,
             Effect::AddTargetReplacement { .. }
                 | Effect::CreatePlaneswalkReplacement { .. }
-                | Effect::FlipCoin { .. }
-                | Effect::FlipCoins { .. }
+                | Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly { .. },
+                    ..
+                }
                 | Effect::RollDie { .. }
                 | Effect::ForceBlock { .. }
                 | Effect::ForceAttack { .. }
@@ -10150,7 +10181,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
     /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
-    /// into `FlipCoin.win_effect`.
+    /// into `FlipCoins.win_effect`.
     #[test]
     fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
         let parsed = parse_named(
@@ -12934,12 +12965,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
         match def.effect.as_ref() {
             Effect::CreateDamageReplacement { .. } => return true,
-            Effect::FlipCoin {
-                win_effect,
-                lose_effect,
-                ..
-            }
-            | Effect::FlipCoins {
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -12961,7 +12987,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
     /// one-shot damage replacements; the Replacement_Instead detector must walk
-    /// `FlipCoin` payloads (issue #2236).
+    /// `FlipCoins` payloads (issue #2236).
     #[test]
     fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
         let parsed = parse_named(
@@ -15711,5 +15737,130 @@ mod detect_condition_if_replacement_exemption_tests {
             result, " if a player would sacrifice a permanent, exile it instead.",
             "only the represented sentence should have been stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod distributed_x_cost_if_exemption_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Unbound Flourishing, verbatim from MTGJSON.
+    const UNBOUND_FLOURISHING: &str = "Whenever you cast a permanent spell with a mana cost that contains {X}, double the value of X.\nWhenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Unbound Flourishing's second line, verbatim.
+    const UNBOUND_COPY_LINE: &str = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Vazi, Keen Negotiator's third line, verbatim: a cast-or-activate
+    /// intervening-if that is not the `{X}`-in-cost restatement.
+    const VAZI_LINE: &str = "Whenever an opponent casts a spell or activates an ability, if mana from a Treasure was spent to cast it or activate it, put a +1/+1 counter on target creature, then draw a card.";
+
+    /// Evidence carrying both folded halves of the distributed condition.
+    const FOLDED: &str = r#"{"triggers":[
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}},
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}
+    ]}"#;
+
+    fn has_condition_if_swallow(diagnostics: &[OracleDiagnostic]) -> bool {
+        diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+    }
+
+    fn no_parsed_abilities() -> ParsedAbilities {
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// Runs Detector G on one unit's text, cleaned as `check_swallowed_clauses`
+    /// cleans it, against `evidence_json`.
+    fn condition_if_fires(text: &str, evidence_json: &str) -> bool {
+        let cleaned = strip_parens(&text.to_ascii_lowercase());
+        let evidence = UnitEvidence::from_json_for_test(evidence_json);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            text,
+            &evidence,
+            &no_parsed_abilities(),
+            &mut diagnostics,
+        );
+        has_condition_if_swallow(&diagnostics)
+    }
+
+    /// CR 603.4: Unbound Flourishing's line-2 intervening-if is folded into each
+    /// half's event filter, so the real parse raises no swallowed `Condition_If`.
+    /// Reach guards: the line lowers to its spell-cast and activation halves and
+    /// nothing on the card is unimplemented, so the per-unit audit is not
+    /// skipped. Paired positive: the same line with the condition left unfolded
+    /// (no `HasXIn*Cost` evidence) still warns.
+    #[test]
+    fn unbound_copy_line_is_not_a_swallowed_condition_if() {
+        let parsed = parse_oracle_text(
+            UNBOUND_FLOURISHING,
+            "Unbound Flourishing",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let modes: Vec<&TriggerMode> = parsed.triggers.iter().map(|t| &t.mode).collect();
+        assert_eq!(
+            modes,
+            vec![
+                &TriggerMode::SpellCast,
+                &TriggerMode::SpellCast,
+                &TriggerMode::AbilityActivated
+            ]
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach: the audit must run over line 2: {parsed:?}"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "{:?}",
+            parsed.parse_warnings
+        );
+
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, "{}"));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// The exemption needs both folded properties: one half's evidence alone
+    /// does not represent a condition that names both cost slots.
+    #[test]
+    fn distributed_x_cost_if_needs_both_folded_halves() {
+        let mana_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}}"#;
+        let activation_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}"#;
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, mana_only));
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, activation_only));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// Text-scoped: only the recognized restatement is removed, so another bare
+    /// " if " in the same unit still flags (SYNTHETIC: Unbound's line with a
+    /// trailing "if you control an artifact"; no printed card pairs the
+    /// restatement with a second condition), and an intervening-if the
+    /// combinator does not recognize (Vazi's, verbatim) is never exempted.
+    #[test]
+    fn distributed_x_cost_if_exempts_only_the_recognized_clause() {
+        let with_second_if = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy if you control an artifact.";
+        assert!(condition_if_fires(with_second_if, FOLDED));
+        assert!(condition_if_fires(VAZI_LINE, FOLDED));
     }
 }

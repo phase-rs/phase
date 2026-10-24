@@ -3,9 +3,9 @@ use std::ops::ControlFlow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -38,12 +38,12 @@ use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, E
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
-    CastPermissionConstraint, CastingPermission, CombatHistoryScope, Comparator, ConjureSource,
-    ContinuousModification, ControllerRef, CountBinding, DamageChannel, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider, FilterProp,
-    GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
-    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
+    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
+    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
+    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
+    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
@@ -2387,6 +2387,9 @@ pub(super) fn target_choice_timing_for_parsed(
     // printed text, so its lowercased fragment is computed once and shared.
     let lower = fragment.to_ascii_lowercase();
     let has_untargeted_resolution_choice = match &parsed.effect {
+        // CR 115.10a + CR 608.2d: a described sticker recipient is chosen
+        // during this instruction, independently of later printed targets.
+        Effect::PutSticker { target, .. } if !target.is_context_ref() => true,
         // CR 115.1d + CR 608.2d: an Attach instruction whose ATTACHMENT operand
         // is itself an untargeted choice ("attach an Equipment", "cast that
         // card") resolves that choice while the effect resolves; its explicit
@@ -3176,9 +3179,7 @@ impl ReflexiveGateParent {
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
             | Effect::RollDie { .. }
-            | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
-            | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
@@ -3243,6 +3244,7 @@ impl ReflexiveGateParent {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -3940,49 +3942,17 @@ pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 111.1: is this a token-creation effect? The authority is
+/// [`Effect::is_token_creator`]; this name is kept for the parser's callers.
 pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Populate | Effect::Token { .. } | Effect::CopyTokenOf { .. }
-    )
+    effect.is_token_creator()
 }
 
-/// CR 608.2c + CR 701.40a + CR 701.58a + CR 701.62a: Does this clause put a NEW
-/// permanent onto the battlefield that a later same-chain anaphor can name?
-///
-/// A created token and a face-down entry are indistinguishable to the anaphor.
-/// Both clauses produce exactly one new permanent and declare NO target, so a
-/// following "it" / "that creature" has exactly one possible referent — the
-/// thing the clause just made. Manifest (CR 701.40a), manifest dread
-/// (CR 701.62a) and cloak (CR 701.58a) all route through the one runtime
-/// producer (`game::morph::manifest_card`) and put a 2/2 face-down creature
-/// onto the battlefield, exactly as `Effect::Token` puts a token there.
-///
-/// Keying the chain-referent flag on "token" alone left the face-down producers
-/// with no referent, so their anaphor fell through to `ParentTarget` (empty —
-/// the producer has no targets) or to the trigger source: Conductive Machete
-/// attached to nothing, Weight Room put its counters on the Room (#7531).
-///
-/// `Effect::Conjure` (digital-only, no CR entry) is the same shape again: it
-/// puts exactly one new object into a zone and declares no target, so a
-/// following same-chain "it" has exactly one possible referent — the card it
-/// just conjured. Agent of Raffine's "Conjure a duplicate ... into your hand.
-/// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
-/// (the ability's actual chosen target — "target opponent" — not the
-/// conjured card).
-///
-/// The declined "if you do" walk (`game::effects`,
-/// `declined_gate_surviving_instructions`) reads the same answer to keep a
-/// created object and its later rider together.
+/// CR 608.2c: does this clause publish the created referent a later same-chain
+/// anaphor names? The authority (and its rationale) is
+/// [`Effect::publishes_created_referent`]; this name is kept for the parser's callers.
 pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
-    is_token_creating_effect(effect)
-        || matches!(
-            effect,
-            Effect::Manifest { .. }
-                | Effect::ManifestDread
-                | Effect::Cloak { .. }
-                | Effect::Conjure { .. }
-        )
+    effect.publishes_created_referent()
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
@@ -4263,7 +4233,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
-            | TargetFilter::SourceAttackTarget
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -4361,7 +4331,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
-        | TargetFilter::SourceAttackTarget
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -4889,7 +4859,8 @@ fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> 
                 damage_source_filter,
                 Some(TargetFilter::ChosenDamageSource { .. })
             ),
-            Effect::FlipCoin {
+            // Branch recursion is mode-agnostic (single, N and until-loss runs).
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -4931,7 +4902,8 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
         {
             *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
-        Effect::FlipCoin {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -5233,7 +5205,7 @@ pub(super) fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut Ab
 /// True when a def is a rider clause bound to the just-created tokens
 /// (`TargetFilter::LastCreated`) — e.g. the "Those tokens gain haste" grant and
 /// the "Exile them at the beginning of the next end step" delayed cleanup that
-/// follow a token-creating `FlipCoinUntilLose` win clause (Mirror March #5966).
+/// follow a token-creating until-loss `FlipCoins` win clause (Mirror March #5966).
 /// Used as the absorb predicate that folds these into the per-win `win_effect`.
 fn def_is_last_created_rider(def: &AbilityDefinition) -> bool {
     effect_targets_last_created(&def.effect)
@@ -5279,11 +5251,17 @@ fn effect_targets_last_created(effect: &Effect) -> bool {
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
-/// branches into their parent `FlipCoin` effect.
+/// branches into their parent `FlipCoins` effect.
 ///
-/// Pattern: a bare `FlipCoin { win: None, lose: None }` followed by one or more
-/// `FlipCoin { win: Some(..), lose: None }` / `FlipCoin { win: None, lose: Some(..) }`
-/// defs produced by the "if you win/lose the flip" intercept in `parse_effect_clause`.
+/// Pattern: a bare single-flip `FlipCoins { win: None, lose: None }` followed by one or
+/// more single-flip `FlipCoins { win: Some(..), lose: None }` / `FlipCoins { win: None,
+/// lose: Some(..) }` defs produced by the "if you win/lose the flip" intercept in
+/// `parse_effect_clause`.
+///
+/// The three run shapes keep their pre-merge consolidation membership through the
+/// head's `flips`: a single flip absorbs only branch-only single-flip stubs, an
+/// `Exactly` multi-flip run absorbs its following clause as the per-heads branch, and
+/// `UntilLoss` absorbs its per-win clause chain.
 pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _kind: AbilityKind) {
     let mut i = 0;
     while i < defs.len() {
@@ -5291,31 +5269,36 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
         // the `flipper` (which player flips); the following branch-only flips are
         // stubs with the default `Controller` flipper, so preserve the bare flip's
         // flipper rather than the stubs'.
-        if let Effect::FlipCoin {
-            win_effect: None,
-            lose_effect: None,
-            flipper,
-        } = &*defs[i].effect
-        {
-            let flipper = flipper.clone();
+        let bare_single_flipper = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips,
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if flips.is_single_flip() => Some(flipper.clone()),
+            _ => None,
+        };
+        if let Some(flipper) = bare_single_flipper {
             let mut win = None;
             let mut lose = None;
             let mut j = i + 1;
             while j < defs.len() && (win.is_none() || lose.is_none()) {
                 match &*defs[j].effect {
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: Some(w),
                         lose_effect: None,
                         ..
-                    } if win.is_none() => {
+                    } if flips.is_single_flip() && win.is_none() => {
                         win = Some(w.clone());
                         j += 1;
                     }
-                    Effect::FlipCoin {
+                    Effect::FlipCoins {
+                        flips,
                         win_effect: None,
                         lose_effect: Some(l),
                         ..
-                    } if lose.is_none() => {
+                    } if flips.is_single_flip() && lose.is_none() => {
                         lose = Some(l.clone());
                         j += 1;
                     }
@@ -5323,7 +5306,8 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                 }
             }
             if win.is_some() || lose.is_some() {
-                *defs[i].effect = Effect::FlipCoin {
+                *defs[i].effect = Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
                     win_effect: win,
                     lose_effect: lose,
                     flipper,
@@ -5332,50 +5316,60 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             }
         }
 
-        // CR 705.2 + CR 608.2c: Consolidate FlipCoinUntilLose with its per-win
+        // CR 705.2 + CR 608.2c: Consolidate an until-loss run with its per-win
         // clause chain. Absorb the win head (e.g. the token-creating copy clause)
         // PLUS any trailing rider clauses that reference the just-created tokens
         // (`LastCreated`) — "Those tokens gain haste", "Exile them …", already
         // rebound to `LastCreated` by the earlier `resolve_populated_token_anaphors`
         // pass — into ONE win_effect chain. They must live INSIDE win_effect
-        // because `finish_until_lose` runs win_effect once per win and each
+        // because `complete_run` runs win_effect once per win and each
         // `CopyTokenOf` overwrites `state.last_created_token_ids`; left as post-loop
         // siblings they would grant haste to / exile only the final win's token
         // (Mirror March #5966). Riders that do NOT reference `LastCreated` stay
         // top-level siblings — the predicate is the reach guard against
         // over-absorbing an unrelated following clause.
-        if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
+        if matches!(
+            &*defs[i].effect,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::UntilLoss,
+                ..
+            }
+        ) && i + 1 < defs.len()
+        {
             let mut head = defs.remove(i + 1);
             absorb_last_created_riders(defs, i, &mut head);
-            *defs[i].effect = Effect::FlipCoinUntilLose {
-                win_effect: Box::new(head),
-            };
+            if let Effect::FlipCoins { win_effect, .. } = &mut *defs[i].effect {
+                *win_effect = Some(Box::new(head));
+            }
         }
 
-        // CR 705: Consolidate FlipCoins with its following effect clause — the
+        // CR 705: Consolidate a multi-flip run with its following effect clause — the
         // "for each heads …" / "skips their next X turns where X is the number of
-        // coins that came up heads" sentence. Like FlipCoinUntilLose, trailing
+        // coins that came up heads" sentence. Like the until-loss run, trailing
         // `LastCreated` riders must join the per-head chain, rather than apply
-        // only to the final token created by the loop.
-        if let Effect::FlipCoins {
-            win_effect: None,
-            lose_effect: None,
-            count,
-            flipper,
-        } = &*defs[i].effect
-        {
-            if i + 1 < defs.len() {
-                let count = count.clone();
-                let flipper = flipper.clone();
-                let mut next = defs.remove(i + 1);
-                absorb_last_created_riders(defs, i, &mut next);
-                *defs[i].effect = Effect::FlipCoins {
-                    count,
-                    win_effect: Some(Box::new(next)),
-                    lose_effect: None,
-                    flipper,
-                };
+        // only to the final token created by the loop. A single flip ("Flip a coin.
+        // Draw a card.") must NOT absorb its following clause: that clause is a
+        // sibling instruction, not a per-heads branch.
+        let multi_flip_head = match &*defs[i].effect {
+            Effect::FlipCoins {
+                flips: flips @ CoinFlipRun::Exactly { .. },
+                win_effect: None,
+                lose_effect: None,
+                flipper,
+            } if !flips.is_single_flip() && i + 1 < defs.len() => {
+                Some((flips.clone(), flipper.clone()))
             }
+            _ => None,
+        };
+        if let Some((flips, flipper)) = multi_flip_head {
+            let mut next = defs.remove(i + 1);
+            absorb_last_created_riders(defs, i, &mut next);
+            *defs[i].effect = Effect::FlipCoins {
+                flips,
+                win_effect: Some(Box::new(next)),
+                lose_effect: None,
+                flipper,
+            };
         }
 
         i += 1;
@@ -5590,8 +5584,8 @@ mod difference_binding_tests {
 /// whether it leads (`"for each flip you won, create …"` — Mirror March) or
 /// trails (`"put a +1/+1 counter on ~ for each flip you won"` — Crazed
 /// Firecat). Unlike `strip_for_each_prefix`, this carries NO iteration count:
-/// `FlipCoinUntilLose`/`FlipCoins` already run their `win_effect` once per win
-/// (`finish_until_lose`), so lifting the count into a `repeat_for` loop (or a
+/// `FlipCoins` already runs its `win_effect` once per win
+/// (`complete_run` for an until-loss run), so lifting the count into a `repeat_for` loop (or a
 /// counter-count multiplier) would double-apply it. Dropping the quantifier
 /// lets the bare imperative reach its own combinator. The `"flip(s) you won"`
 /// noun is not a countable `parse_for_each_clause` clause, so neither
@@ -5640,13 +5634,20 @@ fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
 /// (the game uses only integers), so this is plain count templating, not the
 /// CR 609.3 "do as much as possible" rule.
 ///
-/// Single authority for "attach trailing for-each multiplier", shared across
-/// quantity-taking verbs whose own quantity parser has already returned the
-/// exact remainder where the multiplier is allowed. The count parser leaves
-/// quantity nouns such as `card`/`cards` in the remainder, so this accepts that
-/// draw-count noun axis before the marker. Returns `None` when the remainder
-/// does not begin with an allowed multiplier shape or the clause does not parse
-/// — never silently substitutes `Fixed(1)`.
+/// `for every` is only a marker spelling of `for each`. The whole clause after
+/// the marker, numbered or not, goes to `parse_for_each_clause_expr`. That is
+/// the single grouped-quantity authority: "for every three cards in your
+/// graveyard" counts complete groups of three through
+/// `parse_for_each_grouped_clause_expr_with_parser`, which defines the group
+/// size once (N >= 2) and builds the floor `DivideRounded` (CR 107.1a). This
+/// seam does not parse group sizes itself.
+///
+/// Called by `counter::parse_counter_for_each_suffix` on the exact remainder its
+/// own quantity parser returned, where the multiplier is allowed. The count
+/// parser leaves quantity nouns such as `card`/`cards` in the remainder, so this
+/// accepts that noun axis before the marker. Returns `None` when the remainder
+/// does not begin with an allowed marker or the clause does not parse — never
+/// silently substitutes `Fixed(1)`.
 pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
@@ -5659,8 +5660,7 @@ pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExp
             multispace1,
         ))
         .parse(rest)?;
-        let (rest, _) = tag("for each ").parse(rest)?;
-        Ok((rest, ()))
+        value((), alt((tag("for each "), tag("for every ")))).parse(rest)
     })?;
     let clause_lower = for_each_clause.to_lowercase();
     parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
@@ -7742,6 +7742,67 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 603.7a + CR 500.1: clause-final "at the beginning of {your next <step> |
+/// that player's next <step> | the <step> on your next turn}" for one named step.
+/// The player is a placeholder rewritten from `binding` at delayed-trigger
+/// creation; "on your next turn" skips the creation turn's step, and
+/// CR 608.2c: "that player" is the owner of the object the parent moved.
+fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+    use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
+    // A grouped name ("main phase") is two steps, so it is left to the table.
+    let step = || {
+        map_opt(
+            super::conditions::parse_phase_name_set,
+            |phases| match phases.as_slice() {
+                [phase] => Some(*phase),
+                _ => None,
+            },
+        )
+    };
+    let (rest, (binding, gate, phase)) = terminated(
+        preceded(
+            tag("at the beginning of "),
+            alt((
+                map(preceded(tag("your next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::Controller,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(preceded(tag("that player's next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::ParentTargetOwner,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(
+                    delimited(tag("the "), step(), tag(" on your next turn")),
+                    |phase| {
+                        (
+                            DelayedTriggerPlayerBinding::Controller,
+                            TurnGate::AfterCreationTurn,
+                            phase,
+                        )
+                    },
+                ),
+            )),
+        ),
+        eof,
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player: crate::types::player::PlayerId(0),
+            gate,
+            binding,
+        },
+    ))
+}
+
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
@@ -7754,6 +7815,15 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
+    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
+        &lower,
+        parse_player_next_step_suffix,
+    )
+    .filter(|(offset, ..)| *offset > 0)
+    {
+        let end = text.len() - (lower.len() - offset);
+        return (text[..end].trim_end_matches(',').trim(), Some(condition));
+    }
     for (suffix, condition) in [
         (
             " at the beginning of the next end step",
@@ -7791,54 +7861,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
-        // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
-        // at the beginning of your next end step" uses this suffix shape; the
-        // player placeholder is rewritten to `ability.controller` at resolve
-        // time alongside the main-phase and upkeep variants.
-        (
-            " at the beginning of your next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        // CR 608.2c: anaphoric "that player's next end step" — "that player"
-        // refers to a chained effect's target's OWNER, not the ability's
-        // controller (The Eternal Wanderer's +1: "Return that card to the
-        // battlefield under its owner's control at the beginning of that
-        // player's next end step"; Faramir, Prince of Ithilien uses the same
-        // surface phrase for a DIFFERENT referent — a chosen player — and
-        // remains its own unimplemented gap, not covered by this arm). Must
-        // precede the bare "your next end step" arm textually distinct
-        // (neither is a suffix of the other), so ordering here is not
-        // load-bearing, but is kept adjacent for readability.
-        (
-            " at the beginning of that player's next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
-            },
-        ),
-        // CR 513.2 + CR 603.7a: reordered "…, sacrifice that token at the
-        // beginning of the end step on your next turn" (Kav Landseeker). Suffix
-        // companion of the prefix arm. Skip-current via `AfterCreationTurn`
-        // (rewritten to `After(creation_turn)` at resolve). Diverges from the
-        // Greasefang "your next end step" suffix above ("the end step on" vs
-        // "your next end step"); neither suffix is a tail of the other.
-        (
-            " at the beginning of the end step on your next turn",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::AfterCreationTurn,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
         // turn granted by the parent clause (the controller's next turn), so
         // the controller's next end step. Suffix companion of the prefix arm
@@ -7848,15 +7870,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             " at the beginning of that turn's end step",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        (
-            " at the beginning of your next upkeep",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
@@ -11247,6 +11260,34 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
     (tp, None)
 }
 
+/// Terminal-only form of [`strip_trailing_where_x`] for callers that lower only
+/// the text BEFORE the definition.
+///
+/// The general helper bounds the definition at the first instruction that
+/// follows it (CR 608.2c), which is right for callers that keep parsing the
+/// remainder. A caller that discards the remainder instead would silently drop
+/// that instruction while still reporting the clause as lowered. This form
+/// accepts the strip only when the extracted definition ends the input text
+/// (trailing periods ignored), so a definition the general helper bounded at a
+/// later comma — a parseable one — is rejected here.
+///
+/// It is not a totality check. A definition the quantity grammar cannot parse
+/// (the demonstrative this helper exists for) comes back whole, continuation
+/// included; the caller's definition-level pass then binds it or reports it as a
+/// `where_x_binding` gap, so nothing is dropped silently.
+pub(crate) fn strip_terminal_where_x<'a>(tp: TextPair<'a>) -> Option<(TextPair<'a>, String)> {
+    let (stripped, expression) = strip_trailing_where_x(tp);
+    let expression = expression?;
+    // `expression` was extracted from this same text, so a suffix match holds
+    // exactly when the definition runs to the end of the input. A definition the
+    // general helper bounded at a later instruction's comma leaves that
+    // instruction in the text and fails here.
+    let sentence = tp.trim_end().trim_end_matches('.');
+    // allow-noncombinator: TextPair dual-string suffix test, not parse-branch dispatch.
+    sentence.strip_suffix(&expression.to_lowercase())?;
+    Some((stripped, expression))
+}
+
 fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     let clause = clause.trim_start().trim_end_matches('.').trim_end();
     // CR 613.4c: a "+X/+Y" pump binds each axis to its own quantity via
@@ -12188,8 +12229,12 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::CopyTokenOf { count: amount, .. }
         | Effect::Discard { count: amount, .. }
         | Effect::EachSourceDealsDamage { amount, .. }
+        // CR 701.71a + CR 107.3c: empower Jace's N is the ability's single
+        // quantity slot. A "where X is …" tail defines it exactly like every
+        // other carrier here; the licensed excess demonstrative (CR 120.10)
+        // arrives already normalized by `rebind_context_dependent_where_x`.
+        | Effect::EmpowerJace { count: amount }
         | Effect::Endure { amount, .. }
-        | Effect::FlipCoins { count: amount, .. }
         | Effect::GainEnergy { amount, .. }
         | Effect::GivePlayerCounter { count: amount, .. }
         | Effect::GrantExtraLoyaltyActivations { amount, .. }
@@ -12212,6 +12257,16 @@ pub(super) fn apply_where_x_effect_expression(
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
             if rebind_magnitude_target_anaphor {
                 rebind_cost_paid_object_pt_to_target(amount);
+            }
+        }
+        // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
+        // `UntilLoss` run has no count to bind.
+        Effect::FlipCoins { flips, .. } => {
+            if let Some(amount) = flips.count_expr_mut() {
+                bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+                if rebind_magnitude_target_anaphor {
+                    rebind_cost_paid_object_pt_to_target(amount);
+                }
             }
         }
         // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
@@ -12954,9 +13009,9 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::ManaDynamic { quantity: amount } => {
             bind_where_x_quantity(amount, where_x_expression, unbound);
         }
-        // CR 701.9: "discard X cards, where X is …" — the discard count is a
-        // `QuantityExpr` and must track the same where-X binding.
-        AbilityCost::Discard { count, .. } => {
+        // CR 701.9 / CR 701.20a: discard/reveal counts are QuantityExpr and
+        // track the same where-X binding ("discard X cards, where X is …").
+        AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, unbound);
         }
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -13005,7 +13060,6 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
@@ -13424,6 +13478,10 @@ fn apply_where_x_ability_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
                 apply_where_x_ability_condition(c, where_x_expression, unbound);
@@ -13449,6 +13507,10 @@ fn apply_where_x_static_condition(
             bind_where_x_quantity(lhs, where_x_expression, unbound);
             bind_where_x_quantity(rhs, where_x_expression, unbound);
         }
+        StaticCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => bind_where_x_quantity(quantity, where_x_expression, unbound),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for condition in conditions {
                 apply_where_x_static_condition(condition, where_x_expression, unbound);
@@ -13863,7 +13925,7 @@ mod tests {
         patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
         relink_gated_tracked_set_consumers, strip_redundant_flip_win_quantifier,
         strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
+        strip_terminal_where_x, strip_trailing_duration, strip_trailing_where_x,
         value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
     use crate::parser::oracle_ir::ast::parsed_clause;
@@ -15254,6 +15316,34 @@ mod tests {
         assert_eq!(expr.as_deref(), Some("the number of creatures you control"));
     }
 
+    /// The terminal form accepts only a definition that ends the input text, so a
+    /// caller that lowers nothing after it cannot drop a following instruction.
+    /// Paired negatives: a comma continuation the general helper bounds at, and a
+    /// following sentence. (A definition the quantity grammar cannot parse is
+    /// returned whole instead; the definition-level totality guard owns that case.)
+    #[test]
+    fn strip_terminal_where_x_requires_the_definition_to_end_the_input() {
+        let text = "empower jace x, where x is that excess damage";
+        let lower = text.to_ascii_lowercase();
+        let (stripped, expr) = strip_terminal_where_x(TextPair::new(text, &lower))
+            .expect("a terminal definition is accepted");
+        assert_eq!(stripped.original, "empower jace x");
+        assert_eq!(expr, "that excess damage");
+
+        for text in [
+            // A later instruction in the same sentence.
+            "empower jace x, where x is the number of creatures you control, draw a card",
+            // A later sentence.
+            "empower jace x, where x is that excess damage. draw a card",
+        ] {
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                strip_terminal_where_x(TextPair::new(text, &lower)).is_none(),
+                "{text:?} must not be treated as terminal"
+            );
+        }
+    }
+
     #[test]
     fn where_x_comparator_bounds_preserve_variable_x() {
         for expression in [
@@ -16396,6 +16486,37 @@ mod where_x_tests {
         );
     }
 
+    /// CR 701.20a + CR 107.3i: a reveal count is a `QuantityExpr` slot, so a
+    /// trailing "where X is …" binds it exactly as it binds a discard count.
+    #[test]
+    fn where_x_binds_reveal_cost_count() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::mana::ManaColor;
+        let expression = "the number of cards in your hand";
+        let expected = parse_where_x_quantity_expression(expression)
+            .expect("the where-X expression is representable");
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let mut cost = AbilityCost::Reveal {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+            filter: Some(filter.clone()),
+        };
+        let mut unbound = None;
+        super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
+        assert_eq!(unbound, None);
+        assert_eq!(
+            cost,
+            AbilityCost::Reveal {
+                count: expected,
+                filter: Some(filter),
+            }
+        );
+    }
+
     /// CR 115.1 + CR 608.2c: a clause that announces its own "target creature"
     /// supplies the antecedent for a bare demonstrative "that creature's power",
     /// so the magnitude must read the ANNOUNCED TARGET, not the CR 608.2k
@@ -17341,5 +17462,82 @@ mod dq_d_player_set_lift_tests {
             body,
             "create a 2/2 black Zombie creature token unless they sacrifice a creature."
         );
+    }
+
+    /// CR 107.1a: "for every" is a marker spelling of "for each"; numbered
+    /// clauses lower through the shared grouped-quantity authority
+    /// (`parse_for_each_clause_expr`), never through group-size handling at the
+    /// suffix seam. Every row compares the two markers, and accepting rows are
+    /// pinned to `Some(..)` so `None == None` cannot pass.
+    #[test]
+    fn for_every_marker_agrees_with_for_each_through_shared_grouped_authority() {
+        use super::parse_for_each_multiplier_prefix;
+        use crate::parser::oracle_quantity::parse_for_each_clause_expr;
+        use crate::types::ability::{QuantityExpr, RoundingMode};
+
+        // Reach guard: the grouped form is the floor over the same inner the
+        // ungrouped grammar emits, and equals the authority called directly.
+        let per_each = parse_for_each_multiplier_prefix(" for each card in your graveyard")
+            .expect("for-each regression: the existing marker must still parse");
+        let grouped = parse_for_each_multiplier_prefix(" for every three cards in your graveyard");
+        assert_eq!(
+            grouped,
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(per_each),
+                divisor: 3,
+                rounding: RoundingMode::Down,
+            })
+        );
+        assert_eq!(
+            grouped,
+            parse_for_each_clause_expr("three cards in your graveyard"),
+            "the suffix seam must defer to the shared authority"
+        );
+
+        let is_grouped = |q: &Option<QuantityExpr>| {
+            matches!(
+                q,
+                Some(QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Down,
+                    ..
+                })
+            )
+        };
+        let is_ref = |q: &Option<QuantityExpr>| matches!(q, Some(QuantityExpr::Ref { .. }));
+        let is_none = |q: &Option<QuantityExpr>| q.is_none();
+        type ShapeCheck = dyn Fn(&Option<QuantityExpr>) -> bool;
+        let rows: &[(&str, &ShapeCheck)] = &[
+            ("three cards in your graveyard", &is_grouped),
+            ("3 cards in your graveyard", &is_grouped),
+            ("five counters on it", &is_grouped),
+            ("five counters removed this way", &is_grouped),
+            ("two other creatures you control", &is_grouped),
+            ("three cards in your graveyard.", &is_grouped),
+            ("creature you control", &is_ref),
+            ("one card in your graveyard", &is_none),
+            ("0 cards in your graveyard", &is_none),
+            ("zero cards in your graveyard", &is_none),
+            (
+                "three cards in your graveyard and each land you control",
+                &is_none,
+            ),
+            ("three frobnications", &is_none),
+        ];
+        for (clause, expected) in rows {
+            let every = parse_for_each_multiplier_prefix(&format!(" for every {clause}"));
+            let each = parse_for_each_multiplier_prefix(&format!(" for each {clause}"));
+            assert_eq!(every, each, "markers disagree on {clause:?}");
+            assert!(
+                expected(&every),
+                "unexpected shape for {clause:?}: {every:?}"
+            );
+        }
+
+        // Marker boundary: other spellings and a bare marker decline.
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for any three cards in your graveyard"),
+            None
+        );
+        assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
     }
 }

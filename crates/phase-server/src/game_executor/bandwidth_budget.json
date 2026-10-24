@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "scenario": "four_seat_scripted_round_v1",
+  "update_procedure": "see bandwidth_budget_tests.rs module docs",
+  "tolerance_pct": {
+    "json_bytes": 1.0,
+    "wire_bytes": 2.0
+  },
+  "seats": [
+    {
+      "seat": 0,
+      "updates": 187,
+      "json_bytes": 13991377,
+      "wire_bytes": 1152328
+    },
+    {
+      "seat": 1,
+      "updates": 187,
+      "json_bytes": 14149300,
+      "wire_bytes": 1175503
+    },
+    {
+      "seat": 2,
+      "updates": 187,
+      "json_bytes": 14072275,
+      "wire_bytes": 1159534
+    },
+    {
+      "seat": 3,
+      "updates": 187,
+      "json_bytes": 14206232,
+      "wire_bytes": 1166140
+    }
+  ]
+}

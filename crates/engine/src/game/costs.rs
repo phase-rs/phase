@@ -54,7 +54,6 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::casting::{
@@ -1940,17 +1939,17 @@ fn pay_ability_cost_inner(
         AbilityCost::RemoveCounter {
             target: Some(_), ..
         } => {}
-        // CR 701.43a: "To exert a permanent, its controller chooses to have it
-        // not untap during its controller's next untap step." Modeled as a
-        // transient continuous effect with `StaticMode::CantUntap` scoped to
-        // `Duration::UntilNextStepOf { step: Untap, player: Controller }` on the source permanent,
-        // identical to the "doesn't untap during its controller's next untap
-        // step" pattern already handled by the layer system (see
-        // `layers::prune_controller_untap_step_effects`).
+        // CR 701.43a: "To exert a permanent, you choose to have it not untap
+        // during your next untap step." Paid as part of an activated ability's
+        // cost (CR 602.2b; CR 605.3b for mana abilities), so the bookkeeping -
+        // exerted status, the CantUntap effect and the `CreatureExerted` event
+        // that "whenever you exert" observers read - is the shared
+        // `exert::exert_permanent` authority, the same one the attack-cost path
+        // uses. The event goes to the caller's `events`; the post-action trigger
+        // pipeline (and the mana-ability settle seam) scans it.
         //
         // CR 701.43b: "A permanent can be exerted even if it's not tapped or
-        // has already been exerted in a turn." Pushing a second identical
-        // effect is harmless — both expire during the same untap step.
+        // has already been exerted in a turn." The helper exerts again.
         //
         // CR 701.43c: "An object that isn't on the battlefield can't be
         // exerted." Enforced here so off-battlefield activations (which
@@ -1965,22 +1964,14 @@ fn pay_ability_cost_inner(
                     "Cannot exert: source is not on the battlefield",
                 ));
             }
-            let controller = obj.controller;
-            state.add_transient_continuous_effect(
+            super::exert::exert_permanent(
+                state,
                 source_id,
-                controller,
-                crate::types::ability::Duration::UntilNextStepOf {
-                    step: crate::types::phase::Phase::Untap,
-                    player: crate::types::ability::PlayerScope::Controller,
-                },
-                TargetFilter::SpecificObject { id: source_id },
-                vec![
-                    crate::types::ability::ContinuousModification::AddStaticMode {
-                        mode: StaticMode::CantUntap,
-                    },
-                ],
+                player,
+                crate::types::events::ExertOrigin::AbilityCost,
                 None,
-            );
+                events,
+            )?;
         }
         // CR 118.3 + CR 602.2b + CR 601.2h: Self-return costs such as
         // Recurring Nightmare and Maze's End are automatic once chosen;
@@ -2163,6 +2154,10 @@ pub(crate) fn can_pay(
             // …])`), nor sibling mana legs summed with a branch's mana (Camellia's
             // `Composite([Mana {2}, OneOf([Exile, Sacrifice])])`).
             if let Some(branches) = super::casting::find_one_of_cost(cost) {
+                // Each branch is judged on `state` as given: a manual activation's
+                // CR 601.2g life retry wraps this whole check
+                // (`can_pay_ability_cost_now`), so it already runs on that retry's
+                // board and must not open a second one here.
                 return branches.iter().any(|branch| {
                     super::casting::one_of_branch_payable_in(
                         state,
@@ -2171,6 +2166,7 @@ pub(crate) fn can_pay(
                         cost,
                         branch,
                         *ability_index,
+                        &super::casting::ActivationLifeWindow::Current,
                     )
                 });
             }
@@ -3006,7 +3002,7 @@ mod tests {
             AbilityCost::Exert => AbilityCost::Exert,
             AbilityCost::Blight { .. } => AbilityCost::Blight { count: 1 },
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
             },
             AbilityCost::Behold { .. } => AbilityCost::Behold {
@@ -3129,7 +3125,7 @@ mod tests {
             AbilityCost::Exert,
             AbilityCost::Blight { count: 0 },
             AbilityCost::Reveal {
-                count: 0,
+                count: QuantityExpr::Fixed { value: 0 },
                 filter: None,
             },
             AbilityCost::Behold {

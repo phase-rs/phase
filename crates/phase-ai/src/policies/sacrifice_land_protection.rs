@@ -99,11 +99,7 @@ fn activation_ability(
     engine::types::identifiers::ObjectId,
     engine::types::ability::AbilityDefinition,
 )> {
-    let GameAction::ActivateAbility {
-        source_id,
-        ability_index: _,
-    } = &ctx.candidate.action
-    else {
+    let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
         return None;
     };
     ctx.effective_activated_ability()
@@ -204,6 +200,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -486,6 +483,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -513,5 +511,160 @@ mod tests {
                 panic!("ReactiveSelfProtection must reject parsed Safekeeper")
             }
         }
+    }
+
+    const SYLVAN_SAFEKEEPER: &str = "Sacrifice a land: Target creature you control gains shroud until end of turn. (It can't be the target of spells or abilities.)";
+
+    /// Which `PolicyVerdict` variant a policy returned.
+    #[derive(Debug, PartialEq)]
+    enum VerdictVariant {
+        Reject,
+        Score,
+    }
+
+    /// The verdict variant and reason kind of this policy's and
+    /// `ReactiveSelfProtectionPolicy`'s verdicts on activating `source_id`'s
+    /// first ability.
+    fn verdict_kinds(
+        state: &GameState,
+        source_id: ObjectId,
+    ) -> [(VerdictVariant, &'static str); 2] {
+        use super::super::reactive_self_protection::ReactiveSelfProtectionPolicy;
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        [
+            SacrificeLandProtectionPolicy.verdict(&ctx),
+            ReactiveSelfProtectionPolicy.verdict(&ctx),
+        ]
+        .map(|verdict| match verdict {
+            PolicyVerdict::Reject { reason } => (VerdictVariant::Reject, reason.kind),
+            PolicyVerdict::Score { reason, .. } => (VerdictVariant::Score, reason.kind),
+        })
+    }
+
+    /// P0 controls a 2/2, Sylvan Safekeeper and five Forests.
+    fn safekeeper_board() -> (engine::game::scenario::GameScenario, ObjectId, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::mana::ManaColor;
+        use engine::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let safekeeper = scenario
+            .add_creature_from_oracle(P0, "Sylvan Safekeeper", 1, 1, SYLVAN_SAFEKEEPER)
+            .id();
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        (scenario, bear, safekeeper)
+    }
+
+    #[test]
+    fn safekeeper_allowed_when_a_cast_spell_targets_ai_creature() {
+        use engine::game::scenario::P1;
+        use engine::types::mana::ManaCost;
+        let (mut scenario, bear, safekeeper) = safekeeper_board();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, "Destroy target creature.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner.cast(murder).target_objects(&[bear]).commit();
+        assert_eq!(
+            verdict_kinds(runner.state(), safekeeper),
+            [
+                (
+                    VerdictVariant::Score,
+                    "sacrifice_land_protection_answerable_threat"
+                ),
+                (
+                    VerdictVariant::Score,
+                    "reactive_self_protection_exact_payoff"
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn safekeeper_rejected_against_an_attack_trigger_that_targets_nothing() {
+        use engine::game::ability_utils::flatten_targets_in_chain;
+        use engine::game::combat::AttackTarget;
+        use engine::game::scenario::P1;
+        use engine::types::ability::TargetRef;
+        const SABOTAGE_STRATEGIST: &str = "Flying, vigilance\nWhenever one or more creatures attack you, those creatures get -1/-0 until end of turn.\nExhaust — {5}{U}{U}: Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)";
+        let (mut scenario, bear, safekeeper) = safekeeper_board();
+        let strategist = {
+            let mut builder = scenario.add_creature(P1, "Sabotage Strategist", 2, 2);
+            builder.from_oracle_text_with_keywords(
+                &["Exhaust", "Flying", "Vigilance"],
+                SABOTAGE_STRATEGIST,
+            );
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(bear, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        for _ in 0..4 {
+            if runner
+                .state()
+                .stack
+                .iter()
+                .any(|e| e.source_id == strategist)
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == strategist
+                    && entry.ability().is_some_and(|root| {
+                        flatten_targets_in_chain(root) == vec![TargetRef::Object(bear)]
+                    })),
+            "reach guard: P1's trigger holds the attacking 2/2"
+        );
+        assert_eq!(
+            verdict_kinds(runner.state(), safekeeper),
+            [
+                (
+                    VerdictVariant::Reject,
+                    "sacrifice_land_protection_no_payoff"
+                ),
+                (VerdictVariant::Reject, "reactive_self_protection_no_payoff")
+            ]
+        );
     }
 }

@@ -1,7 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 /// CR 400.1: The seven game zones — library, hand, battlefield, graveyard, stack, exile, and command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumCount,
+)]
 pub enum Zone {
     /// CR 401: The library — a player's draw pile, face-down, order matters.
     Library,
@@ -16,7 +28,22 @@ pub enum Zone {
     Command,
 }
 
+// A new `Zone` variant must be added to `Zone::ALL`: this is a build failure otherwise.
+const _: () = assert!(Zone::ALL.len() == <Zone as strum::EnumCount>::COUNT);
+
 impl Zone {
+    /// CR 400.1: every game zone, in declaration order. Guarded against drift by a
+    /// compile-time count assertion against `strum::EnumCount`.
+    pub const ALL: [Zone; 7] = [
+        Zone::Library,
+        Zone::Hand,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Stack,
+        Zone::Exile,
+        Zone::Command,
+    ];
+
     /// CR 400.2: the battlefield, graveyard, stack, exile, and command zones are
     /// public; the library and hand are hidden even when their cards are
     /// momentarily revealed.
@@ -107,9 +134,9 @@ impl ExileCostSourceZone {
 /// not a producer, so a delivery path added later cannot silently start
 /// overwriting the game-lifetime `last_created_token_ids` ledger.
 ///
-/// The engine's marked call sites and the parser's admission authority
-/// (`oracle_effect::lower::publishes_chain_created_referent`) are the two halves
-/// of one contract and have to be changed together.
+/// The engine's marked call sites and the publisher classification
+/// (`Effect::publishes_created_referent`, which the parser delegates to) are the
+/// two halves of one contract and have to be changed together.
 ///
 /// [`Silent`]: ChainReferentIntent::Silent
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -237,6 +264,26 @@ mod tests {
             Zone::Command,
         ];
         assert_eq!(zones.len(), 7);
+    }
+
+    #[test]
+    fn zone_all_is_exhaustive_and_in_declaration_order() {
+        // Exhaustive match: adding a variant is a compile error here.
+        fn declaration_index(zone: Zone) -> usize {
+            match zone {
+                Zone::Library => 0,
+                Zone::Hand => 1,
+                Zone::Battlefield => 2,
+                Zone::Graveyard => 3,
+                Zone::Stack => 4,
+                Zone::Exile => 5,
+                Zone::Command => 6,
+            }
+        }
+        assert_eq!(Zone::ALL.len(), 7);
+        for zone in Zone::ALL {
+            assert_eq!(Zone::ALL[declaration_index(zone)], zone);
+        }
     }
 
     #[test]

@@ -2,14 +2,14 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{all_consuming, eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
     DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, XModification,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -72,9 +72,10 @@ fn is_it_pronoun(text: &str) -> bool {
 /// token-creating clause binds to that just-created token
 /// (`TargetFilter::LastCreated`) — the anaphor's most-recent object referent —
 /// rather than the ability source (`SelfRef`) or an unbound parent target.
-/// Recognizes three anaphor forms: the object-pronoun class (`it`/`them`/…, via
-/// [`is_it_pronoun`]), the demonstratives `that creature`/`that token`/`that
-/// permanent`, and the definite back-references `the token`/`the permanent`.
+/// Recognizes four anaphor forms: the object-pronoun class (`it`/`them`/…, via
+/// [`is_it_pronoun`]), the distributive plural `each of them`, the
+/// demonstratives `that creature`/`that token`/`that permanent`, and the
+/// definite back-references `the token`/`the permanent`.
 /// `the creature` is deliberately EXCLUDED: it legitimately binds a chosen
 /// target slot (Longstalk Brawl's "the creature you control" →
 /// `ParentTargetSlot`) and is genuinely ambiguous.
@@ -85,7 +86,7 @@ fn is_it_pronoun(text: &str) -> bool {
 /// 3000's "Whenever equipped creature attacks … put a +1/+1 counter on that
 /// creature" keeps its `resolve_that_creature_in_trigger` triggering-source
 /// binding. That subject gate is intentionally SKIPPED for the object-pronoun
-/// form so this helper reproduces the legacy ungated bare-"it" binding exactly,
+/// form (and its distributive plural `each of them`) so this helper reproduces the legacy ungated bare-"it" binding exactly,
 /// making the it-branch refactor provably behavior-preserving. `None` ⇒ the
 /// caller applies its own default (source / parent / typed target).
 /// The demonstrative/definite half of the chain-created anaphor, WITHOUT the
@@ -136,24 +137,58 @@ fn anaphor_is_chain_created_demonstrative(anaphor_lower: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c + CR 111.1: the distributive plural anaphor "each of them" (as the
+/// whole token or followed by a space, so "each of themselves" is excluded).
+/// It names the same plural referent as bare "them" with a distributive
+/// quantifier, so after a token clause it binds every just-created token.
+fn anaphor_is_distributive_them(anaphor_lower: &str) -> bool {
+    nom_on_lower(anaphor_lower, anaphor_lower, |i| {
+        value(
+            (),
+            preceded(
+                tag("each of "),
+                terminated(
+                    verify(nom_primitives::parse_object_recipient_pronoun, |p: &str| {
+                        p == "them"
+                    }),
+                    alt((eof, peek(tag(" ")))),
+                ),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
+/// Single authority for the chain-created counter anaphor (see the doc block
+/// above `chain_created_demonstrative_binding`). Anaphor classes: the bare
+/// object pronoun (`it`/`them`/…), the distributive plural `each of them`, and
+/// the demonstrative/definite forms. Consumers: `resolve_counter_placement_target`
+/// (its `is_it_pronoun` branch and its post-"that creature" fallback, reached by
+/// `try_parse_put_counter`, `try_parse_put_counter_chain` and
+/// `try_parse_reproduce_event_counters`), `try_parse_move_counters`, and in
+/// `oracle_effect/mod.rs` the "put a counter on <target> for each X" dispatch
+/// plus the perpetual-gain "it" subjects (called with the literal "it").
 pub(super) fn counter_anaphor_created_token_binding(
     anaphor_lower: &str,
     ctx: &ParseContext,
 ) -> Option<TargetFilter> {
     let it_pronoun = is_it_pronoun(anaphor_lower);
+    let distributive_them = anaphor_is_distributive_them(anaphor_lower);
     let demonstrative = anaphor_is_chain_created_demonstrative(anaphor_lower);
-    if !it_pronoun && !demonstrative {
+    if !it_pronoun && !distributive_them && !demonstrative {
         return None;
     }
     // A demonstrative/definite anaphor under a non-self, non-`Any` trigger subject
     // refers to that triggering object, not the created token — the subject gate
-    // preserves that legacy binding. The bare object pronoun has no such
-    // re-anchor, so its gate is only the token flag.
+    // preserves that legacy binding. The bare object pronoun and its distributive
+    // plural "each of them" have no such re-anchor, so their gate is only the
+    // token flag.
     let subject_allows_token = matches!(
         ctx.subject,
         None | Some(TargetFilter::SelfRef) | Some(TargetFilter::Any)
     );
-    if ctx.token_created_in_chain && (it_pronoun || subject_allows_token) {
+    if ctx.token_created_in_chain && (it_pronoun || distributive_them || subject_allows_token) {
         Some(TargetFilter::LastCreated)
     } else {
         None
@@ -313,7 +348,7 @@ fn resolve_counter_placement_target<'a>(
     // here is a `GenericEffect` with no target, leaving `ParentTarget`
     // unbound). Mirrors `resolve_it_pronoun` for the explicit "that creature"
     // anaphor.
-    if let Some(rem) = resolve_that_creature_in_trigger(on_rest, ctx) {
+    if let Some(rem) = super::super::oracle_target::resolve_demonstrative_target(on_rest, ctx) {
         // Map `rem` (sliced from `on_rest`) back into `text` so the returned
         // remainder lifetime matches `text`. `on_rest` is the lowercase view;
         // ASCII-equal-length guard above keeps byte offsets aligned.
@@ -1076,8 +1111,16 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
-        let (n, r) = parse_number(rest.trim())?;
-        (QuantityExpr::Fixed { value: n as i32 }, r)
+        // CR 608.2d + CR 107.3a: "remove up to N [kind] counters" lets the
+        // controller choose, at resolution, how many (zero through N) and — for
+        // the untyped form — which kinds. The count is an effect quantity, so
+        // `parse_count_expr` keeps an announced X as `Variable("X")` (Hex
+        // Parasite's "{X}{B/P}: Remove up to X counters") instead of the X→0
+        // reading of `parse_number`. `UpTo` carries the "may remove fewer"
+        // grammar to `resolve_remove`, which caps the interactive selection at
+        // the resolved maximum (Glissa Sunslayer, Gremlin Mine, Render Inert).
+        let (max, r) = parse_count_expr(rest.trim())?;
+        (QuantityExpr::up_to(max), r)
     } else {
         let (n, r) = parse_number(after_remove)?;
         (QuantityExpr::Fixed { value: n as i32 }, r)
@@ -1112,8 +1155,10 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // MULTI-SOURCE choice. The single-source interactive path (Rhys, Tetravus)
     // cannot model "from among", so leave such cards Unimplemented (out of scope)
     // rather than silently collapsing them to a single-source removal (Galloping
-    // Lizrog, Eventide's Shadow). Scoped to the `UpTo` ("any number") branch so
-    // non-interactive removals are untouched.
+    // Lizrog, Eventide's Shadow, and the capped "remove up to three stun
+    // counters from among all permanents" of Sensational Spider-Man). Scoped to
+    // the `UpTo` ("any number" / "up to N") branches so non-interactive removals
+    // are untouched.
     if count.is_up_to()
         && nom_on_lower(target_text, target_text, |i| {
             value((), tag("among ")).parse(i)
@@ -1253,7 +1298,7 @@ fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
         // CR 608.2k: Bare pronoun — context-dependent.
         return resolve_it_pronoun(ctx);
     }
-    if resolve_that_creature_in_trigger(text, ctx).is_some() {
+    if super::super::oracle_target::resolve_demonstrative_target(text, ctx).is_some() {
         // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
         return TargetFilter::TriggeringSource;
     }
@@ -1264,26 +1309,6 @@ fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     t
-}
-
-/// CR 608.2k + CR 301.5a: Returns `Some(remainder)` when `text` begins with
-/// "that creature" AND we are inside a trigger whose subject is a non-self,
-/// non-Any filter (e.g. an `AttachedTo` trigger's "Whenever equipped creature
-/// attacks"). The remainder is the post-phrase tail so callers can continue
-/// parsing trailing punctuation/clauses. Mirrors `resolve_it_pronoun`'s
-/// gating: a trigger whose subject is `SelfRef`/`Any` (or no subject) keeps
-/// the legacy `ParentTarget` semantics — used for spells/abilities like
-/// Twinflame Strive where "that creature" refers back to the parent target.
-fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<&'a str> {
-    let (rest, _): (&'a str, &'a str) = tag::<_, _, OracleError<'a>>("that creature")
-        .parse(text)
-        .ok()?;
-    match &ctx.subject {
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
-            Some(rest)
-        }
-        _ => None,
-    }
 }
 
 /// CR 122.8: Parse "put its counters on [target]" / "put those counters on
@@ -1601,8 +1626,24 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 }
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
-/// mana-doubling, or P/T-doubling.
+/// mana-doubling, or P/T-doubling; CR 107.3e: "double the value of X" to the
+/// triggering spell's X.
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    // CR 107.3e: in a spell-cast trigger body, "the value of X" is the X of the
+    // spell that caused the trigger (the body's object anaphor is pinned to
+    // `TriggeringSource` only by a spell-cast head). Anywhere else nothing names
+    // whose X it is, so the clause stays an honest gap.
+    if all_consuming(tag::<_, _, OracleError<'_>>("double the value of x"))
+        .parse(lower)
+        .is_ok()
+    {
+        return Some(match ctx.object_pronoun_ref {
+            Some(TargetFilter::TriggeringSource) => Effect::ModifyAnnouncedX {
+                modification: XModification::DOUBLE,
+            },
+            _ => Effect::unimplemented("double_value_of_x_without_triggering_spell", lower),
+        });
+    }
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter
     // kinds. The doubled amount is intrinsic to the resolver ("give as many of
     // those counters as already present"), never a `QuantityExpr` carrier.
@@ -3089,7 +3130,137 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+        // CR 608.2d: "up to" is a resolution-time choice of fewer; the count is
+        // the cap, not a fixed removal.
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 }));
+    }
+
+    /// CR 107.3a + CR 608.2d: "remove up to X counters" (Hex Parasite) keeps the
+    /// announced X as `Variable("X")` under the `UpTo` cap — not the X→0 reading
+    /// of a cost-position parser, and not a fixed count that drops "up to".
+    #[test]
+    fn remove_counter_up_to_x_keeps_the_variable_cap() {
+        let result = try_parse_remove_counter(
+            "remove up to x counters from target permanent",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(counter_type, None, "untyped: the controller chooses kinds");
+        assert_eq!(
+            count,
+            QuantityExpr::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            })
+        );
+        assert!(matches!(target, TargetFilter::Typed(_)), "{target:?}");
+    }
+
+    /// CR 608.2d + CR 122.1: the typed form caps a single kind (Gremlin Mine:
+    /// "Remove up to four charge counters from target noncreature artifact").
+    #[test]
+    fn remove_counter_up_to_n_typed_caps_that_kind() {
+        let result = try_parse_remove_counter(
+            "remove up to four charge counters from target noncreature artifact",
+            &mut default_ctx(),
+        );
+        let Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        }) = result
+        else {
+            panic!("expected RemoveCounter, got {result:?}");
+        };
+        assert_eq!(
+            counter_type,
+            Some(CounterType::Generic("charge".to_string()))
+        );
+        assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 4 }));
+    }
+
+    /// CR 608.2d: the capped "up to N ... from among <objects>" is the same
+    /// multi-source distribution as "any number ... from among", which the
+    /// single-source removal cannot model; it stays out of this builder. The
+    /// positive control is the single-source sibling of the same clause.
+    #[test]
+    fn remove_counter_up_to_n_from_among_is_not_a_single_source_removal() {
+        assert!(
+            try_parse_remove_counter(
+                "remove up to three stun counters from target permanent",
+                &mut default_ctx(),
+            )
+            .is_some(),
+            "reach guard: the single-source clause parses"
+        );
+        assert_eq!(
+            try_parse_remove_counter(
+                "remove up to three stun counters from among all permanents",
+                &mut default_ctx(),
+            ),
+            None
+        );
+    }
+
+    /// The full verbatim Hex Parasite line: the removal is capped at X and its
+    /// "for each counter removed this way" rider repeats once per counter the
+    /// removal actually removed (CR 608.2c).
+    #[test]
+    fn hex_parasite_parses_up_to_x_removal_with_a_per_counter_rider() {
+        let parsed = crate::parser::parse_oracle_text(
+            "{X}{B/P}: Remove up to X counters from target permanent. For each counter removed this way, this creature gets +1/+0 until end of turn. ({B/P} can be paid with either {B} or 2 life.)",
+            "Hex Parasite",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(a.effect.as_ref(), Effect::RemoveCounter { .. }))
+            .expect("the activated removal parses");
+        let Effect::RemoveCounter {
+            counter_type,
+            count,
+            ..
+        } = ability.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*counter_type, None);
+        assert_eq!(
+            *count,
+            QuantityExpr::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            })
+        );
+        let rider = ability
+            .sub_ability
+            .as_deref()
+            .expect("the per-counter rider is chained");
+        assert!(
+            matches!(rider.effect.as_ref(), Effect::Pump { .. }),
+            "{rider:?}"
+        );
+        assert!(
+            matches!(
+                rider.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount { .. }
+                })
+            ),
+            "{rider:?}"
+        );
     }
 
     /// CR 608.2k anaphor: "remove those counters" with no "from {target}"
@@ -4506,5 +4677,122 @@ mod tests {
         assert_eq!(ctx.diagnostics, expected);
         resolve_remove_counter_from_target("among all permanents", &mut ctx);
         assert_eq!(ctx.diagnostics, expected, "push_diagnostic deduplicates");
+    }
+
+    /// The per-each quantity of the sibling "for each card in your graveyard"
+    /// tail. Tests compare against it instead of hardcoding the ref shape.
+    fn per_each_card_in_your_graveyard() -> QuantityExpr {
+        let lower = "put a +1/+1 counter on each of them for each card in your graveyard";
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let Some((Effect::PutCounter { count, .. }, _, _)) =
+            try_parse_put_counter(lower, lower, &mut ctx)
+        else {
+            panic!("sibling for-each tail must parse");
+        };
+        count
+    }
+
+    /// CR 608.2c + CR 111.1 + CR 107.1a: Recursive Recruitment's tail. "Each of
+    /// them" after a token clause binds the just-created tokens, and "for every
+    /// three cards" counts complete groups (floor division by 3).
+    #[test]
+    fn put_counter_each_of_them_for_every_three_binds_created_tokens() {
+        let lower = "put a +1/+1 counter on each of them for every three cards in your graveyard";
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let Some((
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            },
+            rem,
+            multi,
+        )) = try_parse_put_counter(lower, lower, &mut ctx)
+        else {
+            panic!("Recursive Recruitment tail must parse to PutCounter");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            count,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(per_each_card_in_your_graveyard()),
+                divisor: 3,
+                rounding: crate::types::ability::RoundingMode::Down,
+            }
+        );
+        assert_eq!(target, TargetFilter::LastCreated);
+        assert!(rem.is_empty(), "whole tail must be consumed, got {rem:?}");
+        assert!(multi.is_none());
+    }
+
+    /// Paired reach-guard: without a chain-created token the same text parses
+    /// (the grammar is reached) but keeps the parent-target anaphor.
+    #[test]
+    fn put_counter_each_of_them_for_every_three_without_token_stays_parent_target() {
+        let lower = "put a +1/+1 counter on each of them for every three cards in your graveyard";
+        let Some((Effect::PutCounter { count, target, .. }, rem, _)) =
+            try_parse_put_counter(lower, lower, &mut default_ctx())
+        else {
+            panic!("tail must still parse without token context");
+        };
+        assert!(matches!(
+            count,
+            QuantityExpr::DivideRounded { divisor: 3, .. }
+        ));
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert!(rem.is_empty());
+    }
+
+    /// CR 107.1a: a fixed base count above one multiplies the grouped count.
+    #[test]
+    fn put_two_counters_each_of_them_for_every_three_multiplies() {
+        let lower =
+            "put two +1/+1 counters on each of them for every three cards in your graveyard";
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        let Some((Effect::PutCounter { count, target, .. }, rem, _)) =
+            try_parse_put_counter(lower, lower, &mut ctx)
+        else {
+            panic!("two-counter tail must parse");
+        };
+        let QuantityExpr::Multiply { factor, inner } = &count else {
+            panic!("expected Multiply, got {count:?}");
+        };
+        assert_eq!(*factor, 2);
+        assert_eq!(
+            **inner,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(per_each_card_in_your_graveyard()),
+                divisor: 3,
+                rounding: crate::types::ability::RoundingMode::Down,
+            }
+        );
+        assert_eq!(target, TargetFilter::LastCreated);
+        assert!(rem.is_empty());
+    }
+
+    /// CR 608.2c: "each of themselves" is not the distributive plural anaphor.
+    #[test]
+    fn distributive_them_anaphor_requires_word_boundary() {
+        let mut ctx = default_ctx();
+        ctx.token_created_in_chain = true;
+        assert_eq!(
+            counter_anaphor_created_token_binding("each of them", &ctx),
+            Some(TargetFilter::LastCreated)
+        );
+        assert_eq!(
+            counter_anaphor_created_token_binding("each of them for each card", &ctx),
+            Some(TargetFilter::LastCreated)
+        );
+        assert_eq!(
+            counter_anaphor_created_token_binding("each of themselves", &ctx),
+            None
+        );
+        assert_eq!(
+            counter_anaphor_created_token_binding("each of them", &default_ctx()),
+            None
+        );
     }
 }

@@ -77,6 +77,7 @@ fn onakke_oathkeeper_graveyard_activation_returns_own_planeswalker() {
         .act(GameAction::ActivateAbility {
             source_id: oathkeeper,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Onakke Oathkeeper activation must enter target selection");
 

@@ -5662,7 +5662,8 @@ mod tests {
     /// CR 603.6a + CR 614.12 (unversioned raw ingress): a derived `GameState`
     /// payload (phase-ai saved state, a bare-object WASM restore) has no
     /// declared version. A current writer's member records date it to
-    /// `RESOLUTION_STATE_WIRE_VERSION`, so it decodes directly; a legacy
+    /// resolution wire version 7 (the version that introduced them; later
+    /// versions decode through the same reader), so it decodes directly; a legacy
     /// bare-id payload is still read as v3 and migrated, or refused when gated.
     /// REVERT: removing the member-record inference in
     /// `declare_raw_resolution_wire` declares v3, the migration rejects the
@@ -5671,7 +5672,6 @@ mod tests {
     fn unversioned_raw_parked_change_zone_declares_its_member_shape() {
         use crate::types::resolution::{
             declare_raw_resolution_wire, LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR,
-            RESOLUTION_STATE_WIRE_VERSION,
         };
 
         let (paused, ..) = paused_mass_return(attacking_with_two_counters, true);
@@ -5696,8 +5696,8 @@ mod tests {
 
         assert_eq!(
             declared_version(&raw),
-            serde_json::Value::from(RESOLUTION_STATE_WIRE_VERSION),
-            "member records date the payload to the current version"
+            serde_json::Value::from(7),
+            "member records date the payload to the version that introduced them"
         );
         let restored = restore_persisted(raw.clone())
             .unwrap_or_else(|error| panic!("current unversioned restore: {error}"));

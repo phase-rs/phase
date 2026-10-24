@@ -457,15 +457,14 @@ pub(super) fn try_parse_add_mana_effect_with_context(
                 // CR 903.4 + CR 903.4f: "any color in your commander('s/s')
                 // color identity" — Path of Ancestry, Study Hall. Colors
                 // resolve dynamically from the activator's commander(s)'
-                // combined color identity. The `alt()` covers both singular
-                // and plural possessive apostrophe placements.
+                // combined color identity. The shared combinator covers both
+                // singular and plural possessive apostrophe placements.
                 value(
                     (),
-                    alt((
-                        tag("in your commander's color identity"),
-                        tag("in your commanders' color identity"),
-                        tag("in your commanders color identity"),
-                    )),
+                    (
+                        tag("in "),
+                        nom_primitives::parse_your_commanders_color_identity,
+                    ),
                 )
                 .parse(i)
             })

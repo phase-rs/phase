@@ -3639,6 +3639,343 @@ mod legacy_debug_permission_restore_tests {
     }
 }
 
+#[cfg(test)]
+mod exact_attack_authority_restore_tests {
+    use super::*;
+    use engine::game::combat::AttackTarget;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+    use engine::game::zones;
+    use engine::types::actions::GameAction;
+    use engine::types::counter::CounterType;
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const SPHERE: &str = "When this creature enters, create four 1/1 colorless Myr artifact creature tokens.\nWhenever this creature attacks, you may tap X untapped Myr you control. If you do, this creature gets +X/+0 until end of turn and deals X damage to the player or planeswalker it's attacking.";
+
+    fn paused_sphere(pay: bool, blink: bool) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        for _ in 0..10 {
+            sc.add_card_to_library_top(P0, "Plains");
+            sc.add_card_to_library_top(P1, "Plains");
+        }
+        let sphere = sc
+            .add_creature_from_oracle(P0, "Myr Battlesphere", 4, 7, SPHERE)
+            .with_subtypes(vec!["Myr", "Construct"])
+            .id();
+        let myr: Vec<_> = (0..4)
+            .map(|_| {
+                sc.add_creature(P0, "Myr", 1, 1)
+                    .with_subtypes(vec!["Myr"])
+                    .id()
+            })
+            .collect();
+        let walker = sc
+            .add_planeswalker_from_oracle(P1, "Test Walker", "Test", 5, "+1: You gain 1 life.")
+            .as_planeswalker_with_loyalty("Test", 5)
+            .id();
+        let mut r = sc.build();
+        assert_eq!(r.state().objects[&walker].base_loyalty, Some(5));
+        assert_eq!(r.state().objects[&walker].loyalty, Some(5));
+        assert_eq!(
+            r.state().objects[&walker].counters[&CounterType::Loyalty],
+            5
+        );
+        r.advance_to_combat();
+        r.declare_attackers(&[(sphere, AttackTarget::Planeswalker(walker))])
+            .unwrap();
+        let pin = r.state().combat.as_ref().unwrap().attacked_permanents[&sphere];
+        assert_eq!(pin.object_id, walker);
+        if blink {
+            // Typed lifecycle fixture; real printed Flicker casting/retirement
+            // is covered by the engine integration cases before this boundary.
+            blink_through_zone_pipeline(r.state_mut(), walker);
+            assert_ne!(r.state().objects[&walker].incarnation, pin.incarnation);
+            assert_eq!(r.state().objects[&walker].base_loyalty, Some(5));
+            assert_eq!(r.state().objects[&walker].loyalty, Some(5));
+            assert_eq!(
+                r.state().objects[&walker].counters[&CounterType::Loyalty],
+                5
+            );
+            assert!(r
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .is_empty());
+        }
+        let mut optional_seen = false;
+        for _ in 0..24 {
+            match r.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    optional_seen = true;
+                    if !pay {
+                        break;
+                    }
+                    r.act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::PayCost { .. } if pay => break,
+                WaitingFor::Priority { .. } => {
+                    r.act(GameAction::PassPriority).unwrap();
+                }
+                ref other => panic!("expected printed optional/tap pause: {other:?}"),
+            }
+        }
+        assert!(optional_seen);
+        assert!(if pay {
+            matches!(r.state().waiting_for, WaitingFor::PayCost { .. })
+        } else {
+            matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            )
+        });
+        (r.state().clone(), sphere, walker, myr)
+    }
+
+    /// CR 400.7 + CR 122.2 + CR 306.5b: Exile and return `id` through the
+    /// replacement-aware zone pipeline. The raw zone primitive clears counters
+    /// without applying the intrinsic entry replacement, so only this path gives
+    /// the returned new object loyalty counters equal to its printed loyalty.
+    fn blink_through_zone_pipeline(state: &mut GameState, id: ObjectId) {
+        let mut events = Vec::new();
+        assert!(!move_object_for_test(
+            state,
+            ZoneMoveRequest::effect(id, Zone::Exile, id),
+            &mut events,
+        ));
+        assert!(!move_object_for_test(
+            state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        ));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
+
+    fn wire(state: &GameState, trusted: bool) -> String {
+        serde_json::to_string(&if trusted {
+            PersistedGameState::capture(state.clone())
+        } else {
+            PersistedGameState::Raw(Box::new(state.clone()))
+        })
+        .unwrap()
+    }
+
+    fn finish(
+        mut r: GameRunner,
+        sphere: ObjectId,
+        walker: ObjectId,
+        myr: &[ObjectId],
+        blink: bool,
+    ) {
+        let mut events = Vec::new();
+        for _ in 0..24 {
+            let result = match r.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    r.act(GameAction::DecideOptionalEffect { accept: true })
+                }
+                WaitingFor::PayCost { choices, .. } => {
+                    assert_eq!(choices.len(), 4);
+                    r.act(GameAction::SelectCards {
+                        cards: myr[..2].to_vec(),
+                    })
+                }
+                WaitingFor::Priority { .. } if r.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => r.act(GameAction::PassPriority),
+                other => panic!("unexpected restored resolution: {other:?}"),
+            };
+            events.extend(result.unwrap().events);
+        }
+        assert_eq!(
+            myr.iter()
+                .filter(|id| r.state().objects[*id].tapped)
+                .count(),
+            2
+        );
+        if r.state().objects[&sphere].zone == Zone::Battlefield {
+            assert_eq!(r.state().objects[&sphere].power, Some(6));
+        } else {
+            assert_eq!(r.state().objects[&sphere].zone, Zone::Graveyard);
+        }
+        assert_eq!(
+            r.state().objects[&walker].counters[&CounterType::Loyalty],
+            if blink { 5 } else { 3 }
+        );
+        assert_eq!(
+            (r.state().players[0].life, r.state().players[1].life),
+            (20, 20)
+        );
+        let damage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target,
+                    amount,
+                    ..
+                } if *source_id == sphere => Some((target.clone(), *amount)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            damage,
+            if blink {
+                vec![]
+            } else {
+                vec![(engine::types::ability::TargetRef::Object(walker), 2)]
+            }
+        );
+        assert!(events.iter().any(|event| matches!(event, GameEvent::EffectResolved { source_id, kind: engine::types::ability::EffectKind::DealDamage, .. } if *source_id == sphere)));
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn raw_and_trusted_restore_printed_optional_and_tap_payment_then_resolve() {
+        for pay in [false, true] {
+            for blink in [false, true] {
+                let (state, sphere, walker, myr) = paused_sphere(pay, blink);
+                for trusted in [false, true] {
+                    let json = wire(&state, trusted);
+                    let restored = decode_restored_game_state(&json)
+                        .expect("exact attack authority is playable");
+                    assert_eq!(
+                        restored.state.combat.as_ref().unwrap().attacked_permanents,
+                        state.combat.as_ref().unwrap().attacked_permanents
+                    );
+                    finish(
+                        GameRunner::from_state(restored.state),
+                        sphere,
+                        walker,
+                        &myr,
+                        blink,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_restore_preserves_the_paid_attack_recipient() {
+        let (state, sphere, walker, myr) = paused_sphere(true, false);
+        for trusted in [false, true] {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            load_minimal_test_card_database();
+            restore_game_state_inner(&wire(&state, trusted))
+                .expect("production restore finalizes with database");
+            let restored = with_state(Clone::clone).unwrap();
+            finish(
+                GameRunner::from_state(restored),
+                sphere,
+                walker,
+                &myr,
+                false,
+            );
+            clear_game_state();
+        }
+    }
+
+    #[test]
+    fn restore_refuses_missing_attack_map_without_guessing_a_live_pin() {
+        let (state, _, _, _) = paused_sphere(true, false);
+        for trusted in [false, true] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&wire(&state, trusted)).unwrap();
+            let payload = if trusted {
+                &mut value["state"]
+            } else {
+                &mut value
+            };
+            payload["combat"]
+                .as_object_mut()
+                .unwrap()
+                .remove("attacked_permanents");
+            let error = decode_restored_game_state(&value.to_string())
+                .expect_err("unproven authority is refused");
+            assert!(error.contains("exact attack authority"));
+            assert!(
+                decode_restored_game_state(&wire(&state, trusted)).is_ok(),
+                "populated positive uses the same ingress/prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn departed_source_restore_keeps_departure_time_recipient_through_both_tap_pauses() {
+        for pay in [false, true] {
+            for timing in 0..4 {
+                let (mut state, sphere, walker, myr) = paused_sphere(pay, false);
+                // Typed lifetime setup around a real printed optional/payment
+                // pause. Engine integration tests independently cast the actual
+                // control-change and blink spells in these orderings.
+                if timing == 2 {
+                    let object = state.objects.get_mut(&walker).unwrap();
+                    object.controller = P0;
+                    object.base_controller = Some(P0);
+                    engine::game::effects::remove_from_combat::remove_object_from_combat(
+                        &mut state, walker,
+                    );
+                }
+                zones::move_to_zone(&mut state, sphere, Zone::Graveyard, &mut Vec::new());
+                let departure = state
+                    .zone_changes_this_turn
+                    .iter()
+                    .rev()
+                    .find(|row| row.object_id == sphere && row.from_zone == Some(Zone::Battlefield))
+                    .unwrap()
+                    .combat_status;
+                assert_eq!(departure.attack_target_identity.is_none(), timing == 2);
+                if timing == 1 {
+                    blink_through_zone_pipeline(&mut state, walker);
+                    assert_ne!(
+                        state.objects[&walker].incarnation,
+                        departure.attack_target_identity.unwrap().incarnation
+                    );
+                    assert_eq!(state.objects[&walker].base_loyalty, Some(5));
+                    assert_eq!(state.objects[&walker].loyalty, Some(5));
+                    assert_eq!(state.objects[&walker].counters[&CounterType::Loyalty], 5);
+                } else if timing == 3 {
+                    let object = state.objects.get_mut(&walker).unwrap();
+                    object.controller = P0;
+                    object.base_controller = Some(P0);
+                    engine::game::effects::remove_from_combat::remove_object_from_combat(
+                        &mut state, walker,
+                    );
+                }
+                assert_eq!(
+                    state
+                        .zone_changes_this_turn
+                        .iter()
+                        .rev()
+                        .find(|row| row.object_id == sphere
+                            && row.from_zone == Some(Zone::Battlefield))
+                        .unwrap()
+                        .combat_status,
+                    departure,
+                    "later recipient changes never edit departure LKI"
+                );
+                for trusted in [false, true] {
+                    let restored = decode_restored_game_state(&wire(&state, trusted))
+                        .expect("exact departure is playable across either ingress");
+                    finish(
+                        GameRunner::from_state(restored.state),
+                        sphere,
+                        walker,
+                        &myr,
+                        timing == 1 || timing == 2,
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ── Replay system ───────────────────────────────────────────────────────
 //
 // Recording: `initialize_game` auto-starts a `ReplayLog` (REPLAY_LOG) and
@@ -4848,10 +5185,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: Some(ChosenAttribute::Number(7)),
-            }),
+            })),
             proposition_truth: Some(true),
         };
         state
@@ -4992,6 +5329,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: x_walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real [-X] activation must issue an X prompt");
@@ -5033,6 +5371,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: target_walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real targeted loyalty activation must issue a target prompt");
@@ -5480,6 +5819,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real loyalty activation must issue a target continuation");
@@ -5569,7 +5909,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == walker
+                    GameAction::ActivateAbility { source_id, ability_index: 0, .. } if source_id == walker
                 )
             })
             .expect("real issuer must offer the plus loyalty ability")
@@ -5606,7 +5946,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == minus_walker
+                    GameAction::ActivateAbility { source_id, ability_index: 0, .. } if source_id == minus_walker
                 )
             })
             .expect("real issuer must offer the affordable targeted minus")
@@ -7784,6 +8124,7 @@ mod settlement_election_host_resume_tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the activation starts");

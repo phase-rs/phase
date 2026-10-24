@@ -17,7 +17,9 @@ use engine::game::game_object::BackFaceData;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::stack;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, EffectKind};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CoinFlipRun, Effect, EffectKind, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -592,25 +594,46 @@ fn the_flip_it_pronoun_form_flips_its_own_source_end_to_end() {
 }
 
 /// CR 705.1 vs CR 710.4: the coin-flip mechanic is untouched — "flip a coin"
-/// still lowers to `Effect::FlipCoin`, not to the new flip-permanent effect.
+/// still lowers to the single-flip `Effect::FlipCoins`, not to the new
+/// flip-permanent effect. CR 705.2: "flip a coin until you lose a flip" lowers to
+/// the complete until-loss run (no per-win `win_effect`, no `lose_effect`, the
+/// controller flips) when no "for each flip you won" clause follows.
 #[test]
 fn flip_a_coin_still_parses_to_flip_coin() {
     let definition =
         engine::parser::oracle_effect::parse_effect_chain("Flip a coin.", AbilityKind::Spell);
-    assert!(
-        matches!(*definition.effect, Effect::FlipCoin { .. }),
-        "CR 705.1: 'flip a coin' must stay a coin flip, got {:?}",
-        definition.effect
-    );
+    match &*definition.effect {
+        Effect::FlipCoins {
+            flips,
+            win_effect: None,
+            lose_effect: None,
+            ..
+        } => assert!(
+            flips.is_single_flip(),
+            "CR 705.1: 'flip a coin' must be a single flip, got {flips:?}"
+        ),
+        other => panic!("CR 705.1: 'flip a coin' must stay a coin flip, got {other:?}"),
+    }
 
     let until_lose = engine::parser::oracle_effect::parse_effect_chain(
         "Flip a coin until you lose a flip.",
         AbilityKind::Spell,
     );
+    let Effect::FlipCoins {
+        flips: CoinFlipRun::UntilLoss,
+        win_effect: None,
+        lose_effect: None,
+        flipper: TargetFilter::Controller,
+    } = &*until_lose.effect
+    else {
+        panic!(
+            "CR 705.1: the until-loss coin-flip run is a complete instruction, got {:?}",
+            until_lose.effect
+        );
+    };
     assert!(
-        matches!(*until_lose.effect, Effect::FlipCoinUntilLose { .. }),
-        "CR 705.1: the Krark-style repeat coin flip is unaffected, got {:?}",
-        until_lose.effect
+        until_lose.sub_ability.is_none(),
+        "the run has no following clause to absorb"
     );
 }
 

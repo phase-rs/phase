@@ -2564,11 +2564,19 @@ fn amount_assignment_projection(
                 action: AmountAssignmentAction::MoveCounters,
             }
         }
-        WaitingFor::RemoveCountersChoice { available, .. } => {
-            let max_total = available
+        WaitingFor::RemoveCountersChoice {
+            available,
+            max_total: cap,
+            ..
+        } => {
+            let available_total = available
                 .iter()
                 .try_fold(0u32, |total, (_, count)| total.checked_add(*count))
                 .ok_or(InteractionReasonCode::PayloadTooLarge)?;
+            // CR 608.2d: a capped "remove up to N counters" prompt publishes its
+            // engine-computed total bound; "any number" is bounded only by the
+            // counters available (CR 107.1c).
+            let max_total = cap.unwrap_or(available_total);
             AmountAssignmentProjection {
                 candidates: available
                     .iter()
@@ -4788,7 +4796,18 @@ fn selection_projection(
             object_ids: cards.clone(),
             constraint: match constraint {
                 None => count_constraint(if *up_to { 0 } else { *count }, *count),
-                Some(ChooseFromZoneConstraint::DistinctCardTypes { .. }) => {
+                Some(ChooseFromZoneConstraint::TotalManaValue { comparator, value })
+                    if *up_to && *count >= cards.len() =>
+                {
+                    SelectionConstraint::Aggregate {
+                        function: InteractionAggregateFunction::Sum,
+                        property: InteractionObjectProperty::ManaValue,
+                        comparator: comparator_dto(*comparator),
+                        amount: *value,
+                    }
+                }
+                Some(ChooseFromZoneConstraint::DistinctCardTypes { .. })
+                | Some(ChooseFromZoneConstraint::TotalManaValue { .. }) => {
                     SelectionConstraint::EngineValidatedCount {
                         min: if *up_to { 0 } else { *count }.min(u32::MAX as usize) as u32,
                         max: (*count).min(u32::MAX as usize) as u32,
@@ -5854,8 +5873,17 @@ fn project_action_payload(
                 cast_payment_mode_code(*payment_mode),
             );
         }
-        GameAction::ActivateAbility { ability_index, .. } => {
-            push_value_surface(surfaces, InteractionRoleCode::AbilityIndex, ability_index)
+        GameAction::ActivateAbility {
+            ability_index,
+            payment_mode,
+            ..
+        } => {
+            push_value_surface(surfaces, InteractionRoleCode::AbilityIndex, ability_index);
+            push_value_surface(
+                surfaces,
+                InteractionRoleCode::PaymentMode,
+                cast_payment_mode_code(*payment_mode),
+            );
         }
         GameAction::DeclareAttackers { attacks, bands } => {
             for (index, (attacker, target)) in attacks.iter().enumerate() {
@@ -6892,6 +6920,10 @@ fn actor_candidates(
     let manual_cast_candidates = candidates
         .iter()
         .filter_map(|candidate| {
+            // CR 605.3a: a mana ability has no payment of its own to make by hand.
+            if super::casting::activates_mana_ability(state, &candidate.action) {
+                return None;
+            }
             let mut manual = candidate.clone();
             let payment_mode = manual.action.payment_mode_mut()?;
             if *payment_mode == CastPaymentMode::Manual {
@@ -11733,6 +11765,47 @@ pub fn submit_interaction_with_rejection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact printed return clauses exercise the shared choice protocol;
+    /// Spree payment/mode selection is outside this test's scope.
+    #[test]
+    fn total_mana_value_return_projection_preserves_bounded_cardinality() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+        for (clause, bounded) in [
+            ("Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.", true),
+            ("Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.", false),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ids: Vec<_> = (0..3).map(|_| scenario.add_creature_to_graveyard(P0, "Memnite", 1, 1)
+                .as_artifact_creature().with_mana_cost(ManaCost::zero()).id()).collect();
+            let spell = scenario.add_spell_to_hand_from_oracle(P0, "Return clause harness", false, clause)
+                .with_mana_cost(ManaCost::zero()).id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            assert!(matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+                if ids.iter().all(|id| cards.contains(id))));
+            let projection = selection_projection(&runner.state().waiting_for, runner.state(), P0)
+                .unwrap().unwrap();
+            if bounded {
+                assert!(matches!(projection.constraint, SelectionConstraint::EngineValidatedCount { min: 0, max: 2 }));
+                assert!(runner.act(GameAction::SelectCards { cards: ids.clone() }).is_err());
+                for id in &ids { assert_eq!(runner.state().objects[id].zone, Zone::Graveyard); }
+                runner.act(GameAction::SelectCards { cards: ids[..2].to_vec() }).unwrap();
+                assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+            } else {
+                assert!(matches!(projection.constraint, SelectionConstraint::Aggregate {
+                    function: InteractionAggregateFunction::Sum,
+                    property: InteractionObjectProperty::ManaValue, amount: 6, ..
+                }));
+                runner.act(GameAction::SelectCards { cards: ids.clone() }).unwrap();
+            }
+            assert_eq!(runner.state().objects[&ids[0]].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&ids[1]].zone, Zone::Battlefield);
+        }
+    }
 
     #[test]
     fn cannot_cast_from_zone_projection_is_lossless() {

@@ -317,28 +317,35 @@ fn counter_move_distribution_candidates(
     actions
 }
 
-/// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
-/// extremal legal answers: "remove none" (empty selection) and "remove all"
-/// (every available counter of every type). The full legal space (any per-type
-/// subset) is combinatorial, so the AI only needs enough variety to never
-/// wedge. The engine validates every submitted selection directly.
+/// CR 107.1c + CR 608.2d: Coarse candidates for a `RemoveCountersChoice`
+/// prompt — the two extremal legal answers: "remove none" (empty selection) and
+/// "remove the most" (every available counter of every type, or — for a capped
+/// "remove up to N counters" prompt — the first `max_total` of them in
+/// published order). The full legal space (any per-type subset) is
+/// combinatorial, so the AI only needs enough variety to never wedge. The
+/// engine validates every submitted selection directly.
 // ponytail: two extremal candidates; add per-type partials if a policy ever
 // wants finer counter-shedding control.
 fn counter_removal_candidates(
     player: PlayerId,
     available: &[(crate::types::counter::CounterType, u32)],
+    max_total: Option<u32>,
 ) -> Vec<CandidateAction> {
     let mut actions = vec![candidate(
         GameAction::ChooseCountersToRemove { selections: vec![] },
         TacticalClass::Selection,
         Some(player),
     )];
+    let mut budget = max_total.unwrap_or(u32::MAX);
     let remove_all: Vec<CounterRemoveChoice> = available
         .iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(counter_type, count)| CounterRemoveChoice {
-            counter_type: counter_type.clone(),
-            count: *count,
+        .filter_map(|(counter_type, count)| {
+            let take = (*count).min(budget);
+            budget -= take;
+            (take > 0).then(|| CounterRemoveChoice {
+                counter_type: counter_type.clone(),
+                count: take,
+            })
         })
         .collect();
     if !remove_all.is_empty() {
@@ -493,8 +500,11 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => counter_move_distribution_candidates(*player, available, destinations),
         WaitingFor::RemoveCountersChoice {
-            player, available, ..
-        } => counter_removal_candidates(*player, available),
+            player,
+            available,
+            max_total,
+            ..
+        } => counter_removal_candidates(*player, available, *max_total),
         // CR 603.3b: Trigger ordering enumeration. Full n! permutations explode
         // (8! = 40320) so cap at n <= 4 (24 perms); larger groups generate only
         // identity + reverse, which is enough variety for search lookahead to
@@ -3292,6 +3302,7 @@ pub fn candidate_actions_broad_with_probe(
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
         WaitingFor::AssignCombatDamage {
             player,
+            attacker_id,
             total_damage,
             blockers,
             assignment_modes,
@@ -3307,8 +3318,25 @@ pub fn candidate_actions_broad_with_probe(
                 assignments.push((slot.blocker_id, assign));
                 remaining = remaining.saturating_sub(assign);
             }
-            // Non-trample: dump remainder to last blocker so total == power.
-            if trample.is_none() && remaining > 0 {
+            let has_recipient = state
+                .combat
+                .as_ref()
+                .and_then(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .find(|info| info.object_id == *attacker_id)
+                })
+                .and_then(|info| {
+                    info.resolve_damage_target(
+                        state,
+                        *trample == Some(crate::game::combat::TrampleKind::OverPlaneswalkers),
+                    )
+                })
+                .is_some();
+            // CR 506.4c + CR 702.19b: without a current excess recipient,
+            // ordinary trample still permits all damage to the blockers.
+            if (trample.is_none() || !has_recipient) && remaining > 0 {
                 if let Some(last) = assignments.last_mut() {
                     last.1 += remaining;
                     remaining = 0;
@@ -4526,20 +4554,26 @@ pub(crate) fn priority_actions_with_probe(
                 if controls || casting::object_permits_non_controller_activation(state, player, obj)
                 {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
-                            && casting::can_activate_ability_now_with_restriction_gates(
-                                state,
-                                player,
-                                obj_id,
-                                i,
-                                &activation_restriction_gates,
-                            )
+                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
+                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
                         {
+                            continue;
+                        }
+                        // CR 602.2b + CR 601.2g: offered in the payment mode the
+                        // reducer honours — `Manual` only when no automatic
+                        // payment can complete the activation.
+                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            &activation_restriction_gates,
+                        ) {
                             actions.push(candidate(
                                 GameAction::ActivateAbility {
                                     source_id: obj_id,
                                     ability_index: i,
+                                    payment_mode,
                                 },
                                 TacticalClass::Ability,
                                 Some(player),
@@ -4582,20 +4616,25 @@ pub(crate) fn priority_actions_with_probe(
                         for (i, ability_def) in
                             casting::activated_ability_definitions(state, obj_id)
                         {
-                            if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                                && !crate::game::mana_abilities::is_mana_ability(&ability_def)
-                                && casting::can_activate_ability_now_with_restriction_gates(
-                                    state,
-                                    player,
-                                    obj_id,
-                                    i,
-                                    &activation_restriction_gates,
-                                )
+                            if ability_def.kind != crate::types::ability::AbilityKind::Activated
+                                || crate::game::mana_abilities::is_mana_ability(&ability_def)
                             {
+                                continue;
+                            }
+                            // CR 602.2b + CR 601.2g: the payment mode the reducer
+                            // honours, as for the battlefield loop above.
+                            if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                                state,
+                                player,
+                                obj_id,
+                                i,
+                                &activation_restriction_gates,
+                            ) {
                                 actions.push(candidate(
                                     GameAction::ActivateAbility {
                                         source_id: obj_id,
                                         ability_index: i,
+                                        payment_mode,
                                     },
                                     TacticalClass::Ability,
                                     Some(player),
@@ -4653,21 +4692,26 @@ pub(crate) fn priority_actions_with_probe(
                 // owner-keyed hand list already means.
                 if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
-                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
-                            && casting::can_activate_ability_now_with_restriction_gates(
-                                state,
-                                player,
-                                obj_id,
-                                i,
-                                &activation_restriction_gates,
-                            )
+                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
+                            || ability_def.activation_zone != Some(crate::types::zones::Zone::Hand)
+                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
                         {
+                            continue;
+                        }
+                        // CR 602.2b + CR 601.2g: the payment mode the reducer
+                        // honours, as for the battlefield loop above.
+                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            &activation_restriction_gates,
+                        ) {
                             actions.push(candidate(
                                 GameAction::ActivateAbility {
                                     source_id: obj_id,
                                     ability_index: i,
+                                    payment_mode,
                                 },
                                 TacticalClass::Ability,
                                 Some(player),
@@ -4699,22 +4743,27 @@ pub(crate) fn priority_actions_with_probe(
                 // rules-correct scope for the flashback / unearth / escape class.
                 if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && ability_def.activation_zone
-                                == Some(crate::types::zones::Zone::Graveyard)
-                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
-                            && casting::can_activate_ability_now_with_restriction_gates(
-                                state,
-                                player,
-                                obj_id,
-                                i,
-                                &activation_restriction_gates,
-                            )
+                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
+                            || ability_def.activation_zone
+                                != Some(crate::types::zones::Zone::Graveyard)
+                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
                         {
+                            continue;
+                        }
+                        // CR 602.2b + CR 601.2g: the payment mode the reducer
+                        // honours, as for the battlefield loop above.
+                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            &activation_restriction_gates,
+                        ) {
                             actions.push(candidate(
                                 GameAction::ActivateAbility {
                                     source_id: obj_id,
                                     ability_index: i,
+                                    payment_mode,
                                 },
                                 TacticalClass::Ability,
                                 Some(player),
@@ -4751,6 +4800,7 @@ pub(crate) fn priority_actions_with_probe(
                             GameAction::ActivateAbility {
                                 source_id: obj_id,
                                 ability_index: i,
+                                payment_mode: CastPaymentMode::Auto,
                             },
                             TacticalClass::Mana,
                             Some(player),
@@ -4786,6 +4836,7 @@ pub(crate) fn priority_actions_with_probe(
                             GameAction::ActivateAbility {
                                 source_id: obj_id,
                                 ability_index: i,
+                                payment_mode: CastPaymentMode::Auto,
                             },
                             TacticalClass::Mana,
                             Some(player),
@@ -4883,6 +4934,7 @@ pub(crate) fn priority_actions_with_probe(
                         GameAction::ActivateAbility {
                             source_id: top_id,
                             ability_index: i,
+                            payment_mode: CastPaymentMode::Auto,
                         },
                         TacticalClass::Ability,
                         Some(player),
@@ -6568,6 +6620,127 @@ fn lethal_first_distribution(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legal_actions_prune_total_mana_value_return_combinations() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ids: Vec<_> = [
+            ("Canoptek Tomb Sentinel", 4, 4, 3),
+            ("Hexmark Destroyer", 6, 6, 6),
+            ("Myr Retriever", 2, 1, 1),
+        ]
+        .into_iter()
+        .map(|(name, value, power, toughness)| {
+            let cost = if value == 6 {
+                ManaCost::Cost {
+                    generic: 4,
+                    shards: vec![ManaCostShard::Black; 2],
+                }
+            } else {
+                ManaCost::generic(value)
+            };
+            scenario
+                .add_creature_to_graveyard(P0, name, power, toughness)
+                .as_artifact_creature()
+                .with_mana_cost(cost)
+                .id()
+        })
+        .collect();
+        // Exact Technomancer return clause isolates the choice class; the full
+        // creature ETB and mill pipeline is covered by integration regressions.
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Return clause harness", false,
+            "Return any number of artifact creature cards with total mana value 6 or less from your graveyard to the battlefield.")
+            .with_mana_cost(ManaCost::zero()).id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+            if ids.iter().all(|id| cards.contains(id)))
+        );
+        let actions = crate::ai_support::legal_actions(runner.state());
+        let selections: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+        assert!(selections.iter().any(|cards| cards.is_empty()));
+        assert!(selections.iter().any(|cards| cards.as_slice() == [ids[1]]));
+        assert!(selections
+            .iter()
+            .any(|cards| cards.len() == 2 && cards.contains(&ids[0]) && cards.contains(&ids[2])));
+        assert!(!selections
+            .iter()
+            .any(|cards| cards.contains(&ids[0]) && cards.contains(&ids[1])));
+    }
+    #[test]
+    fn legal_actions_bounded_zero_mana_value_return_count() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        // Synthetic return-clause harness: verbatim Lively Dirge return mode,
+        // without its separate spree payment machinery.
+        for reject_three in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ids: Vec<_> = (0..3)
+                .map(|index| {
+                    scenario
+                        .add_creature_to_graveyard(P0, &format!("Zero {index}"), 1, 1)
+                        .as_artifact_creature()
+                        .with_mana_cost(ManaCost::zero())
+                        .id()
+                })
+                .collect();
+            let spell = scenario.add_spell_to_hand_from_oracle(P0, "Bounded return clause harness", false,
+                "Return up to two creature cards with total mana value 4 or less from your graveyard to the battlefield.")
+                .with_mana_cost(ManaCost::zero()).id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            assert!(
+                matches!(outcome.final_waiting_for(), WaitingFor::ChooseFromZoneChoice { cards, .. }
+                if cards.len() == 3 && ids.iter().all(|id| cards.contains(id)))
+            );
+            outcome.assert_zone(&ids, Zone::Graveyard);
+            let actions = crate::ai_support::legal_actions(runner.state());
+            let selections: Vec<_> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    GameAction::SelectCards { cards } => Some(cards),
+                    _ => None,
+                })
+                .collect();
+            // CR 608.2d: Zero mana value does not remove the independent two-card ceiling.
+            for count in 0..=2 {
+                assert!(selections
+                    .iter()
+                    .any(|cards| cards.as_slice() == &ids[..count]));
+            }
+            assert!(!selections.iter().any(|cards| cards.len() > 2));
+            if reject_three {
+                let prompt = runner.state().waiting_for.clone();
+                assert!(runner
+                    .act(GameAction::SelectCards { cards: ids.clone() })
+                    .is_err());
+                assert_eq!(runner.state().waiting_for, prompt);
+                assert!(ids
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Graveyard));
+            } else {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: ids[..2].to_vec(),
+                    })
+                    .expect("two zero-MV cards are legal");
+                assert!(ids[..2]
+                    .iter()
+                    .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+                assert_eq!(runner.state().objects[&ids[2]].zone, Zone::Graveyard);
+            }
+        }
+    }
     use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
@@ -7358,7 +7531,9 @@ mod tests {
             .push(CoreType::Creature);
         state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
         state.objects.get_mut(&prepared_id).unwrap().back_face =
-            Some(prepare_back_face_with_cost(ManaCost::NoCost));
+            // A {0} prepare spell needs no mana. `NoCost` would be an
+            // unpayable cost (CR 118.6), so the copy could not be cast.
+            Some(prepare_back_face_with_cost(ManaCost::zero()));
 
         // Create an unprepared creature on battlefield (must NOT appear).
         let plain_id = create_object(
@@ -7537,7 +7712,7 @@ mod tests {
                 candidate.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index,
+                    ability_index, ..
                 } if source_id == hand_sliver && ability_index == printed_len
             )
         }));
@@ -8508,7 +8683,7 @@ mod tests {
                 candidate.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == source
             )
         }));
@@ -8782,7 +8957,7 @@ mod tests {
                 candidate.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == altar
             )
         }));
@@ -8862,7 +9037,7 @@ mod tests {
         assert!(
             candidates.iter().any(|c| matches!(
                 c.action,
-                GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == kci
+                GameAction::ActivateAbility { source_id, ability_index: 0, .. } if source_id == kci
             )),
             "candidate_actions must include KCI activation during ManaPayment",
         );
@@ -8873,7 +9048,7 @@ mod tests {
         assert!(
             actions.iter().any(|a| matches!(
                 a,
-                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+                GameAction::ActivateAbility { source_id, ability_index: 0, .. } if *source_id == kci
             )),
             "legal_actions must expose KCI activation during ManaPayment (#562)",
         );
@@ -8886,7 +9061,7 @@ mod tests {
         assert!(
             kci_actions.iter().any(|a| matches!(
                 a,
-                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+                GameAction::ActivateAbility { source_id, ability_index: 0, .. } if *source_id == kci
             )),
             "grouped legal_actions_full[KCI] must include the KCI activation (#562)",
         );
@@ -9620,7 +9795,7 @@ mod tests {
                 c.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == pest
             )
         });
@@ -9645,7 +9820,7 @@ mod tests {
                 c.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == pest2
             )
         });
@@ -9728,6 +9903,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id,
                     ability_index: 0,
+                    ..
                 } if source_id == lantern => Some(c.metadata.tactical_class),
                 _ => None,
             });

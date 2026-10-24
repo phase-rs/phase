@@ -724,6 +724,7 @@ fn target_opponent_family_offers_only_the_target_opponents_creatures() {
         .act(GameAction::ActivateAbility {
             source_id: en_vec,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Oracle en-Vec");
     let offers = settle_recording_offers(

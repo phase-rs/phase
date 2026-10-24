@@ -90,6 +90,7 @@ fn kozilek_rejects_an_announced_x_without_a_matching_discard() {
         .act(GameAction::ActivateAbility {
             source_id: kozilek,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation must reach X announcement");
     assert!(

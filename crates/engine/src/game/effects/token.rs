@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
+use crate::game::game_object::{
+    AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
+};
 use crate::game::quantity::{
     quantity_expr_recipient_read, resolve_quantity_with_targets,
     resolve_quantity_with_targets_and_recipient, RecipientRead,
@@ -11,12 +13,12 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
-    AttachSelection, CastingPermission, Comparator, ContinuousModification, ControllerRef,
-    CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectError,
-    EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    AttachSelection, CastingPermission, ChosenAttribute, Comparator, ContinuousModification,
+    ControllerRef, CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
+    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -32,7 +34,9 @@ use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenHostRequest, TokenSpec};
+use crate::types::proposed_event::{
+    CopyTokenSpec, EntryChoices, ProposedEvent, TokenHostRequest, TokenSpec,
+};
 use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
     ResolvedTokenCreationReplayInvariantError,
@@ -649,9 +653,15 @@ pub(crate) fn resolve_with_host_override(
             .unwrap_or_default(),
     };
 
+    let window_start = events.len();
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if !apply_create_token_after_replacement(state, event, events) {
+            let completed = apply_create_token_after_replacement(state, event, events);
+            // CR 614.1a + CR 608.2c: the created referent includes any batch a
+            // replacement appended to this event. Published before a pause too:
+            // the counter-pause resume continues from this ledger.
+            publish_replacement_appended_tokens(state, &events[window_start..]);
+            if !completed {
                 return Ok(());
             }
         }
@@ -1067,6 +1077,9 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     token_image_ref: token_image_ref.clone(),
                 },
                 resulting_tapped,
+                // The direct-creation loop builds no proposal and installs no
+                // choices, so an ordinary Spec birth carries no entry answers.
+                entry_choices: Vec::new(),
                 resulting_next_object_id: state.next_object_id,
                 cause,
             };
@@ -1321,6 +1334,21 @@ pub fn apply_resolved_token_creation(
     state.objects.insert(object_id, object);
     // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
     zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    // CR 614.12a + CR 400.7: install the recorded as-enters answers onto the
+    // materialized object, mirroring the live fold. Placed before the
+    // entry-record snapshot below: the live fold precedes the live snapshot,
+    // and the snapshot captures `chosen_attributes` — installing after it
+    // would fork the replayed record from the live one. `mark_layers_entered`
+    // mirrors both live token births (`token.rs` Spec loop, `token_copy.rs`
+    // finish); `flush_layers` escalates when the token sources effects or
+    // carries counters.
+    state
+        .objects
+        .get_mut(&object_id)
+        .expect("the token was materialized above")
+        .chosen_attributes
+        .extend(command.entry_choices.iter().cloned());
+    crate::game::layers::mark_layers_entered(state, object_id);
     // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
     // and the predefined/catalog tables, NOT from the body the command carries,
     // so the body alone materializes a Treasure with no "{T}, Sacrifice this
@@ -1514,13 +1542,7 @@ pub(crate) fn materialize_token_copy_body(
         &copy.additional_modifications,
     );
     values.static_definitions = Arc::new(cda_pruning.definitions);
-    apply_copiable_values_to_liminal_object(
-        object,
-        &values,
-        copy.display_source,
-        copy.printed_ref.clone(),
-        copy.token_image_ref.clone(),
-    );
+    apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
     // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
     // on top of the copied characteristics. Twinflame's haste copies are the
@@ -1577,14 +1599,9 @@ pub(crate) fn reserve_liminal_token_object(
 pub(crate) fn apply_copiable_values_to_liminal_object(
     object: &mut GameObject,
     values: &CopiableValues,
-    display_source: DisplaySource,
-    printed_ref: Option<crate::types::card::PrintedCardRef>,
-    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    display: &DisplayIdentity,
 ) {
-    object.display_source = display_source;
-    object.printed_ref = printed_ref.clone();
-    object.base_printed_ref = printed_ref;
-    object.token_image_ref = token_image_ref;
+    object.install_display_identity_as_base(display);
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
@@ -1797,6 +1814,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         entry_ref,
         enter_tapped,
         enter_with_counters,
+        enter_with_choices,
         ..
     } = event
     else {
@@ -1831,6 +1849,18 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     entry
         .object
         .set_tapped(enter_tapped.resolve(entry.object.projected().tapped));
+    // CR 614.12a + CR 400.7: the entrant's as-enters choices and paid-amount
+    // latch were made before it entered and rode the event; install them on
+    // the projection before the birth command is built (mirrors the ZoneChange
+    // delivery fold in `zone_pipeline.rs`).
+    // CR 733: capture the same answers for the birth command BEFORE the fold
+    // moves `enter_with_choices`. Read from the event slot rather than back
+    // off the projection, so the record does not depend on projection history.
+    let recorded_entry_choices: Vec<ChosenAttribute> =
+        EntryChoices::of(&enter_with_choices).to_vec();
+    if let Some(choices) = enter_with_choices {
+        entry.object.chosen_attributes_mut().extend(choices.0);
+    }
     let owner = entry.object.projected().owner;
 
     // CR 733: the settled copy-token birth journals at the single liminal insert
@@ -1880,6 +1910,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
                 modifications,
             },
             resulting_tapped: entry.object.projected().tapped,
+            entry_choices: recorded_entry_choices,
             // `reserve_liminal_token_object` advanced the allocator to exactly
             // one past this id when it drew it, however many were drawn since.
             resulting_next_object_id: entry_ref.0 + 1,
@@ -2441,6 +2472,46 @@ pub(crate) fn record_last_created_copy_batch_token(state: &mut GameState, object
     }
 }
 
+/// CR 614.1a + CR 608.2c + CR 400.7: the tokens a replacement appended to one
+/// CreateToken event ("those tokens plus …": Chatterfang, Xorn; Academy
+/// Manufactor's "one of each") inside `window`, the event's span, that `own`
+/// (the ids the event's own batch already published) lacks, in event order.
+/// Membership is the window, as in `created_token_union_from_events`, so only
+/// tokens still on the battlefield count (CR 400.7).
+pub(crate) fn replacement_appended_token_ids(
+    state: &GameState,
+    window: &[GameEvent],
+    own: &[ObjectId],
+) -> Vec<ObjectId> {
+    super::created_token_union_from_events(state, window)
+        .into_iter()
+        .map(|pin| pin.object_id)
+        .filter(|id| !own.contains(id))
+        .collect()
+}
+
+/// CR 614.1a + CR 608.2c + CR 111.1: publish one CreateToken event's whole created
+/// referent — its own batch, then [`replacement_appended_token_ids`] — into
+/// `last_created_token_ids`. A replacement's appended batch is applied inside the
+/// replacement pipeline before the event's own batch, and each apply assigns the
+/// ledger, so without this the event's own batch overwrites it. Chatterfang's
+/// ruling: anything else the creating effect specifies ("that token gains haste",
+/// "exile that token") applies to the original tokens and the appended ones alike.
+/// The own batch stays first, so a singular "it" reader keeps the instruction's own
+/// token. A bulk republish, assigned like the apply's own tail.
+pub(crate) fn publish_replacement_appended_tokens(state: &mut GameState, window: &[GameEvent]) {
+    let appended = replacement_appended_token_ids(state, window, &state.last_created_token_ids);
+    if appended.is_empty() {
+        return;
+    }
+    state.last_created_token_ids = state
+        .last_created_token_ids
+        .iter()
+        .copied()
+        .chain(appended)
+        .collect();
+}
+
 /// CR 400.7 + CR 608.2i + CR 614.12a: realize a postponed token battlefield entry — record it
 /// through `record_zone_change` and emit its entry pair — at the first instant the object IS the
 /// thing that entered. Record and emit are ONE indivisible operation over ONE owned value, so no
@@ -2694,6 +2765,10 @@ fn condition_invariant_for_token(
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_is_invariant(lhs) && quantity_is_invariant(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_is_invariant(quantity),
         _ => false,
     }
 }
@@ -3557,7 +3632,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
-        | TargetFilter::SourceAttackTarget
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
@@ -4869,9 +4944,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         state.objects.insert(token_id, token);
 
@@ -6276,6 +6352,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: spawn,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Spawn mana ability should activate");
@@ -8321,6 +8398,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
                 &mut events,
@@ -8429,6 +8507,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
                 &mut events,
@@ -8511,9 +8590,10 @@ mod tests {
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
-            DisplaySource::Token,
-            None,
-            None,
+            &DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
         );
         let timestamp = state.next_timestamp();
         token.reset_for_battlefield_entry(state.turn_number, timestamp);
@@ -8533,10 +8613,10 @@ mod tests {
                 created_ids: Vec::new(),
                 copy_resume: Some(Box::new(CopyTokenSpec {
                     values: Box::new(values.clone()),
-                    display_source: DisplaySource::Token,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: DisplayIdentity {
+                        display_source: DisplaySource::Token,
+                        ..Default::default()
+                    },
                     extra_keywords: Vec::new(),
                     additional_modifications: Vec::new(),
                     tapped: false,
@@ -8544,6 +8624,8 @@ mod tests {
                     sacrifice_at: Some(Duration::UntilEndOfCombat),
                     source_id,
                     controller: PlayerId(0),
+                    // Liminal resume carries values only; empty mods are stamp-proof.
+                    donor: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
@@ -8557,6 +8639,7 @@ mod tests {
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],
+            enter_with_choices: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();

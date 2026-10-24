@@ -30,6 +30,7 @@ use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{CastingVariant, ManaChoice, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -133,6 +134,7 @@ pub(super) fn exile_with_food_chain(
         .act(GameAction::ActivateAbility {
             source_id: food_chain,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Food Chain activates");
     runner

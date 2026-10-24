@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
@@ -334,6 +334,14 @@ fn has_conditional_search_result_destination(lower: &str) -> bool {
             parse_clause(strip_search_result_subject(input))
         })
         .is_some()
+}
+
+/// CR 608.2c: a later "put/shuffle the chosen … and the rest …" instruction owns where the found cards go.
+fn has_choice_partition_destinations(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        map_opt(rest, parse_choice_partition_destinations).parse(input)
+    })
+    .is_some()
 }
 
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
@@ -758,30 +766,23 @@ pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
     alt((
-        value(
-            Zone::Graveyard,
+        preceded(
+            (
+                tag::<_, _, OracleError<'_>>(" into "),
+                parse_partition_owner_possessive,
+            ),
             alt((
-                tag::<_, _, OracleError<'_>>(" into your graveyard"),
-                tag(" into their graveyard"),
-                tag(" into its owner's graveyard"),
-            )),
-        ),
-        value(
-            Zone::Hand,
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your hand"),
-                tag(" into their hand"),
+                value(Zone::Graveyard, tag("graveyard")),
+                value(Zone::Hand, tag("hand")),
+                value(Zone::Library, tag("library")),
             )),
         ),
         value(
             Zone::Library,
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your library"),
-                tag(" into their library"),
-                tag(" into its owner's library"),
-                tag(" on the bottom of your library"),
-                tag(" on the bottom of their library"),
-            )),
+            preceded(
+                (tag(" on the bottom of "), parse_partition_owner_possessive),
+                tag("library"),
+            ),
         ),
         value(
             Zone::Exile,
@@ -791,6 +792,21 @@ pub(super) fn parse_choice_partition_destination(
             )),
         ),
     ))
+    .parse(input)
+}
+
+/// CR 400.3: these zones are always the owner's, so the possessive selects no player.
+fn parse_partition_owner_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("your "),
+            tag("their "),
+            tag("its owner's "),
+            tag("the player's "),
+            tag("that player's "),
+        )),
+    )
     .parse(input)
 }
 
@@ -2359,6 +2375,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
+        // CR 608.2c: ", and <permanents> you control gain …" after a complete clause is a new
+        // instruction; a comma inside the head means a serial subject list ("Auras, Equipment,
+        // and … you control"). A mana-spent-gated head is owned by `starts_mana_spent_conjunct`.
+        if starts_you_control_subject_predicate(after_and)
+            && super::subject_has_no_clause_boundary(&current_lower)
+            && !nom_primitives::scan_contains(&current_lower, MANA_SPENT_TO_CAST)
+        {
+            return Some((ClauseBoundary::Comma, whitespace_len));
+        }
     }
 
     None
@@ -3436,6 +3461,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("transform ")),
     ))
     .or(value((), tag("cast ")))
+    // CR 608.2c: "<instruction> and repeat this process" — split only the
+    // terminal bare directive (anchored to the end of the segment) so
+    // "... and repeat this process for first strike" and the counted / "any
+    // number of times" shapes are not newly split.
+    .or(value(
+        (),
+        terminated(tag("repeat this process"), (opt(tag(".")), eof)),
+    ))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
     // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
@@ -3474,12 +3507,13 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // counters on it equal to …" — the subject ("Each player") iterates and
     // the followup must split as its own clause so the Token effect's
     // continuation absorber (`try_parse_put_counters_on_token_followup`)
-    // sees the counter-placement on its own and lifts it onto
-    // `Token.enter_with_counters`. Mirrors the imperative `put ` axis above
-    // — same verb, different conjugation. Sits in the `.or()` chain rather
-    // than the first `alt()` tuple because the tuple is already at nom's
-    // 21-arm limit; adding it inline would push the cluster over and trip
-    // the `Choice<...>` trait-bound check at compile time.
+    // sees the counter placement on its own and lowers it to a
+    // `PutCounter { target: LastCreated }` continuation step. Mirrors the
+    // imperative `put ` axis above — same verb, different conjugation. Sits
+    // in the `.or()` chain rather than the first `alt()` tuple because the
+    // tuple is already at nom's 21-arm limit; adding it inline would push the
+    // cluster over and trip the `Choice<...>` trait-bound check at compile
+    // time.
     .or(value((), tag("puts ")))
     // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
     // not noun-phrase continuations. Keep the matcher narrow so name-based
@@ -5110,6 +5144,33 @@ fn effect_bears_retargetable_copy(effect: &Effect) -> bool {
     }
 }
 
+/// The intervening optional cost (e.g. Birthing Ritual's "you may sacrifice a
+/// creature") that sits between an anchor look `Dig` at top-level
+/// `anchor_index` and its "from among those cards" dependent — the host whose
+/// sub-ability carries the `DigSource::PriorLook` consumer Digs.
+///
+/// CR 608.2c: written order is real, so the intervening clause is found by
+/// walking emission order FORWARD from the anchor (U6-C3 `Between { anchor }`
+/// under the `DigLookbackTransparentCost` guard), never by assuming adjacency.
+/// The single authority shared by the `DigFromAmong` restructure that installs
+/// the consumers and the `PutRest` fan-out that later patches them, so both
+/// bind the same host. Returns the host's current index in `defs`, or `None`
+/// when no such clause intervenes.
+fn dig_intervening_cost_host(
+    env: &super::assembly::AssemblyEnv,
+    defs: &[AbilityDefinition],
+    anchor_index: usize,
+) -> Option<usize> {
+    env.node_id_at(anchor_index).and_then(|anchor| {
+        env.resolve(
+            defs,
+            super::assembly::AntecedentSelector::Between { anchor },
+            Some(super::assembly::BindGuard::DigLookbackTransparentCost),
+            super::assembly::OnMiss::Ignore,
+        )
+    })
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -5679,6 +5740,37 @@ pub(super) fn apply_clause_continuation(
                     reorder_all,
                     rest_order,
                 );
+                // CR 608.2c + CR 701.20e: when the anchor is the look-only Dig of
+                // the intervening-optional-cost restructure (DigFromAmong arm,
+                // Birthing Ritual), the looked-at set is disposed of by the
+                // PriorLook consumer Digs nested under that cost — not by the
+                // anchor, whose rest fields are never read (a keep-0 look returns
+                // early in `dig::resolve`). "Put the rest … in a random order"
+                // must reach them. The host is bound through
+                // `dig_intervening_cost_host`, the same helper the restructure
+                // calls, so producer and consumer cannot drift. `reorder_all` is
+                // never forwarded: the consumers' kept destination is owned by
+                // their own from-among clause.
+                if !reorder_all {
+                    if let Some(host) = dig_intervening_cost_host(env, defs, bound_index) {
+                        if let Some(consumer) = defs[host].sub_ability.as_deref_mut().filter(|c| {
+                            matches!(
+                                &*c.effect,
+                                Effect::Dig {
+                                    source: DigSource::PriorLook,
+                                    ..
+                                }
+                            )
+                        }) {
+                            patch_rest_destination_recursively(
+                                consumer,
+                                destination,
+                                false,
+                                rest_order,
+                            );
+                        }
+                    }
+                }
             }
         }
         ContinuationAst::DigFromAmong {
@@ -5730,14 +5822,7 @@ pub(super) fn apply_clause_continuation(
                     // CR 608.2c: written order is real, so the intervening clause must be
                     // found by walking emission order FORWARD from the anchor — not by
                     // assuming adjacency. Resolved over `order`, never the output tree.
-                    let sac_pos = env.node_id_at(dig_pos).and_then(|anchor| {
-                        env.resolve(
-                            defs,
-                            super::assembly::AntecedentSelector::Between { anchor },
-                            Some(super::assembly::BindGuard::DigLookbackTransparentCost),
-                            super::assembly::OnMiss::Ignore,
-                        )
-                    });
+                    let sac_pos = dig_intervening_cost_host(env, defs, dig_pos);
 
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
@@ -6404,6 +6489,49 @@ pub(super) fn apply_clause_continuation(
                 enter_with_counters.push((counter_type, count));
             }
         }
+        ContinuationAst::PutCountersOnLastCreated {
+            counter_type,
+            count,
+        } => {
+            // CR 608.2c + CR 122.1: a separate instruction applied after the
+            // token enters, to every token the create instruction made (Zaxara
+            // ruling). `ContinuationStep`: a false or declined gate on the
+            // creating instruction skips it, so the game-lifetime `LastCreated`
+            // ledger is never read stale (G'raha Tia). Kind `Spell`: a sub is a
+            // resolution step; `append_definition_to_sub_chain` bypasses the
+            // fold's kind normalization. Under a player-scoped creation the
+            // placement is co-scoped (CR 608.2e); the driver binds each
+            // player's "it" to the tokens that player created.
+            let mut placement = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target: TargetFilter::LastCreated,
+                },
+            );
+            placement.sub_link = SubAbilityLink::ContinuationStep;
+            match defs.last_mut() {
+                Some(previous) if matches!(&*previous.effect, Effect::Token { .. }) => {
+                    // CR 608.2e: "Each player creates a token and puts counters on it" — the
+                    // subject governs both actions, so the placement is the same players'
+                    // second action, processed after every player completed the first. It
+                    // carries the creating clause's player scope; an unscoped creation stays
+                    // unscoped. (Same co-scoped stamp as the `RevealHandFilter` step above.)
+                    placement.player_scope = previous.player_scope.clone();
+                    append_definition_to_sub_chain(previous, placement);
+                }
+                // Recognition is gated on a `Token` antecedent; fail closed
+                // rather than drop the instruction.
+                _ => defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "created_token_counters_without_token",
+                        "put counters on it",
+                    ),
+                )),
+            }
+        }
         ContinuationAst::TokenSourcePowerToughness {
             power: followup_power,
             toughness: followup_toughness,
@@ -6975,6 +7103,9 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
+        // CR 608.2c: recognition was gated on a preceding Token effect, and the
+        // lowering appends the placement under it (or fails closed).
+        ContinuationAst::PutCountersOnLastCreated { .. } => true,
         ContinuationAst::TokenSourcePowerToughness { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::FaceDownProfileSpec { .. } => true,
@@ -7040,6 +7171,10 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // PutAtLibraryPosition effect applies the later positional instruction.
             let has_positional_put = has_search_result_library_position_restatement(&full_lower);
             if has_positional_put {
+                return None;
+            }
+            // CR 701.24b: the found cards stay in the library until that partition moves them.
+            if has_choice_partition_destinations(&full_lower) {
                 return None;
             }
             let lower = text.to_lowercase();
@@ -8137,9 +8272,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -8200,6 +8333,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -9219,12 +9353,13 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                     .map(|position| ContinuationAst::PutChosenCardsAtLibraryPosition { position })
             }),
         // CR 608.2d: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
-        // of them/those" after ChangeZone, ExileTop, RevealTop, or RevealHand →
-        // ChooseFromZone building block
+        // of them/those" after ChangeZone, ExileTop, RevealTop, RevealHand, or a search
+        // whose found cards wait in the library → ChooseFromZone building block
         Effect::ChangeZone { .. }
         | Effect::ExileTop { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealHand { .. }
+        | Effect::SearchLibrary { .. }
             if (nom_primitives::scan_contains(&lower, "of them")
                 || nom_primitives::scan_contains(&lower, "of those"))
                 && alt((
@@ -9434,8 +9569,13 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             parse_change_zone_enters_tapped_attacking(&lower, ctx)
         }
         // CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token creation.
-        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Populate
-            if let Some(continuation) = try_parse_tokens_goaded_continuation(&lower) =>
+        // The token-creator set is `Effect::is_token_creator`'s; the detector runs only
+        // for its members, and a miss falls through to the later arms.
+        effect
+            if let Some(continuation) = effect
+                .is_token_creator()
+                .then(|| try_parse_tokens_goaded_continuation(&lower))
+                .flatten() =>
         {
             Some(continuation)
         }
@@ -9465,17 +9605,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 scope: AnaphorNumber::Singular,
             })
         }
-        // CR 122.6a + CR 614.1c: Token enters-with-counters continuation. Two forms:
-        //   * Declarative: "The token enters with X +1/+1 counters on it[, where X is ...]"
-        //     or "It enters with X +1/+1 counters on it[, where X is ...]"
-        //   * Imperative followup: "and put N [type] counter(s) on it"
-        //     after a `create a [token]` clause (G'raha Tia, Fractal Anomaly,
-        //     Fractal Tender, Berta — class of "create token ... and put
-        //     counter on it" where "it" is the just-created token).
-        // Both lift onto the preceding Token effect's `enter_with_counters`
-        // so counters apply as the token enters (CR 614.1c replacement)
-        // rather than as a post-ETB PutCounter effect that would mistakenly
-        // target the source ability via `SelfRef`/`ParentTarget`.
+        // Token counter continuations. Two forms:
+        //   * Declarative (CR 614.1c + CR 122.6a): "The token enters with X
+        //     +1/+1 counters on it[, where X is ...]" or "It enters with X
+        //     +1/+1 counters on it[, where X is ...]" → `TokenEntersWithCounters`,
+        //     the token's entry counters.
+        //   * Imperative followup (CR 608.2c + CR 122.1): "[and] put N [type]
+        //     counter(s) on it" after a `create a [token]` clause (G'raha Tia,
+        //     Fractal Anomaly, Fractal Tender, Berta — "it" is the just-created
+        //     token) → `PutCountersOnLastCreated`, a later
+        //     `PutCounter { target: LastCreated }` applied after the token enters.
         Effect::Token { .. } => parse_token_source_power_toughness_followup(&lower)
             .map(|(power, toughness)| ContinuationAst::TokenSourcePowerToughness {
                 power,
@@ -9824,38 +9963,50 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
     })
 }
 
-/// CR 122.6a + CR 614.1c: Parse the imperative followup form
+/// CR 301.5b: Returns true when the counter followup consumed the entire
+/// clause. A trailing `"and attach …"` conjunct (Fractal Harness) must not be
+/// absorbed here — the bare-and splitter needs to peel it into its own attach
+/// clause.
+fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
+    rest.trim().trim_start_matches(['.', ' ']).is_empty()
+}
+
+/// The count prefix of the imperative token-counter followup ("put <prefix> <type> counter(s) on it").
+#[derive(Clone, Copy)]
+enum CountPrefix {
+    VariableX,
+    Fixed(u32),
+    ThatMany,
+}
+
+/// CR 608.2c + CR 122.1: Parse the imperative followup form
 /// "put N [counter type] counter(s) on it[, where X is ...]" /
 /// "put[s] a number of [counter type] counter(s) on it equal to <quantity>"
-/// that follows a `create a [token]` clause. "It" refers to the just-created
-/// token; the counters must be lifted onto `Token.enter_with_counters` so they
-/// apply as the token enters the battlefield (CR 614.1c) rather than as a
-/// post-ETB PutCounter effect targeting the ability source.
+/// that follows a `create a [token]` clause. "It" refers to the token(s) that
+/// clause just created; putting the counters on it is a separate, later
+/// instruction applied after the token enters (CR 608.2c), not counters it
+/// enters with (that is the declarative `try_parse_token_enters_with_counters`).
 ///
 /// Verb axis: `put ` (imperative, "create a token and put …") or `puts `
 /// (third-person, "Each player creates a token and puts …" — Oversimplify
 /// class). The verb is a single `alt()` over the two conjugations — adding
 /// a third form means extending the `alt()`, not duplicating the function.
 ///
-/// Quantity axis: three forms in priority order —
+/// Quantity axis: four forms in priority order —
 ///   1. `"a number of <type> counter(s) on it equal to <quantity>"` →
 ///      delegated to the shared `parse_dynamic_counter_suffix_body` building
-///      block (single source of truth for "enters with N counters equal to
-///      X"; also used by `Effect::ChangeZone.enter_with_counters`).
+///      block (single source of truth for "N counters equal to X"; also used
+///      by `Effect::ChangeZone.enter_with_counters`).
 ///   2. `"N <type> counter(s) on it, where x is <quantity>"` → fixed N with
 ///      a deferred X-binding (Fractal Anomaly class).
 ///   3. `"N <type> counter(s) on it"` → fixed N.
+///   4. `"that many <type> counter(s) on it"` → the `EventContextAmount`
+///      placeholder, bound to the trigger gate's measured count at trigger
+///      lowering (Zimone, All-Questioning); with no gate it stays the
+///      placeholder.
 ///
-/// Returns `TokenEntersWithCounters` so it shares the continuation absorption
-/// path with `try_parse_token_enters_with_counters` (declarative form).
-/// CR 122.6a + CR 301.5b: Returns true when the counter followup consumed the
-/// entire clause. A trailing `"and attach …"` conjunct (Fractal Harness) must
-/// not be absorbed here — the bare-and splitter needs to peel it into its own
-/// attach clause.
-fn token_counter_followup_tail_is_clean(rest: &str) -> bool {
-    rest.trim().trim_start_matches(['.', ' ']).is_empty()
-}
-
+/// Returns `PutCountersOnLastCreated`, which lowers to a `ContinuationStep`
+/// `PutCounter { target: LastCreated }` directly under the `Token`.
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the verb. Both `put ` (imperative) and `puts ` (third-person,
@@ -9881,7 +10032,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         if !token_counter_followup_tail_is_clean(remainder) {
             return None;
         }
-        return Some(ContinuationAst::TokenEntersWithCounters {
+        return Some(ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         });
@@ -9889,21 +10040,21 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
 
     // Forms 2 + 3 (fixed N with optional "where x is" rebind): the original
     // grammar, retained for the Fractal Anomaly / G'raha Tia class. Counter
-    // count is `x` (deferred), an article (1), or a literal number.
+    // count is `x` (deferred), "that many" (gate-bound), an article (1), or a
+    // literal number.
     let (rest, count_prefix) = alt((
         // "x " — variable resolved later via "where X is" or by caller payment
-        value(None, tag::<_, _, OracleError<'_>>("x ")),
-        value(Some(1u32), tag("a ")),
-        value(Some(1u32), tag("an ")),
+        value(CountPrefix::VariableX, tag::<_, _, OracleError<'_>>("x ")),
+        value(CountPrefix::ThatMany, tag("that many ")),
+        value(CountPrefix::Fixed(1), tag("a ")),
+        value(CountPrefix::Fixed(1), tag("an ")),
+        map(
+            terminated(nom_primitives::parse_number, multispace0),
+            CountPrefix::Fixed,
+        ),
     ))
     .parse(rest)
-    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
-        if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            (r.trim_start(), Some(n))
-        } else {
-            (rest, None)
-        }
-    });
+    .unwrap_or((rest, CountPrefix::VariableX));
 
     // Parse counter type: only +1/+1 and -1/-1 are common in token contexts
     // (matches the AST scope of the existing enters-with-counters helper).
@@ -9939,7 +10090,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         } else if let Ok((rest_equal, _)) =
             tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
         {
-            // CR 122.6a: "put a number of counters on it equal to [qty]" — dynamic
+            // CR 122.1: "put a number of counters on it equal to [qty]" — dynamic
             // counter count in the imperative followup form (Primo, the Unbounded).
             // allow-noncombinator: trailing-period cleanup on a pre-tokenized suffix.
             let qty_text = rest_equal.trim().trim_end_matches('.');
@@ -9953,22 +10104,24 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
         return None;
     }
 
-    let count = if let Some(qty) = quantity {
-        qty
-    } else if let Some(n) = count_prefix {
-        QuantityExpr::Fixed { value: n as i32 }
-    } else {
+    let count = match (quantity, count_prefix) {
+        (Some(qty), _) => qty,
+        (None, CountPrefix::Fixed(n)) => QuantityExpr::Fixed { value: n as i32 },
+        // CR 608.2h: "that many" placeholder; the count is determined as the effect is applied, bound to its antecedent at trigger lowering.
+        (None, CountPrefix::ThatMany) => QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
         // Bare X with no "where X is" — variable resolved from the enclosing
         // ability's payment (e.g., G'raha Tia: X is the spell's mana value
         // paid as life via the parent PayCost).
-        QuantityExpr::Ref {
+        (None, CountPrefix::VariableX) => QuantityExpr::Ref {
             qty: QuantityRef::Variable {
                 name: "X".to_string(),
             },
-        }
+        },
     };
 
-    Some(ContinuationAst::TokenEntersWithCounters {
+    Some(ContinuationAst::PutCountersOnLastCreated {
         counter_type,
         count,
     })
@@ -10313,8 +10466,48 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 
 #[cfg(test)]
 mod tests {
+    use super::super::parse_effect_chain;
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    #[test]
+    fn choice_partition_destination_accepts_every_owner_possessive() {
+        for possessive in [
+            "your",
+            "their",
+            "its owner's",
+            "the player's",
+            "that player's",
+        ] {
+            for (word, zone) in [
+                ("graveyard", Zone::Graveyard),
+                ("hand", Zone::Hand),
+                ("library", Zone::Library),
+            ] {
+                let text = format!(" into {possessive} {word}");
+                assert_eq!(
+                    parse_choice_partition_destination(&text).ok(),
+                    Some(("", zone)),
+                    "{text}"
+                );
+            }
+            let bottom = format!(" on the bottom of {possessive} library");
+            assert_eq!(
+                parse_choice_partition_destination(&bottom).ok(),
+                Some(("", Zone::Library)),
+                "{bottom}"
+            );
+        }
+        assert_eq!(
+            parse_choice_partition_destination(" into exile").ok(),
+            Some(("", Zone::Exile))
+        );
+        assert!(parse_choice_partition_destination(" into a player's graveyard").is_err());
+        assert_eq!(
+            parse_choice_partition_destination(" into the player's graveyard").ok(),
+            Some(("", Zone::Graveyard))
+        );
+    }
 
     /// SHAPE — CR 608.2c: a conditional destination owns movement; this
     /// detector suppresses only the earlier search's synthesized default.
@@ -14656,6 +14849,7 @@ mod tests {
             up_to: choice_up_to,
             filter: choice_filter,
             rest_destination: choice_rest,
+            rest_order: choice_rest_order,
             source: choice_src,
             reveal: choice_reveal,
             ..
@@ -14683,6 +14877,14 @@ mod tests {
             *choice_rest,
             Some(Zone::Library),
             "\"put the rest on the bottom\" → rest_destination Library"
+        );
+        // CR 608.2c + CR 701.20e: "in a random order" reaches the PriorLook
+        // consumer that actually disposes of the looked-at set, not only the
+        // look-only anchor (whose rest fields are never read at runtime).
+        assert_eq!(
+            *choice_rest_order,
+            DigRestOrder::Random,
+            "\"in a random order\" must patch the PriorLook choice Dig"
         );
         // Creature + mana-value-relative-to-sacrificed-creature filter.
         let TargetFilter::Typed(TypedFilter {
@@ -14728,6 +14930,7 @@ mod tests {
         let Effect::Dig {
             keep_count: else_keep,
             rest_destination: else_rest,
+            rest_order: else_rest_order,
             source: else_src,
             ..
         } = else_ab.effect.as_ref()
@@ -14747,6 +14950,11 @@ mod tests {
             *else_rest,
             Some(Zone::Library),
             "else_ability Dig routes all to library bottom"
+        );
+        assert_eq!(
+            *else_rest_order,
+            DigRestOrder::Random,
+            "\"in a random order\" must patch the PriorLook decline Dig too"
         );
 
         // No stray `ChangeZone { target: ParentTarget }` from clause 3.
@@ -14768,6 +14976,76 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    /// Regression guard for the DigFromAmong intervening-cost restructure: with
+    /// no trailing "put the rest … in a random order" clause (Preferred
+    /// Selection's effect text), the PriorLook consumers keep the restructure's
+    /// default `DigRestOrder::Preserve`. This input never reaches the PutRest
+    /// arm, so it pins the restructure's default, not the PutRest fan-out.
+    #[test]
+    fn dig_from_among_after_optional_cost_without_rest_clause_keeps_preserve_order() {
+        fn collect_prior_look_digs<'a>(
+            def: &'a AbilityDefinition,
+            out: &mut Vec<&'a AbilityDefinition>,
+        ) {
+            if matches!(
+                def.effect.as_ref(),
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ) {
+                out.push(def);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect_prior_look_digs(sub, out);
+            }
+            if let Some(else_def) = def.else_ability.as_deref() {
+                collect_prior_look_digs(else_def, out);
+            }
+        }
+
+        let def = parse_effect_chain(
+            "look at the top two cards of your library. You may sacrifice this enchantment and \
+             pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put \
+             one of those cards on the bottom of your library.",
+            AbilityKind::Spell,
+        );
+
+        // Positive reach guard: the restructure fired — a PriorLook Dig hangs
+        // under the optional Sacrifice.
+        let mut node = Some(&def);
+        let mut sacrifice = None;
+        while let Some(d) = node {
+            if matches!(d.effect.as_ref(), Effect::Sacrifice { .. }) {
+                sacrifice = Some(d);
+                break;
+            }
+            node = d.sub_ability.as_deref();
+        }
+        let sacrifice = sacrifice.expect("chain must contain the optional Sacrifice");
+        let mut prior_look_digs = Vec::new();
+        if let Some(sub) = sacrifice.sub_ability.as_deref() {
+            collect_prior_look_digs(sub, &mut prior_look_digs);
+        }
+        assert!(
+            !prior_look_digs.is_empty(),
+            "the restructure must wire a PriorLook Dig under the Sacrifice, got {:?}",
+            sacrifice.sub_ability
+        );
+
+        for dig in prior_look_digs {
+            let Effect::Dig { rest_order, .. } = dig.effect.as_ref() else {
+                unreachable!("collected only Dig effects");
+            };
+            assert_eq!(
+                *rest_order,
+                DigRestOrder::Preserve,
+                "no rest-order clause → PriorLook consumer keeps Preserve, got {:?}",
+                dig.effect
+            );
+        }
     }
 
     #[test]
@@ -15120,7 +15398,7 @@ mod tests {
         // After clause splitting, the followup clause is "put x +1/+1 counters on it".
         let result = try_parse_put_counters_on_token_followup("put x +1/+1 counters on it");
         assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters {
+        if let Some(ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         }) = result
@@ -15134,7 +15412,7 @@ mod tests {
                 }
             ));
         } else {
-            panic!("expected TokenEntersWithCounters");
+            panic!("expected PutCountersOnLastCreated");
         }
     }
 
@@ -15143,7 +15421,7 @@ mod tests {
         // Fractal Tender: "... and put three +1/+1 counters on it"
         let result = try_parse_put_counters_on_token_followup("put three +1/+1 counters on it");
         assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters {
+        if let Some(ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         }) = result
@@ -15151,7 +15429,7 @@ mod tests {
             assert_eq!(counter_type, CounterType::Plus1Plus1);
             assert_eq!(count, QuantityExpr::Fixed { value: 3 });
         } else {
-            panic!("expected TokenEntersWithCounters");
+            panic!("expected PutCountersOnLastCreated");
         }
     }
 
@@ -15160,7 +15438,7 @@ mod tests {
         // "and put a +1/+1 counter on it" — singular article form.
         let result = try_parse_put_counters_on_token_followup("put a +1/+1 counter on it");
         assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters {
+        if let Some(ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         }) = result
@@ -15168,7 +15446,7 @@ mod tests {
             assert_eq!(counter_type, CounterType::Plus1Plus1);
             assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         } else {
-            panic!("expected TokenEntersWithCounters");
+            panic!("expected PutCountersOnLastCreated");
         }
     }
 
@@ -15191,10 +15469,10 @@ mod tests {
             "put x +1/+1 counters on it, where x is the number of cards you've drawn this turn",
         );
         assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
+        if let Some(ContinuationAst::PutCountersOnLastCreated { counter_type, .. }) = result {
             assert_eq!(counter_type, CounterType::Plus1Plus1);
         } else {
-            panic!("expected TokenEntersWithCounters");
+            panic!("expected PutCountersOnLastCreated");
         }
     }
 
@@ -15206,12 +15484,12 @@ mod tests {
         let result = try_parse_put_counters_on_token_followup(
             "put a number of +1/+1 counters on it equal to the damage dealt",
         );
-        let Some(ContinuationAst::TokenEntersWithCounters {
+        let Some(ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         }) = result
         else {
-            panic!("expected TokenEntersWithCounters, got {result:?}");
+            panic!("expected PutCountersOnLastCreated, got {result:?}");
         };
         assert_eq!(counter_type, CounterType::Plus1Plus1);
         assert_eq!(
@@ -15228,10 +15506,10 @@ mod tests {
         // -1/-1 counter form (uncommon for tokens, but the helper supports it).
         let result = try_parse_put_counters_on_token_followup("put a -1/-1 counter on it");
         assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
+        if let Some(ContinuationAst::PutCountersOnLastCreated { counter_type, .. }) = result {
             assert_eq!(counter_type, CounterType::Minus1Minus1);
         } else {
-            panic!("expected TokenEntersWithCounters");
+            panic!("expected PutCountersOnLastCreated");
         }
     }
 
@@ -15244,11 +15522,184 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// CR 608.2h: "that many" marks the `EventContextAmount` placeholder on
+    /// both counter kinds; trigger lowering binds it to the gate's count.
+    #[test]
+    fn put_counters_on_it_followup_that_many_marks_the_count_anaphor() {
+        let that_many = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        for (text, expected_type) in [
+            (
+                "put that many +1/+1 counters on it",
+                CounterType::Plus1Plus1,
+            ),
+            (
+                "put that many -1/-1 counters on it",
+                CounterType::Minus1Minus1,
+            ),
+        ] {
+            match try_parse_put_counters_on_token_followup(text) {
+                Some(ContinuationAst::PutCountersOnLastCreated {
+                    counter_type,
+                    count,
+                }) => {
+                    assert_eq!(counter_type, expected_type, "{text:?}");
+                    assert_eq!(count, that_many, "{text:?}");
+                }
+                other => panic!("expected PutCountersOnLastCreated for {text:?}, got {other:?}"),
+            }
+        }
+        // The recipient must still be the just-created token.
+        assert!(try_parse_put_counters_on_token_followup(
+            "put that many +1/+1 counters on target creature"
+        )
+        .is_none());
+    }
+
     #[test]
     fn put_counters_on_it_followup_rejects_non_put_verb() {
         // Other verbs that happen to mention counters must not match.
         let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
+    }
+
+    /// The counter placement directly under a created-token definition, after
+    /// asserting the imperative lowering: no entry counters on the token, and a
+    /// `ContinuationStep`, `Spell`-kind `PutCounter { target: LastCreated }` sub.
+    fn created_token_placement(def: &AbilityDefinition) -> (&CounterType, &QuantityExpr) {
+        let Effect::Token {
+            enter_with_counters,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected Token, got {:?}", def.effect);
+        };
+        assert!(
+            enter_with_counters.is_empty(),
+            "the token carries no entry counters: {enter_with_counters:?}"
+        );
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("the counter placement is the token's direct sub");
+        assert_eq!(sub.sub_link, SubAbilityLink::ContinuationStep);
+        assert_eq!(sub.kind, AbilityKind::Spell);
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::LastCreated,
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected PutCounter {{ LastCreated }}, got {:?}",
+                sub.effect
+            );
+        };
+        (counter_type, count)
+    }
+
+    /// CR 608.2c + CR 122.1: "create … token, then put N counters on it" — and
+    /// its separate-sentence and third-person twins — lowers to the `Token`
+    /// followed directly by a `ContinuationStep` `PutCounter { LastCreated }`:
+    /// the token enters first, then receives the counters.
+    #[test]
+    fn created_token_counter_followup_lowers_to_last_created_placement() {
+        // CR 608.2e: the placement carries the creating clause's player scope —
+        // a scoped creation's "puts … on it" is the same players' second
+        // action; an unscoped creation's stays unscoped.
+        for (text, scope) in [
+            (
+                "create a 0/0 green and blue fractal creature token, then put three +1/+1 counters on it",
+                None,
+            ),
+            (
+                "create a 0/0 green and blue fractal creature token. put three +1/+1 counters on it",
+                None,
+            ),
+            (
+                "each player creates a 0/0 green and blue fractal creature token and puts three +1/+1 counters on it",
+                Some(PlayerFilter::All),
+            ),
+        ] {
+            let def = super::super::parse_effect_chain(text, AbilityKind::Spell);
+            assert_eq!(
+                created_token_placement(&def),
+                (&CounterType::Plus1Plus1, &QuantityExpr::Fixed { value: 3 }),
+                "{text:?}"
+            );
+            let sub = def.sub_ability.as_deref().expect("placement sub");
+            assert_eq!(def.player_scope, scope, "{text:?}: creation scope");
+            assert_eq!(sub.player_scope, def.player_scope, "{text:?}: co-scoped");
+        }
+
+        // An activated ability: the head keeps its kind; the sub is a `Spell`
+        // resolution step.
+        let def = super::super::parse_effect_chain(
+            "create a 0/0 green and blue fractal creature token and put x +1/+1 counters on it",
+            AbilityKind::Activated,
+        );
+        assert_eq!(def.kind, AbilityKind::Activated);
+        let (counter_type, count) = created_token_placement(&def);
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }
+        );
+
+        // Hostile: the declarative "enters with" form keeps entry counters and
+        // has no placement step (CR 614.1c + CR 122.6a).
+        let def = super::super::parse_effect_chain(
+            "create a 0/0 green and blue fractal creature token. the token enters with x +1/+1 counters on it",
+            AbilityKind::Spell,
+        );
+        let Effect::Token {
+            enter_with_counters,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected Token, got {:?}", def.effect);
+        };
+        assert_eq!(enter_with_counters.len(), 1);
+        assert!(def.sub_ability.is_none(), "{:?}", def.sub_ability);
+    }
+
+    /// The lowering fails closed when the antecedent is not a `Token`: the
+    /// placement becomes an `Unimplemented` def instead of being dropped, and
+    /// the antecedent is untouched. The `Token` twin is the test above.
+    #[test]
+    fn created_token_counter_placement_without_a_token_fails_closed() {
+        let draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        let mut defs = vec![AbilityDefinition::new(AbilityKind::Spell, draw.clone())];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::PutCountersOnLastCreated {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 3 },
+            },
+            AbilityKind::Spell,
+            &env,
+        );
+        assert_eq!(defs.len(), 2);
+        assert_eq!(*defs[0].effect, draw);
+        assert!(defs[0].sub_ability.is_none());
+        assert_eq!(
+            *defs[1].effect,
+            Effect::unimplemented("created_token_counters_without_token", "put counters on it")
+        );
     }
 
     #[test]
@@ -15453,12 +15904,12 @@ mod tests {
         );
     }
 
-    /// CR 122.1 + CR 614.1c + CR 607.2a: Oversimplify's third-person
+    /// CR 122.1 + CR 608.2c + CR 607.2a: Oversimplify's third-person
     /// dynamic followup. "Each player creates ... and puts a number of +1/+1
     /// counters on it equal to the total power of creatures they controlled
     /// that were exiled this way." After clause splitting the followup is
     /// "puts a number of +1/+1 counters on it equal to <quantity>". Must
-    /// lower to `TokenEntersWithCounters{Plus1Plus1, Aggregate{Sum,Power,
+    /// lower to `PutCountersOnLastCreated{Plus1Plus1, Aggregate{Sum,Power,
     /// And[Typed{Creature,ScopedPlayer}, ExiledBySource]}}`.
     ///
     /// This is the building-block test for the "puts" (third-person) verb
@@ -15477,12 +15928,12 @@ mod tests {
             "puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way",
         )
         .expect("third-person dynamic followup must parse");
-        let ContinuationAst::TokenEntersWithCounters {
+        let ContinuationAst::PutCountersOnLastCreated {
             counter_type,
             count,
         } = result
         else {
-            panic!("expected TokenEntersWithCounters, got {result:?}");
+            panic!("expected PutCountersOnLastCreated, got {result:?}");
         };
         assert_eq!(counter_type, CounterType::Plus1Plus1);
         let expected_qty = QuantityExpr::Ref {
@@ -15507,7 +15958,7 @@ mod tests {
         assert_eq!(count, expected_qty);
     }
 
-    /// CR 122.1 + CR 614.1c: The same dynamic-counter combinator also accepts
+    /// CR 122.1 + CR 608.2c: The same dynamic-counter combinator also accepts
     /// the imperative "put a number of ..." form (no third-person -s). This
     /// guards the verb-axis `alt()` against future regressions.
     #[test]
@@ -15516,8 +15967,8 @@ mod tests {
             "put a number of +1/+1 counters on it equal to the number of creatures you control",
         )
         .expect("imperative dynamic followup must parse");
-        let ContinuationAst::TokenEntersWithCounters { counter_type, .. } = result else {
-            panic!("expected TokenEntersWithCounters, got {result:?}");
+        let ContinuationAst::PutCountersOnLastCreated { counter_type, .. } = result else {
+            panic!("expected PutCountersOnLastCreated, got {result:?}");
         };
         assert_eq!(counter_type, CounterType::Plus1Plus1);
     }

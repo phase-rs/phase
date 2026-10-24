@@ -309,10 +309,19 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
                 },
             },
         },
-        WardCost::DiscardCard => AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
+        // CR 702.21a + CR 701.9a + CR 701.9b: the discard axes (count, card-type
+        // filter, chosen vs random) pass through to the unified discard cost; a
+        // ward cost is always paid from the payer's hand.
+        WardCost::Discard {
+            count,
+            filter,
+            selection,
+        } => AbilityCost::Discard {
+            count: QuantityExpr::Fixed {
+                value: i32::try_from(*count).unwrap_or(i32::MAX),
+            },
+            filter: filter.clone(),
+            selection: *selection,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
         WardCost::Sacrifice { count, filter } => {
@@ -940,6 +949,20 @@ impl PendingActivationTriggerCollection {
         );
         self.operation_journal = session.into_operation_journal();
         self.pending_contexts.extend(contexts);
+    }
+
+    /// The triggers collected during the announcement, each with its own trigger
+    /// event, that `commit_into` hands to ordinary placement once the activation
+    /// completes. Read-only, for the restore validator.
+    pub(crate) fn pending_contexts(&self) -> &[PendingTriggerContext] {
+        &self.pending_contexts
+    }
+
+    /// Test fixture: a collection already holding `context`.
+    #[cfg(test)]
+    pub(crate) fn with_pending_context_for_test(mut self, context: PendingTriggerContext) -> Self {
+        self.pending_contexts.push(context);
+        self
     }
 
     /// Commit collector consequences exactly once and append the retained
@@ -6110,73 +6133,45 @@ fn collect_pending_triggers_with_collection(
             // only fires on SpellCast, which is only emitted for an actual
             // cast — so the cast-ness is already implied by the trigger event
             // itself and a redundant WasCast condition would add nothing.
+            // CR 702.153b: each instance "triggers based on the payments made
+            // for it". Keyword instances list printed ones first, so a recorded
+            // casualty payment past them was made for a granted one at cast.
+            // The grant is read from the cast-time snapshot, not re-evaluated
+            // now: "the first instant or sorcery spell you cast each turn"
+            // (Anhelo, the Painter) no longer counts zero spells once this one
+            // is cast. CR 611.3b: a grant whose permanent left before the spell
+            // became cast (Silverquill, the Disputant sacrificed for its own
+            // casualty) is not in the snapshot, so its payment makes no copy.
+            // Only casualty payments count; another paid additional cost
+            // (kicker, replicate) is not one.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
                 .and_then(|obj| {
-                    let paid_ordinals: Vec<u32> = state
-                        .stack
-                        .iter()
-                        .find(|entry| entry.id == *cast_obj_id)
-                        .and_then(|entry| {
-                            entry.ability().map(|ability| {
-                                let ordinals: Vec<_> = ability
-                                    .context
-                                    .additional_cost_payments
-                                    .iter()
-                                    .filter(|payment| {
-                                        payment.origin == AdditionalCostOrigin::Casualty
-                                            && payment.count > 0
-                                    })
-                                    .map(|payment| payment.origin_ordinal)
-                                    .collect();
-                                if ordinals.is_empty() && ability.context.additional_cost_paid {
-                                    vec![0]
-                                } else {
-                                    ordinals
-                                }
-                            })
-                        })
-                        .unwrap_or_else(|| {
-                            let ordinals: Vec<_> = obj
-                                .additional_cost_payments
-                                .iter()
-                                .filter(|payment| {
-                                    payment.origin == AdditionalCostOrigin::Casualty
-                                        && payment.count > 0
-                                })
-                                .map(|payment| payment.origin_ordinal)
-                                .collect();
-                            if ordinals.is_empty() && obj.additional_cost_payment_count > 0 {
-                                vec![0]
-                            } else {
-                                ordinals
-                            }
-                        });
-                    if paid_ordinals.is_empty() {
-                        return None;
-                    }
                     let printed_count = obj
                         .keywords
                         .iter()
                         .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
                         .count();
-                    let effective_count = super::casting::effective_spell_keyword_instances(
-                        state,
-                        obj.controller,
-                        *cast_obj_id,
-                    )
-                    .iter()
-                    .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
-                    .count();
-                    let granted_count = effective_count.saturating_sub(printed_count);
                     let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
-                    let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
-                    let paid_granted_count = paid_ordinals
-                        .into_iter()
-                        .filter(|ordinal| *ordinal >= granted_start && *ordinal < granted_end)
+                    let n = state
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == *cast_obj_id)
+                        .and_then(|entry| entry.ability())
+                        .map_or(&obj.additional_cost_payments, |ability| {
+                            &ability.context.additional_cost_payments
+                        })
+                        .iter()
+                        .filter(|payment| {
+                            payment.origin == AdditionalCostOrigin::Casualty
+                                && payment.count > 0
+                                && payment.origin_ordinal >= granted_start
+                                && payment.grant_source.is_none_or(|source| {
+                                    obj.cast_casualty_grant_sources.contains(&source)
+                                })
+                        })
                         .count();
-                    let n = granted_count.min(paid_granted_count);
                     (n > 0).then_some((n, obj.controller))
                 })
                 .unwrap_or((0, PlayerId(0)));
@@ -6890,16 +6885,9 @@ fn pending_trigger_has_no_legal_resolution_targets(
     );
     let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
         Ok(slots) => {
-            // CR 115.1: only effects that DECLARE a target surface a chooseable
-            // slot. `extract_target_filter_from_effect` is the single authority
-            // the slot builder itself uses — it returns `None` not only for
-            // context-refs ("you may draw a card") but for every resolution-time
-            // selection (Sacrifice, at-resolution Bounce, put-from-hand
-            // ChangeZone/CastFromZone, etc.), all of which are ALWAYS resolvable.
-            // Testing raw `target_filter()` here would fork from that authority
-            // and silently drop an auto-accepted "you may put a creature from
-            // your hand …" trigger (Kaalia et al.).
-            (extract_target_filter_from_effect(&pending.ability.effect).is_some()
+            // CR 115.10a + CR 603.3d: only an announcement declaration
+            // requires a legal stack-time choice, not an untargeted recipient.
+            (super::ability_utils::node_has_stack_target_declaration(&pending.ability)
                 && slots.is_empty())
                 || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
         }
@@ -9653,7 +9641,10 @@ pub(crate) enum PendingTriggeredManaClass {
 }
 
 /// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
-fn any_reachable_link(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
+pub(crate) fn any_reachable_link(
+    ability: &ResolvedAbility,
+    pred: &dyn Fn(&ResolvedAbility) -> bool,
+) -> bool {
     if pred(ability) {
         return true;
     }
@@ -12243,6 +12234,10 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_binding_diverges(lhs) || quantity_expr_binding_diverges(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_binding_diverges(quantity),
         AbilityCondition::Not { condition } => gate_binding_diverges_at_fire_time(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(gate_binding_diverges_at_fire_time)
@@ -12875,9 +12870,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer => false,
-        // CR 506.3 + CR 508.1b: the source's attack target is read from combat
-        // state, not derived from the triggering event, so it never diverges.
-        TargetFilter::SourceAttackTarget => false,
+        // CR 506.4c + CR 603.4: unlike `DefendingPlayer`, whose answer rests on the
+        // event binding alone, this referent also reads live combat and battlefield
+        // state (the attacker's current attack target, whether the planeswalker is
+        // still there), which can differ between fire time and resolution. When in
+        // doubt the answer is `true`.
+        TargetFilter::AttackedPlayerOrPlaneswalker => true,
     }
 }
 
@@ -12979,6 +12977,13 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => filter_binding_diverges(filter),
+        // CR 701.3a: the filter-matched host axis resolves its host set from the
+        // RESOLVING ability (the parent target) or from the trigger event
+        // (`TriggeringSource`), so it diverges exactly when the nested filter
+        // does — recurse into the same authority.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_binding_diverges(filter),
         // CR 608.2c: the Radiance-class reference. `DistinctFrom` takes its ids
         // from `ability.targets` for the `ParentTarget` shape, so the nested
         // filter is the whole question.
@@ -13144,6 +13149,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // identically on both legs.
         | FilterProp::PrepareSpell
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::Modified
@@ -14835,7 +14841,26 @@ fn check_trigger_constraint_with_ref(
     controller: PlayerId,
     event: Option<&GameEvent>,
 ) -> bool {
-    use crate::types::ability::TriggerConstraint;
+    // CR 701.43d + CR 603.1: A standalone static permission has no triggered
+    // effect to publish, including when collection uses a latched definition.
+    if trig_def.is_standalone_attack_exert_permission() {
+        return false;
+    }
+
+    // CR 607.2h: A linked payoff observes only its own optional-cost payment.
+    // Generic actor-filtered observers still see every exert, and completed
+    // historical events without a receipt retain their saved interpretation.
+    if trig_def.is_attack_exert_permission() {
+        if let Some(GameEvent::CreatureExerted {
+            attack_permission: Some(permission),
+            ..
+        }) = event
+        {
+            if definition_ref != Some(permission) {
+                return false;
+            }
+        }
+    }
 
     let constraint = match &trig_def.constraint {
         Some(c) => c,
@@ -15884,27 +15909,13 @@ fn evaluate_trigger_condition_with_source(
         // is "no longer in the public zone it was expected to be in" to its LAST KNOWN
         // INFORMATION, and CR 113.7a keeps the ability resolving regardless.
         //
-        // `subject_filter_matches_with_lki` is the single authority for that fallback
-        // (shared with `match_sacrificed` / `match_connives` / the exploit matcher): it
-        // matches the LIVE object first and consults `state.lki_cache` only when the
-        // object no longer carries its battlefield appearance. Live state always wins,
-        // so this is a strict no-op for any source that still exists on the battlefield.
+        // `filter::source_subject_matches_filter` is the single authority for this
+        // subject read (shared with the resolution-time effect-condition gate of the
+        // same predicate): the live object only while it is still the captured
+        // incarnation in its expected zone, otherwise that incarnation's exit LKI —
+        // falling back to the trigger-time snapshot when no exit record survives.
         TriggerCondition::SourceMatchesFilter { filter } => source_context.is_some_and(|source| {
-            let context = FilterContext::from_trigger_source(source);
-            match source.source_read(state) {
-                crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
-                    matches_target_filter(state, object.id, filter, &context)
-                }
-                crate::types::game_state::TriggerSourceRead::Latched(_) => {
-                    super::filter::matches_target_filter_on_lki_snapshot(
-                        state,
-                        source.identity.reference.object_id,
-                        &source.lki,
-                        filter,
-                        &context,
-                    )
-                }
-            }
+            super::filter::source_subject_matches_filter(state, source, filter)
         }),
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
@@ -16198,6 +16209,19 @@ fn evaluate_trigger_condition_with_source(
             );
             comparator.evaluate(lhs, rhs)
         }
+        TriggerCondition::QuantityQuality { quantity, quality } => {
+            // CR 603.4: checked when the trigger event occurs and again on resolution.
+            // Resolved exactly as `QuantityComparison`'s operands, against the
+            // explicit `trigger_event` at detection time.
+            let value = crate::game::quantity::resolve_quantity_for_trigger_check(
+                state,
+                quantity,
+                controller,
+                source_context,
+                trigger_event,
+            );
+            quality.matches(i64::from(value))
+        }
         TriggerCondition::HasMaxSpeed => has_max_speed(state, controller),
         // CR 122.1: "if you put a counter on a permanent this turn"
         TriggerCondition::CounterAddedThisTurn => state
@@ -16364,6 +16388,8 @@ fn evaluate_trigger_condition_with_source(
         }),
         // CR 207.2c + CR 601.2: cast during the configured phase set.
         TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
+        // CR 500.1 + CR 506.1: the game is currently in one of `phases`.
+        TriggerCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3b + CR 702.8a: source permanent came from a spell cast using
         // the specified timing permission this turn.
         TriggerCondition::CastTimingPermission { permission } => {
@@ -17696,12 +17722,12 @@ pub mod tests {
         ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
         DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
         EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
-        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-        QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -17730,6 +17756,50 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
+    /// an untargeted scope, so `extract_target_filter_from_effect` surfaces no
+    /// slot for it — the only declared target is the damage source. The source
+    /// role remains present, and a single declared recipient remains a target.
+    #[test]
+    fn source_scoped_prevent_recipient_scope_is_not_a_target() {
+        let prevent =
+            |recipient_scope, damage_source_filter: Option<TargetFilter>| Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Player,
+                recipient_scope,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter,
+                prevention_duration: Some(Duration::UntilEndOfCombat),
+            };
+        let source_scoped = prevent(
+            EffectScope::All,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            }),
+        );
+        assert_eq!(extract_target_filter_from_effect(&source_scoped), None);
+        assert_eq!(source_scoped.target_filter(), None);
+        // The declared damage source still supplies its independent target role.
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_scoped)
+                .is_some()
+        );
+        // A single declared recipient keeps its target filter.
+        let source_less = prevent(EffectScope::Single, None);
+        assert_eq!(
+            extract_target_filter_from_effect(&source_less),
+            Some(&TargetFilter::Player)
+        );
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_less)
+                .is_none()
+        );
     }
 
     /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time
@@ -19303,6 +19373,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         let seed = |effect: Effect| {
             let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
@@ -21147,6 +21218,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(check_trigger_condition(
             &state,
@@ -21162,6 +21234,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -23938,6 +24011,7 @@ pub mod tests {
                 counters,
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -24540,6 +24614,7 @@ pub mod tests {
             QuantityRef::references_cost_paid_object(&QuantityRef::DistinctSubtypes {
                 source: nested,
                 exclude: Default::default(),
+                restrict: None,
             }),
             "a reference nested inside a union of unions must be detected"
         );
@@ -25803,6 +25878,7 @@ pub mod tests {
                 controller,
                 land,
                 ActivatedAbilityKind::Mana,
+                crate::types::events::BoundActivationCost::basic_land_intrinsic(),
                 None,
                 Zone::Battlefield,
                 &mut events,
@@ -30468,6 +30544,39 @@ pub mod tests {
     }
 
     #[test]
+    fn attack_exert_admission_rejects_only_static_components() {
+        let state = setup();
+        let permission =
+            TriggerDefinition::new(TriggerMode::Exerted).valid_card(TargetFilter::SelfRef);
+        // CR 701.43d + CR 603.1: Shared collection admission refuses only the
+        // static component, before its no-constraint fast return.
+        assert!(!check_trigger_constraint_with_ref(
+            &state,
+            &permission,
+            None,
+            None,
+            PlayerId(0),
+            None,
+        ));
+        let linked = permission.clone().execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("ExertLinkedBody", "unsupported linked effect"),
+        ));
+        let observer = permission.valid_target(TargetFilter::Controller);
+        let unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        for definition in [linked, observer, unrelated] {
+            assert!(check_trigger_constraint_with_ref(
+                &state,
+                &definition,
+                None,
+                None,
+                PlayerId(0),
+                None,
+            ));
+        }
+    }
+
+    #[test]
     fn trigger_no_execute_goes_on_stack_without_targeting() {
         // Trigger with no execute (Effect::Unimplemented) goes on stack without targeting attempt
         let mut state = setup();
@@ -31884,7 +31993,11 @@ pub mod tests {
         ));
 
         // Discard
-        let discard = WardCost::DiscardCard;
+        let discard = WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        };
         let result = ward_cost_to_ability_cost(&discard);
         assert!(matches!(
             result,
@@ -31894,6 +32007,25 @@ pub mod tests {
                 selection: CardSelectionMode::Chosen,
                 self_scope: DiscardSelfScope::FromHand,
             }
+        ));
+
+        // CR 701.9b + CR 205.2a: the count, filter and random-selection axes
+        // pass through to the unified discard cost.
+        let typed_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let counted_random_filtered = WardCost::Discard {
+            count: 2,
+            filter: Some(typed_filter.clone()),
+            selection: CardSelectionMode::Random,
+        };
+        let result = ward_cost_to_ability_cost(&counted_random_filtered);
+        assert!(matches!(
+            result,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: Some(ref f),
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *f == typed_filter
         ));
 
         // Sacrifice
@@ -35397,6 +35529,318 @@ pub mod tests {
             1,
             "Command-zone beginning-of-upkeep trigger must fire while its source is in the command zone"
         );
+    }
+
+    /// "You control a prime number of lands" as a trigger-side arithmetic quality.
+    fn lands_you_control_quality(quality: NumberQuality) -> TriggerCondition {
+        TriggerCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TypedFilter::land().controller(ControllerRef::You).into(),
+                },
+            },
+            quality,
+        }
+    }
+
+    fn add_battlefield_lands(state: &mut GameState, owner: PlayerId, count: usize) {
+        for i in 0..count {
+            let id = create_object(
+                state,
+                CardId(0x0A000 + u64::try_from(i).unwrap()),
+                owner,
+                format!("Test Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+    }
+
+    /// Fires a P0 "at the beginning of your end step, if <condition>" trigger
+    /// with the given land counts and returns the resulting stack length.
+    fn end_step_quality_trigger_stack_len(
+        condition: TriggerCondition,
+        p0_lands: usize,
+        p1_lands: usize,
+    ) -> usize {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F00),
+            PlayerId(0),
+            "Quality Gate Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::End)
+                    .valid_target(TargetFilter::Controller)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .condition(condition),
+            );
+        }
+        add_battlefield_lands(&mut state, PlayerId(0), p0_lands);
+        add_battlefield_lands(&mut state, PlayerId(1), p1_lands);
+        process_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        state.stack.len()
+    }
+
+    #[test]
+    fn quantity_quality_intervening_if_gates_end_step_trigger() {
+        // CR 603.4: the intervening-if is checked when the end step begins.
+        let prime = || lands_you_control_quality(NumberQuality::Prime);
+        for lands in [2, 3, 5, 37] {
+            assert_eq!(
+                end_step_quality_trigger_stack_len(prime(), lands, 0),
+                1,
+                "{lands} lands is prime: the trigger must fire"
+            );
+        }
+        for lands in [0, 1, 4, 9] {
+            assert_eq!(
+                end_step_quality_trigger_stack_len(prime(), lands, 0),
+                0,
+                "{lands} lands is not prime: the trigger must not fire"
+            );
+        }
+
+        let odd = || lands_you_control_quality(NumberQuality::Parity(Parity::Odd));
+        assert_eq!(end_step_quality_trigger_stack_len(odd(), 3, 0), 1);
+        assert_eq!(end_step_quality_trigger_stack_len(odd(), 4, 0), 0);
+
+        // Multi-authority: "you control" is the trigger controller's count. P0
+        // with 4 lands plus P1 with 1 is a combined (prime) 5, yet P0's 4 is not
+        // prime, so the trigger must not fire. Paired positive: P0 alone with 5.
+        assert_eq!(end_step_quality_trigger_stack_len(prime(), 4, 1), 0);
+        assert_eq!(end_step_quality_trigger_stack_len(prime(), 5, 0), 1);
+    }
+
+    /// The one intervening-if trigger `oracle` parses to (verbatim Oracle text),
+    /// asserting its condition reads `qref` through a `QuantityComparison`.
+    fn parsed_quantity_gated_trigger(
+        name: &str,
+        oracle: &str,
+        keywords: &[&str],
+        qref: &QuantityRef,
+    ) -> TriggerDefinition {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            name,
+            &keywords,
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .into_iter()
+            .find(|trigger| trigger.condition.is_some())
+            .unwrap_or_else(|| panic!("{name} parses an intervening-if trigger"));
+        assert!(
+            matches!(
+                &trigger.condition,
+                Some(TriggerCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty },
+                    ..
+                }) if qty == qref
+            ),
+            "{name}: {:?}",
+            trigger.condition
+        );
+        trigger
+    }
+
+    /// Gatstaf Shepherd's parsed upkeep trigger on a P0 creature, after a turn
+    /// in which `spells_cast` spells were cast; returns the stack length after
+    /// the next upkeep begins.
+    fn gatstaf_shepherd_upkeep_stack_len(spells_cast: u8) -> usize {
+        let trigger = parsed_quantity_gated_trigger(
+            "Gatstaf Shepherd",
+            "At the beginning of each upkeep, if no spells were cast last turn, transform this creature.",
+            &["Intimidate", "Transform"],
+            &QuantityRef::SpellsCastLastTurn,
+        );
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F10),
+            PlayerId(0),
+            "Gatstaf Shepherd".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+        state.spells_cast_this_turn = spells_cast;
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+        // Reach: the production turn-boundary snapshot ran.
+        assert_eq!(state.spells_cast_last_turn, Some(spells_cast));
+        state.phase = Phase::Upkeep;
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+        state.stack.len()
+    }
+
+    /// R1. CR 603.4 + CR 601.2i: "if no spells were cast last turn" reads the
+    /// table-wide count of spells cast during the previous turn, snapshotted by
+    /// `turns::start_next_turn`. Runtime evidence for coverage classifying
+    /// `QuantityRef::SpellsCastLastTurn` as `Handled`.
+    /// REVERT-PROBE: resolve the ref as a constant 0 → the n = 1 case fires.
+    #[test]
+    fn spells_cast_last_turn_gates_parsed_werewolf_upkeep_trigger() {
+        assert_eq!(
+            gatstaf_shepherd_upkeep_stack_len(0),
+            1,
+            "no spells were cast last turn: the trigger must fire"
+        );
+        for spells_cast in [1, 2] {
+            assert_eq!(
+                gatstaf_shepherd_upkeep_stack_len(spells_cast),
+                0,
+                "{spells_cast} spell(s) were cast last turn: the trigger must not fire"
+            );
+        }
+    }
+
+    /// Child of the Volcano's parsed end-step trigger on a P0 creature; `dies`
+    /// optionally moves a P0 creature (token or card) from the battlefield to
+    /// the graveyard first. Returns (descended flag, stack length).
+    fn child_of_the_volcano_end_step(dies: Option<bool>) -> (bool, usize) {
+        let trigger = parsed_quantity_gated_trigger(
+            "Child of the Volcano",
+            "Trample\nAt the beginning of your end step, if you descended this turn, put a +1/+1 counter on this creature. (You descended if a permanent card was put into your graveyard from anywhere.)",
+            &["Trample"],
+            &QuantityRef::DescendedThisTurn,
+        );
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(0x09F20),
+            PlayerId(0),
+            "Child of the Volcano".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+        if let Some(is_token) = dies {
+            let victim = create_object(
+                &mut state,
+                CardId(0x09F21),
+                PlayerId(0),
+                "Descend Fodder".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&victim).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.is_token = is_token;
+            }
+            let mut events = Vec::new();
+            move_to_zone(&mut state, victim, Zone::Graveyard, &mut events);
+        }
+        let descended = state.players[0].descended_this_turn;
+        process_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        (descended, state.stack.len())
+    }
+
+    /// R2. CR 700.11: "descended this turn" means a permanent card was put into
+    /// the player's graveyard from anywhere this turn; tokens are not cards.
+    /// Runtime evidence for coverage classifying `QuantityRef::DescendedThisTurn`
+    /// as `Handled`.
+    /// REVERT-PROBE: resolve the ref as a constant → case (a) or (b) flips.
+    #[test]
+    fn descended_this_turn_gates_parsed_end_step_trigger() {
+        // (a) A creature card went to P0's graveyard: P0 descended.
+        assert_eq!(child_of_the_volcano_end_step(Some(false)), (true, 1));
+        // (b) Nothing went to the graveyard.
+        assert_eq!(child_of_the_volcano_end_step(None), (false, 0));
+        // (c) A creature token is not a card (CR 700.11).
+        assert_eq!(child_of_the_volcano_end_step(Some(true)), (false, 0));
+    }
+
+    /// Exercises `stack::bind_triggered_resolution_scope` with a constructed
+    /// scope: the bind function re-evaluates a `QuantityQuality` condition
+    /// against the live board. The production coverage of a stacked trigger's
+    /// resolution recheck is
+    /// `tests/integration/zimone_all_questioning.rs::resolution_recheck_and_live_count`.
+    #[test]
+    fn bind_triggered_resolution_scope_rechecks_quantity_quality() {
+        // CR 603.4 + Zimone ruling: "It won't resolve if you don't control a
+        // prime number of lands as it resolves." The generic resolution recheck
+        // re-evaluates the predicate against the live board.
+        fn recheck(state: &mut GameState, condition: &TriggerCondition) -> bool {
+            crate::game::stack::bind_triggered_resolution_scope(
+                state,
+                Some(crate::game::stack::TriggeredResolutionScope {
+                    condition: Some(condition),
+                    controller: PlayerId(0),
+                    trigger_source: None,
+                    trigger_definition: None,
+                    trigger_event: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }),
+                None,
+            )
+        }
+        let prime = lands_you_control_quality(NumberQuality::Prime);
+        let not_prime = TriggerCondition::Not {
+            condition: Box::new(prime.clone()),
+        };
+
+        let mut state = setup();
+        add_battlefield_lands(&mut state, PlayerId(0), 3);
+        assert!(recheck(&mut state, &prime), "3 lands: still prime");
+        assert!(!recheck(&mut state, &not_prime));
+
+        // The same board gains a fourth land between trigger and resolution.
+        let fourth = create_object(
+            &mut state,
+            CardId(0x0AF00),
+            PlayerId(0),
+            "Fourth Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&fourth)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert!(
+            !recheck(&mut state, &prime),
+            "a fourth land makes the count non-prime: the ability does not resolve"
+        );
+        assert!(recheck(&mut state, &not_prime));
     }
 
     #[test]
@@ -39982,6 +40426,7 @@ pub mod tests {
                     origin: AdditionalCostOrigin::Replicate,
                     origin_ordinal: 0,
                     count: 1,
+                    grant_source: None,
                 },
             );
         }
@@ -40185,7 +40630,13 @@ pub mod tests {
             spell,
             caster,
         );
-        ability.context.additional_cost_paid = true;
+        // CR 702.153b: the cast records the payment against the granted
+        // instance (ordinal 0: the spell has no printed casualty).
+        ability.context.record_additional_cost_instance_payment(
+            AdditionalCostOrigin::Casualty,
+            0,
+            1,
+        );
         state.stack.push_back(StackEntry {
             id: spell,
             source_id: spell,
@@ -42234,6 +42685,7 @@ pub mod tests {
             player: PlayerId(0),
             total: 3,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert!(!resolution_completion_can_settle(&state));
 
@@ -42416,6 +42868,7 @@ pub mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
@@ -44843,6 +45296,7 @@ pub mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: konrad,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("activation {activation} failed: {e:?}"));
             resolve_stack_to_empty(&mut runner);
@@ -52277,6 +52731,24 @@ mod pending_trigger_pin_reassignment_tests {
             assigned_pin,
             Some(expected),
             "assigning an unpinned ability must rebind the pin from the entry's own trigger event"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_binding_tests {
+    use super::*;
+
+    /// CR 506.4c + CR 603.4: the bound referent also reads live combat and battlefield state,
+    /// which can differ between fire time and resolution; "when in doubt, true".
+    #[test]
+    fn attacked_referent_filter_binding_diverges() {
+        assert!(filter_binding_diverges(
+            &TargetFilter::AttackedPlayerOrPlaneswalker
+        ));
+        assert!(
+            !filter_binding_diverges(&TargetFilter::DefendingPlayer),
+            "contrast: the event binding alone is non-divergent"
         );
     }
 }

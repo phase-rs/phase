@@ -13,9 +13,9 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, ProtectionTarget,
+    GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
 };
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
@@ -75,6 +75,14 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
+}
+
+/// Whether generic keyword removal strips this candidate.
+/// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
+/// abilities. Other removal operands keep their existing same-variant scope.
+pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
+    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
 }
 
 /// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
@@ -686,6 +694,86 @@ pub fn source_matches_protection_target(
             crate::types::ability::ControllerRef::You => source.controller == protected.controller,
             _ => false,
         },
+        // CR 702.16i: a set quality is expanded into concrete Color qualities by
+        // resolve_granted_protection before any match; an unexpanded set (a printed
+        // keyword, never produced by a card today) matches nothing.
+        ProtectionTarget::EachColor(_) => false,
+    }
+}
+
+/// CR 702.16i + CR 903.4 + CR 702.124c: The colors a `ProtectionColorSet` stands
+/// for, relative to `you` (the controller of the granting effect), in WUBRG order.
+pub fn protection_color_set_members(
+    state: &GameState,
+    set: &ProtectionColorSet,
+    you: PlayerId,
+) -> Vec<ManaColor> {
+    match set {
+        // CR 903.4f: with no commander the identity is undefined and the grant
+        // does nothing (no colors).
+        ProtectionColorSet::OutsideCommanderColorIdentity => {
+            crate::game::commander::defined_commander_color_identity(state, you)
+                .map(|identity| {
+                    ManaColor::ALL
+                        .iter()
+                        .copied()
+                        .filter(|color| !identity.contains(color))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
+/// continuous effect from `source_id` whose "you" is `you` into the concrete
+/// qualities it grants. This is the single authority shared by the layer applier
+/// (which bakes the result into `obj.keywords`) and attachment legality (which
+/// reads grant definitions directly), so the two cannot drift.
+///
+/// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
+/// several separate protection abilities, so the result may hold 0..n entries.
+/// Chosen qualities yield 0 (no choice recorded, or a chosen card type with no
+/// protection noun) or 1 entries; every concrete
+/// quality yields exactly itself.
+pub fn resolve_granted_protection(
+    state: &GameState,
+    quality: &ProtectionTarget,
+    source_id: ObjectId,
+    you: PlayerId,
+) -> Vec<ProtectionTarget> {
+    match quality {
+        // CR 702.16 + CR 105.4: the color chosen on the granting source.
+        ProtectionTarget::ChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_color())
+            .map(ProtectionTarget::Color)
+            .into_iter()
+            .collect(),
+        // CR 702.16 + CR 205.2: the card type chosen on the granting source.
+        ProtectionTarget::ChosenCardType => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.chosen_card_type())
+            .and_then(|card_type| card_type.protection_quality_str())
+            .map(|quality| ProtectionTarget::CardType(quality.to_string()))
+            .into_iter()
+            .collect(),
+        ProtectionTarget::EachColor(set) => protection_color_set_members(state, set, you)
+            .into_iter()
+            .map(ProtectionTarget::Color)
+            .collect(),
+        // "The chosen player" stays unresolved: it is read off the protected
+        // permanent's own persisted choice, not the granting source.
+        ProtectionTarget::Color(_)
+        | ProtectionTarget::CardType(_)
+        | ProtectionTarget::Quality(_)
+        | ProtectionTarget::Multicolored
+        | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::Everything
+        | ProtectionTarget::Filter(_)
+        | ProtectionTarget::FromPlayer(_) => vec![quality.clone()],
     }
 }
 
@@ -1307,6 +1395,72 @@ mod tests {
     }
 
     #[test]
+    fn lose_hexproof_removal_matches_every_quality() {
+        use crate::types::keywords::HexproofFilter;
+
+        // CR 702.11d/e: losing hexproof removes every qualified hexproof ability.
+        for candidate in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+            Keyword::HexproofFrom(HexproofFilter::CardType("Artifact".into())),
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".into())),
+            Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+        ] {
+            assert!(
+                keyword_matches_removal(&candidate, &Keyword::Hexproof),
+                "lose hexproof must remove {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_unrelated_and_reverse_boundary() {
+        use crate::types::keywords::{HexproofFilter, WardCost};
+
+        let qualified = Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black));
+        assert!(keyword_matches_removal(
+            &Keyword::Hexproof,
+            &Keyword::Hexproof
+        ));
+        assert!(keyword_matches_removal(&qualified, &qualified));
+        assert!(!keyword_matches_removal(&Keyword::Hexproof, &qualified));
+        for candidate in [
+            Keyword::Shroud,
+            Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            Keyword::Indestructible,
+            Keyword::Flying,
+        ] {
+            assert!(!keyword_matches_removal(&candidate, &Keyword::Hexproof));
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_existing_variant_scope() {
+        use crate::types::keywords::WardCost;
+
+        assert!(keyword_matches_removal(
+            &Keyword::Ward(WardCost::PayLife(3)),
+            &Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+        ));
+        assert_eq!(Keyword::Banding.kind(), KeywordKind::Unknown);
+        assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
+        assert!(keyword_matches_removal(
+            &Keyword::Toxic(2),
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Banding,
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Toxic(1),
+            &Keyword::Banding
+        ));
+    }
+
+    #[test]
     fn has_keyword_simple_match() {
         let mut obj = make_obj();
         obj.keywords.push(Keyword::Flying);
@@ -1808,6 +1962,115 @@ mod tests {
             &no_choice,
             &creature_source,
         ));
+    }
+
+    /// CR 702.16i: an unexpanded color-set quality matches nothing through
+    /// `source_matches_protection_target`; only `resolve_granted_protection`
+    /// turns it into concrete `Color` qualities.
+    #[test]
+    fn unexpanded_each_color_quality_matches_nothing() {
+        let protected = make_obj();
+        let mut source = make_obj();
+        source.color = vec![ManaColor::Red];
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            &protected,
+            &source,
+        ));
+    }
+
+    /// CR 702.16i + CR 903.4 + CR 903.4f: the color-set members are the colors
+    /// outside the controller's commander identity (WUBRG order), empty when the
+    /// player has no commander, and every color for a colorless commander.
+    #[test]
+    fn protection_color_set_members_outside_commander_identity() {
+        use crate::types::format::FormatConfig;
+
+        let set = ProtectionColorSet::OutsideCommanderColorIdentity;
+        let mut state = GameState::new(FormatConfig::commander(), 2, 7);
+        // CR 903.4f: no commander -> undefined -> no colors.
+        assert!(protection_color_set_members(&state, &set, PlayerId(0)).is_empty());
+
+        let cmd = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&cmd).unwrap();
+            obj.is_commander = true;
+            obj.base_color = vec![ManaColor::Blue, ManaColor::Red];
+        }
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            vec![ManaColor::White, ManaColor::Black, ManaColor::Green]
+        );
+
+        // Colorless commander -> protection from each of the five colors.
+        state.objects.get_mut(&cmd).unwrap().base_color = vec![];
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            ManaColor::ALL.to_vec()
+        );
+        // The other player has no commander.
+        assert!(protection_color_set_members(&state, &set, PlayerId(1)).is_empty());
+    }
+
+    /// CR 702.16 + CR 702.16i: `resolve_granted_protection` expands set and chosen
+    /// qualities and passes concrete qualities through unchanged.
+    #[test]
+    fn resolve_granted_protection_expands_and_passes_through() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(3);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        let you = PlayerId(0);
+
+        // Concrete qualities resolve to exactly themselves.
+        for quality in [
+            ProtectionTarget::Color(ManaColor::Red),
+            ProtectionTarget::CardType("artifacts".to_string()),
+            ProtectionTarget::Multicolored,
+            ProtectionTarget::Everything,
+        ] {
+            assert_eq!(
+                resolve_granted_protection(&state, &quality, source, you),
+                vec![quality.clone()]
+            );
+        }
+
+        // Chosen color with no recorded choice resolves to nothing, then to the choice.
+        assert!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you)
+                .is_empty()
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::White));
+        assert_eq!(
+            resolve_granted_protection(&state, &ProtectionTarget::ChosenColor, source, you),
+            vec![ProtectionTarget::Color(ManaColor::White)]
+        );
+
+        // A color set with no commander resolves to nothing (CR 903.4f).
+        assert!(resolve_granted_protection(
+            &state,
+            &ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+            source,
+            you,
+        )
+        .is_empty());
     }
 
     /// CR 702.16a + CR 205.3m + #881: "protection from [creature subtype]" — the

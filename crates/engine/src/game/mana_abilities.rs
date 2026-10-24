@@ -9,7 +9,7 @@ use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::{ActivatedAbilityKind, GameEvent, ManaTapState};
+use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
@@ -213,6 +213,23 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
         //  - The Secret Lair — CR 701.22a, Scry reorders WITHIN a library.
         && !cost_moves_card_to_or_from_library(ability_def)
         && !chain_moves_card_to_or_from_library(ability_def)
+}
+
+/// CR 605.1a: semantic support check for a complete activated ability,
+/// including mana produced after another instruction. The legacy inline router
+/// (`is_mana_ability`) requires a Mana root; using that narrower admission here
+/// would let the parser newly support a linked cast on an ordinary stack
+/// ability even though the whole ability must resolve immediately. This check
+/// does not widen runtime admission for other mixed chains. The shared own-
+/// resolution walk supplies mana/target semantics; cost/library exclusions use
+/// the same authorities as the existing activated classifier.
+pub(crate) fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
+    could_be_triggered_mana_ability_body(def)
+        && !mana_sources::cost_has_component(&def.cost, |cost| {
+            matches!(cost, AbilityCost::Loyalty { .. })
+        })
+        && !cost_moves_card_to_or_from_library(def)
+        && !chain_moves_card_to_or_from_library(def)
 }
 
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
@@ -650,6 +667,12 @@ pub(super) fn resolve_mana_ability_excluding(
             .iter()
             .position(|ability| ability == ability_def)
     });
+    // CR 400.7 + CR 602.2a + CR 605.3b: capture the source incarnation at this
+    // announcement, before any cost is paid — see `activate_mana_ability`.
+    let announced_source_incarnation = state
+        .objects
+        .get(&source_id)
+        .map(|source| source.incarnation);
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     let pending = PendingManaAbility {
         player,
@@ -657,6 +680,7 @@ pub(super) fn resolve_mana_ability_excluding(
         ability_index,
         rules_execution_node,
         ability_snapshot: Some(ability_def.clone()),
+        announced_source_incarnation,
         color_override,
         // The direct resolver normally leaves its caller's waiting root
         // untouched.  Its ordinary completion must therefore return to
@@ -732,6 +756,7 @@ fn produce_mana_from_ability(
     color_override: Option<ProductionOverride>,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
     cost_removed_counters: Option<u32>,
 ) {
     with_bound_mana_activation(
@@ -741,6 +766,7 @@ fn produce_mana_from_ability(
         ability_def,
         chosen_x,
         cost_paid_object,
+        announced_source_incarnation,
         cost_removed_counters,
         |state, resolved_for_quantity| {
             produce_mana_from_bound_ability(
@@ -769,6 +795,7 @@ fn with_bound_mana_activation<R>(
     ability_def: &AbilityDefinition,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
     cost_removed_counters: Option<u32>,
     body: impl FnOnce(&mut GameState, &ResolvedAbility) -> R,
 ) -> R {
@@ -795,6 +822,7 @@ fn with_bound_mana_activation<R>(
         ability_def,
         chosen_x,
         cost_paid_object,
+        announced_source_incarnation,
     );
     resolved.context.cost_removed_counter_amount = cost_removed_counters;
     let result = body(state, &resolved);
@@ -962,6 +990,10 @@ fn produce_mana_from_bound_ability(
     resolve_mana_ability_sub_chain(state, resolved_for_quantity, events);
 }
 
+/// CR 605.3b + CR 602.2a: Build the transient ability for a mana ability's
+/// prompt/production stage, carrying the facts captured at its announcement —
+/// the cost-paid object snapshot, the announced X, and the source incarnation
+/// the inline resolution's source-subject condition gate must read.
 fn resolved_mana_ability_for_current_state(
     state: &GameState,
     source_id: ObjectId,
@@ -969,11 +1001,20 @@ fn resolved_mana_ability_for_current_state(
     ability_def: &AbilityDefinition,
     chosen_x: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
+    announced_source_incarnation: Option<u64>,
 ) -> ResolvedAbility {
     let mut resolved =
         super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
     if let Some(snapshot) = cost_paid_object {
         resolved.set_cost_paid_object_recursive(snapshot);
+    }
+    // CR 400.7 + CR 602.2a + CR 605.3b: bind the announcement-captured source
+    // epoch before the condition-consuming swap below, so an inline mana
+    // sub-chain's source-subject condition reads the pre-cost object (its exit
+    // last-known information, CR 113.7a + CR 608.2h, for a self-moving cost)
+    // rather than the moved object at the same storage id.
+    if let Some(incarnation) = announced_source_incarnation {
+        resolved.set_announced_source_incarnation_recursive(Some(incarnation));
     }
     // CR 107.3a/.3c: bind the announced X into the resolved ability so produced
     // mana counts (`AnyCombination { count: Ref(Variable "X") }`) and any X-bearing
@@ -1131,6 +1172,14 @@ pub fn activate_mana_ability(
         super::restrictions::check_summoning_sickness_for_cost(state, source, cost)?;
     }
 
+    // CR 400.7 + CR 602.2a + CR 605.3b: capture the source incarnation at this
+    // announcement — before the cost is paid, the same pre-payment moment the
+    // stack path records in `record_activation_announcement` (CR 602.2b routes
+    // the cost through the casting steps, CR 601.2h). A cost that moves the
+    // source (self-sacrifice, self-exile) advances the storage incarnation
+    // before the inline sub-chain resolves; the source-subject condition gate
+    // must read this epoch's exit last-known information instead.
+    let announced_source_incarnation = Some(source.incarnation);
     let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     advance_mana_ability_activation(
         state,
@@ -1140,6 +1189,7 @@ pub fn activate_mana_ability(
             ability_index: Some(ability_index),
             rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
+            announced_source_incarnation,
             color_override,
             resume,
             cost_move_resume: None,
@@ -1397,7 +1447,13 @@ pub(crate) fn mana_choice_prompt(
         // single option auto-picks). Mirrors `AnyTypeProduceableBy`.
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
-            let options = super::mana_sources::opponent_land_color_options(state, owner);
+            // CR 106.1a + CR 105.1: the survey yields `ManaColor`s, so colorless can
+            // never be offered as an "any color" option.
+            let options: Vec<ManaType> =
+                super::mana_sources::opponent_land_color_options(state, owner)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect();
             // CR 106.5: An ability that would produce mana of an undefined type
             // produces no mana, so it needs no color choice.
             let produces_mana = count_ability
@@ -1505,6 +1561,7 @@ pub fn handle_choose_mana_color(
             Some(override_value),
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
             pending.cost_removed_counters,
         );
         complete_mana_ability_activation(
@@ -3472,11 +3529,16 @@ fn finish_mana_ability_cost_payment(
     // it; it is then an ordinary activation, and "that isn't a mana ability"
     // triggers must see it as one.
     let activation_kind = ActivatedAbilityKind::of_definition(&ability_def);
+    // CR 605.3 + CR 602.1a: the activation cost of the definition bound when this
+    // activation began, before any cost; never `mana_ability_definition`'s
+    // post-payment live fallback (a pending without its snapshot is `Unknown`).
+    let activation_cost = BoundActivationCost::of_definition(pending.ability_snapshot.as_ref());
     let activation_event = super::casting_targets::emit_ability_activated(
         state,
         pending.player,
         pending.source_id,
         activation_kind,
+        activation_cost,
         None,
         ability_def.activation_zone.unwrap_or(Zone::Battlefield),
         events,
@@ -3496,6 +3558,7 @@ fn finish_mana_ability_cost_payment(
             &ability_def,
             pending.chosen_x,
             pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
             pending.cost_removed_counters,
             |state, resolved_for_prompt| {
                 mana_choice_prompt(
@@ -3565,6 +3628,7 @@ fn finish_mana_ability_cost_payment(
         pending.color_override.clone(),
         pending.chosen_x,
         pending.cost_paid_object,
+        pending.announced_source_incarnation,
         pending.cost_removed_counters,
     );
     if !resolves_automatically {
@@ -5474,7 +5538,9 @@ fn tap_creature_cost_choice(
                 state,
                 id,
                 filter,
-                &FilterContext::from_source(state, source_id)
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                &FilterContext::from_source_with_controller(source_id, player)
                     .with_granting_object(ability.granting_object),
             )
         })
@@ -5704,7 +5770,10 @@ fn tap_selected_creature_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id).with_granting_object(granter),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected creature does not satisfy mana ability cost".to_string(),
@@ -5740,7 +5809,10 @@ fn discard_selected_card_for_mana_cost(
             state,
             chosen_id,
             target_filter,
-            &FilterContext::from_source(state, source_id).with_granting_object(granter),
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            &FilterContext::from_source_with_controller(source_id, player)
+                .with_granting_object(granter),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Selected card does not satisfy mana ability discard cost".to_string(),
@@ -5774,7 +5846,10 @@ fn sacrifice_selected_permanent_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id).with_granting_object(granter),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
@@ -6242,6 +6317,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate targetless reflexive mana ability");
@@ -6997,7 +7073,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(wrapped.clone()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -7053,7 +7130,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(draw_one()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -7191,7 +7269,8 @@ mod tests {
             ),
             (
                 "FlipCoin lose branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: None,
                     lose_effect: Some(Box::new(link(draw_one()))),
                     flipper: TargetFilter::Controller,
@@ -7238,7 +7317,8 @@ mod tests {
                 branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
                 kind: ChooseOneOfKind::Ordinary,
             },
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: crate::types::ability::CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: Some(Box::new(link(Effect::NoOp))),
                 flipper: TargetFilter::Controller,
@@ -8786,7 +8866,7 @@ mod tests {
             action,
             crate::types::actions::GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == source
         )));
 
@@ -8795,6 +8875,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("hand-zone self-exile mana ability should activate");
@@ -9392,6 +9473,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: treasure,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("token Treasure should activate into a color prompt");
@@ -9438,6 +9520,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Treasure should activate into a color prompt");
@@ -9515,6 +9598,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: ids[0],
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Treasure should activate into a color prompt");
@@ -10467,6 +10551,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate first Treasure");
@@ -10509,6 +10594,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate first Treasure");
@@ -10551,6 +10637,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activate the 5-color Treasure");
@@ -11561,6 +11648,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }
@@ -11919,6 +12007,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -12020,6 +12109,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -12234,6 +12324,7 @@ mod tests {
                 ability_index: Some(0),
                 rules_execution_node: None,
                 ability_snapshot: None,
+                announced_source_incarnation: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
@@ -12468,6 +12559,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -12575,6 +12667,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -13367,6 +13460,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: nykthos,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Nykthos's {2}{T} ability should activate");
@@ -13463,6 +13557,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("Forest's {T} ability should activate");
@@ -13602,6 +13697,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: opp_forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("opponent's Forest {T} ability should activate");
@@ -13626,6 +13722,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: my_forest,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("controller's Forest {T} ability should activate");
@@ -13710,6 +13807,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -13919,6 +14017,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("storage mana ability should prompt for a counter count");
@@ -14014,6 +14113,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("storage mana ability should prompt for a counter count");
@@ -14123,6 +14223,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect(
@@ -14240,6 +14341,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the first chosen-count leaf should prompt for its own count");
@@ -14396,6 +14498,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the first leaf should prompt for its own count");
@@ -14509,6 +14612,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the first Any leaf should prompt for its own count");
@@ -14628,6 +14732,7 @@ mod tests {
             player,
             source_id: land,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             ability_index: Some(0),
             rules_execution_node: None,
             color_override: None,
@@ -14756,6 +14861,7 @@ mod tests {
             crate::types::actions::GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         );
         assert!(
@@ -15077,6 +15183,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15643,6 +15750,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15717,6 +15825,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15849,6 +15958,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -15916,6 +16026,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -16075,6 +16186,7 @@ mod tests {
             ability_index: Some(0),
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,

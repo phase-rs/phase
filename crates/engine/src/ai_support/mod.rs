@@ -763,11 +763,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 count,
+                up_to,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => {
+            // CR 608.2d: "Up to" permits smaller legal selections while retaining the count ceiling.
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+        }
+        (
             WaitingFor::ConniveDiscard {
                 player: _,
                 cards,
@@ -1292,6 +1297,7 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => activate_mana_action_would_queue_non_mana_trigger(
                 state,
                 player,
@@ -1359,6 +1365,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => FlatPriorityActionClass::ActivateAbility {
             source_id: *source_id,
             ability_index: *ability_index,
@@ -1564,7 +1571,7 @@ fn meaningful_sacrifice_mana_actions<'a>(
             action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } if activate_ability_is_meaningful_priority(state, *source_id, *ability_index)
         )
     })
@@ -1937,6 +1944,7 @@ fn beneficial_mana_tap_trigger_hold(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => {
                 let has_tap = state
                     .objects
@@ -3784,6 +3792,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: card,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 },
             ),
             "cycling ActivateAbility must be offered"
@@ -3823,6 +3832,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: card,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 },
             ),
             "cycling ActivateAbility must still be offered"
@@ -3904,6 +3914,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: hand_sliver,
                     ability_index: transient_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 },
             ),
             "legal actions must expose the runtime-granted Slivercycling activation"
@@ -3914,6 +3925,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: hand_sliver,
                 ability_index: transient_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("runtime-granted Typecycling activation should be accepted");
@@ -4031,6 +4043,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: rock,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto
             },
         ));
         assert!(!flat.iter().any(
@@ -4074,6 +4087,7 @@ mod tests {
         let mana_action = GameAction::ActivateAbility {
             source_id: rock,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
         let count = grouped
             .get(&rock)
@@ -4191,6 +4205,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: altar,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto
             },
         ));
         assert!(!flat.iter().any(
@@ -4304,6 +4319,109 @@ mod tests {
     fn cheap_reject_candidate_preserves_ambiguous_priority_pass() {
         let state = GameState::new_two_player(42);
         assert!(!cheap_reject_candidate(&state, &GameAction::PassPriority));
+    }
+
+    #[test]
+    fn cheap_reject_candidate_zone_choice_count_boundaries() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        // CR 608.2d: Choices must obey both the written count and offered object set.
+        for up_to in [true, false] {
+            for count in [0, 2] {
+                for cards in [choices.clone(), vec![]] {
+                    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                        player: PlayerId(0),
+                        cards,
+                        count,
+                        up_to,
+                        constraint: None,
+                        source_id: ObjectId(100),
+                        reciprocal_role: None,
+                    };
+                    for chosen in [
+                        vec![],
+                        vec![choices[0]],
+                        vec![choices[0], choices[1]],
+                        choices.clone(),
+                        vec![choices[0], choices[0]],
+                        vec![choices[0], ObjectId(99)],
+                    ] {
+                        let valid_count = if up_to {
+                            chosen.len() <= count
+                        } else {
+                            chosen.len() == count
+                        };
+                        let offered = matches!(&state.waiting_for, WaitingFor::ChooseFromZoneChoice { cards, .. }
+                            if chosen.iter().all(|id| cards.contains(id)));
+                        let distinct = chosen
+                            .iter()
+                            .enumerate()
+                            .all(|(i, id)| !chosen[..i].contains(id));
+                        assert_eq!(
+                            cheap_reject_candidate(
+                                &state,
+                                &GameAction::SelectCards {
+                                    cards: chosen.clone()
+                                }
+                            ),
+                            !(valid_count && offered && distinct),
+                            "up_to={up_to}, count={count}, chosen={chosen:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cheap_reject_candidate_preserves_exact_discard_counts() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        let conniver = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        let subject = state
+            .capture_connive_subject(conniver)
+            .expect("fixture conniver exists");
+        // CR 608.2d: Exact discard instructions require exactly the offered count.
+        for prompt in [
+            WaitingFor::ConniveDiscard {
+                player: PlayerId(0),
+                conniver: subject,
+                source_id: conniver,
+                cards: choices.clone(),
+                count: 2,
+            },
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                cards: choices.clone(),
+                count: 2,
+            },
+        ] {
+            state.waiting_for = prompt;
+            assert!(!cheap_reject_candidate(
+                &state,
+                &GameAction::SelectCards {
+                    cards: vec![choices[0], choices[1]]
+                }
+            ));
+            for chosen in [
+                vec![],
+                vec![choices[0]],
+                choices.clone(),
+                vec![choices[0], choices[0]],
+                vec![choices[0], ObjectId(99)],
+            ] {
+                assert!(cheap_reject_candidate(
+                    &state,
+                    &GameAction::SelectCards { cards: chosen }
+                ));
+            }
+        }
     }
 
     #[test]
@@ -4586,6 +4704,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 1,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
         assert!(
@@ -4603,6 +4722,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: land,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
         assert!(
@@ -4703,6 +4823,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: kci,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
         // Classifier reach-guard: the sac-for-mana is still a meaningful
@@ -4732,6 +4853,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: kci,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 },
             ),
             "KCI activation must appear in legal_actions_by_object"
@@ -4879,6 +5001,7 @@ mod tests {
         let action = GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
         let flat = super::flat_priority_actions(runner.state());
         assert!(
@@ -5077,6 +5200,7 @@ mod tests {
                 &GameAction::ActivateAbility {
                     source_id: kci,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 },
             ),
             "KCI activation must appear in legal_actions_by_object"
@@ -6719,7 +6843,7 @@ mod tests {
                 action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 1,
+                    ability_index: 1, ..
                 } if *source_id == land_id
             )),
             "flash sacrifice ability must be activatable when {{1}} is payable"
@@ -8032,6 +8156,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
 
@@ -8070,6 +8195,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
 
@@ -8121,6 +8247,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
         let cast_actions = vec![
@@ -8206,6 +8333,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
 

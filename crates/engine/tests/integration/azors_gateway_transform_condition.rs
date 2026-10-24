@@ -142,6 +142,7 @@ fn activate_and_exile_drawn_card(
         .act(GameAction::ActivateAbility {
             source_id: azor,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Azor's Gateway's ability must be payable ({1}, {T})");
 

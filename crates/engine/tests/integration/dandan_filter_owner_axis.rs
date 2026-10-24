@@ -9,6 +9,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PayCostKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -327,6 +328,7 @@ fn sacrifice_run(
         .act(GameAction::ActivateAbility {
             source_id: seer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Viscera Seer activates");
     for _ in 0..12 {

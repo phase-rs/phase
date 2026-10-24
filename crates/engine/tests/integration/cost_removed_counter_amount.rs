@@ -384,6 +384,7 @@ fn activate(runner: &mut GameRunner, source_id: ObjectId, ability_index: usize) 
         .act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|err| panic!("the ability activates: {err:?}"));
 }
@@ -485,16 +486,25 @@ fn assert_fractal_with_four_counters(runner: &GameRunner, nexus: ObjectId) {
     );
 }
 
-/// C1c: Geometric Nexus in the `Token.enter_with_counters` shape — the Fractal
-/// enters with 4 +1/+1 counters.
+/// C1c: Geometric Nexus in its parsed `Token` → `PutCounter { LastCreated }`
+/// shape (the token is created, then gets its counters; CR 608.2c) — the seeded
+/// amount survives the head and the parent→child hand-off, so the Fractal ends
+/// with 4 +1/+1 counters.
 #[test]
-fn geometric_nexus_fractal_enters_with_the_counters_removed() {
+fn geometric_nexus_fractal_gets_the_counters_removed_through_a_put_counter_sub() {
     let (mut runner, nexus) = nexus_board();
     let index = counter_cost_ability(&runner, nexus, 0);
     let def = &runner.state().objects[&nexus].abilities[index];
     assert!(
-        matches!(&*def.effect, Effect::Token { enter_with_counters, .. } if !enter_with_counters.is_empty()),
-        "structural guard: the parse carries the count on the token: {:?}",
+        matches!(&*def.effect, Effect::Token { enter_with_counters, .. } if enter_with_counters.is_empty())
+            && def.sub_ability.as_deref().is_some_and(|sub| matches!(
+                &*sub.effect,
+                Effect::PutCounter {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            )),
+        "structural guard: the parse puts the count in a PutCounter sub: {:?}",
         def.effect
     );
 
@@ -503,13 +513,25 @@ fn geometric_nexus_fractal_enters_with_the_counters_removed() {
     assert_fractal_with_four_counters(&runner, nexus);
 }
 
-/// C1d: Geometric Nexus in the `Token` → `PutCounter { LastCreated }` shape —
-/// the seeded amount survives the head and the parent→child hand-off.
+/// C1d: Geometric Nexus rewritten into the `Token.enter_with_counters` shape —
+/// the seeded amount also reaches a token that enters with the counters.
 #[test]
-fn geometric_nexus_fractal_gets_the_counters_removed_through_a_put_counter_sub() {
+fn geometric_nexus_fractal_enters_with_the_counters_removed() {
     let (mut runner, nexus) = nexus_board();
     let index = counter_cost_ability(&runner, nexus, 0);
     let mut def = runner.state().objects[&nexus].abilities[index].clone();
+    let sub = def
+        .sub_ability
+        .take()
+        .expect("the parse carries the count in a PutCounter sub");
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::LastCreated,
+    } = *sub.effect
+    else {
+        panic!("the sub is the LastCreated placement: {:?}", sub.effect);
+    };
     let Effect::Token {
         enter_with_counters,
         ..
@@ -517,33 +539,16 @@ fn geometric_nexus_fractal_gets_the_counters_removed_through_a_put_counter_sub()
     else {
         panic!("the head is the token creation: {:?}", def.effect);
     };
-    let (counter_type, count) = enter_with_counters
-        .pop()
-        .expect("the parse carries the count on the token");
     assert!(enter_with_counters.is_empty());
-    assert!(def.sub_ability.is_none(), "no sub before the rewrite");
-    def.sub_ability = Some(Box::new(AbilityDefinition::new(
-        def.kind,
-        Effect::PutCounter {
-            counter_type,
-            count,
-            target: TargetFilter::LastCreated,
-        },
-    )));
+    enter_with_counters.push((counter_type, count));
     let obj = runner.state_mut().objects.get_mut(&nexus).unwrap();
     Arc::make_mut(&mut obj.abilities)[index] = def.clone();
     Arc::make_mut(&mut obj.base_abilities)[index] = def;
     let rewritten = &runner.state().objects[&nexus].abilities[index];
     assert!(
-        matches!(&*rewritten.effect, Effect::Token { enter_with_counters, .. } if enter_with_counters.is_empty())
-            && rewritten.sub_ability.as_deref().is_some_and(|sub| matches!(
-                &*sub.effect,
-                Effect::PutCounter {
-                    target: TargetFilter::LastCreated,
-                    ..
-                }
-            )),
-        "structural guard: the rewrite moved the count into a PutCounter sub"
+        matches!(&*rewritten.effect, Effect::Token { enter_with_counters, .. } if !enter_with_counters.is_empty())
+            && rewritten.sub_ability.is_none(),
+        "structural guard: the rewrite moved the count onto the token"
     );
 
     activate_and_resolve(&mut runner, nexus, 0, Answers::default());
@@ -4969,6 +4974,7 @@ fn removing_zero_counters_adds_no_mana_against_a_stale_amount() {
         .act(GameAction::ActivateAbility {
             source_id: font,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|err| panic!("the ability activates: {err:?}"));
 
