@@ -43423,18 +43423,16 @@ pub mod tests {
         let mut state = setup();
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
-        let observer = add_dies_observer(&mut state, PlayerId(0));
+        add_dies_observer(&mut state, PlayerId(0));
         let subject = make_creature(&mut state, PlayerId(0), "Dying subject", 2, 2);
         let mut events = Vec::new();
         move_to_zone(&mut state, subject, Zone::Graveyard, &mut events);
         assert!(matches!(events.as_slice(), [GameEvent::ZoneChanged { .. }]));
-        state.waiting_for = WaitingFor::OptionalEffectChoice {
+        // The coin-keep prompt is the pause this helper's coin-flip caller leaves behind.
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
             player: PlayerId(0),
-            source_id: observer,
-            decision_subject_id: None,
-            description: Some("paused".to_string()),
-            may_trigger_key: None,
-            same_card_may_trigger_choice_available: false,
+            results: vec![true, false],
+            keep_count: 1,
         };
         (state, events)
     }
