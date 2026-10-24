@@ -373,13 +373,10 @@ pub(crate) fn bind_instruction_actor(
                     state.current_trigger_event.as_ref(),
                 )
             } else {
-                targeting::replacement_context_target(
-                    state,
-                    reference,
-                    actor
-                        .replacement_event()
-                        .or(ability.context.replacement_event.as_ref()),
-                )
+                let owned = actor
+                    .replacement_event()
+                    .or(ability.context.replacement_event.as_ref())?;
+                targeting::replacement_context_target(state, reference, Some(owned))
             };
             match target {
                 Some(TargetRef::Player(player)) => Some(player),

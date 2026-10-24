@@ -2929,6 +2929,19 @@ fn rebind_parent_target_controller_to_targeter(ability: &mut AbilityDefinition) 
         if targeter_rebind_stops_before(link.effect.as_ref()) {
             break;
         }
+        if link
+            .instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.as_controller())
+            == Some(&ControllerRef::ParentTargetController)
+        {
+            link.instruction_actor = Some(
+                crate::types::ability::InstructionActorRef::event(
+                    TargetFilter::TriggeringSpellController,
+                )
+                .expect("targeter is a single-player event reference"),
+            );
+        }
         if let Some(else_ability) = link.else_ability.as_deref_mut() {
             rebind_parent_target_controller_to_targeter(else_ability);
         }
@@ -3257,6 +3270,14 @@ fn rebind_immediate_parent_target_controller_to_event_target_controller(
     while let Some(link) = node {
         if matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }) {
             break;
+        }
+        if link
+            .instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.as_controller())
+            == Some(&ControllerRef::ParentTargetController)
+        {
+            link.instruction_actor = Some(ControllerRef::EventTargetController.into());
         }
         if let Some(else_ability) = link.else_ability.as_deref_mut() {
             rebind_immediate_parent_target_controller_to_event_target_controller(else_ability);

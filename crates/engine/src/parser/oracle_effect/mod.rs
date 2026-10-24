@@ -8805,6 +8805,14 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    parse_effect_clause_with_subject(text, ctx, None)
+}
+
+fn parse_effect_clause_with_subject(
+    text: &str,
+    ctx: &mut ParseContext,
+    inherited_subject: Option<&SubjectPhraseAst>,
+) -> ParsedEffectClause {
     // CR 612.1: "Change the text of <target> by replacing all instances of ..." owns its
     // own duration, so it must run before the clause shell peels a trailing one.
     {
@@ -8915,7 +8923,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     }
     if peel_ctx.is_empty() {
         return attach_unless_slots(
-            parse_effect_clause_inner(text, ctx),
+            parse_effect_clause_inner(text, ctx, inherited_subject),
             unless_condition,
             unless_pay_deferred,
         );
@@ -8994,7 +9002,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         .duration()
         .cloned()
         .map(|duration| ctx.stated_clause_duration.replace(duration));
-    let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
+    let mut clause = parse_effect_clause_inner(&peeled_text, ctx, inherited_subject);
     // Trial-parse fallback: peeling may have removed disambiguation signal
     // a specialized parser depends on (e.g., `the next spell you cast this
     // turn` patterns). If the peeled variant lands in `Unimplemented`,
@@ -9004,7 +9012,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         if let Some(previous) = restore_duration {
             ctx.stated_clause_duration = previous;
         }
-        let fallback = parse_effect_clause_inner(text, ctx);
+        let fallback = parse_effect_clause_inner(text, ctx, inherited_subject);
         return attach_unless_slots(fallback, unless_condition, unless_pay_deferred);
     }
     if let Some(previous) = restore_duration {
@@ -10726,7 +10734,11 @@ mod swap_chosen_labels_parser_tests {
     }
 }
 
-fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+fn parse_effect_clause_inner(
+    text: &str,
+    ctx: &mut ParseContext,
+    inherited_subject: Option<&SubjectPhraseAst>,
+) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -10738,6 +10750,19 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
     if counter_unless_payment_is_unsupported(text) {
         return parsed_unless_payment_unsupported_clause(text);
+    }
+    // CR 608.2c: the already-recognized conjugated continuation carries the
+    // prior grammatical subject through the same lowering as a printed one.
+    // Bind its actor before that lowering materializes any intrinsic wrappers.
+    if let Some(subject) = inherited_subject {
+        return lower_subject_predicate_ast(
+            subject.clone(),
+            PredicateAst::ImperativeFallback {
+                text: subject::deconjugate_verb(text),
+            },
+            ctx,
+            text,
+        );
     }
     // CR 705.1 + CR 608.2c: a set chosen by each object's own coin flip ("Destroy
     // each creature whose coin comes up tails" — Rakdos, the Showstopper; "each
@@ -44959,6 +44984,19 @@ fn parse_effect_chain_ir_body(
             }
             _ => Vec::new(),
         };
+        let inherited_subject_phrase = inherited_player_subject.as_ref().map(|carried| {
+            let declared_player = (*carried == CarriedPlayerSubject::Declared)
+                .then(|| {
+                    declared_player_reference(
+                        builder.clauses(),
+                        &mut declarations,
+                        &mut chain_declared_groups,
+                        &enclosing_declared_player,
+                    )
+                })
+                .flatten();
+            carried.subject_phrase(declared_player)
+        });
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
             (retained_type_clause.lower(duration_binding), repeat_for)
@@ -44969,7 +45007,11 @@ fn parse_effect_chain_ir_body(
         } else {
             let (suffix_repeat_for, stripped_text_no_qty) =
                 strip_for_each_repeat_suffix(&text_no_qty);
-            let mut stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            let mut stripped_clause = parse_effect_clause_with_subject(
+                &stripped_text_no_qty,
+                ctx,
+                inherited_subject_phrase.as_ref(),
+            );
             // CR 701.16a + CR 608.2c: a fieldless Investigate (no count slot) drops a
             // trailing "[once] for each <set>" multiplier. Precompute the lift,
             // gated to Investigate + no prior repeat_for, so ONLY the repeatable-for-each
@@ -45019,9 +45061,23 @@ fn parse_effect_chain_ir_body(
                 // (clause + ctx byte-identical), attaching ONLY the lifted repeat_for.
                 // The gate guaranteed `repeat_for.is_none()`, so `Some(lifted_qty)`
                 // cannot clobber a prior count.
-                (parse_effect_clause(&text_no_qty, ctx), Some(lifted_qty))
+                (
+                    parse_effect_clause_with_subject(
+                        &text_no_qty,
+                        ctx,
+                        inherited_subject_phrase.as_ref(),
+                    ),
+                    Some(lifted_qty),
+                )
             } else {
-                (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+                (
+                    parse_effect_clause_with_subject(
+                        &text_no_qty,
+                        ctx,
+                        inherited_subject_phrase.as_ref(),
+                    ),
+                    repeat_for,
+                )
             }
         };
         let (clause, multi_target) = lift_untargeted_declared_slot_destroy(
@@ -45288,22 +45344,8 @@ fn parse_effect_chain_ir_body(
         }
         // CR 608.2c: re-supply the elided player subject exactly as a printed
         // subject would be applied (`inject_subject_target` is that authority).
-        if let Some(carried) = inherited_player_subject.as_ref() {
-            let declared_player = (*carried == CarriedPlayerSubject::Declared)
-                .then(|| {
-                    declared_player_reference(
-                        builder.clauses(),
-                        &mut declarations,
-                        &mut chain_declared_groups,
-                        &enclosing_declared_player,
-                    )
-                })
-                .flatten();
-            inject_subject_target(
-                &mut clause.effect,
-                &carried.subject_phrase(declared_player),
-                normalized_text,
-            );
+        if let Some(subject) = inherited_subject_phrase.as_ref() {
+            inject_subject_target(&mut clause.effect, subject, normalized_text);
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =

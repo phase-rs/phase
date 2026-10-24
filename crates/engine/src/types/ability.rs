@@ -6527,8 +6527,7 @@ pub struct ReplacementEventContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionActorRef(InstructionActorAuthority);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InstructionActorAuthority {
     Controller(ControllerRef),
     Event(InstructionEventAuthority),
@@ -6558,18 +6557,18 @@ impl InstructionActorRef {
         Self(InstructionActorAuthority::Controller(reference))
     }
 
-    pub fn event(reference: TargetFilter) -> Option<Self> {
+    pub fn event(reference: TargetFilter) -> Result<Self, TargetFilter> {
         match reference {
             TargetFilter::TriggeringSpellController
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTarget
-            | TargetFilter::PostReplacementDamageTargetOwner => Some(Self(
+            | TargetFilter::PostReplacementDamageTargetOwner => Ok(Self(
                 InstructionActorAuthority::Event(InstructionEventAuthority {
                     event_reference: reference,
                     replacement_event: None,
                 }),
             )),
-            _ => None,
+            rejected => Err(rejected),
         }
     }
 
@@ -6613,32 +6612,43 @@ impl From<ControllerRef> for InstructionActorRef {
 
 impl Serialize for InstructionActorRef {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+        match &self.0 {
+            InstructionActorAuthority::Controller(reference) => reference.serialize(serializer),
+            InstructionActorAuthority::Event(event) => event.serialize(serializer),
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for InstructionActorRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match InstructionActorAuthority::deserialize(deserializer)? {
-            InstructionActorAuthority::Controller(reference) => Ok(Self::controller(reference)),
-            InstructionActorAuthority::Event(event) => {
-                let mut actor = Self::event(event.event_reference)
-                    .ok_or_else(|| de::Error::custom("unsupported instruction event reference"))?;
-                if let Some(context) = event.replacement_event {
-                    if actor.as_event() == Some(&TargetFilter::TriggeringSpellController) {
-                        return Err(de::Error::custom(
-                            "trigger actor cannot own a replacement event",
-                        ));
-                    }
-                    if context.source_identity.is_some_and(|identity| {
-                        context.source_id != Some(identity.reference.object_id)
-                    }) {
-                        return Err(de::Error::custom("replacement source identity mismatch"));
-                    }
-                    actor.capture_replacement_event(&context);
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value
+            .as_object()
+            .is_some_and(|object| object.contains_key("event_reference"))
+        {
+            let event: InstructionEventAuthority =
+                serde_json::from_value(value).map_err(de::Error::custom)?;
+            let mut actor = Self::event(event.event_reference)
+                .map_err(|_| de::Error::custom("unsupported instruction event reference"))?;
+            if let Some(context) = event.replacement_event {
+                if actor.as_event() == Some(&TargetFilter::TriggeringSpellController) {
+                    return Err(de::Error::custom(
+                        "trigger actor cannot own a replacement event",
+                    ));
                 }
-                Ok(actor)
+                if context
+                    .source_identity
+                    .is_some_and(|identity| context.source_id != Some(identity.reference.object_id))
+                {
+                    return Err(de::Error::custom("replacement source identity mismatch"));
+                }
+                actor.capture_replacement_event(&context);
             }
+            Ok(actor)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::controller)
+                .map_err(de::Error::custom)
         }
     }
 }

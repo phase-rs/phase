@@ -12423,6 +12423,19 @@ pub(crate) fn resolve_player_for_context_ref(
         TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
+        TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => {
+            crate::game::targeting::replacement_context_target(
+                state,
+                target_filter,
+                ability.context.replacement_event.as_ref(),
+            )
+            .and_then(|target| match target {
+                TargetRef::Player(player) => Some(player),
+                TargetRef::Object(_) => None,
+            })
+        }
         _ if declared_player_slot_is_empty(state, ability, target_filter) => None,
         _ => Some(resolve_context_player(state, ability, target_filter)),
     }
@@ -12729,10 +12742,19 @@ fn ability_with_event_context_targets(
     // for the revealed card, so this must append the affected player rather than
     // treating a nonempty target list as complete.
     if ability_refs_post_replacement_event_target(&pending) {
-        if let Some(target) = state.post_replacement_event_target() {
-            if !pending.targets.contains(target) {
-                pending.push_target(target.clone());
+        if let Some(target) = crate::game::targeting::replacement_context_target(
+            state,
+            &TargetFilter::PostReplacementDamageTarget,
+            pending.context.replacement_event.as_ref(),
+        ) {
+            if !pending.targets.contains(&target) {
+                pending.push_target(target);
             }
+            return pending;
+        }
+        // CR 615.5: owned missing authority cannot be hydrated by a nested
+        // trigger or by the legacy generic event-context fallback below.
+        if pending.context.replacement_event.is_some() {
             return pending;
         }
     }
@@ -16816,6 +16838,10 @@ fn resolve_chain_body(
     }
     let ability = &actor_bound;
 
+    if deal_damage::replacement_recipient_is_missing(state, ability) {
+        return skip_instruction_and_dependents(state, ability, events, depth);
+    }
+
     // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
     // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
     // ("choose one of them at random") is resolved here, at the chain resolution
@@ -17174,17 +17200,18 @@ fn resolve_chain_body(
                 // draw, changing the card's rules). `None` (exclude no one) is
                 // reserved for AnyPlayer and must NOT be the missing-context
                 // fallback here.
-                OpponentMayScope::AnyOtherPlayer => match state.post_replacement_event_target() {
-                    Some(crate::types::ability::TargetRef::Player(p)) => Some(*p),
-                    _ => {
-                        debug_assert!(
-                            false,
-                            "AnyOtherPlayer fan-out reached without a resident \
-                                 replaced-Draw event target; failing closed"
-                        );
-                        return Ok(());
+                OpponentMayScope::AnyOtherPlayer => {
+                    match crate::game::targeting::replacement_context_target(
+                        state,
+                        &TargetFilter::PostReplacementDamageTarget,
+                        ability.context.replacement_event.as_ref(),
+                    ) {
+                        Some(TargetRef::Player(player)) => Some(player),
+                        _ => {
+                            return skip_instruction_and_dependents(state, ability, events, depth);
+                        }
                     }
-                },
+                }
             };
             let description = ability.description.clone();
             // apnap_order returns ALL living players active-player-first
@@ -21447,19 +21474,61 @@ pub(crate) fn evaluate_condition(
         }
         // CR 615.5 + CR 120.1: "If damage from a [type] source is prevented this
         // way, …" — gate a prevention rider on the type of the PREVENTED event's
-        // damage source (Comeuppance). Reads `post_replacement_event_source`,
-        // populated while the prevention continuation drains; absent outside that
-        // window → the gate is false and the rider does not fire.
-        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => state
-            .post_replacement_event_source()
-            .is_some_and(|source_id| {
-                crate::game::filter::matches_target_filter(
-                    state,
-                    source_id,
-                    filter,
-                    &crate::game::filter::FilterContext::from_ability(ability),
-                )
-            }),
+        // damage source (Comeuppance), independently of the reflection's actor
+        // and recipient. CR 608.2h + CR 400.7: only the selected occurrence's
+        // current information or exact last known information may supply type.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            let event = crate::game::targeting::selected_replacement_event(
+                state,
+                ability.context.replacement_event.as_ref(),
+            );
+            let context = crate::game::filter::FilterContext::from_ability(ability);
+            match (event.source_id, event.source_identity) {
+                (Some(source_id), Some(identity)) => {
+                    let reference = identity.reference;
+                    if reference.object_id != source_id {
+                        false
+                    } else if state.objects.get(&source_id).is_some_and(|source| {
+                        source.incarnation == reference.incarnation
+                            && source.zone == identity.expected_zone
+                    }) {
+                        filter::matches_target_filter(state, source_id, filter, &context)
+                    } else {
+                        match identity.expected_zone {
+                            Zone::Battlefield => state
+                                .lki_by_incarnation
+                                .get(&source_id)
+                                .and_then(|history| history.get(&reference.incarnation))
+                                .is_some_and(|lki| {
+                                    filter::matches_target_filter_on_departed_battlefield_lki(
+                                        state, source_id, lki, filter, &context,
+                                    )
+                                }),
+                            Zone::Stack => state
+                                .departed_stack_spells
+                                .get(&source_id)
+                                .and_then(|history| history.get(&reference.incarnation))
+                                .is_some_and(|spell| {
+                                    filter::matches_target_filter_on_lki_snapshot(
+                                        state,
+                                        source_id,
+                                        &spell.object.snapshot_public_characteristics(),
+                                        filter,
+                                        &context,
+                                    )
+                                }),
+                            _ => false,
+                        }
+                    }
+                }
+                // Historical context-free saves retain their object-reference
+                // role; an owned event without an occurrence stays unresolved.
+                (Some(source_id), None) if ability.context.replacement_event.is_none() => {
+                    filter::matches_target_filter(state, source_id, filter, &context)
+                }
+                _ => false,
+            }
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             origin,
             destination,

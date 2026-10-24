@@ -3363,6 +3363,14 @@ fn parse_subject_application_for(
                 // `ctx.subject.is_some()` fallback below (Archnemesis vs. the Curse
                 // cycle).
                 filter
+            } else if let Some(ControllerRef::DeclaredPlayer { group }) = ctx
+                .declared_player_scope
+                .as_ref()
+                .filter(|_| matches!(subject_anaphor, PlayerSubjectAnaphor::Player))
+            {
+                // CR 608.2c: the typed player anaphor names the already minted
+                // declaration for both performer and patient, before lowering.
+                TargetFilter::DeclaredPlayer { group: *group }
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -4302,7 +4310,12 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
             .unwrap_or(TargetFilter::TriggeringSource),
         // CR 608.2c: the nearest earlier clause announced a player; "they" is that
         // player, spelled as "that player" is.
-        _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
+        _ if ctx.prior_player_declaration => match ctx.declared_player_scope.as_ref() {
+            Some(ControllerRef::DeclaredPlayer { group }) => {
+                TargetFilter::DeclaredPlayer { group: *group }
+            }
+            _ => TargetFilter::ParentTargetController,
+        },
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }

@@ -14303,6 +14303,19 @@ fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Opt
 pub(crate) fn rewrite_parent_target_controller_to_post_replacement_source(
     def: &mut AbilityDefinition,
 ) {
+    if def
+        .instruction_actor
+        .as_ref()
+        .and_then(|actor| actor.as_controller())
+        == Some(&ControllerRef::ParentTargetController)
+    {
+        def.instruction_actor = Some(
+            crate::types::ability::InstructionActorRef::event(
+                TargetFilter::PostReplacementSourceController,
+            )
+            .expect("prevented source controller is a single-player event reference"),
+        );
+    }
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(f, TargetFilter::ParentTargetController) {
             *f = TargetFilter::PostReplacementSourceController;
@@ -14342,6 +14355,19 @@ pub(crate) fn rewrite_parent_target_controller_to_post_replacement_source(
 /// `Shuffle.target` anaphor is rewritten LOCALLY in the body — covering Weeping
 /// Angel's "...and that creature's owner shuffles it into their library".
 fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
+    if def
+        .instruction_actor
+        .as_ref()
+        .and_then(|actor| actor.as_controller())
+        == Some(&ControllerRef::ParentTargetOwner)
+    {
+        def.instruction_actor = Some(
+            crate::types::ability::InstructionActorRef::event(
+                TargetFilter::PostReplacementDamageTargetOwner,
+            )
+            .expect("recipient owner is a single-player event reference"),
+        );
+    }
     // The shared walker rewrites every target-bearing effect arm it visits. It
     // does NOT visit `Effect::Shuffle` — deliberately: four callers of
     // `each_target_filter_mut` (e.g. `replace_player_anaphor_with_parent_target`)
@@ -14535,6 +14561,21 @@ fn parse_exile_head_actor(input: &str) -> OracleResult<'_, LibraryInstructionAct
 /// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top
 /// card of the *drawing player's* library, not the enchantment controller's.
 fn rewrite_reveal_top_player_to_post_replacement_target(def: &mut AbilityDefinition) {
+    // CR 608.2c: the recipient subject and a printed "you" remain independent
+    // even when RevealTop's default patient is normalized below.
+    if matches!(
+        def.instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.as_controller()),
+        Some(ControllerRef::ParentTargetController | ControllerRef::TriggeringPlayer)
+    ) {
+        def.instruction_actor = Some(
+            crate::types::ability::InstructionActorRef::event(
+                TargetFilter::PostReplacementDamageTarget,
+            )
+            .expect("replaced drawing player is a single-player event reference"),
+        );
+    }
     match def.effect.as_mut() {
         Effect::RevealTop { player, .. } => {
             if matches!(
@@ -14588,6 +14629,23 @@ fn rewrite_replacement_event_recipient_to_post_replacement_target(def: &mut Abil
 
 fn rewrite_replacement_event_recipient(def: &mut AbilityDefinition, in_player_fan_out: bool) {
     let in_player_fan_out = in_player_fan_out || def.player_scope.is_some();
+    let actor_names_event_recipient = match def
+        .instruction_actor
+        .as_ref()
+        .and_then(|actor| actor.as_controller())
+    {
+        Some(ControllerRef::ParentTargetController | ControllerRef::TriggeringPlayer) => true,
+        Some(ControllerRef::ScopedPlayer) => !in_player_fan_out,
+        _ => false,
+    };
+    if actor_names_event_recipient {
+        def.instruction_actor = Some(
+            crate::types::ability::InstructionActorRef::event(
+                TargetFilter::PostReplacementDamageTarget,
+            )
+            .expect("affected player is a single-player event reference"),
+        );
+    }
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         let names_event_recipient = match f {
             TargetFilter::Player

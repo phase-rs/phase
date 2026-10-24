@@ -2153,6 +2153,18 @@ pub(crate) fn resident_replacement_event(state: &GameState) -> ReplacementEventC
     }
 }
 
+/// CR 615.5: a follow-up's owned event takes precedence, including missing
+/// members; only historical work without an owned event reads the resident one.
+pub(crate) fn selected_replacement_event<'a>(
+    state: &GameState,
+    owned: Option<&'a ReplacementEventContext>,
+) -> std::borrow::Cow<'a, ReplacementEventContext> {
+    match owned {
+        Some(event) => std::borrow::Cow::Borrowed(event),
+        None => std::borrow::Cow::Owned(resident_replacement_event(state)),
+    }
+}
+
 /// CR 615.5: actor and recipient independently read the same owning event.
 /// Only absent owned context uses the legacy resident event; owned missing
 /// members remain missing during nested replacement resolution.
@@ -2161,14 +2173,7 @@ pub(crate) fn replacement_context_target(
     filter: &TargetFilter,
     owned: Option<&ReplacementEventContext>,
 ) -> Option<TargetRef> {
-    let resident;
-    let event = match owned {
-        Some(event) => event,
-        None => {
-            resident = resident_replacement_event(state);
-            &resident
-        }
-    };
+    let event = selected_replacement_event(state, owned);
     match filter {
         TargetFilter::PostReplacementSourceController => {
             source_controller_at_identity(state, event.source_identity?).map(TargetRef::Player)

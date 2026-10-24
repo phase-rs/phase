@@ -70,7 +70,10 @@ fn player_context_target(
 ) -> Option<PlayerRecipient> {
     if matches!(
         target_filter,
-        TargetFilter::DeclaredPlayer { .. } | TargetFilter::SpecificPlayer { .. }
+        TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTargetOwner
     ) {
         // CR 608.2b: a declared player with no legal referent is dealt nothing.
         return Some(
@@ -137,8 +140,6 @@ fn bound_player_context_target(
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetOwner
-            | TargetFilter::PostReplacementSourceController
-            | TargetFilter::PostReplacementDamageTargetOwner
     ) {
         super::resolve_player_for_context_ref(state, ability, target_filter).map(TargetRef::Player)
     } else {
@@ -180,11 +181,17 @@ fn resolve_effect_recipients(
     // reflecting to "that creature"). An OBJECT context ref — resolved here (not
     // via `player_context_target`, which only projects players) before the
     // `ability.targets` fallback, since the reflection rider carries no targets.
-    if matches!(target_filter, TargetFilter::PostReplacementDamageSource) {
-        return state
-            .post_replacement_event_source()
-            .map(|id| vec![TargetRef::Object(id)])
-            .unwrap_or_default();
+    if matches!(
+        target_filter,
+        TargetFilter::PostReplacementDamageSource | TargetFilter::PostReplacementDamageTarget
+    ) {
+        return crate::game::targeting::replacement_context_target(
+            state,
+            target_filter,
+            ability.context.replacement_event.as_ref(),
+        )
+        .into_iter()
+        .collect();
     }
     match player_context_target(state, ability, target_filter) {
         Some(PlayerRecipient::Bound(target)) => return vec![target],
@@ -259,6 +266,29 @@ fn resolve_effect_recipients(
         TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
         _ => vec![],
     }
+}
+
+/// CR 608.2c + CR 615.5: a recognized missing replacement recipient cannot
+/// produce a dependent result. Both damage handlers use this same decision.
+pub(crate) fn replacement_recipient_is_missing(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let filter = match &ability.effect {
+        Effect::DealDamage { target, .. }
+        | Effect::EachSourceDealsDamage {
+            recipient: EachDamageRecipient::Shared(target),
+            ..
+        } => target,
+        _ => return false,
+    };
+    matches!(
+        filter,
+        TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+    ) && resolve_effect_recipients(state, ability, filter, false).is_empty()
 }
 
 /// CR 120.1 + CR 608.2b: The single authority for which object deals the damage
@@ -1320,7 +1350,7 @@ fn stash_each_source_combined_continuation(
     state: &mut GameState,
     ability: &ResolvedAbility,
     already_replaced: &[(DamageContext, ProposedEvent)],
-    raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+    raw_remaining: impl IntoIterator<Item = (DamageContext, TargetRef, u32)>,
 ) {
     let controller = ability.controller;
 
@@ -1338,8 +1368,8 @@ fn stash_each_source_combined_continuation(
         }
     }
 
-    for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+    for (context, target, amount) in raw_remaining {
+        let node = build_remaining_damage_node(&context, controller, target, amount);
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1376,11 +1406,11 @@ fn stash_each_source_combined_continuation(
 fn stash_remaining_each_source_damage(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (DamageContext, TargetRef, u32)>,
 ) {
     let controller = ability.controller;
     let mut iter = remaining.into_iter();
-    let Some((first_source, first_target, first_amount)) = iter.next() else {
+    let Some((first_context, first_target, first_amount)) = iter.next() else {
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1393,9 +1423,9 @@ fn stash_remaining_each_source_damage(
     };
 
     let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
-    for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        build_remaining_damage_node(&first_context, controller, first_target, first_amount);
+    for (context, target, amount) in iter {
+        let node = build_remaining_damage_node(&context, controller, target, amount);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1859,7 +1889,7 @@ fn resolve_each_target_power_damage(
                 let remaining = batch
                     .iter()
                     .skip(idx + 1)
-                    .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
+                    .map(|(_, context, amt)| (*context, recipient.clone(), *amt));
                 stash_remaining_each_source_damage(state, ability, remaining);
                 return Ok(());
             }
@@ -2790,19 +2820,26 @@ pub fn resolve_each_deals_equal_to_power(
         return Ok(());
     };
 
-    for (i, &source_id) in source_ids.iter().enumerate() {
+    // CR 608.2h: each remaining source keeps the occurrence selected before a
+    // replacement can move it; resuming never captures a later incarnation.
+    let source_contexts: Vec<_> = source_ids
+        .iter()
+        .map(|&source_id| {
+            DamageContext::from_source(state, source_id)
+                .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller))
+        })
+        .collect();
+    for (i, ctx) in source_contexts.iter().enumerate() {
+        let source_id = ctx.source_id;
         // CR 113.7a + CR 208.3: power from the live object, falling back to LKI
         // when the source left the battlefield after targets were chosen.
         let power = object_power_with_lki(state, source_id);
         if power <= 0 {
             continue;
         }
-        // CR 120.1: each source creature is the source of its own damage.
-        let ctx = DamageContext::from_source(state, source_id)
-            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
         match apply_damage_to_target(
             state,
-            &ctx,
+            ctx,
             TargetRef::Object(recipient_id),
             power as u32,
             false,
@@ -2818,7 +2855,7 @@ pub fn resolve_each_deals_equal_to_power(
                 stash_remaining_each_deals_chain(
                     state,
                     ability,
-                    &source_ids[i + 1..],
+                    &source_contexts[i + 1..],
                     recipient_id,
                 );
                 mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
@@ -3049,7 +3086,7 @@ pub fn resolve_each_source_deals_damage(
         // exactly once.
         let raw_remaining = entries[pause_at + 1..]
             .iter()
-            .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
+            .map(|(_, context, t, a)| (*context, t.clone(), *a));
         stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
         return Ok(());
@@ -3107,17 +3144,17 @@ fn object_power_with_lki(state: &GameState, id: ObjectId) -> i32 {
 fn stash_remaining_each_deals_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    remaining_sources: &[ObjectId],
+    remaining_sources: &[DamageContext],
     recipient_id: ObjectId,
 ) {
     let mut head: Option<ResolvedAbility> = None;
-    for &source_id in remaining_sources {
-        let power = object_power_with_lki(state, source_id);
+    for context in remaining_sources {
+        let power = object_power_with_lki(state, context.source_id);
         if power <= 0 {
             continue;
         }
         let node = build_remaining_damage_node(
-            source_id,
+            context,
             ability.controller,
             TargetRef::Object(recipient_id),
             power as u32,
