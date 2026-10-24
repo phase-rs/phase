@@ -258,14 +258,16 @@ pub fn resolve(
     // the upper-bound expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
     // player may discard 0..=count.
-    let (num_cards, up_to, unless_filter, target_filter, random) = match &ability.effect {
-        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false),
+    let (num_cards, up_to, unless_filter, target_filter, random, card_filter) = match &ability
+        .effect
+    {
+        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false, None),
         Effect::Discard {
             count,
             unless_filter,
             target,
             selection,
-            ..
+            filter,
         } => {
             let (inner, up_to) = count.peel_up_to();
             (
@@ -280,9 +282,10 @@ pub fn resolve(
                 unless_filter.clone(),
                 target.clone(),
                 selection.is_random(),
+                filter.clone(),
             )
         }
-        _ => (1, false, None, TargetFilter::Any, false),
+        _ => (1, false, None, TargetFilter::Any, false, None),
     };
 
     // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
@@ -591,6 +594,22 @@ pub fn resolve(
             .iter()
             .copied()
             .collect();
+        // CR 608.2c + CR 201.2: "discards a card with that name" restricts which
+        // cards in the hand can satisfy the instruction. A player with no such
+        // card can't discard, so the instruction does nothing (the empty pool
+        // takes the same no-op path as an empty hand).
+        let hand_cards: Vec<ObjectId> = match &card_filter {
+            Some(filter) => {
+                let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                hand_cards
+                    .into_iter()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                    })
+                    .collect()
+            }
+            None => hand_cards,
+        };
 
         // CR 701.9b: For "up to N" discards, present the full N to the player.
         // The available cards list naturally constrains actual selection.

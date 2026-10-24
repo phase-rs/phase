@@ -2152,8 +2152,20 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(noun_lower.as_str())
         .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
+        // CR 201.2 + CR 608.2c: a trailing "with that name" binds the discard to the
+        // card name chosen earlier in this resolution (Brain Pry). It composes onto
+        // whatever type qualifier precedes it.
+        let (noun, has_chosen_name) = match terminated(
+            take_until::<_, _, OracleError<'_>>(" with that name"),
+            all_consuming(tag(" with that name")),
+        )
+        .parse(noun)
+        {
+            Ok((_, base)) => (base, true),
+            Err(_) => (noun, false),
+        };
         let plain_noun = noun.to_lowercase();
-        let filter = if all_consuming((
+        let type_filter = if all_consuming((
             opt(tag::<_, _, OracleError<'_>>("additional ")),
             alt((tag("cards"), tag("card"))),
         ))
@@ -2163,6 +2175,13 @@ pub(super) fn parse_targeted_action_ast(
             None
         } else {
             Some(parse_discard_card_filter(noun)?)
+        };
+        let filter = match (type_filter, has_chosen_name) {
+            (filter, false) => filter,
+            (None, true) => Some(TargetFilter::HasChosenName),
+            (Some(filter), true) => Some(TargetFilter::And {
+                filters: vec![filter, TargetFilter::HasChosenName],
+            }),
         };
         return Some(TargetedImperativeAst::Discard {
             count,

@@ -2067,6 +2067,7 @@ mod owned_you_target_authority;
 mod attack_target_latch;
 mod attacked_player_referent;
 mod base_pt_designation_filter;
+mod brain_pry_named_discard;
 mod controller_anaphor_binds_through_context;
 mod declared_group_identity;
 mod declared_player_gate_arms;

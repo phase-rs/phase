@@ -1756,6 +1756,15 @@ pub enum GameEvent {
         source_id: Option<ObjectId>,
         choice: String,
     },
+    /// CR 201.4: A player chose a card name as an instruction resolved
+    /// ("Choose a nonland card name" — Brain Pry). Chosen names are public, so
+    /// this carries the name for the game log and the frontend rather than
+    /// leaving it only on the source's `ChosenAttribute::CardName`.
+    CardNamed {
+        player_id: PlayerId,
+        source_id: Option<ObjectId>,
+        name: String,
+    },
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regenerated {
         object_id: ObjectId,

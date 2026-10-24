@@ -33465,6 +33465,7 @@ impl GameState {
                 | GameEvent::PhysicalContestStarted { .. }
                 | GameEvent::PhysicalContestResolved { .. }
                 | GameEvent::VoteCast { .. }
+                | GameEvent::CardNamed { .. }
                 | GameEvent::VoteResolved { .. }
                 | GameEvent::PowerToughnessChanged { .. }
                 | GameEvent::CascadeMissed { .. }

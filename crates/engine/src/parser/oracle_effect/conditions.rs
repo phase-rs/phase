@@ -7362,9 +7362,24 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     // is repopulated per-effect, so after the preceding effect resolves it holds
     // exactly that effect's zone changes; `Not { ZoneChangedThisWay { Any } }` is
     // true iff that effect moved nothing — i.e. "you can't".
-    if alt((tag::<_, _, OracleError<'_>>("you can't"), tag("you cannot")))
-        .parse(lower.as_str())
-        .is_ok()
+    // The instruction's actor may be named in the third person ("if they can't,
+    // you draw a card" — Brain Pry); that reads the same outcome. The third-person
+    // form must be the whole condition so "they can't block" is not swallowed.
+    if alt((
+        value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("you can't"), tag("you cannot"))),
+        ),
+        value(
+            (),
+            all_consuming(terminated(
+                alt((tag("they can't"), tag("they cannot"))),
+                (multispace0, opt(char('.'))),
+            )),
+        ),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
     {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::ZoneChangedThisWay {
@@ -11015,6 +11030,23 @@ mod tests {
                 "expected Not {{ ZoneChangedThisWay {{ Any }} }} for {text:?}",
             );
         }
+    }
+
+    #[test]
+    fn if_they_cant_matches_only_the_whole_condition() {
+        // CR 608.2c: third-person "they can't" reads the preceding instruction's
+        // outcome like "you can't" — but only as the whole condition.
+        assert!(
+            try_nom_condition_as_ability_condition("they can't", &mut ParseContext::default())
+                .is_some()
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "they can't block",
+                &mut ParseContext::default()
+            ),
+            None
+        );
     }
 
     #[test]
