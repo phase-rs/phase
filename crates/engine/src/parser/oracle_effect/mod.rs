@@ -23632,7 +23632,7 @@ fn try_parse_multi_target_damage_chain_inner(
     // which read the un-stripped ClauseChunk text (a separate path). Fixed
     // amounts (the primary 5) are untouched — apply_where_x_quantity_expression
     // only rewrites Variable("X")/CostXPaid leaves.
-    let (stripped, _binding) = strip_trailing_where_x(TextPair::new(text, &lower));
+    let (stripped, local_where_x_expression) = strip_trailing_where_x(TextPair::new(text, &lower));
     let text = stripped.original;
     let lower = stripped.lower;
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
@@ -23673,12 +23673,10 @@ fn try_parse_multi_target_damage_chain_inner(
             Ok((recipient, recipient))
         })
     });
-    let recipient_has_target_keyword = recipient_span.is_some_and(|span| {
-        nom_primitives::scan_at_word_boundaries(span, |input| {
-            super::oracle_target::parse_word_bounded(input, "target")
-        })
-        .is_some()
-    });
+    // CR 115.1a: the recipient itself must start the target declaration;
+    // target words in a controller phrase or after a count do not qualify.
+    let recipient_starts_with_target = recipient_span
+        .is_some_and(|span| tag::<_, _, OracleError<'_>>("target ").parse(span).is_ok());
     let parent_object_target = match &primary_effect {
         Effect::DealDamage {
             amount,
@@ -23686,9 +23684,11 @@ fn try_parse_multi_target_damage_chain_inner(
             damage_source: None,
             excess: None,
         } if damage_context == DamageTargetContext::FreshClause
+            // CR 608.2c: a later X definition can introduce an earlier target.
+            && local_where_x_expression.is_none()
             && parent_population_amount_is_plain(amount)
             && source_has_no_target
-            && recipient_has_target_keyword
+            && recipient_starts_with_target
             && primary_damage_multi_target.is_none()
             && lower::target_filter_is_single_object_target(target)
             && super::oracle_target::resolve_pronoun_target(ctx, "it")
@@ -43142,33 +43142,38 @@ fn parse_effect_chain_ir_body(
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
         // CR 608.2c: only a root chunk with no earlier same-sentence target
-        // declaration can open permission. Nested builders retain their ceiling.
-        let damage_context = if builder
-            .clauses()
-            .iter()
-            .rev()
-            .take_while(|clause| clause.boundary != Some(ClauseBoundary::Sentence))
-            .any(|clause| {
-                std::iter::once((
-                    &clause.parsed.effect,
-                    clause
-                        .unless_pay
-                        .as_ref()
-                        .or(clause.parsed.unless_pay.as_ref()),
-                ))
-                .chain(
-                    std::iter::successors(clause.parsed.sub_ability.as_deref(), |ability| {
-                        ability.sub_ability.as_deref()
-                    })
-                    .map(|ability| (ability.effect.as_ref(), ability.unless_pay.as_ref())),
-                )
-                .any(|(effect, unless_pay)| {
-                    crate::game::ability_utils::effect_has_stack_target_declaration(effect)
-                        || unless_pay.is_some_and(|modifier| {
-                            crate::game::ability_utils::payer_is_declared_target(&modifier.payer)
+        // declaration can open permission. A local or sentence-inherited X
+        // definition can introduce such a target, even after its text is stripped.
+        // Nested builders retain their ceiling.
+        let damage_context = if sentence_where_x.get(chunk_idx).is_some_and(Option::is_some)
+            || builder
+                .clauses()
+                .iter()
+                .rev()
+                .take_while(|clause| clause.boundary != Some(ClauseBoundary::Sentence))
+                .any(|clause| {
+                    std::iter::once((
+                        &clause.parsed.effect,
+                        clause
+                            .unless_pay
+                            .as_ref()
+                            .or(clause.parsed.unless_pay.as_ref()),
+                    ))
+                    .chain(
+                        std::iter::successors(clause.parsed.sub_ability.as_deref(), |ability| {
+                            ability.sub_ability.as_deref()
                         })
-                })
-            }) {
+                        .map(|ability| (ability.effect.as_ref(), ability.unless_pay.as_ref())),
+                    )
+                    .any(|(effect, unless_pay)| {
+                        crate::game::ability_utils::effect_has_stack_target_declaration(effect)
+                            || unless_pay.is_some_and(|modifier| {
+                                crate::game::ability_utils::payer_is_declared_target(
+                                    &modifier.payer,
+                                )
+                            })
+                    })
+                }) {
             DamageTargetContext::InheritedTargets
         } else {
             enclosing_damage_context.unwrap_or(DamageTargetContext::FreshClause)
@@ -53519,9 +53524,13 @@ mod parent_controller_population_tests {
     /// Both entries must reach the population and retain the pre-existing
     /// unbound fallback when permission is withheld; neither must fail strictly.
     fn assert_population_boundary_through_both_parsers(head: &str) {
-        let ordinary = format!("{head} and 1 damage to each creature.");
+        assert_population_boundary_with_suffix_through_both_parsers(head, "");
+    }
+
+    fn assert_population_boundary_with_suffix_through_both_parsers(head: &str, suffix: &str) {
+        let ordinary = format!("{head} and 1 damage to each creature{suffix}.");
         let qualified =
-            format!("{head} and 1 damage to each other creature with the same controller.");
+            format!("{head} and 1 damage to each other creature with the same controller{suffix}.");
         let parse_spell = |text: &str| {
             let mut parsed =
                 parse_oracle_text(text, "Fear, Fire, Foes!", &[], &["Sorcery".into()], &[]);
@@ -53929,6 +53938,38 @@ mod parent_controller_population_tests {
     fn quantity_target_amount_withholds_target_recipient_population() {
         assert_population_boundary_through_both_parsers(
             "~ deals damage equal to the number of cards in target player's hand to target creature",
+        );
+    }
+
+    #[test]
+    fn controller_phrase_target_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals 3 damage to enchanted creature target player controls",
+        );
+    }
+
+    #[test]
+    fn counted_target_recipient_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals 3 damage to two target creatures you control",
+        );
+    }
+
+    #[test]
+    fn where_x_definition_keeps_permission_disabled() {
+        let head = "~ deals X damage to target creature";
+        let suffix = ", where X is the number of cards in target player's hand";
+        assert_population_boundary_with_suffix_through_both_parsers(head, suffix);
+
+        let ordinary = format!("{head} and 1 damage to each creature{suffix}.");
+        let control = try_parse_multi_target_damage_chain(&ordinary, &mut ParseContext::default())
+            .expect("local where-X definition must still reach an ordinary population");
+        assert_reaches_uniform_population(&control);
+        let qualified =
+            format!("{head} and 1 damage to each other creature with the same controller{suffix}.");
+        assert!(
+            try_parse_multi_target_damage_chain(&qualified, &mut ParseContext::default()).is_none(),
+            "a locally stripped where-X definition must withhold permission"
         );
     }
 
