@@ -4489,25 +4489,39 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     // for the shapes THIS PR's lift produces — a fieldless `Effect::Investigate` whose
     // `repeat_for` is a member-count `QuantityRef` (`PlayerCount`/`ObjectCount`), i.e.
     // exactly the eligibility set of `for_each_repeatable_repeat_for`
-    // (parser/oracle_effect/mod.rs). Projecting the *whole* repeat_for surface
+    // (parser/oracle_effect/lower.rs). Projecting the *whole* repeat_for surface
     // (CopySpell/Token/Proliferate/… and pre-existing `Fixed`/`Variable`/tracked-set
     // Investigate forms) would migrate ~250 unrelated, parse-identical cards' coverage
     // signatures in one shot — a deliberate global coverage-schema migration, deferred
     // out of this focused feature. `None`, or any out-of-scope shape, pushes nothing,
     // so those cards keep a byte-identical signature.
-    // COUPLING: if the lift's eligible quantity set ever widens (e.g. the Gap B
-    // leading-adjective fix), this scope MUST widen in lockstep, or the new lift class
-    // becomes false-green in the parse-diff.
+    // The second projected shape is the "that many times" suffix-lift class
+    // (`strip_repeat_count_suffix`, parser/oracle_effect/lower.rs): an Investigate or
+    // Incubate whose `repeat_for` is the anaphoric `EventContextAmount` ("investigate
+    // that many times", "incubate 2 that many times"). No pre-existing Investigate /
+    // Incubate def carries that repeat count, so admitting it moves only the cards the
+    // suffix lift newly reaches; other effects' `EventContextAmount` repeats (rider
+    // forms) stay unprojected for the same global-migration reason.
+    // COUPLING: if either lift's eligible quantity or effect set ever widens (e.g. the
+    // Gap B leading-adjective fix for `for_each_repeatable_repeat_for`, or a new
+    // effect reaching `strip_repeat_count_suffix` with "that many times"), this scope
+    // MUST widen in lockstep, or the new lift class becomes false-green in the
+    // parse-diff.
     if let Some(rf) = &def.repeat_for {
-        let is_lift_shape = matches!(&*def.effect, Effect::Investigate)
-            && matches!(
-                rf,
-                QuantityExpr::Ref { qty }
-                    if matches!(
-                        qty,
-                        QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. }
-                    )
-            );
+        let is_lift_shape = matches!(
+            (&*def.effect, rf),
+            (
+                Effect::Investigate,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. },
+                },
+            ) | (
+                Effect::Investigate | Effect::Incubate { .. },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            )
+        );
         if is_lift_shape {
             d.push(("repeat_for".into(), fmt_quantity(rf)));
         }
@@ -16038,6 +16052,45 @@ mod tests {
         assert!(
             !projects(Effect::Populate, Some(object_count())),
             "a non-Investigate repeat_for must not project (scope is the Investigate lift class)",
+        );
+
+        // Positive — the "that many times" suffix lift (`strip_repeat_count_suffix`):
+        // Investigate (Piper Wright / Inquisitor Eisenhorn / Lonis) and Incubate
+        // (Phyrexian Incubator) with an `EventContextAmount` repeat surface.
+        // Revert-probe: dropping the `EventContextAmount` arm flips both.
+        let that_many = || QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let incubate_two = || Effect::Incubate {
+            count: QuantityExpr::Fixed { value: 2 },
+        };
+        assert!(
+            projects(Effect::Investigate, Some(that_many())),
+            "Investigate + EventContextAmount suffix lift must appear in the signature",
+        );
+        assert!(
+            projects(incubate_two(), Some(that_many())),
+            "Incubate + EventContextAmount suffix lift must appear in the signature",
+        );
+        // Negative — a pre-existing `Fixed` Incubate repeat ("Incubate 2 five
+        // times") keeps a byte-identical signature.
+        assert!(
+            !projects(incubate_two(), Some(QuantityExpr::Fixed { value: 2 })),
+            "a Fixed Incubate repeat_for must not project",
+        );
+        // Negative — an `EventContextAmount` repeat on any other effect (the Gatta
+        // and Luzzu / Inkshield rider shape) stays unprojected. Revert-probe:
+        // widening the arm to every effect flips this.
+        assert!(
+            !projects(
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+                Some(that_many()),
+            ),
+            "an EventContextAmount repeat_for on a non-lift effect must not project",
         );
     }
 
