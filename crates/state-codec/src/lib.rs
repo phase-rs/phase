@@ -67,6 +67,9 @@ impl fmt::Display for StateHash {
 pub enum CodecError {
     #[error("invalid codec JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// A frame the JSON grammar accepts but this codec's named-object grammar does not.
+    #[error("malformed codec frame: {0}")]
+    Malformed(&'static str),
 }
 
 impl WireState {
@@ -112,7 +115,7 @@ pub fn state_hash(state: &WireState) -> StateHash {
     StateHash(Sha256::digest(state.as_bytes()).into())
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 enum FrameTag {
     Full,
 }
@@ -120,7 +123,7 @@ enum FrameTag {
 #[derive(Deserialize)]
 struct Envelope<'a> {
     #[serde(rename = "type")]
-    tag: FrameTag,
+    tag: &'a str,
     #[serde(borrow)]
     data: &'a RawValue,
 }
@@ -140,10 +143,25 @@ struct FullEnvelope<'a> {
 
 impl Frame {
     /// Parse the tag and borrowed payload separately, accepting either key order.
+    ///
+    /// The grammar is named JSON objects only. Serde's derived readers would also
+    /// accept positional arrays and skip unknown values without validating their
+    /// UTF-8, so the whole frame is validated as UTF-8 first and both objects are
+    /// required to be objects.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
-        let envelope: Envelope<'_> = serde_json::from_slice(bytes)?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| CodecError::Malformed("frame is not valid UTF-8"))?;
+        if !text.trim_start().starts_with('{') {
+            return Err(CodecError::Malformed(
+                "frame envelope must be a JSON object",
+            ));
+        }
+        let envelope: Envelope<'_> = serde_json::from_str(text)?;
         match envelope.tag {
-            FrameTag::Full => {
+            "Full" => {
+                if !envelope.data.get().starts_with('{') {
+                    return Err(CodecError::Malformed("frame payload must be a JSON object"));
+                }
                 let data: FullData<'_> = serde_json::from_str(envelope.data.get())?;
                 Ok(Self {
                     payload: FramePayload::Full(WireState {
@@ -151,6 +169,7 @@ impl Frame {
                     }),
                 })
             }
+            _ => Err(CodecError::Malformed("unsupported frame tag")),
         }
     }
 

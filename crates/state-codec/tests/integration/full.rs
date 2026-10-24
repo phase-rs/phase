@@ -185,6 +185,33 @@ fn envelope_rejects_trailing_garbage() {
 #[test]
 fn envelope_rejects_invalid_utf8() {
     rejects_with_valid_control(b"{\"type\":\"Full\",\"data\":{\"state\":\"\xff\"}}");
+    // An ignored unknown envelope value must not hide invalid UTF-8 from validation.
+    rejects_with_valid_control(b"{\"type\":\"Full\",\"data\":{\"state\":null},\"extra\":\"\xff\"}");
+}
+
+#[test]
+fn envelope_rejects_positional_and_non_object_forms() {
+    for invalid in [
+        br#"["Full",[null]]"#.as_slice(),
+        br#"{"type":"Full","data":[null]}"#,
+        br#"{"type":"Full","data":null}"#,
+        br#"{"type":{"Full":null},"data":{"state":null}}"#,
+        br#"[{"type":"Full","data":{"state":null}}]"#,
+    ] {
+        rejects_with_valid_control(invalid);
+    }
+    // Unknown valid fields stay tolerated, in either key order.
+    for valid in [
+        br#"{"type":"Full","data":{"state":null,"x":1},"extra":[1]}"#.as_slice(),
+        "{\"extra\":\"é\",\"data\":{\"state\":null},\"type\":\"Full\"}".as_bytes(),
+    ] {
+        assert_eq!(
+            decode(None, &Frame::from_bytes(valid).unwrap())
+                .unwrap()
+                .as_json(),
+            "null"
+        );
+    }
 }
 
 #[test]
