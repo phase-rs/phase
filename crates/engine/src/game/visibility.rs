@@ -4081,6 +4081,7 @@ fn redact_mana_ability_resume_payment(
         // whether it retains an ability. None of these holds one.
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::ManaPayment { .. }

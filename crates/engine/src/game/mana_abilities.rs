@@ -338,6 +338,14 @@ pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// not widened here: the parser strict-fails an activation trigger whose
 /// untargeted body could add mana (`could_be_triggered_mana_ability_body`), so
 /// no supported trigger needs inline routing from it. No printed card uses it.
+///
+/// A mana-echo body ("add one mana of any type that land produced") resolving
+/// from a multi-type tap event still qualifies here (CR 605.1b classifies on
+/// targets, event, and mana-adding ability — a choice owed at resolution is
+/// not an exclusion): it resolves inside immediate resolution and pauses for
+/// the SingleColor choice there (CR 608.2d), resumed by the fixed-point
+/// authority without a stack entry. The `echo_distinct_types` helper below is
+/// the single authority both the pause and the prompt read.
 pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
@@ -358,6 +366,10 @@ pub fn is_triggered_mana_ability(
     // (b) CR 106.12a / CR 605.1b: triggered by a `{T}`-cost mana ability
     // resolving and producing mana, or by mana being added. See the doc comment
     // above for the deliberately-unwidened `AbilityActivated { kind: Mana }` axis.
+    // A choice owed at resolution (CR 608.2d mana-echo) does NOT fail this
+    // gate: classification keys on targets, event, and mana-adding ability,
+    // and the fixed-point authority pauses for and resumes the choice without
+    // leaving immediate resolution.
     matches!(
         trigger_event,
         Some(
@@ -366,6 +378,48 @@ pub fn is_triggered_mana_ability(
                 | GameEvent::ManaAdded { .. }
         )
     )
+}
+
+/// CR 608.2d + CR 106.12a: distinct mana types carried by a tap/production
+/// event, in stable order; empty for any other event shape. Single authority
+/// for the pause question shared by `resolve` below and the fixed-point
+/// whitelist contract, so pausing and prompting cannot drift on what counts
+/// as multi-type.
+pub(crate) fn echo_distinct_types(event: &GameEvent) -> Vec<ManaType> {
+    let produced = match event {
+        GameEvent::TappedForMana { produced, .. }
+        | GameEvent::ManaAbilityProduced { produced, .. } => produced,
+        _ => return Vec::new(),
+    };
+    let mut distinct: Vec<ManaType> = produced
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    distinct.sort();
+    distinct
+}
+
+/// CR 608.2d: true when `ability`'s root effect is a mana-echo production
+/// ("add one mana of any type that land produced") and the firing event
+/// carries more than one distinct type. Single authority for the pause
+/// question shared by `resolve`, the Pass-1 skip, and the resolved-marker
+/// guard exemption below.
+pub(crate) fn echo_body_owes_type_choice(
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if !matches!(
+        &ability.effect,
+        Effect::Mana {
+            produced: ManaProduction::TriggerEventManaType,
+            ..
+        }
+    ) {
+        return false;
+    }
+    trigger_event.is_some_and(|event| echo_distinct_types(event).len() > 1)
 }
 
 /// CR 605.1b + CR 605.4a: the **resolver-facing** counterpart of
@@ -1488,6 +1542,31 @@ pub(crate) fn mana_choice_prompt(
                     .len();
             if count > 0 {
                 Some(ManaChoicePrompt::AnyCombination { count, options })
+            } else {
+                None
+            }
+        }
+        // CR 608.2d + CR 106.12a: mana-echo bodies ("add one mana of any type
+        // that land produced" — Mirari's Wake, Selesnya Loft Gardens) read
+        // their type from the triggering tap event. A single resolution can
+        // produce several types at once (Simic Growth Chamber's {G}{U}), and
+        // the Oracle asks for exactly ONE of them, so the resolving player
+        // must choose when the event carries more than one distinct type.
+        // With 0 or 1 distinct types the resolver handles it without a
+        // prompt (CR 106.5: empty → no mana; single auto-picks — the common
+        // basic-land case stays prompt-free). Options come from the shared
+        // `echo_distinct_types` authority so the prompt agrees with the
+        // inline gate above on what counts as multi-type. Activation-time
+        // calls (whose effect can never be an echo production — no printed
+        // activated ability has this shape) see no tap event and stay silent.
+        ManaProduction::TriggerEventManaType => {
+            let options = state
+                .current_trigger_event
+                .as_ref()
+                .map(echo_distinct_types)
+                .unwrap_or_default();
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
             }
@@ -2848,6 +2927,31 @@ fn pause_mana_ability_cost_payment(
     pause_pre_delivery_mana_cost_replacement_choice(state, pre_delivery_choice_player);
 }
 
+/// CR 605.4a + CR 608.2d + CR 605.3b: A nested mana sub-cost's auto-taps owed
+/// a pre-spend echo choice. The enclosing activation's snapshot (`parent`)
+/// still has that Mana component unpaid, so park it exactly as a replacement
+/// pause would — but with only the events from before the sub-cost attempt,
+/// because the echo settlement already claimed the attempt's own range. The
+/// next priority boundary resumes the same component with the bonus in the
+/// pool.
+fn pause_mana_ability_cost_payment_for_echo_choice(
+    state: &mut GameState,
+    mut pending: PendingManaAbility,
+    mut cursor: ManaAbilityCostCursor,
+    unscanned_events: &[GameEvent],
+) {
+    promote_cost_move_resume_chain(&mut pending, cursor.parent.as_deref_mut());
+    suspend_mana_ability_parent_chain(cursor.parent.as_deref_mut());
+    cursor.current_action_deferred_start = cursor.deferred_cost_events.len();
+    cursor
+        .deferred_cost_events
+        .extend_from_slice(unscanned_events);
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::ManaAbilityPayment {
+        pending: Box::new(pending),
+        cursor,
+    });
+}
+
 fn mana_ability_cursor_after_current_component(
     cursor: &ManaAbilityCostCursor,
 ) -> ManaAbilityCostCursor {
@@ -3393,6 +3497,7 @@ fn pay_mana_ability_cost_component(
                 .get(cursor.next_counter_choice)
                 .copied();
             let prior_waiting_for = state.waiting_for.clone();
+            let component_event_start = events.len();
             let component_progress = match pay_mana_ability_cost_with_choices(
                 state,
                 pending.source_id,
@@ -3418,6 +3523,21 @@ fn pay_mana_ability_cost_component(
                 // into a failed parent mana payment.
                 Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {
                     return Ok(ManaAbilityPaymentProgress::Paused)
+                }
+                // CR 605.4a + CR 608.2d: The sub-cost's own auto-taps owed a
+                // pre-spend echo choice. The settlement already claimed every
+                // event this attempt produced, so only the earlier still-unscanned
+                // prefix travels with the parked cursor; its next component is
+                // still this unpaid Mana cost, which the next priority boundary
+                // retries with the bonus in the pool.
+                Err(_) if state.pending_triggered_mana_resume.is_some() => {
+                    pause_mana_ability_cost_payment_for_echo_choice(
+                        state,
+                        *parent.pending,
+                        *parent.cursor,
+                        &events[cost_event_start..component_event_start],
+                    );
+                    return Ok(ManaAbilityPaymentProgress::Paused);
                 }
                 Err(error) => return Err(error),
             };
@@ -3997,6 +4117,12 @@ fn resume_mana_ability_root_payment(
         ManaAbilityResume::CompanionToHand { player, cost } => {
             super::companion::resume_companion_to_hand_payment(state, player, cost, events)
         }
+        // CR 116.2i + CR 605.3b: the announced cost is locked; finish the roll
+        // exactly once after its payment completes, including through a further
+        // echo choice or a deferred life payment.
+        ManaAbilityResume::PlanarDieRoll { player, cost } => {
+            super::planechase::resume_paid_planar_die_roll(state, player, cost, events)
+        }
         // CR 116.2b + CR 605.3b: NOT compiler-forced either — the `resume =>`
         // catch-all below would route a paused turn-face-up payment into
         // `resume_waiting_for`, which `unreachable!()`s for this family.
@@ -4156,6 +4282,12 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                 state, player, group, events,
             ),
         ),
+        // CR 116.2i + CR 118.3b: the deferred life component finished, so the
+        // paid roll commits once with its locked cost.
+        ManaAbilityResume::PlanarDieRoll { player, .. } => {
+            super::planechase::finish_paid_planar_die_roll(state, player, events);
+            Ok(WaitingFor::Priority { player })
+        }
         ManaAbilityResume::ManaAbilityManaPayment {
             pending_mana_ability,
         } => continue_mana_ability_activation(state, *pending_mana_ability, events),
@@ -5924,10 +6056,11 @@ pub(crate) fn resume_waiting_for(
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. }
         | ManaAbilityResume::CompanionToHand { .. }
-        // CR 116.2c + CR 116.2b: like `CompanionToHand`, the pay-to-end and
-        // turn-face-up special actions are resumed by
-        // `resume_mana_ability_root`'s named arms, never here.
+        // CR 116.2c + CR 116.2i + CR 116.2b: like `CompanionToHand`, the
+        // pay-to-end, planar-die, and turn-face-up special actions are resumed
+        // by `resume_mana_ability_root`'s named arms, never here.
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
@@ -11842,6 +11975,205 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.total(), 0);
         assert_eq!(state.players[1].mana_pool.count_color(ManaType::Red), 1);
+    }
+
+    /// CR 106.4 + CR 109.5 + CR 608.2d: an UNSCOPED echo production (subjectless
+    /// body, no actor scoping — `target: None`) observing another player's
+    /// multi-type tap directs both the choice and the deposit to the TAPPER,
+    /// never the source controller. Mirrors the single-type sibling above into
+    /// the choosing shape: P0's source observes P1 tapping a {G}{U} land, P1
+    /// (not P0) is prompted, and answering Green lands exactly one Green in
+    /// P1's pool with P0 untouched. Reverting the prompt origin to the
+    /// controller default fails the prompt-player assert; reverting the
+    /// completion recipient fails the pool asserts.
+    #[test]
+    fn unscoped_echo_multitype_tap_prompts_and_pays_tapper() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Dual".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let echo_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unscoped Echo".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&echo_source)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land())),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::TappedForMana {
+                player_id: PlayerId(1),
+                source_id: land,
+                produced: vec![ManaType::Green, ManaType::Blue],
+                tap_state: crate::types::events::ManaTapState::FromTap,
+            }],
+        );
+
+        // The choice must go to the tapper P1 with both produced options —
+        // never to the source controller P0.
+        let pending_effect = match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "unscoped echo choice belongs to tapper P1, not controller P0"
+                );
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+                (**pending_effect).clone()
+            }
+            other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
+        };
+        crate::game::effects::mana::handle_choose_mana_effect(
+            &mut state,
+            &pending_effect,
+            PlayerId(1),
+            &ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::Blue],
+            },
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Green),
+            1,
+            "exactly the chosen bonus Green lands in the tapper's pool"
+        );
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Blue),
+            0,
+            "the unchosen type is not deposited"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "P0 gains nothing");
+    }
+
+    /// Same unscoped contract across suspension: when the firing event is gone
+    /// by completion time, the latched prompt player — not the controller
+    /// default — receives the deposit. Reverting the backstop misroutes the
+    /// bonus to P0.
+    #[test]
+    fn unscoped_echo_completion_without_live_event_uses_prompt_player() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Dual".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let echo_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unscoped Echo".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&echo_source)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land())),
+            );
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::TappedForMana {
+                player_id: PlayerId(1),
+                source_id: land,
+                produced: vec![ManaType::Green, ManaType::Blue],
+                tap_state: crate::types::events::ManaTapState::FromTap,
+            }],
+        );
+        let pending_effect = match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                player,
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                (**pending_effect).clone()
+            }
+            other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
+        };
+        // The firing event is cleared while the choice is pending (ordinary
+        // stack resolution clears trigger-event context); the latched prompt
+        // player must still receive the deposit.
+        state.current_trigger_event = None;
+        crate::game::effects::mana::handle_choose_mana_effect(
+            &mut state,
+            &pending_effect,
+            PlayerId(1),
+            &ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::Blue],
+            },
+            ManaChoice::SingleColor(ManaType::Blue),
+            &mut vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Blue),
+            1,
+            "latched prompt player P1 receives the bonus without a live event"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "P0 gains nothing");
     }
 
     #[test]

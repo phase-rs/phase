@@ -73,6 +73,8 @@ pub(crate) fn turn_face_up_offer(
         Some(object_id),
         &cost,
         crate::types::mana::SpecialAction::TurnFaceUp,
+        // Live payment carries `ManaAbilityResume::TurnFaceUp`.
+        super::casting::PausedManaPayment::Resumable,
     )
     .then_some(())?;
     Some(if super::casting_costs::cost_has_x(&cost) {

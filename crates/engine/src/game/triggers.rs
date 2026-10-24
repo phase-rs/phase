@@ -3300,6 +3300,14 @@ fn collect_matching_triggers_inner(
             // marker so manual `TapLandForMana` taps (still `FromTap`) still
             // fire, and on `is_triggered_mana_ability` so non-mana `TapsForMana`
             // triggers still fire (CR 603.3).
+            //
+            // CR 608.2d exemption: a multi-type mana-echo trigger is never
+            // skipped by this marker — Pass 1 deliberately leaves exactly that
+            // shape unresolved (it owes a SingleColor choice the bare loop
+            // cannot pause for), so skipping it here would drop the trigger
+            // instead of merely de-duplicating it. `echo_body_owes_type_choice`
+            // is the single authority both sites share, so the skip and the
+            // exemption cannot drift apart.
             if matches!(
                 (trig_def.mode.clone(), event),
                 (
@@ -3317,6 +3325,7 @@ fn collect_matching_triggers_inner(
                     }
                 )
             ) && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
+                && !super::mana_abilities::echo_body_owes_type_choice(&ability, Some(event))
             {
                 continue;
             }
@@ -4038,6 +4047,18 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             );
         }
         for (definition_ref, ability) in coupled {
+            // CR 608.2d + CR 106.12a: a mana-echo body resolving from a
+            // multi-type tap event owes the player a choice of exactly one
+            // type, and this bare loop has no pause/resume step — resolving
+            // those here would strand the prompt with no continuation (and
+            // cost-payment previews must never prompt). Leave them for the
+            // frame batch: the resolved-marker guard below exempts exactly
+            // this shape from the marker, and the fixed-point authority pauses
+            // for and resumes the choice there. Single-type echo still
+            // resolves here with no choice to make.
+            if super::mana_abilities::echo_body_owes_type_choice(&ability, Some(&tap_event)) {
+                continue;
+            }
             // Look up the color override the auto-tap planner chose for this aura's
             // triggered mana ability. Only non-None for AnyOneColor bonus triggers
             // (Fertile Ground) when called from the auto-tap path; None for manual
@@ -4075,6 +4096,165 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     // consumed in Pass 1. Clear them now so the map is always empty outside the
     // synchronous auto-tap + trigger-resolution window.
     state.pending_taps_for_mana_overrides.clear();
+}
+
+/// CR 605.4a + CR 608.2d + CR 601.2g-h: preview helper for the synchronous
+/// payment affordability probe.
+///
+/// Deterministic delayed mana production — a fixed `{R}` (Molten Tide's "add an
+/// additional {R}") or a single-type `TriggerEventManaType` echo (Selesnya's
+/// "add one mana of any type that land produced" after a single-type tap) —
+/// owes no type choice, so it is resolved straight into the disposable preview
+/// `state` through the same inline triggered-mana authority the live payment
+/// uses, and the caller re-reads the pool. Only delayed deterministic contexts
+/// are applied here: battlefield deterministic triggers were already resolved
+/// by `resolve_tap_mana_triggers_inline`, so applying a normal one again would
+/// double the bonus.
+///
+/// Choice-owing firings are returned as one entry per owed echo firing in
+/// `events` (the Pass-1 `continue` shape), each entry the distinct bonus types
+/// that firing may choose among. Collection runs through the same
+/// normal-plus-delayed authority the live settlement uses, so delayed-generator
+/// echoes (Selesnya Loft Gardens) and multiple same-event firings (two Mirari's
+/// Wakes on one tap) are each reported — a unioned single-type list cannot
+/// distinguish one bonus from two. Only unrestricted echo bodies
+/// (`restrictions` empty) are reported: a restricted bonus cannot generally
+/// fund an arbitrary cost, so previews must not count it. Runs on disposable
+/// preview state only; previews stay choice-free (no prompt) while the live
+/// payment pauses for a real choice via the typed fixed-point continuation.
+pub(crate) fn echo_bonus_firings_for_preview(
+    state: &mut GameState,
+    events: &[GameEvent],
+) -> Vec<Vec<crate::types::mana::ManaType>> {
+    super::layers::flush_layers(state);
+    super::trigger_index::ensure_ready(state);
+    let seed = collect_triggers_for_batch(state, events);
+    let collected = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        seed,
+        events,
+        DelayedTriggerEventScope::Any,
+    );
+    let (accepted, _ordinary) = partition_collected_mana_frame_contexts(state, collected.contexts);
+    let mut firings: Vec<Vec<crate::types::mana::ManaType>> = Vec::new();
+    for view in accepted {
+        // CR 106.12a: the "is tapped for mana" firing event carries the
+        // produced set the echo reads.
+        let trigger_event = view
+            .context
+            .pending
+            .trigger_event
+            .as_ref()
+            .or_else(|| view.context.trigger_events.first());
+        let Some(trigger_event) = trigger_event else {
+            continue;
+        };
+        // CR 106.4: only an unrestricted echo bonus is generally spendable;
+        // a restricted one (e.g. spend-only-on-X) cannot be counted
+        // optimistically for an arbitrary cost.
+        let restricted = match &view.context.pending.ability.effect {
+            Effect::Mana { restrictions, .. } => !restrictions.is_empty(),
+            _ => true,
+        };
+        if restricted {
+            continue;
+        }
+        if super::mana_abilities::echo_body_owes_type_choice(
+            &view.context.pending.ability,
+            Some(trigger_event),
+        ) {
+            let mut options = super::mana_abilities::echo_distinct_types(trigger_event);
+            options.sort();
+            options.dedup();
+            if !options.is_empty() {
+                firings.push(options);
+            }
+            continue;
+        }
+        // CR 106.4 + CR 605.4a: only a production that owes no type choice is
+        // resolved inline. `AnyOneColor` / `AnyCombination` / the
+        // `ChoiceAmong*` shapes and a multi-type `TriggerEventManaType` echo
+        // choose a type; fixed, colorless, mixed, and a single-type echo do
+        // not. `ChosenColor` / `NotedType` read a stored choice and are left
+        // out: the preview does not need that class, and an unset readback can
+        // surface a prompt.
+        let deterministic_production = match &view.context.pending.ability.effect {
+            Effect::Mana {
+                produced:
+                    crate::types::ability::ManaProduction::Fixed { .. }
+                    | crate::types::ability::ManaProduction::Colorless { .. }
+                    | crate::types::ability::ManaProduction::Mixed { .. },
+                ..
+            } => true,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::TriggerEventManaType,
+                ..
+            } => super::mana_abilities::echo_distinct_types(trigger_event).len() == 1,
+            _ => false,
+        };
+        // CR 605.4a: a deterministic delayed bonus owes no choice, so the
+        // optional-pause machinery cannot strand it. Resolve it inline into the
+        // disposable preview. `optional`/`optional_for` bodies are left out:
+        // the preview cannot answer a prompt, and a mandatory fixed/single-type
+        // echo is the class this preview exists for.
+        if deterministic_production
+            && matches!(
+                view.context.dispatch_origin,
+                PendingTriggerDispatchOrigin::Delayed
+            )
+            && !view.context.pending.ability.optional
+            && view.context.pending.ability.optional_for.is_none()
+        {
+            let mut scratch = Vec::new();
+            super::mana_abilities::resolve_triggered_mana_ability_inline(
+                state,
+                &view.context.pending.ability,
+                Some(trigger_event),
+                &mut scratch,
+                None,
+            );
+        }
+    }
+    firings
+}
+
+/// CR 605.4a + CR 608.2d + CR 601.2g-h + CR 603.3: pre-spend echo settlement
+/// for synchronous auto-tap payment. Runs the typed fixed-point batch over the
+/// auto-tap events (`events[events_before..]`, already marked
+/// `FromTapTriggersResolved` with the mixed-echo exemption) with `outer_resume`
+/// as its continuation, then claims every exact live occurrence this payment
+/// owns — mirroring `collect_completed_mana_frame_events`. Ordinary observers
+/// are deferred (queued, preserved), never discarded: collection records
+/// constrained admissions (once-per-turn ledgers) at match time, so dropping an
+/// admitted context would strand it while a later scan rejects it as already
+/// fired. The exact-occurrence claim stops the post-action scan rediscovering
+/// the same occurrences. Accepted echo work runs immediately; a
+/// `ChooseManaColor` pause returns `Some` with `pending_triggered_mana_resume`
+/// stored, otherwise `None`.
+pub(crate) fn settle_skipped_echo_before_spend(
+    state: &mut GameState,
+    events: &[GameEvent],
+    events_before: usize,
+    outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
+    let raw_batch: Vec<GameEvent> = events[events_before..].to_vec();
+    let pause = collect_mana_action_trigger_batch(state, &raw_batch, outer_resume);
+    // Only after the combined collection result is durably owned: claim every
+    // exact live occurrence this payment is responsible for, by full-action
+    // index, so the post-action pipeline cannot collect them a second time.
+    let occurrences = (events_before..events.len())
+        .map(|index| ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: trigger_event_occurrence(events, index),
+            scope: ConsumedTriggerEventScope::AllCollectors,
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("pre-spend echo settlement consumed-before-priority journal cause must be live");
+    pause
 }
 
 /// CR 101.4 + CR 603.3b: APNAP rank of `controller` for trigger ordering — its
@@ -10027,6 +10207,12 @@ fn dispatch_pending_trigger_context_core(
                 &trigger.ability,
                 trigger.trigger_event.as_ref(),
             ) {
+                // CR 608.2d: an inline body can still pause — a multi-type
+                // mana-echo body pauses for its SingleColor choice (see the
+                // echo pre-check in `effects::mana::resolve`). Mirror the
+                // immediate backend's pause check so the pause is reported,
+                // not stranded as a silent `ResolvedInline`.
+                let waiting_before = state.waiting_for.clone();
                 super::mana_abilities::resolve_triggered_mana_ability_inline(
                     state,
                     &trigger.ability,
@@ -10035,6 +10221,11 @@ fn dispatch_pending_trigger_context_core(
                     None,
                 );
                 restore_trigger_event_context(state, context_snapshot);
+                if state.waiting_for != waiting_before
+                    && is_accepted_triggered_mana_pause(&state.waiting_for)
+                {
+                    return TriggerDispatchDisposition::Paused;
+                }
                 return TriggerDispatchDisposition::ResolvedInline;
             }
             push_pending_trigger_to_stack_with_firing_and_duration_events(
@@ -10156,9 +10347,13 @@ fn dispatch_pending_trigger_context_core(
 /// body may pause on (CR 605.4a).
 ///
 /// A triggered-body colour choice and every unless/nested-cost prompt are
-/// deliberately absent: the classifier proved the graph choice-free at
-/// acceptance and rejected every `unless_pay` link, so encountering one is an
-/// invariant failure rather than a wait to serialize generically.
+/// deliberately absent: the classifier proved the graph free of optional /
+/// repeat / replacement pauses at acceptance and rejected every `unless_pay`
+/// link, so encountering one is an invariant failure rather than a wait to
+/// serialize generically. (`ChooseManaColor` is the one listed exception: a
+/// mana-echo body needs no annotation in its graph to owe a type choice — the
+/// choice depends on the firing event's produced set, which only exists at
+/// resolution — so the pause is admitted here and carried by the resume.)
 fn is_accepted_triggered_mana_pause(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
@@ -10166,6 +10361,11 @@ fn is_accepted_triggered_mana_pause(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::ReplacementChoice { .. }
+            // CR 608.2d: a multi-type mana-echo body pauses for its SingleColor
+            // choice inside immediate resolution (see the echo pre-check in
+            // `effects::mana::resolve`); the fixed-point authority carries and
+            // resumes it like any other whitelisted pause.
+            | WaitingFor::ChooseManaColor { .. }
     )
 }
 
@@ -10458,18 +10658,42 @@ pub(crate) fn collect_activation_event_at_boundary(
 fn collect_undispatched_emission_batch(
     state: &mut GameState,
     emitted: &[GameEvent],
+    exclude: &[GameEvent],
 ) -> Option<CollectedTriggerContextBatch> {
+    // CR 605.4a: an occurrence's own trigger event is its cause, never an
+    // emission of its body. A resumed action can replay the parked frame's
+    // trigger event through its frame-local buffer; filtering those exact
+    // occurrence events keeps child discovery from re-collecting the parent
+    // as its own child.
+    let emitted: Vec<GameEvent> = emitted
+        .iter()
+        .filter(|event| !exclude.contains(event))
+        .cloned()
+        .collect();
     if emitted.is_empty() {
         return None;
     }
-    let seed = collect_triggers_for_batch(state, emitted);
+    let seed = collect_triggers_for_batch(state, &emitted);
     let batch = collect_pending_and_delayed_triggers_for_batch(
         state,
         seed,
-        emitted,
+        &emitted,
         DelayedTriggerEventScope::Any,
     );
     (!batch.contexts.is_empty()).then_some(batch)
+}
+
+/// CR 605.4a: every event that caused this occurrence. Child discovery must
+/// exclude them because a paused or resumed body can replay its own cause
+/// through the frame-local event buffer.
+fn occurrence_cause_events(context: &PendingTriggerContext) -> Vec<GameEvent> {
+    context
+        .pending
+        .trigger_event
+        .iter()
+        .chain(context.trigger_events.iter())
+        .cloned()
+        .collect()
 }
 
 /// CR 605.4a fixed point: resolve each accepted occurrence under its own node,
@@ -10501,7 +10725,8 @@ fn run_accepted_triggered_mana_fixed_point(
                 "a paused occurrence's marker must restore before its emission batch is collected"
             );
             let emitted: Vec<GameEvent> = events_out[emitted_start..].to_vec();
-            let collected_batches = collect_undispatched_emission_batch(state, &emitted)
+            let exclude = occurrence_cause_events(&context_for_resume);
+            let collected_batches = collect_undispatched_emission_batch(state, &emitted, &exclude)
                 .into_iter()
                 .collect();
             state.pending_triggered_mana_resume =
@@ -10523,7 +10748,12 @@ fn run_accepted_triggered_mana_fixed_point(
             "a completed occurrence's marker must restore before child discovery"
         );
         if events_out.len() > emitted_start {
-            let emitted: Vec<GameEvent> = events_out[emitted_start..].to_vec();
+            let exclude = occurrence_cause_events(&context_for_resume);
+            let emitted: Vec<GameEvent> = events_out[emitted_start..]
+                .iter()
+                .filter(|event| !exclude.contains(event))
+                .cloned()
+                .collect();
             let seed = collect_triggers_for_batch(state, &emitted);
             let child = collect_pending_and_delayed_triggers_for_batch(
                 state,
@@ -10628,7 +10858,12 @@ pub(crate) fn finish_accepted_triggered_mana_action(
         "readiness must run outside the resumed occurrence's own scope"
     );
     let emitted: Vec<GameEvent> = events[event_start.min(events.len())..].to_vec();
-    let batch = collect_undispatched_emission_batch(state, &emitted);
+    let exclude = state
+        .pending_triggered_mana_resume
+        .as_ref()
+        .map(|carrier| occurrence_cause_events(&carrier.current))
+        .unwrap_or_default();
+    let batch = collect_undispatched_emission_batch(state, &emitted, &exclude);
     claim_resumed_triggered_mana_events(state, events, event_start);
     let carrier = state
         .pending_triggered_mana_resume
@@ -10679,20 +10914,48 @@ pub(crate) fn finish_accepted_triggered_mana_action(
             settled_direct_priority_root: false,
         });
     }
-    // CR 117.3c + CR 117.5: recognize the ONE consumed shape that may run full
+    // CR 117.3c + CR 117.5: recognize the consumed shapes that may run full
     // settled-Priority convergence, exhaustively and before the frame resumes:
-    // a direct `ManaAbilityResume::Priority` root, i.e. an activation that began
-    // at `WaitingFor::Priority` with nothing else owning the action. Every cast,
-    // payment, colour, unless and special-action owner is excluded here, not by
+    // a direct `ManaAbilityResume::Priority` root (an activation that began at
+    // `WaitingFor::Priority` with nothing else owning the action), and a
+    // top-level special action (CR 116.2) whose completion likewise returns
+    // priority with no enclosing owner left to scan its own events. Every cast,
+    // cast-payment, colour, and resolution-time owner is excluded here, not by
     // the convergence wrapper.
     let direct_priority_root = matches!(
         outer_resume,
         crate::types::game_state::ManaTriggerFixedPointResume::Root { ref resume, .. }
-            if matches!(**resume, crate::types::game_state::ManaAbilityResume::Priority)
+            if resume.reaches_direct_priority_root()
     );
     let Some(wait) = super::mana_abilities::resume_settled_mana_frame(state, outer_resume, events)?
     else {
-        return Ok(TriggeredManaReadiness::Pending);
+        // CR 605.3b + CR 117.5: a nested sub-cost's suspended parent cursor
+        // has no reconstructed wait of its own; the typed cost-move
+        // continuation is the authority. Resume it at the common priority
+        // boundary NOW, so the enclosing activation finishes before priority
+        // is handed back — a parked cost move must never coexist with a
+        // visible `Priority` prompt. This is the same authority every other
+        // parked cost move drains through (CR 605.3b + CR 616.1).
+        let direct_priority_parent = matches!(
+            state.pending_cost_move_resume.as_ref(),
+            Some(
+                crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment { pending, .. }
+            ) if pending.resume.reaches_direct_priority_root()
+        );
+        super::engine::resume_pending_continuation_if_priority(state, events)?;
+        let wait = state.waiting_for.clone();
+        // The drained parent may itself have paused again (a further echo, a
+        // replacement choice); only a fully settled Priority leaf converges.
+        let settled_direct_priority_root = direct_priority_parent
+            && matches!(wait, WaitingFor::Priority { .. })
+            && state.pending_triggered_mana_resume.is_none()
+            && state.pending_cast.is_none()
+            && !super::casting::mana_ability_cost_payment_is_paused(state)
+            && resolution_completion_can_settle(state);
+        return Ok(TriggeredManaReadiness::Resumed {
+            wait: Box::new(wait),
+            settled_direct_priority_root,
+        });
     };
     let settled_direct_priority_root = direct_priority_root
         && matches!(wait, WaitingFor::Priority { .. })

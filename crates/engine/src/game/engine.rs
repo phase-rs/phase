@@ -12599,8 +12599,16 @@ fn apply_non_priority_pass_action(
             // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
             // does not use the stack; the escalating cost is charged before the
             // roll and effect-caused rolls do not increment the counter.
-            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
-            WaitingFor::Priority { player: *player }
+            // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
+            // leaves the action uncommitted; the typed planar-die root returns
+            // its prompt and finishes the locked-cost roll once answered.
+            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
+            {
+                crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
+                    WaitingFor::Priority { player: *player }
+                }
+                crate::game::planechase::PaidPlanarDieAction::Paused => state.waiting_for.clone(),
+            }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -13757,7 +13765,9 @@ fn apply_non_priority_pass_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
-                choice, context, ..
+                player: prompt_player,
+                choice,
+                context,
             },
             GameAction::ChooseManaColor {
                 choice: chosen,
@@ -13812,13 +13822,58 @@ fn apply_non_priority_pass_action(
                     wf
                 }
                 crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                    effects::mana::handle_choose_mana_effect(
+                    // CR 605.4a: a choice answered inside a paused accepted
+                    // triggered-mana occurrence resumes that fixed point (same
+                    // wrap the optional/opponent-may answers use). With no live
+                    // carrier both hooks are exact no-ops and this is the
+                    // historical immediate completion. The latched prompt
+                    // player travels as the recipient backstop so suspension
+                    // cannot misroute the deposit.
+                    let wf = super::triggers::with_accepted_triggered_mana_action_scope(
                         state,
-                        pending_effect,
-                        choice,
-                        chosen.clone(),
+                        |state| {
+                            effects::mana::handle_choose_mana_effect(
+                                state,
+                                pending_effect,
+                                *prompt_player,
+                                choice,
+                                chosen.clone(),
+                                &mut events,
+                            )
+                        },
+                    )?;
+                    if let super::triggers::TriggeredManaReadiness::Resumed {
+                        wait,
+                        settled_direct_priority_root,
+                    } = super::triggers::finish_accepted_triggered_mana_action(
+                        state,
                         &mut events,
-                    )?
+                        events_before,
+                    )? {
+                        // CR 117.5 + CR 605.4a (mirrors the opponent-may arm):
+                        // this reducer arm returns its `ActionResult` directly,
+                        // so the ordinary epilogue never runs. A resumed
+                        // direct `Priority` root with no live owner must
+                        // converge here, or ordinary deferred triggers from
+                        // its own settled batch (e.g. a Manabarbs observer on
+                        // the same tap) would sit undrained when priority
+                        // returns. Every other owner keeps its queue and
+                        // returns the frame's wait unchanged.
+                        let wait = *wait;
+                        let wait = if settled_direct_priority_root {
+                            engine_priority::run_post_action_pipeline_from_settled_priority(
+                                state,
+                                &mut events,
+                                events_before,
+                                &wait,
+                            )?
+                        } else {
+                            wait
+                        };
+                        state.waiting_for = wait.clone();
+                        return Ok(ActionResult::applied(events, wait));
+                    }
+                    wf
                 }
             };
             // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice

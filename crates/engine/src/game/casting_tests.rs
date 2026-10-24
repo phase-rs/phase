@@ -62089,3 +62089,149 @@ fn quantity_vs_each_opponent_skips_a_player_who_left_the_game() {
         "P2 left the game, so only P1's one card is compared"
     );
 }
+
+/// CR 116.2m + CR 605.4a + CR 608.2d: a rootless special action (Room unlock)
+/// pays through `pay_special_action_mana_cost`, which carries no continuation
+/// and cannot suspend for a pre-spend choice-owing mana echo. Its affordability
+/// probe must therefore stay at the real pool: `Unresumable` declines the
+/// bonus-dependent cost that the `Resumable` preview (companion / planar die /
+/// turn face up / end continuous effect) admits, and the rootless live payment
+/// fails at affordability exactly where the conservative probe declined.
+#[test]
+fn rootless_special_action_probe_stays_at_the_real_pool() {
+    use crate::game::scenario::{GameScenario, P0};
+    fn floating_colorless(n: usize) -> Vec<ManaUnit> {
+        (0..n)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect()
+    }
+    const MIRARI_ORACLE: &str =
+        "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.";
+    const CHAMBER_ORACLE: &str = "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ORACLE);
+    scenario.add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER_ORACLE);
+    // Two floating colorless plus the chamber's base {G}{U} is 4 mana; the
+    // cost needs 5, so only the owed echo bonus can fund it.
+    scenario.with_mana_pool(P0, floating_colorless(2));
+    let mut runner = scenario.build();
+    let cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+        generic: 3,
+    };
+
+    assert!(
+        can_pay_special_action_mana_cost_after_auto_tap(
+            runner.state(),
+            P0,
+            None,
+            &cost,
+            crate::types::mana::SpecialAction::UnlockDoor,
+            PausedManaPayment::Resumable,
+        ),
+        "a continuation-carrying live payment suspends for the echo choice, so its preview counts the bonus"
+    );
+    assert!(
+        !can_pay_special_action_mana_cost_after_auto_tap(
+            runner.state(),
+            P0,
+            None,
+            &cost,
+            crate::types::mana::SpecialAction::UnlockDoor,
+            PausedManaPayment::Unresumable,
+        ),
+        "a rootless live payment cannot deposit the bonus; its preview must stay at the real pool"
+    );
+
+    let mut events = Vec::new();
+    let live = pay_special_action_mana_cost(
+        runner.state_mut(),
+        P0,
+        None,
+        &cost,
+        crate::types::mana::SpecialAction::UnlockDoor,
+        &mut events,
+    );
+    match &live {
+        Err(EngineError::ActionNotAllowed(reason)) => assert_eq!(
+            reason, "Cannot pay mana cost",
+            "the rootless live payment must fail at affordability exactly where the \
+             conservative probe declined"
+        ),
+        other => {
+            panic!("expected the rootless payment to fail at affordability, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn echo_upper_bound_defers_to_life_payment_permissions() {
+    // CR 107.4f + CR 118.3b: a K'rrik-style grant pays a colored shard with
+    // 2 life instead of mana. `max_life` counts affordable 2-life payments,
+    // so one unit must already defer to the exact echo search rather than
+    // reject a legal payment. One firing and an empty pool make the
+    // minimum-unit check short without the deferral.
+    let cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 0,
+    };
+    let pool = crate::types::mana::ManaPool::default();
+    let life_permission = crate::types::mana::CostPermissionContext {
+        max_life: 1,
+        life_colors: std::iter::once(ManaColor::Black).collect(),
+        ..Default::default()
+    };
+    assert!(
+        !super::echo_bonus_upper_bound_is_short(&cost, &pool, 1, life_permission),
+        "one affordable 2-life payment must defer the mana-only bound"
+    );
+    assert!(
+        super::echo_bonus_upper_bound_is_short(
+            &cost,
+            &pool,
+            1,
+            crate::types::mana::CostPermissionContext::default()
+        ),
+        "without a life-payment permission the same empty pool is still short"
+    );
+}
+
+#[test]
+fn echo_upper_bound_defers_to_spend_any_color_permission() {
+    // CR 609.4b + CR 118.14: under "spend mana as though it were mana of any
+    // color", a green unit pays a black pip. The per-colour demand is not
+    // necessary, so the bound must defer; the minimum-unit demand still holds.
+    let cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+        ],
+        generic: 0,
+    };
+    let mut pool = crate::types::mana::ManaPool::default();
+    pool.add(ManaUnit::new(
+        ManaType::Green,
+        ObjectId(0),
+        false,
+        Vec::new(),
+    ));
+    let any_color = crate::types::mana::CostPermissionContext {
+        mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+        ..Default::default()
+    };
+    assert!(
+        !super::echo_bonus_upper_bound_is_short(&cost, &pool, 2, any_color),
+        "a spend-as-any-colour concession must defer the per-colour bound"
+    );
+    assert!(
+        super::echo_bonus_upper_bound_is_short(
+            &cost,
+            &pool,
+            2,
+            crate::types::mana::CostPermissionContext::default()
+        ),
+        "without the concession the green unit cannot cover the black pips"
+    );
+}

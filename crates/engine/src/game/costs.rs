@@ -959,13 +959,22 @@ fn pay_ability_cost_inner(
             // CR 118.12: Resolution-time mana payment uses the effect-context
             // auto-tap path. Pre-flight then pay; either step failing is a
             // payment failure (not an engine error).
-            PaymentScope::Resolution { .. } => {
+            PaymentScope::Resolution { cost_move_root, .. } => {
+                // CR 118.12 + CR 605.3b + CR 616.1: only an `EffectPayCost`
+                // root can suspend for a pre-spend echo choice. A
+                // `ReplacementMayCost` payment has no resume channel, so its
+                // preview must stay at the real pool and its pre-gate must
+                // refuse a bonus-dependent payment before auto-tapping.
+                let paused = match cost_move_root {
+                    ResolutionCostMoveRoot::EffectPayCost => PausedManaPayment::Resumable,
+                    ResolutionCostMoveRoot::ReplacementMayCost => PausedManaPayment::Unresumable,
+                };
                 if !can_pay_effect_mana_cost_after_auto_tap(
                     state,
                     player,
                     source_id,
                     cost,
-                    PausedManaPayment::Resumable,
+                    paused,
                 ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
@@ -987,9 +996,12 @@ fn pay_ability_cost_inner(
                 {
                     // CR 118.12 + CR 605.3b + CR 616.1: The mana ability
                     // cursor, rather than the unless-payment handler, owns
-                    // the replacement choice and exact resume state.
+                    // the replacement choice and exact resume state. A
+                    // pre-spend echo choice (CR 605.4a) suspends through the
+                    // same typed continuation channel.
                     if mana_ability_cost_payment_is_paused(state)
                         || state.pending_deferred_life_cost_resume.is_some()
+                        || state.pending_triggered_mana_resume.is_some()
                     {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
@@ -1009,15 +1021,21 @@ fn pay_ability_cost_inner(
                     "ManaDynamic cost should be resolved upstream",
                 ));
             }
-            PaymentScope::Resolution { .. } => {
+            PaymentScope::Resolution { cost_move_root, .. } => {
                 let amount = resolve_cost_quantity(state, quantity, player, source_id, scope);
                 let mana_cost = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
+                // CR 118.12 + CR 605.3b + CR 616.1: mirror the concrete-Mana
+                // arm's resume-capability gate for the dynamic-generic shape.
+                let paused = match cost_move_root {
+                    ResolutionCostMoveRoot::EffectPayCost => PausedManaPayment::Resumable,
+                    ResolutionCostMoveRoot::ReplacementMayCost => PausedManaPayment::Unresumable,
+                };
                 if !can_pay_effect_mana_cost_after_auto_tap(
                     state,
                     player,
                     source_id,
                     &mana_cost,
-                    PausedManaPayment::Resumable,
+                    paused,
                 ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
@@ -1039,9 +1057,11 @@ fn pay_ability_cost_inner(
                 {
                     // CR 118.12 + CR 605.3b + CR 616.1: See the concrete
                     // mana-cost arm above; the replacement-aware cursor owns
-                    // this pause as well.
+                    // this pause as well, and a pre-spend echo choice
+                    // (CR 605.4a) suspends through the same channel.
                     if mana_ability_cost_payment_is_paused(state)
                         || state.pending_deferred_life_cost_resume.is_some()
+                        || state.pending_triggered_mana_resume.is_some()
                     {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
@@ -1095,10 +1115,14 @@ fn pay_ability_cost_inner(
                         // already owns this component and every later component.
                         // Never copy that suffix into the generic effect
                         // continuation: it would retry a paid prefix or let the
-                        // rider run before the unpaid cost is settled.
+                        // rider run before the unpaid cost is settled. A
+                        // pre-spend echo (CR 605.4a) parks the same ownership in
+                        // `pending_triggered_mana_resume`, so the composite must
+                        // not also hand its suffix to the generic queue.
                         if matches!(scope, PaymentScope::Resolution { .. })
                             && (mana_ability_cost_payment_is_paused(state)
-                                || state.pending_deferred_life_cost_resume.is_some())
+                                || state.pending_deferred_life_cost_resume.is_some()
+                                || state.pending_triggered_mana_resume.is_some())
                         {
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: None,
