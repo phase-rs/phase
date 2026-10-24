@@ -3421,6 +3421,11 @@ fn resolving_adventure_filtered_independent_permission_uses_the_selected_face_in
 #[test]
 fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibition() {
     let (mut runner, hearth, silence) = paid_whole_stoke_authority_scene();
+    let earned = runner.state().objects[&hearth].casting_permissions.clone();
+    let normal_cost = ManaCost::Cost {
+        generic: 5,
+        shards: vec![ManaCostShard::Red],
+    };
     for _ in 0..6 {
         runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
             ManaType::Red,
@@ -3435,11 +3440,51 @@ fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibi
         hearth
     ));
     runner.advance_to_phase(Phase::BeginCombat);
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert_eq!(runner.state().active_player, P0);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner.state().stack.is_empty());
+    // CR 106.4 + CR 500.5: the phase boundary drains ordinary mana, so
+    // replenish the full normal cost before testing timing independently.
+    assert!(runner.state().players[0].mana_pool.is_empty());
+    for _ in 0..6 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Red),
+        6
+    );
+    assert_eq!(
+        engine::game::casting::display_spell_cost(runner.state(), P0, hearth),
+        Some(normal_cost.clone())
+    );
+    assert_eq!(runner.state().objects[&hearth].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&hearth].casting_permissions, earned);
     assert!(!engine::game::casting::can_cast_object_now(
         runner.state(),
         P0,
         hearth
     ));
+    let combat_forbidden = GameAction::CastSpell {
+        object_id: hearth,
+        card_id: runner.state().objects[&hearth].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(!engine::ai_support::legal_actions(runner.state()).contains(&combat_forbidden));
+    assert!(runner.act(combat_forbidden).is_err());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
     runner.advance_to_phase(Phase::PostCombatMain);
     for _ in 0..6 {
         runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
@@ -3466,6 +3511,17 @@ fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibi
         WaitingFor::Priority { player: P1 }
     ));
     runner.cast(silence).commit();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(!runner.state().stack.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
     assert!(!engine::game::casting::can_cast_object_now(
         runner.state(),
         P0,
@@ -3473,6 +3529,12 @@ fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibi
     ));
     runner.resolve_top();
     assert_eq!(runner.state().objects[&silence].zone, Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
     assert!(!engine::game::casting::can_cast_object_now(
         runner.state(),
         P0,
@@ -3489,14 +3551,24 @@ fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibi
     runner.advance_to_phase(Phase::End);
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P1);
-    assert!(!engine::game::casting::can_cast_object_now(
-        runner.state(),
-        P0,
-        hearth
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
     ));
-    runner.advance_to_phase(Phase::End);
-    runner.advance_to_phase(Phase::PreCombatMain);
-    assert_eq!(runner.state().active_player, P0);
+    // CR 117.3d: pass the active player's priority so timing, rather than
+    // lack of priority, is the reason P0 cannot cast the normal permanent.
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(runner.state().stack.is_empty());
+    // CR 106.4 + CR 500.5: end-step and turn progression also drain the
+    // pool; fund the unchanged 5R normal cost again in this priority window.
+    assert!(runner.state().players[0].mana_pool.is_empty());
     for _ in 0..6 {
         runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
             ManaType::Red,
@@ -3505,10 +3577,65 @@ fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibi
             vec![],
         ));
     }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Red),
+        6
+    );
+    assert_eq!(
+        engine::game::casting::display_spell_cost(runner.state(), P0, hearth),
+        Some(normal_cost.clone())
+    );
+    assert_eq!(runner.state().objects[&hearth].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&hearth].casting_permissions, earned);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    let opponent_turn_forbidden = GameAction::CastSpell {
+        object_id: hearth,
+        card_id: runner.state().objects[&hearth].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(!engine::ai_support::legal_actions(runner.state()).contains(&opponent_turn_forbidden));
+    assert!(runner.act(opponent_turn_forbidden).is_err());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for _ in 0..6 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 6);
+    assert_eq!(
+        engine::game::casting::effective_spell_cost(runner.state(), P0, hearth),
+        Some(normal_cost)
+    );
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
     runner
         .cast(hearth)
         .resolve()
         .assert_zone(&[hearth], Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
