@@ -15689,9 +15689,19 @@ fn alternative_spell_face_choice_offered_from_zone(
     if alternative_spell_layout(obj) != Some(LayoutKind::Adventure) {
         return false;
     }
-    let mut selected = obj.clone();
-    swap_to_alternative_spell_face(&mut selected);
-    castable_from_current_zone(state, &selected, player, Some(CastingVariant::Adventure))
+    // CR 715.3a: Permission filters must see the selected Adventure
+    // characteristics, including filters that look up the object in state.
+    let mut selected_state = state.clone();
+    let Some(selected) = selected_state.objects.get_mut(&obj.id) else {
+        return false;
+    };
+    swap_to_alternative_spell_face(selected);
+    castable_from_current_zone(
+        &selected_state,
+        &selected_state.objects[&obj.id],
+        player,
+        Some(CastingVariant::Adventure),
+    )
 }
 
 /// CR 709.3 + CR 712.11b: Spell//spell split cards and spell//spell MDFCs need a

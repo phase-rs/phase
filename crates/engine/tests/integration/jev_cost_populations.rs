@@ -3162,6 +3162,262 @@ fn resolving_adventure_selected_index_survives_payment_restore_and_rejects_a_sta
     }
 }
 
+/// CR 715.3a + CR 715.3d: An independent instant/sorcery permission evaluates
+/// the chosen Adventure characteristics; the earned normal-play grant cannot
+/// lend its grantee or authorize that Adventure.
+#[test]
+fn resolving_adventure_filtered_independent_permission_uses_the_selected_face_in_state() {
+    use engine::game::casting::{
+        can_cast_adventure_face_now, can_cast_object_now, legal_target_slots_for_castable_spell,
+    };
+    use engine::types::ability::{CardPlayMode, CastingPermission, PlayFromExileProvenance};
+    use engine::types::game_state::{CastOfferKind, CastingPermissionIndex};
+    use engine::types::identifiers::{ObjectIncarnationRef, TrackedSetId};
+    use engine::types::statics::CastFrequency;
+    for independent_first in [false, true] {
+        let (mut runner, hearth, silence) = paid_whole_stoke_authority_scene();
+        let object = &runner.state().objects[&hearth];
+        let original_pin = ObjectIncarnationRef::from_object(object);
+        let earned = CastingPermission::resolved_adventure(P0, original_pin);
+        assert_eq!(object.casting_permissions, vec![earned.clone()]);
+        assert_eq!(object.name, "Hearth Elemental");
+        for _ in 0..6 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        assert!(can_cast_adventure_face_now(
+            runner.state(),
+            P0,
+            hearth,
+            true
+        ));
+        assert!(!can_cast_adventure_face_now(
+            runner.state(),
+            P0,
+            hearth,
+            false
+        ));
+        let p0_hand = runner.state().players[0].hand.clone();
+        runner.advance_to_phase(Phase::End);
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(runner.state().active_player, P1);
+        let filtered = CastingPermission::PlayFromExile {
+            provenance: PlayFromExileProvenance::Impulse,
+            mode: CardPlayMode::Cast,
+            duration: Duration::UntilEndOfTurn,
+            granted_to: P1,
+            frequency: CastFrequency::Unlimited,
+            source_id: Some(silence),
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ])],
+                controller: None,
+                properties: vec![],
+            })),
+            single_use_group: Some(TrackedSetId(9021)),
+            single_use: true,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+        };
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&hearth)
+            .unwrap()
+            .casting_permissions = if independent_first {
+            vec![filtered.clone(), earned.clone()]
+        } else {
+            vec![earned.clone(), filtered.clone()]
+        };
+        for _ in 0..6 {
+            runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        assert!(!can_cast_adventure_face_now(
+            runner.state(),
+            P1,
+            hearth,
+            true
+        ));
+        assert!(!can_cast_adventure_face_now(
+            runner.state(),
+            P0,
+            hearth,
+            false
+        ));
+        assert!(can_cast_adventure_face_now(
+            runner.state(),
+            P1,
+            hearth,
+            false
+        ));
+        let index = usize::from(!independent_first);
+        let mut wrong_grantee = runner.state().clone();
+        let CastingPermission::PlayFromExile { granted_to, .. } = &mut wrong_grantee
+            .objects
+            .get_mut(&hearth)
+            .unwrap()
+            .casting_permissions[index]
+        else {
+            panic!("the independent filtered authority keeps its exact slot");
+        };
+        *granted_to = P0;
+        assert!(!can_cast_adventure_face_now(
+            &wrong_grantee,
+            P1,
+            hearth,
+            false
+        ));
+        assert!(!can_cast_object_now(&wrong_grantee, P1, hearth));
+        assert!(
+            can_cast_object_now(runner.state(), P1, hearth),
+            "general castability must agree with the independently legal Adventure"
+        );
+        assert!(legal_target_slots_for_castable_spell(runner.state(), hearth).is_empty());
+        let cast = GameAction::CastSpell {
+            object_id: hearth,
+            card_id: runner.state().objects[&hearth].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        };
+        assert!(engine::ai_support::legal_actions(runner.state()).iter().any(|action|
+            matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == hearth)));
+        runner.act(cast).unwrap();
+        assert!(matches!(runner.state().waiting_for, WaitingFor::CastOffer {
+            player: P1, kind: CastOfferKind::Adventure { object_id, .. }
+        } if object_id == hearth));
+        assert_eq!(
+            runner.state().objects[&hearth].name,
+            "Hearth Elemental",
+            "read-only projection must not swap the authoritative exiled card"
+        );
+        for restored in adventure_authority_save_representations(runner.state()) {
+            let mut resumed = GameRunner::from_state(restored);
+            let actions = engine::ai_support::legal_actions(resumed.state());
+            assert!(actions.contains(&GameAction::ChooseAdventureFace { creature: false }));
+            assert!(!actions.contains(&GameAction::ChooseAdventureFace { creature: true }));
+            let mut forbidden = GameRunner::from_state(resumed.state().clone());
+            assert!(forbidden
+                .act(GameAction::ChooseAdventureFace { creature: true })
+                .is_err());
+            resumed
+                .act(GameAction::ChooseAdventureFace { creature: false })
+                .unwrap();
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::ManaPayment { player: P1, .. }
+            ));
+            let pending = resumed.state().pending_cast.as_ref().unwrap();
+            assert_eq!(
+                pending.casting_permission_index,
+                Some(CastingPermissionIndex(index))
+            );
+            assert_eq!(
+                pending.cost,
+                ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Red],
+                }
+            );
+            assert_eq!(
+                resumed.state().objects[&hearth].casting_permissions[index],
+                filtered
+            );
+            assert_eq!(resumed.state().players[1].mana_pool.total(), 6);
+            let discarded = resumed.state().players[1].hand.clone();
+            let library: Vec<_> = resumed.state().players[1].library.iter().copied().collect();
+            assert_eq!(
+                library.len(),
+                2,
+                "the next-turn draw leaves two cards for Stoke"
+            );
+            resumed.act(GameAction::PassPriority).unwrap();
+            assert_eq!(resumed.state().objects[&hearth].name, "Stoke Genius");
+            assert_eq!(resumed.state().objects[&hearth].mana_cost.mana_value(), 2);
+            assert!(matches!(
+                resumed.state().stack.back().unwrap().kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 2,
+                    ..
+                }
+            ));
+            assert_eq!(resumed.state().players[1].mana_pool.total(), 4);
+            let mut events = Vec::new();
+            for _ in 0..4 {
+                if resumed.state().objects[&hearth].zone == Zone::Exile {
+                    break;
+                }
+                events.extend(resumed.act(GameAction::PassPriority).unwrap().events);
+            }
+            for id in &discarded {
+                assert_eq!(resumed.state().objects[id].zone, Zone::Graveyard);
+            }
+            assert_eq!(
+                resumed.state().players[1]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                library[..2].iter().copied().collect()
+            );
+            assert!(resumed.state().players[1].library.is_empty());
+            assert_eq!(resumed.state().players[0].hand, p0_hand);
+            let first_draw = events
+                .iter()
+                .position(|event| matches!(event, GameEvent::CardDrawn { player_id: P1, .. }))
+                .unwrap();
+            assert!(!discarded.is_empty());
+            for id in &discarded {
+                assert!(events.iter().position(|event|
+                    matches!(event, GameEvent::Discarded { object_id, .. } if object_id == id)).unwrap() < first_draw);
+            }
+            let object = &resumed.state().objects[&hearth];
+            assert_eq!(object.owner, P0);
+            assert_eq!(object.zone, Zone::Exile);
+            assert_eq!(object.name, "Hearth Elemental");
+            assert_ne!(ObjectIncarnationRef::from_object(object), original_pin);
+            assert_eq!(
+                object.casting_permissions,
+                vec![CastingPermission::resolved_adventure(
+                    P1,
+                    ObjectIncarnationRef::from_object(object),
+                )]
+            );
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+            );
+            assert!(resumed.state().trigger_stack.is_empty());
+            assert!(resumed.state().owed_spell_final_part().is_none());
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
 #[test]
 fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibition() {
     let (mut runner, hearth, silence) = paid_whole_stoke_authority_scene();
