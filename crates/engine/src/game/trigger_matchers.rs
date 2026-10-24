@@ -3664,13 +3664,17 @@ pub(super) fn match_taps_for_mana(
 }
 
 /// CR 603.2 + CR 613.1b: ChangesController — fires on the `ControllerChanged`
-/// event a Layer-2 control change (or its end) emits. Every control-change path
-/// now emits this event (targeted `GainControl`, `GainControlAll`, `GiveControl`,
-/// `apply_permanent_control_change`, `exchange_control::resolve` — CR 701.12a,
-/// on its success path only — and the until-EOT control reversion in
-/// `turns::execute_cleanup`), so the redundant `EffectResolved { GainControl }`
-/// arm was dropped — matching both would have double-fired now that the gain
-/// also emits `ControllerChanged`.
+/// event a Layer-2 control change (or its end) emits. Every effect-driven
+/// control-change path now emits this event (targeted `GainControl`,
+/// `GainControlAll`, `GiveControl`, `apply_permanent_control_change`,
+/// `exchange_control::resolve` — CR 701.12a, on its success path only — and the
+/// until-EOT control reversion in `turns::execute_cleanup`), so the redundant
+/// `EffectResolved { GainControl }` arm was dropped — matching both would have
+/// double-fired now that the gain also emits `ControllerChanged`. Control that
+/// a static ability's layer-2 effect assigns (Confiscate, Control Magic) only
+/// sets `obj.controller` in `layers::finish_layer_evaluation` and emits nothing
+/// (phase-rs/phase#9903); coverage keeps the `Gains` side unsupported for that
+/// reason (`coverage::trigger_mode_has_unpublished_event_source`).
 ///
 /// (The until-EOT emitter is `turns::execute_cleanup`, NOT
 /// `layers::prune_end_of_turn_effects`: the latter only retains over
