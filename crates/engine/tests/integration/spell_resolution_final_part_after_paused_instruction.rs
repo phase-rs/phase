@@ -708,9 +708,10 @@ fn assert_adventure_debt_save_and_viewer_boundaries(state: &GameState) {
         persisted.into_game_state().unwrap().owed_spell_final_part(),
         Some(&debt)
     );
-    let trusted: PersistedGameState =
-        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
-            .unwrap();
+    let trusted: PersistedGameState = serde_json::from_value(
+        serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         trusted.into_game_state().unwrap().owed_spell_final_part(),
         Some(&debt)

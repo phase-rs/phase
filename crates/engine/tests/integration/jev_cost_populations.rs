@@ -2960,9 +2960,10 @@ fn adventure_authority_save_representations(state: &GameState) -> Vec<GameState>
     let raw = serde_json::to_value(state).unwrap();
     let direct: GameState = serde_json::from_value(raw.clone()).unwrap();
     let persisted: PersistedGameState = serde_json::from_value(raw.clone()).unwrap();
-    let trusted: PersistedGameState =
-        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
-            .unwrap();
+    let trusted: PersistedGameState = serde_json::from_value(
+        serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+    )
+    .unwrap();
     let mut restored = vec![
         direct,
         persisted.into_game_state().unwrap(),
@@ -3880,9 +3881,10 @@ fn assert_public_adventure_grant_current_and_legacy_saves(
     let raw = serde_json::to_value(state).unwrap();
     let current: GameState = serde_json::from_value(raw.clone()).unwrap();
     let persisted: PersistedGameState = serde_json::from_value(raw.clone()).unwrap();
-    let trusted: PersistedGameState =
-        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
-            .unwrap();
+    let trusted: PersistedGameState = serde_json::from_value(
+        serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+    )
+    .unwrap();
     for loaded in [
         current,
         persisted.into_game_state().unwrap(),
