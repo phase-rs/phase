@@ -1596,6 +1596,7 @@ pub(crate) fn apply_combat_damage(
     // and are dropped here; the gate already emitted any required DamagePrevented.
     let mut entries: Vec<BatchEntry> = Vec::with_capacity(assignments.len());
     let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(assignments.len());
+    let mut source_identities = std::collections::BTreeMap::new();
     for (source_id, assignment) in assignments {
         // Read commander flag before DamageContext borrows — both are immutable reads.
         let source_is_commander = state
@@ -1625,6 +1626,9 @@ pub(crate) fn apply_combat_damage(
             None
         };
         ctx.has_lifelink = false;
+        if let Some(identity) = ctx.source_identity {
+            source_identities.insert(*source_id, identity);
+        }
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
@@ -1800,6 +1804,7 @@ pub(crate) fn apply_combat_damage(
     drain_combat_lifelink(
         state,
         PendingCombatLifelink {
+            source_identities,
             remaining: lifelink_by_source
                 .into_iter()
                 .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
@@ -1885,7 +1890,12 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    fire_combat_prevention_riders(
+        state,
+        &record.prevention_tally,
+        &record.source_identities,
+        &mut record.batch_events,
+    );
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -1916,6 +1926,10 @@ fn drain_combat_lifelink(
 fn fire_combat_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[(AppliedReplacementKey, i32)],
+    source_identities: &std::collections::BTreeMap<
+        ObjectId,
+        crate::types::identifiers::ObjectIdentityBinding,
+    >,
     events: &mut Vec<GameEvent>,
 ) {
     for &(key, total_prevented) in prevention_tally {
@@ -1995,6 +2009,7 @@ fn fire_combat_prevention_riders(
                 .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             {
                 drain.event_source = Some(source);
+                drain.event_source_identity = source_identities.get(&source).copied();
             }
         }
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(

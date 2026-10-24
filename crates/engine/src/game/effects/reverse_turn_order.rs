@@ -39,6 +39,7 @@ mod tests {
 
     fn make_ability() -> ResolvedAbility {
         ResolvedAbility {
+            instruction_actor: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,

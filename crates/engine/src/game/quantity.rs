@@ -793,6 +793,7 @@ pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
 /// cast normally, but must not hard-reject it as a known no-op.
 pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefinition) -> bool {
     let AbilityDefinition {
+        instruction_actor,
         kind: _,
         effect,
         declares_chosen_group: _,
@@ -850,7 +851,8 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         granting_object: _,
     } = definition;
 
-    declares_return_result.is_none()
+    instruction_actor.is_none()
+        && declares_return_result.is_none()
         && reads_return_result.is_none()
         && activation_mana_payment_restriction.is_none()
         && activator_filter.is_none()
@@ -927,6 +929,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
     // carrier outright. A source-local counter-removal cost is an independent
     // payment choice, so the X chooser has no second partial quantity walk.
     let AbilityDefinition {
+        instruction_actor: None,
         kind: _,
         effect,
         declares_chosen_group: _,
@@ -10178,6 +10181,57 @@ mod tests {
     fn cast_stability_definition_walks_direct_metadata_and_fails_open_elsewhere() {
         let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
         assert!(ability_definition_is_cast_stable_for_pre_cast(&definition));
+
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = definition.clone();
+            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(
+                !ability_definition_is_cast_stable_for_pre_cast(&marked),
+                "root {actor:?}"
+            );
+            let mut parent = definition.clone();
+            parent.sub_ability = Some(Box::new(marked.clone()));
+            assert!(
+                !ability_definition_is_cast_stable_for_pre_cast(&parent),
+                "child {actor:?}"
+            );
+            parent.sub_ability = None;
+            parent.else_ability = Some(Box::new(marked.clone()));
+            assert!(
+                !ability_definition_is_cast_stable_for_pre_cast(&parent),
+                "else {actor:?}"
+            );
+            parent.else_ability = None;
+            parent.mode_abilities.push(marked);
+            assert!(
+                !ability_definition_is_cast_stable_for_pre_cast(&parent),
+                "mode {actor:?}"
+            );
+        }
+
+        let mana = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".into() },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        assert!(ability_definition_has_only_unbound_variable_quantities_for_pre_cast(&mana));
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = mana.clone();
+            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(
+                !ability_definition_has_only_unbound_variable_quantities_for_pre_cast(&marked),
+                "mana {actor:?}"
+            );
+        }
 
         let graveyard_count = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {

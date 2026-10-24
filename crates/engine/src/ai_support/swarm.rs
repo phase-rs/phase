@@ -527,6 +527,12 @@ fn replacement_applies(
     !find_applicable_replacements(
         state,
         &ProposedEvent::Damage {
+            source_identity: state.objects.get(&source_id).map(|source| {
+                crate::types::identifiers::ObjectIdentityBinding::new(
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+                    source.zone,
+                )
+            }),
             source_id,
             target,
             amount,

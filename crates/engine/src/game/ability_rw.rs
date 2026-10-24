@@ -1822,6 +1822,9 @@ fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
         || a.duration.as_ref().is_some_and(legacy_duration)
         || a.player_scope.as_ref().is_some_and(legacy_player_filter)
+        || a.instruction_actor
+            .as_ref()
+            .is_some_and(|actor| actor.classify(legacy_controller_ref, legacy_target_filter))
         || a.starting_with.as_ref().is_some_and(legacy_controller_ref)
         || a.repeat_for.as_ref().is_some_and(legacy_quantity_expr)
         || a.multi_target.as_ref().is_some_and(legacy_multi_target)
@@ -1843,6 +1846,9 @@ fn legacy_definition(a: &AbilityDefinition) -> bool {
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
         || a.duration.as_ref().is_some_and(legacy_duration)
         || a.player_scope.as_ref().is_some_and(legacy_player_filter)
+        || a.instruction_actor
+            .as_ref()
+            .is_some_and(|actor| actor.classify(legacy_controller_ref, legacy_target_filter))
         || a.starting_with.as_ref().is_some_and(legacy_controller_ref)
         || a.repeat_for.as_ref().is_some_and(legacy_quantity_expr)
         || a.multi_target.as_ref().is_some_and(legacy_multi_target)
@@ -4223,6 +4229,7 @@ fn walk_ability(
     acc: &mut RwProfile,
 ) {
     let ResolvedAbility {
+        instruction_actor,
         effect,
         sub_ability,
         else_ability,
@@ -4332,6 +4339,9 @@ fn walk_ability(
     if let Some(ps) = player_scope {
         acc.merge(rw_player_filter(ps));
     }
+    if let Some(actor) = instruction_actor {
+        acc.merge(actor.classify(rw_controller_ref, rw_target_filter));
+    }
     if let Some(sw) = starting_with {
         acc.merge(rw_controller_ref(sw));
     }
@@ -4390,6 +4400,7 @@ fn walk_definition(
     acc: &mut RwProfile,
 ) {
     let AbilityDefinition {
+        instruction_actor,
         effect,
         sub_ability,
         else_ability,
@@ -4473,6 +4484,9 @@ fn walk_definition(
     }
     if let Some(ps) = player_scope {
         acc.merge(rw_player_filter(ps));
+    }
+    if let Some(actor) = instruction_actor {
+        acc.merge(actor.classify(rw_controller_ref, rw_target_filter));
     }
     if let Some(sw) = starting_with {
         acc.merge(rw_controller_ref(sw));
@@ -7524,6 +7538,35 @@ mod tests {
         };
         assert_eq!(profile(AttackSubject::EventAttackers), reads_event_live());
         assert_eq!(profile(AttackSubject::You), RwProfile::empty());
+    }
+
+    #[test]
+    fn instruction_actor_rw_and_legacy_walks_preserve_the_full_reference_domain() {
+        let base = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![],
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        assert_eq!(ability_rw_profile(&base), RwProfile::empty());
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut expected = rw_controller_ref(&actor);
+            expected.legacy_batch_prompt = legacy_controller_ref(&actor);
+            let mut resolved = base.clone();
+            resolved.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert_eq!(ability_rw_profile(&resolved), expected, "{actor:?}");
+            let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            definition.instruction_actor = (Some(actor.clone())).map(Into::into);
+            let mut nested = base.clone();
+            nested.mode_abilities.push(definition);
+            assert_eq!(
+                ability_rw_profile(&nested),
+                expected,
+                "nested definition {actor:?}"
+            );
+        }
+        assert!(rw_controller_ref(&ControllerRef::EventTargetController).reads_event_live);
+        assert!(rw_controller_ref(&ControllerRef::SourceChosenPlayer).reads_member_bound);
     }
 
     #[test]

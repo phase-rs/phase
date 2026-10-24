@@ -770,9 +770,14 @@ fn produce_mana_from_ability(
     let mut produced_for_ability_events = Vec::new();
     for recipient in recipients {
         let mut scoped = resolved_for_quantity.clone();
-        scoped.set_original_controller_recursive(player);
+        scoped.set_original_controller_recursive(
+            resolved_for_quantity.original_controller.unwrap_or(player),
+        );
         scoped.set_controller_recursive(recipient);
         scoped.set_scoped_player_recursive(recipient);
+        if super::ability_utils::bind_instruction_actor(state, &mut scoped).is_none() {
+            continue;
+        }
 
         // CR 106.6: Resolve spend-restriction templates, grants, and expiry so
         // they attach to each produced `ManaUnit`.
@@ -6089,6 +6094,63 @@ mod tests {
             safety -= 1;
         }
         assert_eq!(state.players[1].life, opponent_life - 2);
+    }
+
+    #[test]
+    fn instruction_actor_scoped_mana_activation_binds_before_production_and_keeps_recipients() {
+        for actor in [
+            None,
+            Some(ControllerRef::You),
+            Some(ControllerRef::ScopedPlayer),
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+            Some(ControllerRef::ChosenPlayer { index: 0 }),
+            Some(ControllerRef::Opponent),
+        ] {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let mut definition = make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            })
+            .player_scope(PlayerFilter::Opponent);
+            definition.instruction_actor = (actor.clone()).map(Into::into);
+            let source = scenario
+                .add_creature(P0, "Synthetic Actor Mana Source", 1, 2)
+                .with_ability_definition(definition)
+                .id();
+            let mut runner = scenario.build();
+            let events = runner.activate(source, 0).resolve().events().to_vec();
+            let missing = matches!(
+                actor,
+                Some(ControllerRef::ChosenPlayer { .. } | ControllerRef::Opponent)
+            );
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            for player in [PlayerId(1), PlayerId(2)] {
+                assert_eq!(
+                    runner.state().players[player.0 as usize].mana_pool.total(),
+                    usize::from(!missing)
+                );
+                if !missing {
+                    assert_eq!(
+                        runner.state().players[player.0 as usize]
+                            .mana_pool
+                            .unit_at(0)
+                            .unwrap()
+                            .color,
+                        ManaType::Green
+                    );
+                }
+            }
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == source)).count(), if missing { 0 } else { 2 });
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::TappedForMana { player_id, source_id, .. } if *player_id == P0 && *source_id == source)).count(), usize::from(!missing));
+            assert!(runner.state().objects[&source].tapped);
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(
+                runner.state().objects[&source].abilities[0].instruction_actor,
+                actor,
+                "the printed template remains unconsumed"
+            );
+        }
     }
 
     #[test]

@@ -464,6 +464,8 @@ fn rewrite_resolved_ability(
     substitution: &TextSubstitution,
 ) -> usize {
     let ResolvedAbility {
+        // Every ControllerRef selects a player and contains no color/type word.
+        instruction_actor: _,
         // Rules text: filters, conditions and quantities that carry words.
         effect,
         condition,
@@ -563,9 +565,64 @@ fn rewrite_resolved_ability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCondition, BasicLandType, SpentColor, TriggerCondition};
+    use crate::types::ability::{
+        AbilityCondition, AbilityDefinition, AbilityKind, BasicLandType, Effect, FilterProp,
+        QuantityExpr, SpentColor, TriggerCondition, TypedFilter,
+    };
     use crate::types::mana::ManaColor;
+    use crate::types::player::PlayerId;
     use serde_json::json;
+
+    #[test]
+    fn instruction_actors_survive_real_color_rewrites_across_nested_payloads() {
+        let substitution = TextSubstitution::color(ManaColor::Green, ManaColor::Blue).unwrap();
+        for actor in std::iter::once(None).chain(
+            crate::types::ability::instruction_actor_test_refs()
+                .into_iter()
+                .map(Some),
+        ) {
+            let mut root = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Green,
+                        },
+                    ])),
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            root.instruction_actor = (actor.clone()).map(Into::into);
+            root.sub_ability = Some(Box::new(root.clone()));
+            root.else_ability = Some(Box::new(root.clone()));
+            let mut mode = AbilityDefinition::new(AbilityKind::Spell, root.effect.clone());
+            mode.instruction_actor = (actor.clone()).map(Into::into);
+            root.mode_abilities.push(mode);
+            assert!(
+                rewrite_resolved_ability(&mut root, &substitution) > 0,
+                "a real color word must change"
+            );
+            assert_eq!(root.instruction_actor, actor);
+            assert_eq!(root.sub_ability.as_ref().unwrap().instruction_actor, actor);
+            assert_eq!(root.else_ability.as_ref().unwrap().instruction_actor, actor);
+            assert_eq!(root.mode_abilities[0].instruction_actor, actor);
+            let Effect::Draw {
+                target: TargetFilter::Typed(typed),
+                ..
+            } = &root.effect
+            else {
+                panic!("draw preserved");
+            };
+            assert_eq!(
+                typed.properties,
+                vec![FilterProp::HasColor {
+                    color: ManaColor::Blue
+                }]
+            );
+        }
+    }
 
     #[test]
     fn land_word_rewrites_type_positions_but_not_names() {

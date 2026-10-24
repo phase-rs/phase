@@ -1630,6 +1630,7 @@ mod tests {
         // directly (combat damage no longer routes through the per-source
         // `apply_damage_to_target` inline-rider path).
         let proposed = crate::types::proposed_event::ProposedEvent::Damage {
+            source_identity: None,
             source_id: damage_source,
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,

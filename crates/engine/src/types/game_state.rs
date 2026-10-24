@@ -4977,7 +4977,12 @@ pub struct PendingPlayerScopeSacrificeChoice {
     /// The scoped sacrifice ability template. The current chooser is rebound
     /// onto a clone before each prompt is built.
     pub ability: Box<ResolvedAbility>,
-    /// Players not yet prompted, in APNAP order.
+    /// CR 101.4 + CR 101.4c: Frozen scope slots mapped to the actual actors
+    /// admitted before any choice. None preserves actor-free legacy saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_actors: Option<BTreeMap<PlayerId, PlayerId>>,
+    /// Outstanding scope slots in actual-actor APNAP order. New cursors retain
+    /// the current prompted slot at the front until its answer is collected.
     pub remaining_players: Vec<PlayerId>,
     /// Already collected choices, paired with the player who will sacrifice
     /// those permanents once all choices are known.
@@ -5003,7 +5008,8 @@ pub struct PendingPlayerScopeUnlessPayment {
     pub pending_effect: Box<ResolvedAbility>,
     /// Seats still to answer in APNAP order.
     pub remaining_players: Vec<PlayerId>,
-    /// Seats that declined the sacrifice payment.
+    /// Settled unpaid slots, including departed unanswered/unasked payers.
+    /// A completed or replacement-modified payment contributes no unpaid slot.
     pub declining_players: Vec<PlayerId>,
     /// The seat whose `UnlessPayment` or `WardSacrificeChoice` is live.
     pub current_player: PlayerId,
@@ -14572,6 +14578,8 @@ impl PersistedGameState {
             &mut state,
         )
         .map_err(PersistedRestoreError::InvalidPerPlayerChoice)?;
+        crate::game::effects::validate_player_scope_sacrifice_on_restore(&state)
+            .map_err(PersistedRestoreError::InvalidPerPlayerChoice)?;
         state
             .format_config
             .reject_unimplemented_range_of_influence()
@@ -17433,6 +17441,10 @@ pub struct PendingLifelinkGain {
 /// while the CR 616.1 prompt is open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
+    /// CR 608.2h: Phase A source occurrences retained through the lifelink tail.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_identities:
+        std::collections::BTreeMap<ObjectId, crate::types::identifiers::ObjectIdentityBinding>,
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
     /// gain events, never merged.
     ///
@@ -24532,6 +24544,9 @@ pub struct PostReplacementDrain {
     /// `TargetFilter::PostReplacementSourceController` — "the source's controller
     /// draws cards".
     pub event_source: Option<crate::types::identifiers::ObjectId>,
+    /// CR 608.2h: exact occurrence of the prevented damage source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
 
     /// CR 615.5: target of the prevented event itself, for
     /// `TargetFilter::PostReplacementDamageTarget`.
@@ -24678,6 +24693,7 @@ impl PostReplacementDrain {
             source: None,
             applied: HashSet::new(),
             event_source: None,
+            event_source_identity: None,
             event_target: None,
             controller: None,
         }
@@ -30577,6 +30593,14 @@ impl GameState {
         self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_source)
+    }
+
+    pub fn post_replacement_event_source_identity(
+        &self,
+    ) -> Option<crate::types::identifiers::ObjectIdentityBinding> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.event_source_identity)
     }
 
     /// CR 615.5: the resident drain's prevented-event target.
@@ -36566,6 +36590,7 @@ mod tests {
     /// produces (Inkshield's tokens) inside a batch that then parks.
     fn parked_combat_lifelink(record: ZoneChangeRecord) -> Box<PendingCombatLifelink> {
         Box::new(PendingCombatLifelink {
+            source_identities: Default::default(),
             remaining: VecDeque::from(vec![PendingLifelinkGain {
                 controller: PlayerId(1),
                 amount: 3,
@@ -36934,6 +36959,55 @@ mod tests {
     }
 
     #[test]
+    fn instruction_actor_sacrifice_carrier_roundtrip_and_equality_preserve_exact_admission_pairs() {
+        let legacy = PendingPlayerScopeSacrificeChoice {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(9_900),
+                PlayerId(0),
+            )),
+            admitted_actors: None,
+            remaining_players: vec![PlayerId(1)],
+            selections: vec![],
+            completion: Default::default(),
+        };
+        let old_json = serde_json::to_value(&legacy).unwrap();
+        assert!(old_json.get("admitted_actors").is_none());
+        let old: PendingPlayerScopeSacrificeChoice = serde_json::from_value(old_json).unwrap();
+        assert_eq!(old, legacy);
+        assert_eq!(old.admitted_actors, None);
+        assert!(serde_json::to_value(&old)
+            .unwrap()
+            .get("admitted_actors")
+            .is_none());
+        let mut present = legacy.clone();
+        present.admitted_actors = Some([(PlayerId(1), PlayerId(0))].into_iter().collect());
+        let encoded = serde_json::to_vec(&present).unwrap();
+        let decoded: PendingPlayerScopeSacrificeChoice = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, present);
+        assert_ne!(decoded, legacy);
+        let mut state = GameState::new_two_player(42);
+        state.pending_player_scope_sacrifice_choice = Some(present);
+        let encoded = serde_json::to_vec(&state).unwrap();
+        let decoded: GameState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            decoded.pending_player_scope_sacrifice_choice,
+            state.pending_player_scope_sacrifice_choice
+        );
+        let mut different = state.clone();
+        different
+            .pending_player_scope_sacrifice_choice
+            .as_mut()
+            .unwrap()
+            .admitted_actors = None;
+        assert_ne!(
+            different, state,
+            "GameState semantic equality includes the actor map"
+        );
+    }
+
+    #[test]
     fn persisted_zone_change_traverses_direct_queue_and_stack_carriers() {
         let mut state = normal_trigger_firing_fixture();
         state.turn_number = 19;
@@ -36955,6 +37029,7 @@ mod tests {
             .stack_trigger_event_batches
             .insert(ObjectId(9_003), vec![event.clone()]);
         state.pending_player_scope_sacrifice_choice = Some(PendingPlayerScopeSacrificeChoice {
+            admitted_actors: None,
             ability: state
                 .pending_trigger
                 .as_ref()

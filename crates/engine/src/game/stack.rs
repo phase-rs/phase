@@ -191,6 +191,19 @@ fn push_to_stack_with_firing(
         .objects
         .get(&entry.source_id)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
+    let source_identity = state.objects.get(&entry.source_id).map(|source| {
+        crate::types::identifiers::ObjectIdentityBinding::new(
+            crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+            source.zone,
+        )
+    });
+    if let Some(ability) = entry.ability_mut() {
+        // CR 113.7a + CR 608.2h: keep the pre-cost activation or trigger pin;
+        // an ordinary spell first acquires its actual stack occurrence here.
+        if let Some(identity) = source_identity {
+            ability.capture_source_identity_recursive(identity);
+        }
+    }
     // CR 701.27f: an activated or triggered ability of a permanent may
     // transform that permanent only if it has not transformed/converted since
     // the ability was put onto the stack. Spells and keyword actions do not
@@ -4325,8 +4338,149 @@ fn self_counter_run_key<'a>(
     })
 }
 
+// CR 608.2c: fixed source-independent batch proofs ignore only own-source
+// provenance. Replacement-event and all other execution facts remain exact.
+fn batch_contexts_eq_ignoring_own_source(
+    a: &crate::types::ability::SpellContext,
+    b: &crate::types::ability::SpellContext,
+) -> bool {
+    let crate::types::ability::SpellContext {
+        source_identity: _,
+        replacement_event: a_replacement_event,
+        face_down_in_exile: a_face_down_in_exile,
+        granting_object: a_granting_object,
+        creation_lookback_event: a_creation_lookback_event,
+        outer_declared_players: a_outer_declared_players,
+        boon_captured_noted_number: a_boon_captured_noted_number,
+        boon_trigger_batch_objects: a_boon_trigger_batch_objects,
+        forwarded_result_context: a_forwarded_result_context,
+        pending_forwarded_zone_result: a_pending_forwarded_zone_result,
+        exile_until_batch: a_exile_until_batch,
+        duration_events: a_duration_events,
+        pay_cost_paid_life_amount: a_pay_cost_paid_life_amount,
+        direct_discard_result: a_direct_discard_result,
+        parent_target_iteration_members: a_parent_target_iteration_members,
+        prior_effect_result: a_prior_effect_result,
+        announcing_opponent: a_announcing_opponent,
+        gift_recipient: a_gift_recipient,
+        additional_cost_paid: a_additional_cost_paid,
+        alternative_mana_cost_paid: a_alternative_mana_cost_paid,
+        alt_cost_grant_source: a_alt_cost_grant_source,
+        graveyard_permission_authority: a_graveyard_permission_authority,
+        graveyard_permission_latch: a_graveyard_permission_latch,
+        additional_cost_payment_count: a_additional_cost_payment_count,
+        additional_cost_payments: a_additional_cost_payments,
+        kickers_paid: a_kickers_paid,
+        chosen_modes: a_chosen_modes,
+        optional_effect_performed: a_optional_effect_performed,
+        unperformed_compound_instruction: a_unperformed_compound_instruction,
+        guess_outcome: a_guess_outcome,
+        accepting_player: a_accepting_player,
+        cast_from_zone: a_cast_from_zone,
+        cast_controller: a_cast_controller,
+        cast_active_player: a_cast_active_player,
+        cast_phase: a_cast_phase,
+        chain_root_targets: a_chain_root_targets,
+        controller_controlled_as_cast: a_controller_controlled_as_cast,
+        ability_tag: a_ability_tag,
+        source_transformation_count: a_source_transformation_count,
+        attach_target_bindings: a_attach_target_bindings,
+        target_damage_source: a_target_damage_source,
+        triggering_spell: a_triggering_spell,
+        source_ability_provenance: a_source_ability_provenance,
+    } = a;
+    let crate::types::ability::SpellContext {
+        source_identity: _,
+        replacement_event: b_replacement_event,
+        face_down_in_exile: b_face_down_in_exile,
+        granting_object: b_granting_object,
+        creation_lookback_event: b_creation_lookback_event,
+        outer_declared_players: b_outer_declared_players,
+        boon_captured_noted_number: b_boon_captured_noted_number,
+        boon_trigger_batch_objects: b_boon_trigger_batch_objects,
+        forwarded_result_context: b_forwarded_result_context,
+        pending_forwarded_zone_result: b_pending_forwarded_zone_result,
+        exile_until_batch: b_exile_until_batch,
+        duration_events: b_duration_events,
+        pay_cost_paid_life_amount: b_pay_cost_paid_life_amount,
+        direct_discard_result: b_direct_discard_result,
+        parent_target_iteration_members: b_parent_target_iteration_members,
+        prior_effect_result: b_prior_effect_result,
+        announcing_opponent: b_announcing_opponent,
+        gift_recipient: b_gift_recipient,
+        additional_cost_paid: b_additional_cost_paid,
+        alternative_mana_cost_paid: b_alternative_mana_cost_paid,
+        alt_cost_grant_source: b_alt_cost_grant_source,
+        graveyard_permission_authority: b_graveyard_permission_authority,
+        graveyard_permission_latch: b_graveyard_permission_latch,
+        additional_cost_payment_count: b_additional_cost_payment_count,
+        additional_cost_payments: b_additional_cost_payments,
+        kickers_paid: b_kickers_paid,
+        chosen_modes: b_chosen_modes,
+        optional_effect_performed: b_optional_effect_performed,
+        unperformed_compound_instruction: b_unperformed_compound_instruction,
+        guess_outcome: b_guess_outcome,
+        accepting_player: b_accepting_player,
+        cast_from_zone: b_cast_from_zone,
+        cast_controller: b_cast_controller,
+        cast_active_player: b_cast_active_player,
+        cast_phase: b_cast_phase,
+        chain_root_targets: b_chain_root_targets,
+        controller_controlled_as_cast: b_controller_controlled_as_cast,
+        ability_tag: b_ability_tag,
+        source_transformation_count: b_source_transformation_count,
+        attach_target_bindings: b_attach_target_bindings,
+        target_damage_source: b_target_damage_source,
+        triggering_spell: b_triggering_spell,
+        source_ability_provenance: b_source_ability_provenance,
+    } = b;
+    a_replacement_event == b_replacement_event
+        && a_face_down_in_exile == b_face_down_in_exile
+        && a_granting_object == b_granting_object
+        && a_creation_lookback_event == b_creation_lookback_event
+        && a_outer_declared_players == b_outer_declared_players
+        && a_boon_captured_noted_number == b_boon_captured_noted_number
+        && a_boon_trigger_batch_objects == b_boon_trigger_batch_objects
+        && a_forwarded_result_context == b_forwarded_result_context
+        && a_pending_forwarded_zone_result == b_pending_forwarded_zone_result
+        && a_exile_until_batch == b_exile_until_batch
+        && a_duration_events == b_duration_events
+        && a_pay_cost_paid_life_amount == b_pay_cost_paid_life_amount
+        && a_direct_discard_result == b_direct_discard_result
+        && a_parent_target_iteration_members == b_parent_target_iteration_members
+        && a_prior_effect_result == b_prior_effect_result
+        && a_announcing_opponent == b_announcing_opponent
+        && a_gift_recipient == b_gift_recipient
+        && a_additional_cost_paid == b_additional_cost_paid
+        && a_alternative_mana_cost_paid == b_alternative_mana_cost_paid
+        && a_alt_cost_grant_source == b_alt_cost_grant_source
+        && a_graveyard_permission_authority == b_graveyard_permission_authority
+        && a_graveyard_permission_latch == b_graveyard_permission_latch
+        && a_additional_cost_payment_count == b_additional_cost_payment_count
+        && a_additional_cost_payments == b_additional_cost_payments
+        && a_kickers_paid == b_kickers_paid
+        && a_chosen_modes == b_chosen_modes
+        && a_optional_effect_performed == b_optional_effect_performed
+        && a_unperformed_compound_instruction == b_unperformed_compound_instruction
+        && a_guess_outcome == b_guess_outcome
+        && a_accepting_player == b_accepting_player
+        && a_cast_from_zone == b_cast_from_zone
+        && a_cast_controller == b_cast_controller
+        && a_cast_active_player == b_cast_active_player
+        && a_cast_phase == b_cast_phase
+        && a_chain_root_targets == b_chain_root_targets
+        && a_controller_controlled_as_cast == b_controller_controlled_as_cast
+        && a_ability_tag == b_ability_tag
+        && a_source_transformation_count == b_source_transformation_count
+        && a_attach_target_bindings == b_attach_target_bindings
+        && a_target_damage_source == b_target_damage_source
+        && a_triggering_spell == b_triggering_spell
+        && a_source_ability_provenance == b_source_ability_provenance
+}
+
 fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        instruction_actor,
         effect,
         targets,
         declares_chosen_group,
@@ -4411,6 +4565,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     );
 
     self_counter
+        && instruction_actor.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -4576,6 +4731,7 @@ fn fixed_controller_gain_life_run_key<'a>(
 
 fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        instruction_actor,
         effect,
         targets,
         declares_chosen_group,
@@ -4659,6 +4815,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     );
 
     fixed_controller_gain_life
+        && instruction_actor.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -4671,7 +4828,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
-        && *context == SpellContext::default()
+        && batch_contexts_eq_ignoring_own_source(context, &SpellContext::default())
         && !*optional_targeting
         && !*optional
         && optional_player.is_none()
@@ -4805,6 +4962,7 @@ fn fixed_opponent_effect_run_key<'a>(
 
 fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        instruction_actor,
         effect,
         targets,
         declares_chosen_group,
@@ -4892,6 +5050,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     );
 
     fixed_opponent_effect
+        && instruction_actor.is_none()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -4904,7 +5063,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
-        && *context == SpellContext::default()
+        && batch_contexts_eq_ignoring_own_source(context, &SpellContext::default())
         && !*optional_targeting
         && !*optional
         && optional_player.is_none()
@@ -5120,6 +5279,7 @@ fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> 
 fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut out = ability.clone();
     out.source_id = ObjectId(0);
+    out.context.source_identity = None;
     out.source_incarnation = None;
     out.trigger_source = None;
     out.trigger_definition_ref = None;
@@ -5144,6 +5304,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ) -> bool {
     let ResolvedAbility {
         effect: a_effect,
+        instruction_actor: a_instruction_actor,
         targets: a_targets,
         declares_chosen_group: a_declares_chosen_group,
         reads_chosen_group: a_reads_chosen_group,
@@ -5230,6 +5391,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = a;
     let ResolvedAbility {
         effect: b_effect,
+        instruction_actor: b_instruction_actor,
         targets: b_targets,
         declares_chosen_group: b_declares_chosen_group,
         reads_chosen_group: b_reads_chosen_group,
@@ -5316,6 +5478,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = b;
 
     a_effect == b_effect
+        && a_instruction_actor == b_instruction_actor
         && a_targets == b_targets
         && a_declares_chosen_group == b_declares_chosen_group
         && a_reads_chosen_group == b_reads_chosen_group
@@ -5354,7 +5517,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         }
         && a_duration == b_duration
         && a_condition == b_condition
-        && a_context == b_context
+        && batch_contexts_eq_ignoring_own_source(a_context, b_context)
         && a_optional_targeting == b_optional_targeting
         && a_optional == b_optional
         && a_optional_player == b_optional_player
@@ -6290,6 +6453,86 @@ mod tests {
             &a,
             &same_shape_different_provenance
         ));
+    }
+
+    #[test]
+    fn instruction_actor_refuses_inert_batches_and_participates_in_recursive_identity() {
+        let counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let gain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(2),
+            PlayerId(0),
+        );
+        let mut loss = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            vec![],
+            ObjectId(3),
+            PlayerId(0),
+        );
+        loss.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
+        assert!(self_counter_ability_is_batch_candidate(&counter));
+        assert!(fixed_controller_gain_life_ability_is_batch_candidate(&gain));
+        assert!(fixed_opponent_effect_ability_is_batch_candidate(&loss));
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut a = counter.clone();
+            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(!self_counter_ability_is_batch_candidate(&a), "{actor:?}");
+            let mut a = gain.clone();
+            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(
+                !fixed_controller_gain_life_ability_is_batch_candidate(&a),
+                "{actor:?}"
+            );
+            let mut a = loss.clone();
+            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(
+                !fixed_opponent_effect_ability_is_batch_candidate(&a),
+                "{actor:?}"
+            );
+            for branch in 0..3 {
+                let mut left = gain.clone();
+                let mut right = left.clone();
+                let mut child = gain.clone();
+                child.instruction_actor = (Some(actor.clone())).map(Into::into);
+                match branch {
+                    0 => right.instruction_actor = Some(actor.clone().into()),
+                    1 => {
+                        left.sub_ability = Some(Box::new(gain.clone()));
+                        right.sub_ability = Some(Box::new(child));
+                    }
+                    2 => {
+                        left.else_ability = Some(Box::new(gain.clone()));
+                        right.else_ability = Some(Box::new(child));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                    &left, &right
+                ));
+                let mut same = right.clone();
+                same.source_id = ObjectId(999);
+                same.ability_index = Some(9);
+                assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                    &right, &same
+                ));
+            }
+        }
     }
 
     #[test]
@@ -9977,6 +10220,125 @@ mod tests {
         }
 
         #[test]
+        fn instruction_actor_ordinary_trigger_resolution_falls_back_from_each_inert_batch_family() {
+            for family in 0..4 {
+                for marked in [false, true] {
+                    crate::game::perf_counters::reset();
+                    let mut state = setup();
+                    let source = add_self_counter_source(&mut state, "Synthetic Actor Trigger");
+                    for player in [PlayerId(0), PlayerId(1)] {
+                        for index in 0..4 {
+                            create_object(
+                                &mut state,
+                                CardId(80_000 + u64::from(player.0) * 10 + index),
+                                player,
+                                "Mill card".into(),
+                                Zone::Library,
+                            );
+                        }
+                    }
+                    for _ in 0..2 {
+                        let event = life_event(PlayerId(0), 1);
+                        match family {
+                            0 => push_self_counter_trigger(&mut state, source, event),
+                            1 => push_fixed_controller_gain_life_trigger(&mut state, source, event),
+                            2 => push_fixed_opponent_lose_life_trigger(
+                                &mut state, source, event, None, None,
+                            ),
+                            3 => push_fixed_opponent_mill_trigger(&mut state, source, event),
+                            _ => unreachable!(),
+                        }
+                        if marked {
+                            let StackEntryKind::TriggeredAbility { ability, .. } =
+                                &mut state.stack.back_mut().unwrap().kind
+                            else {
+                                unreachable!()
+                            };
+                            ability.instruction_actor =
+                                (Some(crate::types::ability::ControllerRef::SpecificPlayer {
+                                    id: PlayerId(1),
+                                }))
+                                .map(Into::into);
+                        }
+                    }
+                    let life_before = [state.players[0].life, state.players[1].life];
+                    assert_eq!(state.stack.len(), 2);
+                    let mut events = crate::game::engine::apply(
+                        &mut state,
+                        PlayerId(0),
+                        crate::types::actions::GameAction::SetAutoPass {
+                            mode: crate::types::game_state::AutoPassRequest::UntilStackEmpty,
+                        },
+                    )
+                    .expect("the real Resolve All action admits the trigger stack")
+                    .events;
+                    for _ in 0..8 {
+                        if state.stack.is_empty() {
+                            break;
+                        }
+                        let crate::types::game_state::WaitingFor::Priority { player } =
+                            state.waiting_for
+                        else {
+                            panic!("the ordinary actor-bearing trigger needs only priority passes");
+                        };
+                        let submitter = authorized_submitter_for_player(&state, player);
+                        events.extend(
+                            crate::game::engine::apply(
+                                &mut state,
+                                submitter,
+                                crate::types::actions::GameAction::PassPriority,
+                            )
+                            .expect("the actual priority holder may pass")
+                            .events,
+                        );
+                    }
+                    assert_eq!(
+                        crate::game::perf_counters::snapshot().stack_batched_entries,
+                        if marked { 0 } else { 2 },
+                        "family {family}: actor-bearing entries use normal single-entry resolution"
+                    );
+                    assert!(state.stack.is_empty());
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                            .count(),
+                        2
+                    );
+                    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { source_id, .. } if *source_id == source)).count(), 2);
+                    match family {
+                        0 => {
+                            assert_eq!(
+                                state.objects[&source]
+                                    .counters
+                                    .get(&CounterType::Plus1Plus1),
+                                Some(&2)
+                            );
+                            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actor == PlayerId(u8::from(marked)) && *object_id == source)).count(), 2);
+                        }
+                        1 => {
+                            let recipient = usize::from(marked);
+                            assert_eq!(state.players[recipient].life, life_before[recipient] + 2);
+                            assert_eq!(
+                                state.players[1 - recipient].life,
+                                life_before[1 - recipient]
+                            );
+                        }
+                        2 => {
+                            assert_eq!(state.players[1].life, life_before[1] - 4);
+                            assert_eq!(state.players[0].life, life_before[0]);
+                        }
+                        3 => {
+                            assert_eq!(state.players[1].graveyard.len(), 2);
+                            assert!(state.players[0].graveyard.is_empty());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn self_counter_batch_requires_an_empty_resolution_stack() {
             let mut state = setup();
             state.push_proliferate_frame(PendingProliferateActions {
@@ -10009,6 +10371,7 @@ mod tests {
 
             state.pending_combat_lifelink =
                 Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                    source_identities: Default::default(),
                     remaining: std::collections::VecDeque::from(vec![
                         crate::types::game_state::PendingLifelinkGain {
                             controller: PlayerId(0),

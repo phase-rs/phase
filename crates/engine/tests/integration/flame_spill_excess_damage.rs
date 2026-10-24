@@ -522,6 +522,7 @@ fn t8_shape_flame_spill_and_ram_through_absorb_excess_rider() {
 #[test]
 fn t9_snapshot_carries_excess_recipient_across_resume() {
     let snap = DamageContextSnapshot {
+        source_identity: None,
         source_id: ObjectId(1),
         source_incarnation: None,
         controller: P0,

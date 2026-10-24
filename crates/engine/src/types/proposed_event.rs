@@ -608,6 +608,9 @@ pub enum ProposedEvent {
     },
     Damage {
         source_id: ObjectId,
+        /// CR 608.2h: the original damaging occurrence, preserved by redirection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
         target: TargetRef,
         amount: u32,
         is_combat: bool,

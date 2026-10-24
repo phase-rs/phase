@@ -5335,6 +5335,7 @@ impl LegacyReplacementTailsWire {
                         source: self.post_replacement_source,
                         applied: self.post_replacement_applied,
                         event_source: self.post_replacement_event_source,
+                        event_source_identity: None,
                         event_target: self.post_replacement_event_target,
                         // The pre-fold split-slot wire shape predates the
                         // CR 109.5 controller slot; a migrated drain falls back

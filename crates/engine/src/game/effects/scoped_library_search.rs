@@ -1,7 +1,7 @@
 use crate::game::effects::{resolve_ability_chain, search_library};
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility, SubAbilityLink,
+    ControllerRef, Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility, SubAbilityLink,
     TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -20,6 +20,13 @@ use crate::types::zones::Zone;
 /// established sequential player-scope resolver rather than being coerced into
 /// a subtly different timing model.
 pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool {
+    if !ability
+        .instruction_actor
+        .as_ref()
+        .is_none_or(|actor| actor.as_controller() == Some(&ControllerRef::ScopedPlayer))
+    {
+        return false;
+    }
     let Effect::SearchLibrary {
         reveal,
         target_player,
@@ -139,7 +146,8 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
 /// disposition) that a shortcut resolving only its own effect would drop.
 /// Target, scope and ordering fields are the caller's own checks.
 pub(crate) fn has_no_resolution_riders(ability: &ResolvedAbility) -> bool {
-    ability.sub_ability.is_none()
+    ability.instruction_actor.is_none()
+        && ability.sub_ability.is_none()
         && ability.else_ability.is_none()
         && ability.duration.is_none()
         && ability.condition.is_none()
@@ -546,9 +554,13 @@ fn prepare_scoped_group(
     for player in accepted.iter().copied() {
         let mut scoped = template.clone();
         scoped.optional = false;
-        scoped.set_original_controller_recursive(template.controller);
+        scoped.set_original_controller_recursive(
+            template.original_controller.unwrap_or(template.controller),
+        );
         scoped.set_controller_recursive(player);
         scoped.set_scoped_player_recursive(player);
+        let actor = crate::game::ability_utils::bind_instruction_actor(state, &mut scoped);
+        debug_assert_eq!(actor, Some(player));
         prepared_group.push((
             player,
             search_library::prepare_effective_search(state, &scoped)?,
@@ -722,8 +734,19 @@ fn prepared_candidate_is_live(
         return false;
     };
     let mut ability = (*pending.ability).clone();
+    ability.set_original_controller_recursive(
+        pending
+            .ability
+            .original_controller
+            .unwrap_or(pending.ability.controller),
+    );
     ability.set_controller_recursive(choice.player);
     ability.set_scoped_player_recursive(choice.player);
+    if crate::game::ability_utils::bind_instruction_actor(state, &mut ability)
+        != Some(choice.player)
+    {
+        return false;
+    }
     let context = crate::game::filter::FilterContext::from_ability(&ability);
     crate::game::filter::matches_target_filter_in_owner_zone(
         state,
@@ -920,11 +943,19 @@ pub(crate) fn resume_after_elimination(
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
-    use crate::types::ability::{PlayerFilter, QuantityExpr, SearchSelectionConstraint};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, EffectKind, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, SearchSelectionConstraint, SubAbilityLink,
+    };
     use crate::types::actions::GameAction;
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use crate::types::proposed_event::ProposedEvent;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::OptionalEffectFrame;
 
     fn three_player_scoped_search(reveal: bool) -> (GameState, ResolvedAbility, Vec<ObjectId>) {
@@ -983,6 +1014,247 @@ mod tests {
         )
         .sub_ability(delivery);
         (state, search, cards)
+    }
+
+    #[test]
+    fn instruction_actor_search_cast_preserves_optimized_heads_and_refuses_every_marked_delivery() {
+        for head_actor in [
+            None,
+            Some(ControllerRef::ScopedPlayer),
+            Some(ControllerRef::You),
+        ] {
+            for (child_actor, prior_choice) in [
+                (None, false),
+                (Some(ControllerRef::ScopedPlayer), false),
+                (Some(ControllerRef::You), false),
+                (
+                    Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+                    false,
+                ),
+                (Some(ControllerRef::ChosenPlayer { index: 0 }), false),
+                (Some(ControllerRef::ChosenPlayer { index: 0 }), true),
+            ] {
+                let controller_head = head_actor == Some(ControllerRef::You);
+                if controller_head && child_actor.is_some() {
+                    continue; // head refusal is isolated from the independent delivery guard
+                }
+                let mut scenario = GameScenario::new_n_player(3, 42);
+                scenario.at_phase(Phase::PreCombatMain);
+                let mut cards: Vec<_> = [P0, P1, PlayerId(2)]
+                    .into_iter()
+                    .map(|player| scenario.add_card_to_library_top(player, "Exact search card"))
+                    .collect();
+                // Identical libraries in every head row: You searches P0's
+                // library on all three iterations; None/Scoped search each seat.
+                let printed_cards = vec![
+                    cards[0],
+                    scenario.add_card_to_library_top(P0, "Second printed-controller card"),
+                    scenario.add_card_to_library_top(P0, "Third printed-controller card"),
+                ];
+                if controller_head {
+                    cards = printed_cards;
+                }
+                let (_, shape, _) = three_player_scoped_search(true);
+                let mut child = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    shape.sub_ability.as_ref().unwrap().effect.clone(),
+                );
+                child.instruction_actor = (child_actor.clone()).map(Into::into);
+                let mut head = AbilityDefinition::new(AbilityKind::Spell, shape.effect.clone());
+                head.player_scope = Some(PlayerFilter::All);
+                head.instruction_actor = (head_actor.clone()).map(Into::into);
+                head.sub_ability = Some(Box::new(child));
+                let mut tail = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::OriginalController,
+                    },
+                );
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                head.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(tail));
+                let referential = matches!(child_actor, Some(ControllerRef::ChosenPlayer { .. }));
+                if referential {
+                    let child = head.sub_ability.as_mut().unwrap();
+                    let mut dependent = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::SpecificPlayer { id: P1 },
+                        },
+                    );
+                    dependent.sub_ability = child.sub_ability.take();
+                    child.sub_ability = Some(Box::new(dependent));
+                    child.else_ability = Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 100 },
+                            player: TargetFilter::OriginalController,
+                        },
+                    )));
+                }
+                if prior_choice {
+                    let mut prior = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Choose {
+                            choice_type: crate::types::ability::ChoiceType::player(),
+                            persist: false,
+                            selection: crate::types::ability::TargetSelectionMode::Chosen,
+                        },
+                    );
+                    prior.sub_ability = Some(Box::new(head));
+                    head = prior;
+                }
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic Scoped Search Actor", false)
+                    .with_ability_definition(head)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let optimized = child_actor.is_none() && head_actor != Some(ControllerRef::You);
+                // A real optional move replacement exposes the move's existing
+                // performer authority. Declining it keeps the ordinary destination.
+                if !optimized && !matches!(child_actor, Some(ControllerRef::ChosenPlayer { .. })) {
+                    let mut redirect = shape.sub_ability.as_ref().unwrap().effect.clone();
+                    if let Effect::ChangeZone { destination, .. } = &mut redirect {
+                        *destination = Zone::Graveyard;
+                    }
+                    scenario
+                        .add_enchantment_from_oracle(P0, "Synthetic Optional Move Observer", "")
+                        .with_replacement_definition(
+                            ReplacementDefinition::new(ReplacementEvent::Moved)
+                                .mode(ReplacementMode::Optional { decline: None })
+                                .destination_zone(Zone::Hand)
+                                .execute(AbilityDefinition::new(AbilityKind::Spell, redirect)),
+                        );
+                }
+                let mut runner = scenario.build();
+                let cast = runner.cast(spell);
+                let mut events = if prior_choice {
+                    cast.choose_option("1").resolve().events().to_vec()
+                } else {
+                    cast.resolve().events().to_vec()
+                };
+                assert_eq!(
+                    runner.state().pending_scoped_library_search.is_some(),
+                    optimized
+                );
+                if optimized {
+                    assert_eq!(runner.state().active_library_searches.iter().count(), 3);
+                    assert_eq!(
+                        runner
+                            .state()
+                            .active_search_decision_controls
+                            .iter()
+                            .count(),
+                        3
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(event, GameEvent::HiddenSearchViewed { .. }))
+                            .count(),
+                        3
+                    );
+                }
+                for (index, player) in [P0, P1, PlayerId(2)].into_iter().enumerate() {
+                    let searcher = if controller_head { P0 } else { player };
+                    assert!(matches!(&runner.state().waiting_for,
+                        WaitingFor::SearchChoice { player: actual, library_owner: Some(owner), cards: eligible, .. }
+                        if *actual == searcher && *owner == searcher && eligible.contains(&cards[index])));
+                    if controller_head {
+                        assert!(runner.state().pending_scoped_library_search.is_none());
+                        assert_eq!(runner.state().objects[&cards[index]].owner, P0);
+                    }
+                    let incarnation = runner.state().objects[&cards[index]].incarnation;
+                    events.extend(
+                        runner
+                            .act(GameAction::SelectCards {
+                                cards: vec![cards[index]],
+                            })
+                            .unwrap()
+                            .events,
+                    );
+                    if optimized && index < 2 {
+                        assert!(cards
+                            .iter()
+                            .all(|id| runner.state().objects[id].zone == Zone::Library));
+                    }
+                    if !optimized
+                        && !matches!(child_actor, Some(ControllerRef::ChosenPlayer { .. }))
+                    {
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ));
+                        let expected = match child_actor {
+                            Some(ControllerRef::ScopedPlayer) => player,
+                            Some(ControllerRef::You) => P0,
+                            Some(ControllerRef::SpecificPlayer { id }) => id,
+                            None => player,
+                            _ => unreachable!(),
+                        };
+                        assert!(
+                            matches!(&runner.state().pending_replacement.as_ref().unwrap().proposed,
+                            ProposedEvent::ZoneChange { object_id, performed_by: Some(actor), from: Zone::Library, to: Zone::Hand, .. } if *object_id == cards[index] && *actor == expected)
+                        );
+                        assert_eq!(
+                            runner.state().objects[&cards[index]].incarnation,
+                            incarnation,
+                            "the selected incarnation is still the proposed card"
+                        );
+                        events.extend(
+                            runner
+                                .act(GameAction::ChooseReplacement { index: 1 })
+                                .unwrap()
+                                .events,
+                        );
+                    }
+                }
+                let missing = !prior_choice
+                    && matches!(child_actor, Some(ControllerRef::ChosenPlayer { .. }));
+                assert!(cards.iter().all(|id| runner.state().objects[id].zone
+                    == if missing { Zone::Library } else { Zone::Hand }));
+                for (index, player) in [P0, P1, PlayerId(2)].into_iter().enumerate() {
+                    assert_eq!(
+                        runner.state().players
+                            [if controller_head { P0 } else { player }.0 as usize]
+                            .hand
+                            .contains(&cards[index]),
+                        !missing,
+                        "actor does not replace the searcher/recipient"
+                    );
+                }
+                if controller_head {
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(
+                                event,
+                                GameEvent::HiddenSearchViewed { searcher: P0, .. }
+                            ))
+                            .count(),
+                        3
+                    );
+                    assert!(runner.state().players[P1.0 as usize].hand.is_empty());
+                    assert!(runner.state().players[2].hand.is_empty());
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(event,
+                        GameEvent::StackResolved { object_id } if *object_id == spell))
+                            .count(),
+                        1,
+                        "the ordinary head fallback resolves its source once"
+                    );
+                }
+                assert_eq!(runner.life(P0), 21);
+                assert_eq!(runner.life(P1), if prior_choice { 26 } else { 20 });
+                assert!(runner.state().pending_scoped_library_search.is_none());
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), if prior_choice { 4 } else { 1 });
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+                assert!(runner.state().stack.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1935,6 +2207,11 @@ mod tests {
             )
         };
         assert!(has_no_resolution_riders(&bare()), "reach: a bare effect");
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = bare();
+            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(!has_no_resolution_riders(&marked), "unconsumed {actor:?}");
+        }
         type Mutation = fn(&mut ResolvedAbility);
         let riders: [(&str, Mutation); 8] = [
             ("sub_ability", |a| a.sub_ability = Some(Box::new(a.clone()))),

@@ -892,16 +892,12 @@ fn pay_top_library_exile_cost(
 /// normal player-scope driver cannot own this grammar: it would create one
 /// token per decline, whereas the printed instruction creates one batch after
 /// every player has made their choice.
-pub(crate) fn begin_player_scope_token_unless_sacrifice(
-    state: &mut GameState,
+pub(crate) fn player_scope_token_unless_sacrifice_cost(
     ability: &ResolvedAbility,
-    players: Vec<PlayerId>,
-) -> bool {
-    let Some(modifier) = ability.unless_pay.as_ref() else {
-        return false;
-    };
+) -> Option<&AbilityCost> {
+    let modifier = ability.unless_pay.as_ref()?;
     let AbilityCost::Sacrifice(cost) = &modifier.cost else {
-        return false;
+        return None;
     };
     // The scoped resolver owns the actual payer. Oracle lowering can preserve
     // an anaphoric "they" as `Player` before the outer player scope is applied.
@@ -916,11 +912,20 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
             }
         )
     ) {
-        return false;
+        return None;
     }
-    let Some((current_player, remaining_players)) = players.split_first() else {
-        return false;
-    };
+    Some(&modifier.cost)
+}
+
+pub(crate) fn begin_player_scope_token_unless_sacrifice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    players: Vec<PlayerId>,
+    cost: &AbilityCost,
+) {
+    let (current_player, remaining_players) = players
+        .split_first()
+        .expect("aggregate admission has payers");
 
     let mut pending_effect = ability.clone();
     pending_effect.player_scope = None;
@@ -933,10 +938,9 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
         remaining_players: remaining_players.to_vec(),
         declining_players: Vec::new(),
         current_player: *current_player,
-        cost: modifier.cost.clone(),
+        cost: cost.clone(),
     }));
     set_player_scope_unless_payment_waiting_for(state);
-    true
 }
 
 fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
@@ -954,7 +958,40 @@ fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
     };
 }
 
-fn advance_player_scope_token_unless_payment(
+/// The canonical aggregate owns the full effect/cost/payer context, not every
+/// payment or replacement that happens to carry the same source id.
+pub(crate) fn player_scope_token_unless_payment_owns_live_work(state: &GameState) -> bool {
+    let Some(pending) = state.pending_player_scope_unless_payment.as_ref() else {
+        return false;
+    };
+    match &state.waiting_for {
+        WaitingFor::UnlessPayment {
+            player,
+            cost,
+            pending_effect,
+            trigger_event: None,
+            remaining,
+            ..
+        } => {
+            *player == pending.current_player
+                && cost == &pending.cost
+                && pending_effect == &pending.pending_effect
+                && remaining.is_empty()
+        }
+        WaitingFor::WardSacrificeChoice {
+            player,
+            pending_effect,
+            remaining: 1,
+            min_total_power: None,
+            ..
+        } => *player == pending.current_player && pending_effect == &pending.pending_effect,
+        _ => matches!(state.pending_cost_move_resume.as_ref(),
+            Some(PendingCostMoveResume::WardSacrificePayment { player, pending_effect, .. })
+                if *player == pending.current_player && pending_effect == &pending.pending_effect),
+    }
+}
+
+pub(crate) fn advance_player_scope_token_unless_payment(
     state: &mut GameState,
     player: PlayerId,
     paid: bool,
@@ -963,8 +1000,20 @@ fn advance_player_scope_token_unless_payment(
     let Some(mut pending) = state.pending_player_scope_unless_payment.take() else {
         unreachable!("player-scope unless settlement requires aggregate state")
     };
-    if !paid {
+    if !paid && !pending.declining_players.contains(&player) {
         pending.declining_players.push(player);
+    }
+    // CR 800.4f + CR 118.12a: Every already-admitted unasked departed
+    // payer settles unpaid once; absence before admission had no slot.
+    for player in &pending.remaining_players {
+        if !state
+            .players
+            .get(player.0 as usize)
+            .is_some_and(|candidate| !candidate.is_eliminated)
+            && !pending.declining_players.contains(player)
+        {
+            pending.declining_players.push(*player);
+        }
     }
     pending.remaining_players.retain(|player| {
         state
@@ -1005,21 +1054,11 @@ fn settle_player_scope_token_unless_payment(
         }
         effects::resolve_ability_chain(state, &effect, events, 0)
             .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+    } else {
+        effects::skip_instruction_and_dependents(state, &pending.pending_effect, events, 0)
+            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
     }
     Ok(state.waiting_for.clone())
-}
-
-/// CR 800.4a + CR 101.4: After eliminating the current final payer, settle
-/// the same aggregate token batch the ordinary payment path would settle.
-pub(crate) fn settle_eliminated_player_scope_token_unless_payment(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    let pending = state
-        .pending_player_scope_unless_payment
-        .take()
-        .expect("elimination settlement requires aggregate state");
-    settle_player_scope_token_unless_payment(state, pending, events)
 }
 
 fn finish_player_scope_token_unless_payment(
@@ -1083,9 +1122,10 @@ pub(super) fn handle_unless_payment(
         .is_some_and(|pending| {
             matches!(
                 &waiting_for,
-                WaitingFor::UnlessPayment { player, pending_effect, .. }
+                WaitingFor::UnlessPayment { player, cost, pending_effect, .. }
                     if *player == pending.current_player
-                        && pending_effect.source_id == pending.pending_effect.source_id
+                        && cost == &pending.cost
+                        && pending_effect == &pending.pending_effect
             )
         })
     {
@@ -2397,7 +2437,7 @@ fn finish_ward_sacrifice_payment(
     if state
         .pending_player_scope_unless_payment
         .as_ref()
-        .is_some_and(|pending| pending.pending_effect.source_id == pending_effect.source_id)
+        .is_some_and(|pending| pending.pending_effect.as_ref() == &pending_effect)
     {
         let player = state
             .pending_player_scope_unless_payment

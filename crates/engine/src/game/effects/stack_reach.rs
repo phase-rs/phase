@@ -733,6 +733,10 @@ fn proposed_events(
     });
     let source = Some(bound.source_id);
     let damage = |source_id: ObjectId, target: TargetRef| ProposedEvent::Damage {
+        source_identity: bound
+            .context
+            .source_identity
+            .filter(|identity| identity.reference.object_id == source_id),
         source_id,
         target,
         amount: 1,

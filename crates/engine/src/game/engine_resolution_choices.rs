@@ -33,7 +33,50 @@ use super::{
     zone_pipeline,
 };
 
-/// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
+/// CR 101.4: Order and selection answers share terminal simultaneous-action
+/// stamping, observer batching and continuation/priority settlement.
+pub(super) fn settle_player_scope_sacrifice_outcome(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: crate::types::player::PlayerId,
+    outcome: effects::PendingPlayerScopeSacrificeOutcome,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionChoiceOutcome, EngineError> {
+    if let effects::PendingPlayerScopeSacrificeOutcome::Completed {
+        events_before_sacrifice,
+        events_after_sacrifice,
+        sacrificed_count,
+    } = outcome
+    {
+        effects::stamp_active_player_action_completion(
+            state,
+            source_id,
+            crate::types::ability::EffectResolutionResult {
+                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                count: sacrificed_count,
+            },
+        );
+        if state.active_ability_continuation().is_none() {
+            state.finish_active_paused_post_replacement_dispatch();
+        }
+        set_priority(state, player);
+        resume_with_error_propagation(state, events)?;
+        if let Some(outcome) = batch_or_drain_observer_triggers(
+            state,
+            events,
+            events_before_sacrifice,
+            events_after_sacrifice,
+            false,
+        ) {
+            return Ok(outcome);
+        }
+    }
+    Ok(ResolutionChoiceOutcome::WaitingFor(
+        state.waiting_for.clone(),
+    ))
+}
+
+/// CR 115.1a + CR 601.2c: Dig's selected result cannot replace
 /// an instruction's announced targets. Result-dependent instructions bind the
 /// settled selection, including clearing a previous result on an empty choice.
 fn bind_dig_continuation_targets(chain: &mut ResolvedAbility, selected: &[ObjectId]) {
@@ -3865,6 +3908,19 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
             if matches!(purpose, ZoneOpponentChooserPurpose::PerPlayerChoiceOrder) {
+                if matches!(ability.effect, Effect::Sacrifice { .. }) {
+                    let outcome = effects::answer_player_scope_sacrifice_order(
+                        state, &ability, player, opponent, events,
+                    )
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    return settle_player_scope_sacrifice_outcome(
+                        state,
+                        ability.source_id,
+                        player,
+                        outcome,
+                        events,
+                    );
+                }
                 // CR 101.4c: the chooser picked whose selection to make next.
                 // Candidates may include the chooser themself (each player).
                 effects::choose_from_zone::answer_per_player_order(
@@ -6062,6 +6118,17 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            if matches!(effect_kind, EffectKind::Sacrifice)
+                && state
+                    .pending_player_scope_sacrifice_choice
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.admitted_actors.is_some() && pending.ability.source_id == source_id
+                    })
+            {
+                effects::validate_player_scope_sacrifice_on_restore(state)
+                    .map_err(EngineError::InvalidAction)?;
+            }
             let legacy_optional_attach_empty = chosen.is_empty()
                 && matches!(effect_kind, EffectKind::Attach)
                 && !up_to
@@ -6272,7 +6339,7 @@ pub(super) fn handle_resolution_choice(
             }
 
             if matches!(effect_kind, EffectKind::Sacrifice)
-                && state.pending_player_scope_sacrifice_choice.is_some()
+                && effects::owns_player_scope_sacrifice_selection(state, player, source_id)
             {
                 // CR 101.4: If multiple players make choices for one
                 // instruction, collect those choices before the simultaneous
@@ -6281,54 +6348,9 @@ pub(super) fn handle_resolution_choice(
                     state, player, &chosen, events,
                 )
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-                match outcome {
-                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
-                        events_before_sacrifice,
-                        events_after_sacrifice,
-                        sacrificed_count,
-                    } => {
-                        effects::stamp_active_player_action_completion(
-                            state,
-                            source_id,
-                            crate::types::ability::EffectResolutionResult {
-                                cause: crate::types::ability::ThisWayCause::Sacrificed,
-                                count: sacrificed_count,
-                            },
-                        );
-                        // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
-                        // complete body of a paused post-replacement dispatch
-                        // (Devour). Retire that exact resident before its outer
-                        // ChangeZone iteration resumes; a chained ability
-                        // continuation remains its owner.
-                        if state.active_ability_continuation().is_none() {
-                            state.finish_active_paused_post_replacement_dispatch();
-                        }
-                        set_priority(state, player);
-                        resume_with_error_propagation(state, events)?;
-                        if let Some(outcome) = batch_or_drain_observer_triggers(
-                            state,
-                            events,
-                            events_before_sacrifice,
-                            events_after_sacrifice,
-                            false,
-                        ) {
-                            return Ok(outcome);
-                        }
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                }
+                return settle_player_scope_sacrifice_outcome(
+                    state, source_id, player, outcome, events,
+                );
             }
 
             if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {

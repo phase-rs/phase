@@ -921,7 +921,8 @@ fn definition_is_componentwise_known_zero(
     root: bool,
     parent_target_bound: bool,
 ) -> bool {
-    if definition.kind != AbilityKind::Spell
+    if definition.instruction_actor.is_some()
+        || definition.kind != AbilityKind::Spell
         || definition.cost.is_some()
         || definition.else_ability.is_some()
         || definition.duration.is_some()
@@ -1684,10 +1685,10 @@ mod tests {
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
-        CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
-        CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FilterProp,
-        ManaProduction, ModalChoice, MultiTargetSpec, ParsedCondition, PlayerFilter,
-        PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        CastPermissionConstraint, CastingPermission, CastingRestriction, ChosenGroupId, Comparator,
+        ControllerRef, CountScope, CounterCostSelection, DelayedTriggerCondition, Duration,
+        EffectKind, FilterProp, ManaProduction, ModalChoice, MultiTargetSpec, ParsedCondition,
+        PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
         SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
         TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
@@ -4727,6 +4728,210 @@ mod tests {
     }
 
     #[test]
+    fn instruction_actor_broad_consumer_root_and_recursive_payloads_keep_the_issued_zero_cast() {
+        for position in 0..4 {
+            let (mut control, harvest) = funded_zero_harvest_state();
+            let source = create_object(
+                &mut control,
+                CardId(91_810),
+                P0,
+                "Synthetic stable actor consumer".into(),
+                Zone::Battlefield,
+            );
+            let mut definition = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            let child = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            match position {
+                0 => {}
+                1 => definition.sub_ability = Some(Box::new(child)),
+                2 => definition.else_ability = Some(Box::new(child)),
+                3 => definition.mode_abilities.push(child),
+                _ => unreachable!(),
+            }
+            assert!(ability_definition_is_cast_stable_for_pre_cast(&definition));
+            assert!(!engine::game::mana_abilities::is_mana_ability(&definition));
+            Arc::make_mut(&mut control.objects.get_mut(&source).unwrap().abilities)
+                .push(definition);
+            let object = &control.objects[&source];
+            assert_eq!(
+                (object.owner, object.controller, object.zone),
+                (P0, P0, Zone::Battlefield)
+            );
+            assert!(
+                object.card_types.core_types.is_empty()
+                    && object.keywords.is_empty()
+                    && object.static_definitions.is_empty()
+                    && object.trigger_definitions.is_empty()
+                    && object.replacement_definitions.is_empty()
+            );
+            assert_eq!(object.abilities.len(), 1);
+            assert!(control.stack.is_empty());
+            assert_eq!(harvest_amount(&control, harvest), Some(0));
+            assert!(!object_has_cast_unstable_consumer(
+                &control, P0, object, None
+            ));
+            assert!(
+                !zero_cast_is_retained(&control, harvest),
+                "all-None stable control reaches real known-zero rejection"
+            );
+            for actor in [
+                ControllerRef::You,
+                ControllerRef::ScopedPlayer,
+                ControllerRef::SpecificPlayer { id: P1 },
+                ControllerRef::ChosenPlayer { index: 0 },
+            ] {
+                let mut marked = control.clone();
+                let root =
+                    &mut Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0];
+                let node = match position {
+                    0 => root,
+                    1 => root.sub_ability.as_deref_mut().unwrap(),
+                    2 => root.else_ability.as_deref_mut().unwrap(),
+                    3 => &mut root.mode_abilities[0],
+                    _ => unreachable!(),
+                };
+                node.instruction_actor = (Some(actor.clone())).map(Into::into);
+                let root = &marked.objects[&source].abilities[0];
+                assert_eq!(
+                    root.instruction_actor,
+                    (position == 0).then_some(actor.clone())
+                );
+                assert!(!ability_definition_is_cast_stable_for_pre_cast(root));
+                assert_eq!(harvest_amount(&marked, harvest), Some(0));
+                assert!(object_has_cast_unstable_consumer(
+                    &marked,
+                    P0,
+                    &marked.objects[&source],
+                    None
+                ));
+                assert!(zero_cast_is_retained(&marked, harvest), "position {position}, {actor:?}: actual issued candidate remains available to normal scoring");
+                let root =
+                    &mut Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0];
+                let node = match position {
+                    0 => root,
+                    1 => root.sub_ability.as_deref_mut().unwrap(),
+                    2 => root.else_ability.as_deref_mut().unwrap(),
+                    3 => &mut root.mode_abilities[0],
+                    _ => unreachable!(),
+                };
+                assert_eq!(node.instruction_actor.take(), Some(actor));
+                assert!(ability_definition_is_cast_stable_for_pre_cast(
+                    &marked.objects[&source].abilities[0]
+                ));
+                assert_eq!(harvest_amount(&marked, harvest), Some(0));
+                assert!(!object_has_cast_unstable_consumer(
+                    &marked,
+                    P0,
+                    &marked.objects[&source],
+                    None
+                ));
+                assert!(
+                    !zero_cast_is_retained(&marked, harvest),
+                    "clearing only the marker restores rejection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn instruction_actor_narrow_unbound_mana_exception_refuses_each_authority_without_hard_veto() {
+        let (mut control, harvest) = funded_zero_harvest_state();
+        let source = create_object(
+            &mut control,
+            CardId(91_811),
+            P0,
+            "Synthetic unbound-X actor consumer".into(),
+            Zone::Battlefield,
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".into() },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut control.objects.get_mut(&source).unwrap().abilities).push(definition);
+        let definition = &control.objects[&source].abilities[0];
+        assert!(engine::game::mana_abilities::is_mana_ability(definition));
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(definition));
+        assert!(ability_definition_has_only_unbound_variable_quantities_for_pre_cast(definition));
+        assert!(!object_has_cast_unstable_consumer(
+            &control,
+            P0,
+            &control.objects[&source],
+            None
+        ));
+        assert_eq!(harvest_amount(&control, harvest), Some(0));
+        assert!(control.stack.is_empty());
+        assert!(
+            !zero_cast_is_retained(&control, harvest),
+            "positive reach of the exact unbound-X exception"
+        );
+        for actor in [
+            ControllerRef::You,
+            ControllerRef::ScopedPlayer,
+            ControllerRef::SpecificPlayer { id: P1 },
+            ControllerRef::ChosenPlayer { index: 0 },
+        ] {
+            let mut marked = control.clone();
+            Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0]
+                .instruction_actor = (Some(actor.clone())).map(Into::into);
+            let definition = &marked.objects[&source].abilities[0];
+            assert!(
+                matches!(definition.effect.as_ref(), Effect::Mana { produced: ManaProduction::Colorless { count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } } }, restrictions, grants, expiry: None, target: None } if name == "X" && restrictions.is_empty() && grants.is_empty())
+            );
+            assert!(engine::game::mana_abilities::is_mana_ability(definition));
+            assert!(!ability_definition_is_cast_stable_for_pre_cast(definition));
+            assert!(
+                !ability_definition_has_only_unbound_variable_quantities_for_pre_cast(definition)
+            );
+            assert!(object_has_cast_unstable_consumer(
+                &marked,
+                P0,
+                &marked.objects[&source],
+                None
+            ));
+            assert_eq!(harvest_amount(&marked, harvest), Some(0));
+            assert!(zero_cast_is_retained(&marked, harvest), "{actor:?}");
+            Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0]
+                .instruction_actor = None;
+            assert!(
+                ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
+                    &marked.objects[&source].abilities[0]
+                )
+            );
+            assert!(!object_has_cast_unstable_consumer(
+                &marked,
+                P0,
+                &marked.objects[&source],
+                None
+            ));
+            assert_eq!(harvest_amount(&marked, harvest), Some(0));
+            assert!(!zero_cast_is_retained(&marked, harvest));
+        }
+    }
+
+    #[test]
     fn zero_cast_battlefield_mana_ability_keeps_zone_reads_but_not_unbound_x() {
         let (mut state, harvest) = funded_zero_harvest_state();
         let source = create_object(
@@ -5928,6 +6133,195 @@ mod tests {
             true,
             false,
         ));
+        for actor in [
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            ControllerRef::ScopedPlayer,
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+            ControllerRef::DeclaredPlayer {
+                group: ChosenGroupId(1),
+            },
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+            ControllerRef::EventTargetController,
+            ControllerRef::DefendingPlayer,
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::SourceChosenPlayer,
+            ControllerRef::TriggeringPlayer,
+            ControllerRef::EnchantedPlayer,
+            ControllerRef::ActivePlayer,
+            ControllerRef::SpecificPlayer { id: P1 },
+        ] {
+            for child_only in [false, true] {
+                let mut definition = zero_controller_gain_definition();
+                if child_only {
+                    definition.sub_ability = Some(Box::new(zero_controller_gain_definition()));
+                }
+                assert!(definition_is_componentwise_known_zero(
+                    state,
+                    &definition,
+                    P0,
+                    source,
+                    true,
+                    false
+                ));
+                let node = if child_only {
+                    definition.sub_ability.as_deref_mut().unwrap()
+                } else {
+                    &mut definition
+                };
+                node.instruction_actor = (Some(actor.clone())).map(Into::into);
+                assert!(
+                    !definition_is_componentwise_known_zero(
+                        state,
+                        &definition,
+                        P0,
+                        source,
+                        true,
+                        false
+                    ),
+                    "child_only={child_only}, {actor:?}"
+                );
+                let node = if child_only {
+                    definition.sub_ability.as_deref_mut().unwrap()
+                } else {
+                    &mut definition
+                };
+                assert_eq!(node.instruction_actor.take(), Some(actor.clone()));
+                assert!(definition_is_componentwise_known_zero(
+                    state,
+                    &definition,
+                    P0,
+                    source,
+                    true,
+                    false
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn instruction_actor_synthetic_zero_candidate_root_and_sub_keep_real_gate_fallback() {
+        for with_child in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = add_zero_controller_gain_spell(
+                &mut scenario,
+                "Synthetic zero actor candidate",
+                ManaCost::Cost {
+                    generic: 4,
+                    shards: vec![ManaCostShard::Green],
+                },
+            );
+            scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+            scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+            let mut runner = scenario.build();
+            let mut control = runner.state_mut().clone();
+            control.active_player = P0;
+            control.priority_player = P0;
+            control.waiting_for = WaitingFor::Priority { player: P0 };
+            if with_child {
+                Arc::make_mut(&mut control.objects.get_mut(&spell).unwrap().abilities)[0]
+                    .sub_ability = Some(Box::new(zero_controller_gain_definition()));
+            }
+            let object = &control.objects[&spell];
+            assert_eq!(
+                (object.owner, object.controller, object.zone),
+                (P0, P0, Zone::Hand)
+            );
+            assert_eq!(object.abilities.len(), 1);
+            assert_eq!(object.abilities[0].kind, AbilityKind::Spell);
+            assert!(
+                object.parse_warnings.is_empty()
+                    && object.keywords.is_empty()
+                    && object.trigger_definitions.is_empty()
+                    && object.static_definitions.is_empty()
+                    && object.replacement_definitions.is_empty()
+                    && object.casting_permissions.is_empty()
+                    && object.casting_restrictions.is_empty()
+            );
+            assert!(control.battlefield.is_empty() && control.stack.is_empty());
+            for actor in [
+                ControllerRef::You,
+                ControllerRef::ScopedPlayer,
+                ControllerRef::SpecificPlayer { id: P1 },
+                ControllerRef::ChosenPlayer { index: 0 },
+            ] {
+                let mut state = control.clone();
+                for marker in [None, Some(actor.clone()), None] {
+                    let definition =
+                        &mut Arc::make_mut(&mut state.objects.get_mut(&spell).unwrap().abilities)
+                            [0];
+                    if with_child {
+                        definition
+                            .sub_ability
+                            .as_deref_mut()
+                            .unwrap()
+                            .instruction_actor = (marker.clone()).map(Into::into);
+                        assert_eq!(definition.instruction_actor, None);
+                    } else {
+                        definition.instruction_actor = (marker.clone()).map(Into::into);
+                        assert!(definition.sub_ability.is_none());
+                    }
+                    let definition = &state.objects[&spell].abilities[0];
+                    assert!(matches!(
+                        definition.effect.as_ref(),
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 0 },
+                            player: TargetFilter::Controller
+                        }
+                    ));
+                    assert_eq!(
+                        try_resolve_quantity_in_source_context(
+                            &state,
+                            match definition.effect.as_ref() {
+                                Effect::GainLife { amount, .. } => amount,
+                                _ => unreachable!(),
+                            },
+                            P0,
+                            spell
+                        ),
+                        Some(0)
+                    );
+                    if with_child {
+                        let child = definition.sub_ability.as_deref().unwrap();
+                        assert_eq!(child.instruction_actor, marker);
+                        assert!(matches!(
+                            child.effect.as_ref(),
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 0 },
+                                player: TargetFilter::Controller
+                            }
+                        ));
+                        assert!(SubAbilityLink::is_continuation(&child.sub_link));
+                    }
+                    let unproved = marker.is_some();
+                    assert_eq!(
+                        ability_definition_is_cast_stable_for_pre_cast(definition),
+                        !unproved
+                    );
+                    assert_eq!(
+                        definition_is_componentwise_known_zero(
+                            &state, definition, P0, spell, true, false
+                        ),
+                        !unproved
+                    );
+                    assert_eq!(
+                        object_has_cast_unstable_consumer(
+                            &state,
+                            P0,
+                            &state.objects[&spell],
+                            Some(spell)
+                        ),
+                        unproved,
+                        "candidate-self census must not suppress the new authority"
+                    );
+                    assert_eq!(cast_has_relevant_payoff(&state, P0, Some(spell)), unproved);
+                    assert_eq!(zero_cast_is_retained(&state, spell), unproved, "with_child={with_child}, marker={marker:?}: real issued Auto candidate remains available only for unproved authority");
+                }
+            }
+        }
     }
 
     #[test]

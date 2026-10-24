@@ -29,6 +29,7 @@ use crate::types::proposed_event::ProposedEvent;
 #[derive(Clone, Copy)]
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
+    pub(crate) source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
     /// CR 400.7: The source incarnation observed before the damage event is
     /// applied. This remains authoritative if the source changes zones while a
     /// replacement effect pauses the event.
@@ -361,6 +362,10 @@ impl DamageContext {
     pub(crate) fn from_source(state: &GameState, source_id: ObjectId) -> Option<Self> {
         state.objects.get(&source_id).map(|obj| Self {
             source_id,
+            source_identity: Some(crate::types::identifiers::ObjectIdentityBinding::new(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
+                obj.zone,
+            )),
             source_incarnation: Some(obj.incarnation),
             controller: obj.controller,
             source_is_creature: obj.card_types.core_types.contains(&CoreType::Creature),
@@ -402,12 +407,66 @@ impl DamageContext {
         })
     }
 
+    /// CR 113.7a + CR 608.2h: retain the selected source occurrence after
+    /// costs, replacements, or a nested prompt move its storage row.
+    pub(crate) fn from_identity(
+        state: &GameState,
+        identity: crate::types::identifiers::ObjectIdentityBinding,
+    ) -> Option<Self> {
+        let reference = identity.reference;
+        if state
+            .objects
+            .get(&reference.object_id)
+            .is_some_and(|source| {
+                source.incarnation == reference.incarnation && source.zone == identity.expected_zone
+            })
+        {
+            let mut context = Self::from_source(state, reference.object_id)?;
+            context.controller =
+                crate::game::targeting::source_controller_at_identity(state, identity)?;
+            context.source_identity = Some(identity);
+            return Some(context);
+        }
+        let lki = match identity.expected_zone {
+            crate::types::zones::Zone::Battlefield => state
+                .lki_by_incarnation
+                .get(&reference.object_id)
+                .and_then(|history| history.get(&reference.incarnation))
+                .cloned(),
+            crate::types::zones::Zone::Stack => state
+                .departed_stack_spells
+                .get(&reference.object_id)
+                .and_then(|history| history.get(&reference.incarnation))
+                .map(|spell| spell.object.snapshot_public_characteristics()),
+            _ => None,
+        }?;
+        let has = |kind| lki.keywords.iter().any(|keyword| keyword.kind() == kind);
+        let mut context = Self::fallback(reference.object_id, lki.controller);
+        context.source_identity = Some(identity);
+        context.source_incarnation = Some(reference.incarnation);
+        context.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+        context.has_deathtouch = has(KeywordKind::Deathtouch);
+        context.has_lifelink = has(KeywordKind::Lifelink);
+        context.has_wither = has(KeywordKind::Wither);
+        context.has_infect = has(KeywordKind::Infect);
+        context.combat_damage_poison = lki
+            .keywords
+            .iter()
+            .filter_map(|keyword| match keyword {
+                crate::types::keywords::Keyword::Toxic(value) => Some(*value),
+                _ => None,
+            })
+            .sum();
+        Some(context)
+    }
+
     /// Fallback context when source no longer exists (all keyword flags false).
     /// CR 702.15c: last known information should be used for lifelink, but if the
     /// source is truly gone with no LKI available, defaulting to false is safe.
     pub(crate) fn fallback(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
             source_id,
+            source_identity: None,
             source_incarnation: None,
             controller,
             source_is_creature: false,
@@ -427,6 +486,7 @@ impl From<DamageContextSnapshot> for DamageContext {
     fn from(snapshot: DamageContextSnapshot) -> Self {
         Self {
             source_id: snapshot.source_id,
+            source_identity: snapshot.source_identity,
             source_incarnation: snapshot.source_incarnation,
             controller: snapshot.controller,
             source_is_creature: snapshot.source_is_creature,
@@ -448,6 +508,7 @@ impl From<&DamageContext> for DamageContextSnapshot {
     fn from(ctx: &DamageContext) -> Self {
         Self {
             source_id: ctx.source_id,
+            source_identity: ctx.source_identity,
             source_incarnation: ctx.source_incarnation,
             controller: ctx.controller,
             source_is_creature: ctx.source_is_creature,
@@ -568,6 +629,7 @@ pub(crate) fn pre_replacement_damage_gate(
     }
 
     Some(ProposedEvent::Damage {
+        source_identity: ctx.source_identity,
         source_id: ctx.source_id,
         target: target.clone(),
         amount,
@@ -1100,12 +1162,12 @@ pub(crate) fn apply_damage_after_replacement(
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
 fn build_remaining_damage_node(
-    damage_source_id: ObjectId,
+    context: &DamageContext,
     controller: PlayerId,
     target: TargetRef,
     amount: u32,
 ) -> ResolvedAbility {
-    ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
                 value: amount as i32,
@@ -1120,9 +1182,12 @@ fn build_remaining_damage_node(
             excess: None,
         },
         vec![target],
-        damage_source_id,
+        context.source_id,
         controller,
-    )
+    );
+    node.context.source_identity = context.source_identity;
+    node.source_incarnation = context.source_incarnation;
+    node
 }
 
 /// CR 120.4b: Build a one-shot continuation that applies an already-replaced
@@ -1193,7 +1258,7 @@ fn stash_remaining_post_replacement_damage(
 fn stash_remaining_damage_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    damage_source_id: ObjectId,
+    context: &DamageContext,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
     let controller = ability.controller;
@@ -1210,10 +1275,9 @@ fn stash_remaining_damage_chain(
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
+    let mut head = build_remaining_damage_node(context, controller, first_target, first_amount);
     for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
+        let node = build_remaining_damage_node(context, controller, target, amount);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1438,7 +1502,7 @@ pub fn resolve(
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(state, ability, &ctx, remaining);
                     return Ok(());
                 }
             }
@@ -1453,7 +1517,7 @@ pub fn resolve(
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(state, ability, &ctx, remaining);
                     return Ok(());
                 }
             }
@@ -1491,6 +1555,7 @@ pub fn resolve_post_replacement(
     };
     let ctx = DamageContext::from(context);
     let event = ProposedEvent::Damage {
+        source_identity: ctx.source_identity,
         source_id: ctx.source_id,
         target,
         amount,
@@ -1530,18 +1595,35 @@ fn single_damage_source(
         Some(DamageSource::Target) => target_damage_source(state, ability),
         // "That creature/permanent deals damage..." inside a triggered ability
         // binds the damage source to the triggering event object.
-        Some(DamageSource::TriggeringSource) => Some(
+        Some(DamageSource::TriggeringSource) => {
+            if let Some(event) = ability.context.replacement_event.as_ref() {
+                return event
+                    .source_identity
+                    .and_then(|identity| DamageContext::from_identity(state, identity));
+            }
             state
                 .current_trigger_event
                 .as_ref()
                 .and_then(crate::game::targeting::extract_source_from_event)
                 .and_then(|id| DamageContext::from_source(state, id))
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
-        None => Some(
-            DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
+        }
+        None => {
+            if let Some(identity) = ability.context.source_identity {
+                let mut context =
+                    DamageContext::from_identity(state, identity).unwrap_or_else(|| {
+                        DamageContext::fallback(ability.source_id, ability.controller)
+                    });
+                context.source_identity = Some(identity);
+                context.source_incarnation = Some(identity.reference.incarnation);
+                Some(context)
+            } else {
+                Some(
+                    DamageContext::from_source(state, ability.source_id).unwrap_or_else(|| {
+                        DamageContext::fallback(ability.source_id, ability.controller)
+                    }),
+                )
+            }
+        }
         // CR 120.1: multi-source per-power damage is dispatched to
         // `resolve_each_target_power_damage` (each source has its own
         // `DamageContext`) before a single source is asked for.
@@ -1977,14 +2059,13 @@ pub fn resolve_all(
         Some(DamageSource::Target) => {
             target_source_ctx.expect("Target damage source resolved before the recipient set")
         }
-        Some(DamageSource::TriggeringSource) => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .and_then(|id| DamageContext::from_source(state, id))
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        None => DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        Some(DamageSource::TriggeringSource) | None => {
+            let Some(context) = single_damage_source(state, ability, damage_source) else {
+                no_damage_source_resolved(ability, events);
+                return Ok(());
+            };
+            context
+        }
         // CR 120.1: `EachTarget` (multi-source per-power) is only produced by the
         // parser for the single-recipient `DealDamage` shape; the batch
         // `DamageAll` form is never constructed with it.
@@ -2027,7 +2108,7 @@ pub fn resolve_all(
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
                 let remaining = recipient_amounts[i + 1..].iter().cloned();
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                stash_remaining_damage_chain(state, ability, &ctx, remaining);
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
@@ -2336,8 +2417,10 @@ pub fn resolve_each_player(
         }
     };
 
-    let ctx = DamageContext::from_source(state, ability.source_id)
-        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+    let Some(ctx) = single_damage_source(state, ability, None) else {
+        no_damage_source_resolved(ability, events);
+        return Ok(());
+    };
 
     // Collect matching player IDs first to avoid borrow issues.
     let player_ids: Vec<PlayerId> = state
@@ -2638,7 +2721,7 @@ pub fn resolve_each_player(
                             (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
                         })
                         .collect();
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(state, ability, &ctx, remaining);
                     // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
                     // so the drain re-emits the parent event the non-pause tail fires.
                     mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
@@ -4471,6 +4554,7 @@ mod tests {
             let state = runner.state_mut();
             let ctx = DamageContext::from_source(state, guardian).expect("guardian source ctx");
             let event = ProposedEvent::Damage {
+                source_identity: None,
                 source_id: guardian,
                 target: TargetRef::Object(victim),
                 amount: 1,
@@ -4542,6 +4626,7 @@ mod tests {
                 .push(CoreType::Creature);
             let ctx = DamageContext::from_source(state, id).expect("pinger source ctx");
             let event = ProposedEvent::Damage {
+                source_identity: None,
                 source_id: id,
                 target: TargetRef::Player(P0),
                 amount: 1,
@@ -4612,6 +4697,7 @@ mod tests {
         );
         let ctx = DamageContext::fallback(ObjectId(100), PlayerId(0));
         let event = ProposedEvent::Damage {
+            source_identity: ctx.source_identity,
             source_id: ctx.source_id,
             target: TargetRef::Object(target),
             amount: 2,
@@ -4658,6 +4744,7 @@ mod tests {
         state.objects.get_mut(&source).unwrap().incarnation += 1;
 
         let event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: source,
             target: TargetRef::Object(target),
             amount: 1,
@@ -4696,6 +4783,7 @@ mod tests {
 
         let ctx = DamageContext::fallback(source, P0);
         let event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: source,
             target: TargetRef::Object(target),
             amount: 2,
@@ -4725,6 +4813,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ctx = DamageContext::fallback(ObjectId(100), PlayerId(0));
         let event = ProposedEvent::Damage {
+            source_identity: ctx.source_identity,
             source_id: ctx.source_id,
             target: TargetRef::Player(PlayerId(1)),
             amount: 2,

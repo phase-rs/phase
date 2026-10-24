@@ -142,7 +142,7 @@ fn resolve_advokist_upkeep(
     source: ObjectId,
     p1_creature_a: ObjectId,
     p1_creature_b: ObjectId,
-) {
+) -> Vec<GameEvent> {
     process_triggers(
         runner.state_mut(),
         &[GameEvent::PhaseChanged {
@@ -151,6 +151,7 @@ fn resolve_advokist_upkeep(
     );
 
     let mut optional_players = Vec::new();
+    let mut resolution_events = Vec::new();
     for _ in 0..96 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalEffectChoice {
@@ -158,36 +159,48 @@ fn resolve_advokist_upkeep(
             } => {
                 assert_eq!(source_id, source, "each offer comes from Advokist");
                 optional_players.push(player);
-                runner
-                    .act(GameAction::DecideOptionalEffect {
-                        accept: player == P1,
-                    })
-                    .expect("answering an Advokist optional offer succeeds");
+                resolution_events.extend(
+                    runner
+                        .act(GameAction::DecideOptionalEffect {
+                            accept: player == P1,
+                        })
+                        .expect("answering an Advokist optional offer succeeds")
+                        .events,
+                );
             }
             WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
                 assert_eq!(player, P1, "the accepting player chooses their creature");
                 assert!(cards.contains(&p1_creature_a) && cards.contains(&p1_creature_b));
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: vec![p1_creature_a],
-                    })
-                    .expect("P1 can select their creature for the counters");
+                resolution_events.extend(
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![p1_creature_a],
+                        })
+                        .expect("P1 can select their creature for the counters")
+                        .events,
+                );
             }
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(engine::types::ability::TargetRef::Object(p1_creature_a)),
-                    })
-                    .expect("P1 can target their creature for the counters");
+                resolution_events.extend(
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(p1_creature_a)),
+                        })
+                        .expect("P1 can target their creature for the counters")
+                        .events,
+                );
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
                 assert_eq!(optional_players, vec![P0, P1, P2]);
-                return;
+                return resolution_events;
             }
             WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("priority progresses the upkeep trigger");
+                resolution_events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority progresses the upkeep trigger")
+                        .events,
+                );
             }
             other => panic!("unexpected Advokist resolution state: {other:?}"),
         }
@@ -220,7 +233,13 @@ fn orzhov_advokist_restriction_tracks_acceptance_controller_changes_and_expiry()
             .unwrap()
             .summoning_sick = false;
     }
-    resolve_advokist_upkeep(&mut runner, advokist, p1_creature_a, p1_creature_b);
+    let events = resolve_advokist_upkeep(&mut runner, advokist, p1_creature_a, p1_creature_b);
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, counter_type: CounterType::Plus1Plus1, count: 2, actor: P1 }
+            if *object_id == p1_creature_a)).count(), 1, "the accepting P1 places their own two counters");
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::PutCounter, source_id, .. }
+            if *source_id == advokist)).count(), 1, "one same-source counter instruction completes");
 
     assert_eq!(plus_counters(&runner, p1_creature_a), 2);
     assert_eq!(plus_counters(&runner, p1_creature_b), 0);
@@ -366,7 +385,13 @@ fn scoped_advokist_planeswalker_only_restriction_snapshots_controller_provenance
             .unwrap()
             .summoning_sick = false;
     }
-    resolve_advokist_upkeep(&mut runner, source, p1_a, p1_b);
+    let events = resolve_advokist_upkeep(&mut runner, source, p1_a, p1_b);
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, counter_type: CounterType::Plus1Plus1, count: 2, actor: P1 }
+            if *object_id == p1_a)).count(), 1, "the accepting P1 places their own two counters");
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::PutCounter, source_id, .. }
+            if *source_id == source)).count(), 1, "one same-source counter instruction completes");
 
     assert!(matches!(
         runner.state().restrictions.as_slice(),

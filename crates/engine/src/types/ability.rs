@@ -18,7 +18,8 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+    LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -6506,6 +6507,140 @@ where
         return Ok(exile.then_some(SpellStackToGraveyardReplacement::Exile));
     }
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
+/// CR 615.5 + CR 608.2h: the original event owned by a replacement follow-up.
+/// An owned snapshot with missing members must not borrow a nested event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacementEventContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<ObjectIdentityBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_target: Option<TargetRef>,
+}
+
+/// CR 608.2c: an instruction's single-player authority. Controller references
+/// retain their legacy wire values; event references have a checked envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionActorRef(InstructionActorAuthority);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum InstructionActorAuthority {
+    Controller(ControllerRef),
+    Event(InstructionEventAuthority),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionEventAuthority {
+    event_reference: TargetFilter,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_event: Option<ReplacementEventContext>,
+}
+
+impl InstructionActorRef {
+    pub(crate) fn classify<T>(
+        &self,
+        controller: impl FnOnce(&ControllerRef) -> T,
+        event: impl FnOnce(&TargetFilter) -> T,
+    ) -> T {
+        match &self.0 {
+            InstructionActorAuthority::Controller(reference) => controller(reference),
+            InstructionActorAuthority::Event(authority) => event(&authority.event_reference),
+        }
+    }
+
+    pub fn controller(reference: ControllerRef) -> Self {
+        Self(InstructionActorAuthority::Controller(reference))
+    }
+
+    pub fn event(reference: TargetFilter) -> Option<Self> {
+        match reference {
+            TargetFilter::TriggeringSpellController
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner => Some(Self(
+                InstructionActorAuthority::Event(InstructionEventAuthority {
+                    event_reference: reference,
+                    replacement_event: None,
+                }),
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn as_controller(&self) -> Option<&ControllerRef> {
+        match &self.0 {
+            InstructionActorAuthority::Controller(reference) => Some(reference),
+            InstructionActorAuthority::Event(_) => None,
+        }
+    }
+
+    pub fn as_event(&self) -> Option<&TargetFilter> {
+        match &self.0 {
+            InstructionActorAuthority::Controller(_) => None,
+            InstructionActorAuthority::Event(event) => Some(&event.event_reference),
+        }
+    }
+
+    pub fn replacement_event(&self) -> Option<&ReplacementEventContext> {
+        match &self.0 {
+            InstructionActorAuthority::Controller(_) => None,
+            InstructionActorAuthority::Event(event) => event.replacement_event.as_ref(),
+        }
+    }
+
+    pub(crate) fn capture_replacement_event(&mut self, context: &ReplacementEventContext) {
+        if let InstructionActorAuthority::Event(event) = &mut self.0 {
+            if event.event_reference != TargetFilter::TriggeringSpellController
+                && event.replacement_event.is_none()
+            {
+                event.replacement_event = Some(context.clone());
+            }
+        }
+    }
+}
+
+impl From<ControllerRef> for InstructionActorRef {
+    fn from(reference: ControllerRef) -> Self {
+        Self::controller(reference)
+    }
+}
+
+impl Serialize for InstructionActorRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InstructionActorRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match InstructionActorAuthority::deserialize(deserializer)? {
+            InstructionActorAuthority::Controller(reference) => Ok(Self::controller(reference)),
+            InstructionActorAuthority::Event(event) => {
+                let mut actor = Self::event(event.event_reference)
+                    .ok_or_else(|| de::Error::custom("unsupported instruction event reference"))?;
+                if let Some(context) = event.replacement_event {
+                    if actor.as_event() == Some(&TargetFilter::TriggeringSpellController) {
+                        return Err(de::Error::custom(
+                            "trigger actor cannot own a replacement event",
+                        ));
+                    }
+                    if context.source_identity.is_some_and(|identity| {
+                        context.source_id != Some(identity.reference.object_id)
+                    }) {
+                        return Err(de::Error::custom("replacement source identity mismatch"));
+                    }
+                    actor.capture_replacement_event(&context);
+                }
+                Ok(actor)
+            }
+        }
+    }
 }
 
 /// Controller reference for filter matching.
@@ -16103,6 +16238,9 @@ pub enum ExcessRecipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageContextSnapshot {
     pub source_id: ObjectId,
+    /// CR 608.2h: the damaging source's expected-zone occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<ObjectIdentityBinding>,
     /// CR 400.7: Exact source identity captured when the damage context was
     /// created. A replacement pause must not rebind a later incarnation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27789,6 +27927,9 @@ pub struct ReturnResultReadSpec {
 pub struct AbilityDefinition {
     pub kind: AbilityKind,
     pub effect: Box<Effect>,
+    /// CR 608.2c + CR 109.5: The instruction's grammatical actor, independently
+    /// of an enclosing player's scope and of the instruction's recipient.
+    pub instruction_actor: Option<InstructionActorRef>,
     /// Group announced by this clause, including its mutually exclusive cost branch.
     pub declares_chosen_group: Option<ChosenGroupId>,
     /// Exact announced group consumed by this clause.
@@ -27974,6 +28115,8 @@ struct AbilityDefinitionRepr<'a> {
     kind: &'a AbilityKind,
     effect: &'a Effect,
     #[serde(skip_serializing_if = "Option::is_none")]
+    instruction_actor: &'a Option<InstructionActorRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     declares_chosen_group: &'a Option<ChosenGroupId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reads_chosen_group: &'a Option<ChosenGroupId>,
@@ -28066,6 +28209,7 @@ impl Serialize for AbilityDefinition {
         let AbilityDefinition {
             kind,
             effect,
+            instruction_actor,
             declares_chosen_group,
             reads_chosen_group,
             declares_return_result,
@@ -28117,6 +28261,7 @@ impl Serialize for AbilityDefinition {
             kind,
             // `effect` is `&Box<Effect>` from the destructure; deref to `&Effect`.
             effect,
+            instruction_actor,
             declares_chosen_group,
             reads_chosen_group,
             declares_return_result,
@@ -28199,6 +28344,8 @@ impl Serialize for AbilityDefinition {
 struct AbilityDefinitionDe {
     kind: AbilityKind,
     effect: Box<Effect>,
+    #[serde(default)]
+    instruction_actor: Option<InstructionActorRef>,
     #[serde(default)]
     declares_chosen_group: Option<ChosenGroupId>,
     #[serde(default)]
@@ -28300,6 +28447,15 @@ struct AbilityDefinitionDe {
 impl<'de> Deserialize<'de> for AbilityDefinition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let de = AbilityDefinitionDe::deserialize(deserializer)?;
+        if de
+            .instruction_actor
+            .as_ref()
+            .is_some_and(|actor| actor.replacement_event().is_some())
+        {
+            return Err(de::Error::custom(
+                "definition cannot own runtime replacement context",
+            ));
+        }
         let mut activation_restrictions = de.activation_restrictions;
         // CR 602.5d: migrate the legacy `sorcery_speed: bool` into the single
         // authority `activation_restrictions` (dedup if already present).
@@ -28314,6 +28470,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             reads_chosen_group: de.reads_chosen_group,
             declares_return_result: de.declares_return_result,
             reads_return_result: de.reads_return_result,
+            instruction_actor: de.instruction_actor,
             cost: de.cost,
             sub_ability: de.sub_ability,
             else_ability: de.else_ability,
@@ -28611,6 +28768,7 @@ impl AbilityDefinition {
         Self {
             kind,
             effect: Box::new(effect),
+            instruction_actor: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -30212,6 +30370,12 @@ pub struct PendingForwardedZoneResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 113.7a + CR 608.2h: this instruction's own source before costs or zone departure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<ObjectIdentityBinding>,
+    /// CR 615.5: the event whose replacement created this running instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_event: Option<ReplacementEventContext>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
@@ -35201,6 +35365,10 @@ impl AttachTargetBindings {
 #[serde(remote = "Self")]
 pub struct ResolvedAbility {
     pub effect: Effect,
+    /// CR 608.2c + CR 109.5: Unconsumed instruction-local actor. Admission
+    /// latches the concrete player in `controller` before this node acts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_actor: Option<InstructionActorRef>,
     pub targets: Vec<TargetRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declares_chosen_group: Option<ChosenGroupId>,
@@ -35716,6 +35884,7 @@ impl PartialEq for ResolvedAbility {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             effect: a_effect,
+            instruction_actor: a_instruction_actor,
             targets: a_targets,
             declares_chosen_group: a_declares_chosen_group,
             reads_chosen_group: a_reads_chosen_group,
@@ -35790,6 +35959,7 @@ impl PartialEq for ResolvedAbility {
         } = self;
         let Self {
             effect: b_effect,
+            instruction_actor: b_instruction_actor,
             targets: b_targets,
             declares_chosen_group: b_declares_chosen_group,
             reads_chosen_group: b_reads_chosen_group,
@@ -35864,6 +36034,7 @@ impl PartialEq for ResolvedAbility {
         } = other;
 
         a_effect == b_effect
+            && a_instruction_actor == b_instruction_actor
             && a_targets == b_targets
             && a_declares_chosen_group == b_declares_chosen_group
             && a_reads_chosen_group == b_reads_chosen_group
@@ -36241,6 +36412,7 @@ impl ResolvedAbility {
         Self {
             effect,
             targets,
+            instruction_actor: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -36410,6 +36582,7 @@ impl ResolvedAbility {
     pub fn set_trigger_source_recursive(&mut self, source: TriggerSourceContext) {
         self.source_id = source.identity.reference.object_id;
         self.source_incarnation = Some(source.identity.reference.incarnation);
+        self.context.source_identity = Some(source.identity);
         self.controller = source.lki.controller;
         self.original_controller = Some(source.lki.controller);
         self.trigger_source = Some(source.clone());
@@ -36418,6 +36591,44 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_trigger_source_recursive(source);
+        }
+    }
+
+    /// CR 113.7a + CR 608.2h: capture the same source before costs can move it.
+    /// Previously captured nodes and independently sourced children keep their authority.
+    pub(crate) fn capture_source_identity_recursive(&mut self, identity: ObjectIdentityBinding) {
+        if self.source_id != identity.reference.object_id {
+            return;
+        }
+        self.context.source_identity.get_or_insert(identity);
+        self.source_incarnation
+            .get_or_insert(identity.reference.incarnation);
+        if let Some(sub) = self.sub_ability.as_deref_mut() {
+            sub.capture_source_identity_recursive(identity);
+        }
+        if let Some(otherwise) = self.else_ability.as_deref_mut() {
+            otherwise.capture_source_identity_recursive(identity);
+        }
+    }
+
+    /// CR 615.5: capture at actual dispatch, before any nested event can run.
+    /// Definitions and detached future prevention riders remain unbound.
+    pub(crate) fn capture_replacement_event_recursive(&mut self, event: &ReplacementEventContext) {
+        let owned = self
+            .context
+            .replacement_event
+            .get_or_insert_with(|| event.clone());
+        if let Some(actor) = self.instruction_actor.as_mut() {
+            actor.capture_replacement_event(owned);
+        }
+        let detach_prevention_rider = matches!(self.effect, Effect::PreventDamage { .. });
+        if let Some(sub) = self.sub_ability.as_deref_mut() {
+            if !detach_prevention_rider || sub.sub_link != SubAbilityLink::ContinuationStep {
+                sub.capture_replacement_event_recursive(event);
+            }
+        }
+        if let Some(otherwise) = self.else_ability.as_deref_mut() {
+            otherwise.capture_replacement_event_recursive(event);
         }
     }
 
@@ -36431,6 +36642,13 @@ impl ResolvedAbility {
     /// creator. Walk mirrors `set_trigger_source_recursive` exactly.
     pub fn set_gameplay_source_recursive(&mut self, source: ObjectId) {
         self.source_id = source;
+        if self
+            .context
+            .source_identity
+            .is_some_and(|identity| identity.reference.object_id != source)
+        {
+            self.context.source_identity = None;
+        }
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_gameplay_source_recursive(source);
         }
@@ -36583,6 +36801,7 @@ impl ResolvedAbility {
     pub fn clear_trigger_identity_recursive(&mut self) {
         self.source_id = ObjectId(0);
         self.source_incarnation = None;
+        self.context.source_identity = None;
         self.trigger_source = None;
         self.trigger_definition_ref = None;
         self.force_block_attacker = None;
@@ -37904,6 +38123,30 @@ where
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+pub(crate) fn instruction_actor_test_refs() -> [ControllerRef; 16] {
+    [
+        ControllerRef::You,
+        ControllerRef::ScopedPlayer,
+        ControllerRef::Opponent,
+        ControllerRef::TargetPlayer,
+        ControllerRef::TargetOpponent,
+        ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId(1),
+        },
+        ControllerRef::ParentTargetController,
+        ControllerRef::ParentTargetOwner,
+        ControllerRef::EventTargetController,
+        ControllerRef::DefendingPlayer,
+        ControllerRef::ChosenPlayer { index: 0 },
+        ControllerRef::SourceChosenPlayer,
+        ControllerRef::TriggeringPlayer,
+        ControllerRef::EnchantedPlayer,
+        ControllerRef::ActivePlayer,
+        ControllerRef::SpecificPlayer { id: PlayerId(1) },
+    ]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::events::GameEvent;
@@ -37911,6 +38154,68 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
     use syn::__private::ToTokens;
+
+    #[test]
+    fn instruction_actor_serde_defaults_omits_and_preserves_nested_authorities() {
+        let old = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("instruction_actor").is_none());
+        let loaded: AbilityDefinition = serde_json::from_value(old_json).unwrap();
+        assert_eq!(loaded.instruction_actor, None);
+        assert_eq!(
+            serde_json::to_value(&loaded)
+                .unwrap()
+                .get("instruction_actor"),
+            None
+        );
+        let mut present = old.clone();
+        present.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+        let mut child = old.clone();
+        child.instruction_actor = (Some(ControllerRef::ScopedPlayer)).map(Into::into);
+        present.sub_ability = Some(Box::new(child));
+        let mut otherwise = old.clone();
+        otherwise.instruction_actor =
+            (Some(ControllerRef::ChosenPlayer { index: 1 })).map(Into::into);
+        present.else_ability = Some(Box::new(otherwise));
+        assert_ne!(present, old);
+        let roundtrip: AbilityDefinition =
+            serde_json::from_value(serde_json::to_value(&present).unwrap()).unwrap();
+        assert_eq!(roundtrip, present);
+        assert_eq!(
+            roundtrip.sub_ability.as_ref().unwrap().instruction_actor,
+            Some(ControllerRef::ScopedPlayer)
+        );
+        assert_eq!(
+            roundtrip.else_ability.as_ref().unwrap().instruction_actor,
+            Some(ControllerRef::ChosenPlayer { index: 1 })
+        );
+
+        let legacy = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        let json = serde_json::to_value(&legacy).unwrap();
+        assert!(json.get("instruction_actor").is_none());
+        let loaded: ResolvedAbility = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded, legacy);
+        let mut resolved =
+            crate::game::ability_utils::build_resolved_from_def(&present, ObjectId(1), PlayerId(0));
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            crate::game::ability_utils::bind_instruction_actor(&state, &mut resolved),
+            Some(PlayerId(0))
+        );
+        assert_eq!(resolved.instruction_actor, None);
+        assert_eq!(resolved.original_controller, Some(PlayerId(0)));
+        assert_eq!(
+            resolved.sub_ability.as_ref().unwrap().instruction_actor,
+            Some(ControllerRef::ScopedPlayer)
+        );
+        let restored: ResolvedAbility =
+            serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
+        assert_eq!(restored, resolved);
+        let mut different = restored.clone();
+        different.sub_ability.as_mut().unwrap().instruction_actor =
+            (Some(ControllerRef::You)).map(Into::into);
+        assert_ne!(restored, different);
+    }
 
     #[test]
     fn names_one_player_is_the_declared_and_bound_player_only() {

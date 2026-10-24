@@ -905,6 +905,25 @@ pub(crate) fn plan_simultaneous_draw(
     seats
         .iter()
         .map(|(player, ability)| {
+            let mut bound;
+            let ability = match ability.instruction_actor.as_ref() {
+                None => ability,
+                Some(actor)
+                    if actor.as_controller()
+                        == Some(&crate::types::ability::ControllerRef::ScopedPlayer)
+                        && ability.scoped_player == Some(*player)
+                        && ability.controller == *player =>
+                {
+                    bound = ability.clone();
+                    if crate::game::ability_utils::bind_instruction_actor(state, &mut bound)
+                        != Some(*player)
+                    {
+                        return None;
+                    }
+                    &bound
+                }
+                Some(_) => return None,
+            };
             let Effect::Draw { count, target } = &ability.effect else {
                 return None;
             };
@@ -1308,12 +1327,18 @@ fn enqueue_miracle_offer_for_first_draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, StaticDefinition,
-        SubAbilityLink, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition, SubAbilityLink,
+        TargetFilter,
     };
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::ProhibitionScope;
@@ -2131,6 +2156,235 @@ mod tests {
         let plan = plan_simultaneous_draw(&dandan_state(), &two_seats()).expect("a bare draw");
         let counts: Vec<_> = plan.iter().map(|seat| (seat.player, seat.count)).collect();
         assert_eq!(counts, [(PlayerId(0), 3), (PlayerId(1), 2)]);
+    }
+
+    #[test]
+    fn instruction_actor_both_draw_cast_entries_keep_dealer_reach_only_for_proved_seats() {
+        for targeted in [false, true] {
+            for (actor, prior_choice) in [
+                (None, false),
+                (Some(ControllerRef::ScopedPlayer), false),
+                (Some(ControllerRef::SpecificPlayer { id: P1 }), false),
+                (Some(ControllerRef::ChosenPlayer { index: 0 }), false),
+                (Some(ControllerRef::ChosenPlayer { index: 0 }), true),
+            ] {
+                let mut scenario = GameScenario::new_with_format(
+                    crate::types::format::FormatConfig::dandan(),
+                    2,
+                    42,
+                );
+                scenario
+                    .at_phase(Phase::PreCombatMain)
+                    .with_life(P0, 2)
+                    .with_life(P1, 5);
+                let pile: Vec<_> = (0..8)
+                    .map(|index| scenario.add_card_to_library_top(P0, &format!("Shared {index}")))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                scenario.add_creature_from_oracle(
+                    P0,
+                    "Obstinate Familiar",
+                    1,
+                    1,
+                    "If you would draw a card, you may skip that draw instead.",
+                );
+                let mut draw = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                        },
+                        target: if targeted {
+                            TargetFilter::Player
+                        } else {
+                            TargetFilter::ScopedPlayer
+                        },
+                    },
+                );
+                draw.instruction_actor = (actor.clone()).map(Into::into);
+                if targeted {
+                    draw.multi_target = Some(MultiTargetSpec::unlimited(0));
+                } else {
+                    draw.player_scope = Some(PlayerFilter::All);
+                }
+                let mut tail = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::OriginalController,
+                    },
+                );
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                draw.sub_ability = Some(Box::new(tail));
+                let referential = matches!(actor, Some(ControllerRef::ChosenPlayer { .. }));
+                if referential {
+                    let mut dependent = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 10 },
+                            player: TargetFilter::SpecificPlayer { id: P1 },
+                        },
+                    );
+                    dependent.sub_ability = draw.sub_ability.take();
+                    draw.sub_ability = Some(Box::new(dependent));
+                    draw.else_ability = Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 100 },
+                            player: TargetFilter::OriginalController,
+                        },
+                    )));
+                }
+                if prior_choice {
+                    let mut prior = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Choose {
+                            choice_type: crate::types::ability::ChoiceType::player(),
+                            persist: false,
+                            selection: crate::types::ability::TargetSelectionMode::Chosen,
+                        },
+                    );
+                    prior.sub_ability = Some(Box::new(draw));
+                    draw = prior;
+                }
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic Shared Draw Actor", false)
+                    .with_ability_definition(draw)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let mut runner = scenario.build();
+                let cast = runner.cast(spell);
+                let cast = if prior_choice {
+                    cast.choose_option("1")
+                } else {
+                    cast
+                };
+                let mut events = if targeted {
+                    cast.target_players(&[P0, P1]).resolve().events().to_vec()
+                } else {
+                    cast.resolve().events().to_vec()
+                };
+                let missing =
+                    !prior_choice && matches!(actor, Some(ControllerRef::ChosenPlayer { .. }));
+                let optimized =
+                    actor.is_none() || (!targeted && actor == Some(ControllerRef::ScopedPlayer));
+                if !missing {
+                    assert!(
+                        matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ReplacementChoice { player: P0, .. }
+                        ),
+                        "ordinary draw reached the real replacement pause"
+                    );
+                    let frame = runner
+                        .state()
+                        .active_draw_sequence()
+                        .expect("the real paused draw owns a sequence");
+                    assert_eq!(frame.dealer.is_some(), optimized);
+                    assert!(
+                        events
+                            .iter()
+                            .all(|event| !matches!(event, GameEvent::CardDrawn { .. })),
+                        "planning never partially deals before a later refusal"
+                    );
+                    while matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        events.extend(
+                            runner
+                                .act(GameAction::ChooseReplacement { index: 1 })
+                                .unwrap()
+                                .events,
+                        );
+                    }
+                }
+                let actual: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
+                        _ => None,
+                    })
+                    .collect();
+                let expected = if missing {
+                    vec![]
+                } else if optimized {
+                    vec![P0, P1, P0, P1]
+                } else {
+                    vec![P0, P0, P1, P1]
+                };
+                assert_eq!(
+                    actual, expected,
+                    "actor admission determines optimization, not recipient equality"
+                );
+                for (index, player) in expected.iter().enumerate() {
+                    assert!(
+                        runner.state().players[player.0 as usize]
+                            .hand
+                            .contains(&pile[index]),
+                        "exact dealt card {index}"
+                    );
+                }
+                for player in [P0, P1] {
+                    assert_eq!(
+                        runner.state().players[player.0 as usize].hand.len(),
+                        if missing { 0 } else { 2 },
+                        "printed P0 quantity survives remapping to P1"
+                    );
+                }
+                assert_eq!(runner.life(P0), 3);
+                assert_eq!(
+                    runner.life(P1),
+                    if referential && !missing { 25 } else { 5 },
+                    "missing actor skips its dependent instruction and does not select else"
+                );
+                assert!(runner.state().active_draw_sequence().is_none());
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), if referential && !missing { 3 } else { 1 });
+                assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn draw_plan_binds_only_the_proved_matching_scoped_actor_without_mutating_templates() {
+        let state = dandan_state();
+        let legacy = two_seats();
+        assert!(plan_simultaneous_draw(&state, &legacy).is_some());
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut seats = legacy.clone();
+            for (player, ability) in &mut seats {
+                ability.scoped_player = Some(*player);
+                ability.instruction_actor = (Some(actor.clone())).map(Into::into);
+            }
+            let before = seats.clone();
+            assert_eq!(
+                plan_simultaneous_draw(&state, &seats).is_some(),
+                actor == crate::types::ability::ControllerRef::ScopedPlayer,
+                "{actor:?}"
+            );
+            assert_eq!(seats, before, "planning cannot consume templates");
+        }
+        let mut seats = legacy.clone();
+        seats[0].1.instruction_actor =
+            (Some(crate::types::ability::ControllerRef::ScopedPlayer)).map(Into::into);
+        assert!(
+            plan_simultaneous_draw(&state, &seats).is_none(),
+            "target fan-out cannot invent a scoped seat"
+        );
+        seats[0].1.scoped_player = Some(PlayerId(1));
+        assert!(
+            plan_simultaneous_draw(&state, &seats).is_none(),
+            "mismatched seat refuses before dealing"
+        );
     }
 
     #[test]

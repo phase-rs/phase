@@ -706,6 +706,7 @@ mod tests {
 
     fn damage_to(target: TargetRef, amount: u32) -> ProposedEvent {
         ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(99),
             target,
             amount,
@@ -1582,6 +1583,7 @@ mod tests {
 
         // Positive: damage from OUR source is boosted 2 -> 3.
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: my_source,
             target: TargetRef::Object(victim),
             amount: 2,
@@ -1599,6 +1601,7 @@ mod tests {
 
         // Negative: damage from the OPPONENT's source is unchanged.
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: their_source,
             target: TargetRef::Object(victim),
             amount: 2,

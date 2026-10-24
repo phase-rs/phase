@@ -28020,6 +28020,16 @@ pub(crate) fn record_activation_announcement(
     ability_index: usize,
     ability: &mut ResolvedAbility,
 ) {
+    // CR 602.2a + CR 113.7a: self-sacrifice payment must not replace the
+    // announced source's battlefield occurrence with its graveyard incarnation.
+    if let Some(source) = state.objects.get(&source_id) {
+        ability.capture_source_identity_recursive(
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+                source.zone,
+            ),
+        );
+    }
     ability.activation_record =
         capture_activation_record(state, player, source_id, ability_index, ability).map(Box::new);
     let provenance = state
@@ -28079,6 +28089,14 @@ fn capture_settled_targets(state: &GameState, player: PlayerId, pending: &mut Pe
     let Some(ability_index) = pending.activation_ability_index else {
         return;
     };
+    if let Some(source) = state.objects.get(&pending.object_id) {
+        pending.ability.capture_source_identity_recursive(
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+                source.zone,
+            ),
+        );
+    }
     let Some(fresh) = capture_activation_record(
         state,
         player,

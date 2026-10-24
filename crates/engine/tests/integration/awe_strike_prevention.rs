@@ -139,6 +139,7 @@ fn awe_strike_zero_damage_event_does_not_consume_shield_or_fire_rider() {
     let result = engine::game::replacement::replace_event(
         runner.state_mut(),
         engine::types::proposed_event::ProposedEvent::Damage {
+            source_identity: None,
             source_id: b1,
             target: TargetRef::Player(P0),
             amount: 0,

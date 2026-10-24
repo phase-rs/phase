@@ -609,6 +609,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         mode_abilities,
         cost,
         player_scope,
+        instruction_actor,
         // ---- conservative-when-present: each can name a player, an object, or
         //      a payment outside the actor, and none is walked ----
         activator_filter,
@@ -696,7 +697,8 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         acc = acc.or(WindowReach::of(matches!(scope, PlayerFilter::Controller)));
     }
 
-    let conservative_when_present = activator_filter.is_some()
+    let conservative_when_present = instruction_actor.is_some()
+        || activator_filter.is_some()
         || starting_with.is_some()
         || target_chooser.is_some()
         || unless_pay.is_some()
@@ -1686,6 +1688,59 @@ mod tests {
     /// NOT weaken any assertion here to restore the old sentence.
     #[test]
     fn window_reach_matches_the_measured_class_table() {
+        let confined_actor_control = ability(&RAMPANT_GROWTH, 0);
+        assert_eq!(
+            ability_window_reach(&confined_actor_control),
+            WindowReach::OwnResourcesOnly
+        );
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = confined_actor_control.clone();
+            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert_eq!(
+                ability_window_reach(&marked),
+                WindowReach::MayInterfere,
+                "{actor:?}"
+            );
+            for branch in 0..3 {
+                let mut parent = confined_actor_control.clone();
+                match branch {
+                    0 => parent.sub_ability = Some(Box::new(marked.clone())),
+                    1 => parent.else_ability = Some(Box::new(marked.clone())),
+                    2 => parent.mode_abilities.push(marked.clone()),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    ability_window_reach(&parent),
+                    WindowReach::MayInterfere,
+                    "nested {actor:?}"
+                );
+            }
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                crate::types::identifiers::CardId(1),
+                PlayerId(0),
+                "Synthetic Actor Reach".into(),
+                Zone::Hand,
+            );
+            state.objects.get_mut(&source).unwrap().abilities =
+                std::sync::Arc::new(vec![confined_actor_control.clone()]);
+            let action = GameAction::CastSpell {
+                object_id: source,
+                card_id: crate::types::identifiers::CardId(1),
+                targets: vec![],
+                payment_mode: Default::default(),
+            };
+            assert!(
+                !any_action_may_interfere(&state, PlayerId(0), std::slice::from_ref(&action)),
+                "legacy production candidate is confined"
+            );
+            state.objects.get_mut(&source).unwrap().abilities = std::sync::Arc::new(vec![marked]);
+            assert!(
+                any_action_may_interfere(&state, PlayerId(0), &[action]),
+                "production candidate cannot discard {actor:?}"
+            );
+        }
         let confined: &[(&Card, usize)] = &[
             (&TERRAMORPHIC, 0),
             (&EVOLVING_WILDS, 0),

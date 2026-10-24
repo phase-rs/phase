@@ -1,12 +1,14 @@
 use crate::types::ability::{
-    ControllerRef, FilterProp, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, ReplacementEventContext, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DepartedStackSpell, GameState, StackEntry, StackEntryKind, TriggerSourceContext,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{
+    ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -2112,6 +2114,78 @@ pub(crate) fn event_referent_controller(state: &GameState, event: &GameEvent) ->
     crate::game::ability_utils::last_known_permanent_controller(state, id)
 }
 
+/// CR 608.2h + CR 400.7: inspect only the captured occurrence in its expected
+/// zone, or that occurrence's exact last known information. A reused storage
+/// id never supplies the original source's controller.
+pub(crate) fn source_controller_at_identity(
+    state: &GameState,
+    identity: ObjectIdentityBinding,
+) -> Option<PlayerId> {
+    let reference = identity.reference;
+    if let Some(source) = state.objects.get(&reference.object_id).filter(|source| {
+        source.incarnation == reference.incarnation && source.zone == identity.expected_zone
+    }) {
+        return Some(match identity.expected_zone {
+            Zone::Battlefield | Zone::Stack => source.controller,
+            _ => source.owner,
+        });
+    }
+    match identity.expected_zone {
+        Zone::Battlefield => state
+            .lki_by_incarnation
+            .get(&reference.object_id)
+            .and_then(|history| history.get(&reference.incarnation))
+            .map(|lki| lki.controller),
+        Zone::Stack => state
+            .departed_stack_spells
+            .get(&reference.object_id)
+            .and_then(|history| history.get(&reference.incarnation))
+            .map(|spell| spell.object.controller),
+        _ => None,
+    }
+}
+
+pub(crate) fn resident_replacement_event(state: &GameState) -> ReplacementEventContext {
+    ReplacementEventContext {
+        source_id: state.post_replacement_event_source(),
+        source_identity: state.post_replacement_event_source_identity(),
+        event_target: state.post_replacement_event_target().cloned(),
+    }
+}
+
+/// CR 615.5: actor and recipient independently read the same owning event.
+/// Only absent owned context uses the legacy resident event; owned missing
+/// members remain missing during nested replacement resolution.
+pub(crate) fn replacement_context_target(
+    state: &GameState,
+    filter: &TargetFilter,
+    owned: Option<&ReplacementEventContext>,
+) -> Option<TargetRef> {
+    let resident;
+    let event = match owned {
+        Some(event) => event,
+        None => {
+            resident = resident_replacement_event(state);
+            &resident
+        }
+    };
+    match filter {
+        TargetFilter::PostReplacementSourceController => {
+            source_controller_at_identity(state, event.source_identity?).map(TargetRef::Player)
+        }
+        TargetFilter::PostReplacementDamageSource => event.source_id.map(TargetRef::Object),
+        TargetFilter::PostReplacementDamageTarget => event.event_target.clone(),
+        TargetFilter::PostReplacementDamageTargetOwner => match event.event_target.as_ref()? {
+            TargetRef::Player(player) => Some(TargetRef::Player(*player)),
+            TargetRef::Object(id) => state
+                .objects
+                .get(id)
+                .map(|object| TargetRef::Player(object.owner)),
+        },
+        _ => None,
+    }
+}
+
 /// CR 109.4 + CR 608.2h: the controller of the spell `announcement` names:
 /// live on the stack (object `id` still carries that announcement), else its
 /// departure record. `None` when neither exists (it resolved, or the cast was
@@ -2415,35 +2489,11 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // applier at `replacement.rs:Prevented`; read here during follow-up
         // resolution. Returns `None` if invoked outside the post-replacement
         // window — caller should never reach this filter from elsewhere.
-        TargetFilter::PostReplacementSourceController => {
-            let source_obj_id = state.post_replacement_event_source()?;
-            let controller = state.objects.get(&source_obj_id)?.controller;
-            Some(TargetRef::Player(controller))
-        }
-        // CR 615.5 + CR 120.1: "Comeuppance deals that much damage to that
-        // creature" — the reflection target is the prevented event's damage
-        // source object itself (the creature that would have dealt the damage).
-        // Returns the source as an object ref; `None` outside the
-        // post-replacement window. Sibling of `PostReplacementSourceController`
-        // (which projects the same source to its controller player).
-        TargetFilter::PostReplacementDamageSource => {
-            state.post_replacement_event_source().map(TargetRef::Object)
-        }
-        TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target().cloned(),
-        // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
-        // recipient ("that creature's owner shuffles it into their library").
-        // Mirrors `PostReplacementSourceController`'s player-projection but reads
-        // the recipient slot and projects to OWNER (CR 108.3), not the source
-        // slot / controller (CR 109.4). Routed here to the recipient's owner's
-        // library by CR 400.3.
-        TargetFilter::PostReplacementDamageTargetOwner => {
-            match state.post_replacement_event_target() {
-                Some(TargetRef::Object(id)) => {
-                    state.objects.get(id).map(|o| TargetRef::Player(o.owner))
-                }
-                Some(TargetRef::Player(p)) => Some(TargetRef::Player(*p)),
-                None => None,
-            }
+        TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner => {
+            replacement_context_target(state, filter, None)
         }
         _ => None,
     }
@@ -4630,6 +4680,7 @@ mod tests {
                 source: None,
                 applied: HashSet::new(),
                 event_source: Some(c0),
+                event_source_identity: None,
                 event_target: None,
                 controller: None,
             },
@@ -4678,6 +4729,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
+                event_source_identity: None,
                 controller: None,
             },
             ResidentDrainPolicy::Replace,

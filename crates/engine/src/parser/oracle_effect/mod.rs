@@ -280,6 +280,7 @@ fn clause_delayed_payload(clause: &ClauseIr, kind: AbilityKind) -> Option<Abilit
         Effect::CreateDelayedTrigger { ref effect, .. } => Some((**effect).clone()),
         _ if clause.delayed_condition.is_some() => {
             let mut payload = AbilityDefinition::new(kind, clause.parsed.effect.clone());
+            payload.instruction_actor = (clause.parsed.instruction_actor.clone()).map(Into::into);
             payload.sub_ability = clause.parsed.sub_ability.clone();
             Some(payload)
         }
@@ -2460,6 +2461,7 @@ fn try_parse_whenever_this_turn_from(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WheneverEvent {
                 trigger: Box::new(trigger_def),
@@ -2598,6 +2600,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
 
     ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -2638,6 +2641,7 @@ fn build_when_next_delayed_trigger(
     });
     ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -2893,6 +2897,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -2995,6 +3000,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3081,6 +3087,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3235,6 +3242,7 @@ fn try_parse_at_next_phase_delayed_trigger(
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition,
             effect: Box::new(inner),
@@ -4109,6 +4117,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
@@ -4655,6 +4664,7 @@ fn try_parse_inline_delayed_trigger(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::CreateDelayedTrigger {
             condition,
             effect: Box::new(inner),
@@ -4993,6 +5003,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction { restriction },
         duration: None,
         sub_ability: None,
@@ -5062,6 +5073,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::CantEnterBattlefieldFrom {
                 source: ObjectId(0), // Filled in at resolution time.
@@ -5126,6 +5138,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5189,6 +5202,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
     // control) so it functions exactly as if printed on the source.
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -5237,6 +5251,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
     };
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -5304,6 +5319,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
     };
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::ParentTarget)
@@ -5518,6 +5534,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
 
     let clause = ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5617,6 +5634,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5703,6 +5721,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5824,6 +5843,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5900,6 +5920,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -5943,6 +5964,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -6014,6 +6036,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
 
         return Some(ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect: Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
@@ -6093,6 +6116,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -6230,6 +6254,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect,
         duration: None,
         sub_ability: Some(Box::new(
@@ -6351,6 +6376,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::Animate {
             power: Some(PtValue::Fixed(0)),
             toughness: Some(PtValue::Fixed(0)),
@@ -8004,6 +8030,7 @@ fn ability_definition_from_clause(
 ) -> AbilityDefinition {
     let ParsedEffectClause {
         effect,
+        instruction_actor,
         duration,
         sub_ability,
         distribute,
@@ -8016,6 +8043,7 @@ fn ability_definition_from_clause(
         unlowered_guard: _,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
+    def.instruction_actor = (instruction_actor).map(Into::into);
     def.sub_ability = sub_ability;
     def.duration = duration;
     def.condition = condition;
@@ -8386,6 +8414,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![fixed_branch, dynamic_branch],
@@ -8429,6 +8458,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
     let categories = all_core_type_categories();
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::ChooseFromZone {
             count: categories.len() as u32,
             zone: Zone::Library,
@@ -8534,6 +8564,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::ForEachCategory {
             category,
             chooser: crate::types::ability::Chooser::Controller,
@@ -8619,6 +8650,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::ForEachCategory {
             category,
             chooser: crate::types::ability::Chooser::Controller,
@@ -10075,6 +10107,7 @@ fn try_parse_choose_player_to_verb(
         // ability controller. Rebind the player-recipient field.
         retarget_effect_to_chosen_player(&mut verb_clause.effect, index, tp.original);
         let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+        sub.instruction_actor = (verb_clause.instruction_actor.clone()).map(Into::into);
         sub.sub_ability = verb_clause.sub_ability;
         sub.duration = verb_clause.duration;
         clause.sub_ability = Some(Box::new(sub));
@@ -10129,6 +10162,7 @@ fn try_parse_an_opponent_to_verb(
         selection: TargetSelectionMode::Chosen,
     });
     let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+    sub.instruction_actor = (verb_clause.instruction_actor.clone()).map(Into::into);
     sub.sub_ability = verb_clause.sub_ability;
     sub.duration = verb_clause.duration;
     clause.sub_ability = Some(Box::new(sub));
@@ -10615,6 +10649,7 @@ fn try_parse_player_draws_and_gains_control(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::Draw {
             count,
             target: recipient.clone(),
@@ -14211,6 +14246,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll {
                 blockers: blockers.clone(),
@@ -14312,6 +14348,7 @@ impl ParsedRetainedTypeClause {
         let duration = duration_binding.duration();
         ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
@@ -18927,6 +18964,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     if let Some(effect) = parse_energy_gain_base(&numeric_base_lower, quantity.clone()) {
         return Some(ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect,
             duration,
             sub_ability: None,
@@ -18968,6 +19006,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             let effect = thread_for_each_subject(effect, base_no_duration, ctx);
             return Some(ParsedEffectClause {
                 unlowered_guard: None,
+                instruction_actor: None,
                 effect,
                 duration,
                 sub_ability: None,
@@ -19242,6 +19281,7 @@ fn parsed_for_each_quantity_effect(
             sub_ability.duration = duration;
             return ParsedEffectClause {
                 unlowered_guard: None,
+                instruction_actor: None,
                 effect: Effect::TargetOnly { target },
                 duration: None,
                 sub_ability: Some(Box::new(sub_ability)),
@@ -19256,6 +19296,7 @@ fn parsed_for_each_quantity_effect(
 
     ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect,
         duration,
         sub_ability: None,
@@ -19391,6 +19432,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(nonland_card_in_hand_filter(controller))
@@ -20357,6 +20399,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         // CR 115.1: `TargetOnly` surfaces the "target permanent" slot; the chosen
         // permanent is inherited by the sub-ability's `ParentTarget` references.
         effect: Effect::TargetOnly { target },
@@ -21683,6 +21726,7 @@ fn try_parse_reanimate_self_and_target(
     // Wrap the second conjunct as the chained sub_ability, preserving the
     // "up to N" cardinality (which the generic try_split wrapper omits).
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
     sub_ability.sub_ability = sub_clause.sub_ability;
     sub_ability.multi_target = multi_target;
     sub_ability.optional = sub_clause.optional;
@@ -21903,6 +21947,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             if sub_rem.trim().is_empty() && !matches!(sub_target, TargetFilter::Any) {
                 sub_clause = ParsedEffectClause {
                     unlowered_guard: None,
+                    instruction_actor: None,
                     effect: Effect::PutCounter {
                         counter_type: counter_type.clone(),
                         count: count.clone(),
@@ -22089,6 +22134,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         sub_clause.multi_target.is_some(),
     );
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
     sub_ability.target_choice_timing = continuation_timing;
     sub_ability.sub_ability = sub_clause.sub_ability;
     // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
@@ -22145,6 +22191,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -22183,6 +22230,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -22550,6 +22598,7 @@ fn try_parse_compound_player_object_damage(
     // observe — see `resolve_all` in game/effects/deal_damage.rs.
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::DamageAll {
             amount: qty,
             target: object_filter,
@@ -22681,6 +22730,7 @@ fn try_parse_compound_object_player_damage(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::DamageAll {
             amount: qty,
             target: object_filter,
@@ -22818,6 +22868,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect.clone(),
         duration: None,
         sub_ability: Some(Box::new(AbilityDefinition::new(
@@ -22992,6 +23043,7 @@ fn try_parse_multi_target_damage_chain_inner(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect,
         duration: None,
         sub_ability: chain_tail,
@@ -23116,6 +23168,7 @@ fn try_parse_multi_target_counter_chain(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect,
         duration: None,
         sub_ability: chain_tail,
@@ -23565,6 +23618,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: copy_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -23689,11 +23743,13 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     }
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
     sub_ability.sub_ability = sub_clause.sub_ability;
     sub_ability.target_chooser = sub_target_chooser;
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -23842,6 +23898,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     };
     let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_def.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
     sub_def.sub_ability = sub_clause.sub_ability;
 
     // Build ChangeZone for the first subject as the primary effect
@@ -23863,6 +23920,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_def)),
@@ -24373,6 +24431,7 @@ fn try_parse_compound_subject_each(
 
     let distributed = ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: *half_a.effect,
         duration: half_a.duration,
         sub_ability: half_a.sub_ability,
@@ -24395,6 +24454,7 @@ fn try_parse_compound_subject_each(
     };
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::TargetOnly { target },
         duration: None,
         sub_ability: Some(Box::new(ability_definition_from_clause(
@@ -27268,12 +27328,49 @@ fn lower_subject_predicate_ast(
     ctx: &mut ParseContext,
     original_clause: &str,
 ) -> ParsedEffectClause {
+    // CR 608.2c + CR 109.5: A player's printed subject owns this node's
+    // actor. An object subject's controller qualifier is not a player subject.
+    let instruction_actor = subject.affected.as_ref().and_then(|affected| {
+        if subject
+            .target
+            .as_ref()
+            .is_some_and(|target| target == affected)
+        {
+            if let Some(actor) = declared_player_controller_ref(affected) {
+                return Some(actor);
+            }
+        }
+        match affected {
+            TargetFilter::Controller | TargetFilter::OriginalController => Some(ControllerRef::You),
+            TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
+            TargetFilter::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
+            TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+            TargetFilter::ParentTargetOwner => Some(ControllerRef::ParentTargetOwner),
+            TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
+            TargetFilter::SourceChosenPlayer => Some(ControllerRef::SourceChosenPlayer),
+            TargetFilter::SpecificPlayer { id } => Some(ControllerRef::SpecificPlayer { id: *id }),
+            TargetFilter::DeclaredPlayer { group } => {
+                Some(ControllerRef::DeclaredPlayer { group: *group })
+            }
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.properties.is_empty()
+                    && tf
+                        .controller
+                        .as_ref()
+                        .is_some_and(|actor| *actor != ControllerRef::Opponent) =>
+            {
+                tf.controller.clone()
+            }
+            _ => None,
+        }
+    });
     let seed = if ctx.relative_player_scope.is_none() {
         subject::subject_player_antecedent(&subject)
     } else {
         None
     };
-    match seed {
+    let mut lowered = match seed {
         Some(seed @ (ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)) => {
             let prev_declared = ctx.declared_player_scope.replace(seed.clone());
             let prev_prior = std::mem::replace(&mut ctx.prior_player_declaration, true);
@@ -27283,16 +27380,35 @@ fn lower_subject_predicate_ast(
                 ctx,
                 original_clause,
                 Some(&seed),
+                instruction_actor.as_ref(),
             );
             ctx.declared_player_scope = prev_declared;
             ctx.prior_player_declaration = prev_prior;
             lowered
         }
         Some(seed) => ctx.with_player_scope(seed.clone(), |ctx| {
-            lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, Some(&seed))
+            lower_subject_predicate_ast_body(
+                subject,
+                predicate,
+                ctx,
+                original_clause,
+                Some(&seed),
+                instruction_actor.as_ref(),
+            )
         }),
-        None => lower_subject_predicate_ast_body(subject, predicate, ctx, original_clause, None),
+        None => lower_subject_predicate_ast_body(
+            subject,
+            predicate,
+            ctx,
+            original_clause,
+            None,
+            instruction_actor.as_ref(),
+        ),
+    };
+    if let Some(actor) = instruction_actor {
+        lower::default_clause_instruction_actor(&mut lowered, actor);
     }
+    lowered
 }
 
 /// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
@@ -27304,6 +27420,7 @@ fn lower_subject_predicate_ast_body(
     ctx: &mut ParseContext,
     original_clause: &str,
     seeded: Option<&ControllerRef>,
+    instruction_actor: Option<&ControllerRef>,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -27317,6 +27434,7 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
         } => ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect,
             duration,
             sub_ability,
@@ -27332,6 +27450,7 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
         } => ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect,
             duration,
             sub_ability,
@@ -27347,6 +27466,7 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
         } => ParsedEffectClause {
             unlowered_guard: None,
+            instruction_actor: None,
             effect,
             duration,
             sub_ability,
@@ -27621,6 +27741,9 @@ fn lower_subject_predicate_ast_body(
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
             let mut clause = lower_imperative_clause(&text, ctx);
+            if let Some(actor) = instruction_actor {
+                lower::default_clause_instruction_actor(&mut clause, actor.clone());
+            }
             let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
             if clause.multi_target.is_none() {
                 clause.multi_target = placement_target_set;
@@ -27656,10 +27779,12 @@ fn lower_subject_predicate_ast_body(
                 if let Some(object_target) = subject.target.clone() {
                     bind_player_recipient_to_possessive_actor(&mut clause.effect, &affected);
                     let mut inner = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+                    inner.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
                     return ParsedEffectClause {
                         unlowered_guard: None,
+                        instruction_actor: None,
                         effect: Effect::TargetOnly {
                             target: object_target,
                         },
@@ -27849,6 +27974,8 @@ fn lower_subject_predicate_ast_body(
                     sync_player_into_nested_shuffle_sub(&mut clause, &TargetFilter::ParentTarget);
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
+                    sub_ability.instruction_actor =
+                        (clause.instruction_actor.clone()).map(Into::into);
                     sub_ability.sub_ability = clause.sub_ability;
                     // CR 115.1d: an "up to N target" count on the moved-object
                     // clause (Memory's Journey — "shuffles up to three target
@@ -27869,6 +27996,7 @@ fn lower_subject_predicate_ast_body(
                     }
                     return ParsedEffectClause {
                         unlowered_guard: None,
+                        instruction_actor: None,
                         effect: Effect::TargetOnly {
                             target: player_target.clone(),
                         },
@@ -27894,6 +28022,7 @@ fn lower_subject_predicate_ast_body(
                     explore.sub_ability = clause.sub_ability;
                     return ParsedEffectClause {
                         unlowered_guard: None,
+                        instruction_actor: None,
                         effect: Effect::TargetOnly {
                             target: subject_filter,
                         },
@@ -27913,6 +28042,7 @@ fn lower_subject_predicate_ast_body(
                 if !matches!(affected, TargetFilter::SelfRef) {
                     return ParsedEffectClause {
                         unlowered_guard: None,
+                        instruction_actor: None,
                         effect: Effect::ExploreAll {
                             filter: subject_filter,
                         },
@@ -29293,6 +29423,7 @@ fn wrap_target_subject_damage(
     }
 
     let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+    damage_ability.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
     damage_ability.sub_ability = clause.sub_ability;
     damage_ability.duration = clause.duration.clone();
     damage_ability.condition = clause.condition.clone();
@@ -29302,6 +29433,7 @@ fn wrap_target_subject_damage(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::TargetOnly {
             target: subject_target.clone(),
         },
@@ -38378,6 +38510,11 @@ fn reveal_choice_consumer_actor(
     if player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk {
         return ConsumerActor::Other;
     }
+    instruction_consumer_actor(text)
+}
+
+/// Classify the instruction's own subject using the shared subject grammar.
+fn instruction_consumer_actor(text: &str) -> ConsumerActor {
     let lower = text.to_lowercase();
     // No predicate found → not a recognizable instruction.
     let Some(start) = subject::find_predicate_start(&lower) else {
@@ -43686,6 +43823,13 @@ fn parse_effect_chain_ir_body(
             .or_else(|| pending_repeat_for.take());
         let owner_relative_player_scope = chain_parent_target_owner_scope_for_chunk
             .zip(strip_owner_relative_each_other_player_subject(&text));
+        let prepositional_instruction_actor = early_player_scope.as_ref().map(|_| {
+            if instruction_consumer_actor(&text) == ConsumerActor::Controller {
+                ControllerRef::You
+            } else {
+                ControllerRef::ScopedPlayer
+            }
+        });
         let (player_scope, text, subject_worded_exile) =
             match (early_player_scope, owner_relative_player_scope) {
                 (Some(scope), _) => (Some(scope), text, false),
@@ -44201,23 +44345,27 @@ fn parse_effect_chain_ir_body(
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any
             // chunk resolves to TargetPlayer rather than defaulting to You.
-            // CR 608.2c: a chosen-player scope set by an earlier "choose a
-            // player" sentence (Gluntch) takes precedence — the "they"/"that
-            // player controls" anaphor binds to the most recent choice.
-            relative_player_scope: chain_chosen_player_scope
-                .clone()
-                // CR 608.2c (issue #1670): body "its controller may" antecedent
-                // (Star Athlete; issue #3659 Gix — "its controller may pay … if
-                // they do, they draw" must bind "they" to the creature's
-                // controller, not the damaged player from the trigger
-                // condition's TriggeringPlayer scope).
-                .or_else(|| chain_parent_target_controller_scope.clone())
-                .or_else(|| ctx.relative_player_scope.clone())
-                .or_else(|| {
-                    player_scope
-                        .is_some()
-                        .then_some(ControllerRef::ScopedPlayer)
-                }),
+            // The recognized decline dispatch supplies the contextual player
+            // antecedent before typed subject parsing. Explicit possessive and
+            // event subjects retain their own references; no actor-tree remap
+            // is needed after lowering. Outside this dispatch the most recent
+            // chosen-player sentence retains its existing precedence.
+            relative_player_scope: (is_decline_consequence
+                || matches!(decline_dispatch, DeclineDispatch::SubjectOnly))
+            .then_some(ControllerRef::ScopedPlayer)
+            .or_else(|| chain_chosen_player_scope.clone())
+            // CR 608.2c (issue #1670): body "its controller may" antecedent
+            // (Star Athlete; issue #3659 Gix — "its controller may pay … if
+            // they do, they draw" must bind "they" to the creature's
+            // controller, not the damaged player from the trigger
+            // condition's TriggeringPlayer scope).
+            .or_else(|| chain_parent_target_controller_scope.clone())
+            .or_else(|| ctx.relative_player_scope.clone())
+            .or_else(|| {
+                player_scope
+                    .is_some()
+                    .then_some(ControllerRef::ScopedPlayer)
+            }),
             // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
             // clauses already finalized — supplies the next `ChosenPlayer`
             // index.
@@ -44723,6 +44871,7 @@ fn parse_effect_chain_ir_body(
                     normalized_text,
                     ParsedEffectClause {
                         unlowered_guard: None,
+                        instruction_actor: None,
                         effect: (*animate_def.effect).clone(),
                         duration: animate_def.duration.clone(),
                         sub_ability: animate_def.sub_ability.clone(),
@@ -45116,10 +45265,26 @@ fn parse_effect_chain_ir_body(
         //     Controller → ScopedPlayer so the body's implicit recipient binds
         //     to the per-iteration player who couldn't perform the predicate.
         if matches!(decline_dispatch, DeclineDispatch::SubjectOnly) {
-            rebind_clause_recipients_with(&mut clause, rebind_subject_only_body_recipient);
+            rebind_clause_recipients_with(
+                &mut clause,
+                rebind_subject_only_body_recipient,
+                ControllerRef::ScopedPlayer,
+            );
         }
         if is_decline_consequence {
-            rebind_clause_recipients_with(&mut clause, rebind_decline_body_recipient);
+            let actor = if instruction_consumer_actor(&text) == ConsumerActor::Controller {
+                ControllerRef::You
+            } else {
+                ControllerRef::ScopedPlayer
+            };
+            rebind_clause_recipients_with(&mut clause, rebind_decline_body_recipient, actor);
+        } else if player_scope.is_some()
+            && !matches!(decline_dispatch, DeclineDispatch::SubjectOnly)
+        {
+            lower::default_clause_instruction_actor(
+                &mut clause,
+                prepositional_instruction_actor.unwrap_or(ControllerRef::ScopedPlayer),
+            );
         }
         // CR 608.2c: re-supply the elided player subject exactly as a printed
         // subject would be applied (`inject_subject_target` is that authority).
@@ -45655,6 +45820,7 @@ fn parse_effect_chain_ir_body(
         ) {
             // Build the def that lowering will attach — apply condition + effect
             let mut instead_def = AbilityDefinition::new(kind, clause.effect.clone());
+            instead_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
             if let Some(ref cond) = condition {
                 instead_def = instead_def.condition(cond.clone());
             }
@@ -46157,6 +46323,7 @@ fn parse_effect_chain_ir_body(
         // The intrinsic continuation parser needs the assembled effect to determine
         // what continuation pattern applies.
         let mut temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+        temp_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
         // Wire sub_ability for TargetOnly unwrapping in intrinsic_continuation_effect.
         if matches!(clause.effect, Effect::TargetOnly { .. }) {
             temp_def.sub_ability = clause.sub_ability.clone();
@@ -46180,6 +46347,7 @@ fn parse_effect_chain_ir_body(
             };
             // Build temporary defs for the cascade check
             let mut check_def = AbilityDefinition::new(kind, clause.effect.clone());
+            check_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
             if is_optional {
                 check_def.optional = true;
                 check_def.optional_for = opponent_may_scope;

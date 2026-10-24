@@ -58,6 +58,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, n: usize) {
 
 fn damage_from(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEvent {
     ProposedEvent::Damage {
+        source_identity: None,
         source_id: source,
         target,
         amount,

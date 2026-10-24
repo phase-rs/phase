@@ -60,6 +60,7 @@ fn install(state: &mut GameState, controller: PlayerId) {
 
 fn damage(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEvent {
     ProposedEvent::Damage {
+        source_identity: None,
         source_id: source,
         target,
         amount,

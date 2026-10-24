@@ -5406,6 +5406,7 @@ mod tests {
             }];
         state.pending_player_scope_sacrifice_choice = Some(
             crate::types::game_state::PendingPlayerScopeSacrificeChoice {
+                admitted_actors: None,
                 ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner)),
                 remaining_players: Vec::new(),
                 selections: Vec::new(),
@@ -6858,6 +6859,7 @@ mod tests {
                 Box::new(|state: &mut GameState| {
                     state.pending_player_scope_sacrifice_choice =
                         Some(PendingPlayerScopeSacrificeChoice {
+                            admitted_actors: None,
                             ability: effect(),
                             remaining_players: Vec::new(),
                             selections: Vec::new(),
@@ -6878,6 +6880,29 @@ mod tests {
                             current_player: opponent_id,
                             cost: pay_life(),
                         }));
+                }),
+            ),
+            (
+                "pending_player_scope_sacrifice_choice with admitted actors",
+                "/pending_player_scope_sacrifice_choice/".to_string(),
+                3,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_sacrifice_choice =
+                        Some(PendingPlayerScopeSacrificeChoice {
+                            admitted_actors: Some(
+                                [(owner, opponent_id), (opponent_id, owner)]
+                                    .into_iter()
+                                    .collect(),
+                            ),
+                            ability: effect(),
+                            remaining_players: vec![owner, opponent_id],
+                            selections: Vec::new(),
+                            completion:
+                                crate::types::game_state::PendingPlayerScopeSacrificeCompletion {
+                                    deferred_events: vec![fixture.event.clone()],
+                                    ..Default::default()
+                                },
+                        });
                 }),
             ),
             (
@@ -6951,6 +6976,17 @@ mod tests {
         for (label, prefix, expected, seed) in &rows {
             let mut state = fixture.state.clone();
             seed(&mut state);
+            if let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() {
+                assert_eq!(
+                    filter_state_for_viewer(&state, owner)
+                        .pending_player_scope_sacrifice_choice
+                        .as_ref()
+                        .unwrap()
+                        .admitted_actors,
+                    pending.admitted_actors,
+                    "the owner retains the same public admission map"
+                );
+            }
             let raw = payment_arrays_under(&state, prefix);
             assert_eq!(
                 raw.len(),
@@ -7005,6 +7041,16 @@ mod tests {
                     _ => {}
                 }
                 let projected = payment_arrays_under(&view, prefix);
+                if let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() {
+                    assert_eq!(
+                        view.pending_player_scope_sacrifice_choice
+                            .as_ref()
+                            .unwrap()
+                            .admitted_actors,
+                        pending.admitted_actors,
+                        "the public slot-to-actor map is identical for every viewer"
+                    );
+                }
                 assert_eq!(
                     projected.iter().map(|(path, _)| path).collect::<Vec<_>>(),
                     raw.iter().map(|(path, _)| path).collect::<Vec<_>>(),
@@ -11850,6 +11896,7 @@ mod tests {
         );
         state.pending_combat_lifelink =
             Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                source_identities: Default::default(),
                 remaining: std::collections::VecDeque::from(vec![
                     crate::types::game_state::PendingLifelinkGain {
                         controller: PlayerId(0),

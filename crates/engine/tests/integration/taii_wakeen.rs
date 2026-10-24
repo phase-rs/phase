@@ -306,6 +306,7 @@ mod a2_runtime {
 
     fn noncombat_damage(source: ObjectId, victim: ObjectId, amount: u32) -> ProposedEvent {
         ProposedEvent::Damage {
+            source_identity: None,
             source_id: source,
             target: TargetRef::Object(victim),
             amount,

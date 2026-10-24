@@ -6532,12 +6532,60 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
 pub(super) fn rebind_clause_recipients_with(
     clause: &mut ParsedEffectClause,
     rebind: impl Fn(&mut Effect),
+    default_actor: ControllerRef,
 ) {
     rebind(&mut clause.effect);
-    let mut cursor = clause.sub_ability.as_deref_mut();
-    while let Some(node) = cursor {
+    // CR 608.2c + CR 109.5: Defaults belong only to this owned instruction.
+    // Explicit subjects win; an independently scoped child is a new boundary.
+    fn bind_owned(node: &mut AbilityDefinition, rebind: &impl Fn(&mut Effect)) {
+        if node.player_scope.is_some() {
+            return;
+        }
         rebind(&mut node.effect);
-        cursor = node.sub_ability.as_deref_mut();
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            bind_owned(sub, rebind);
+        }
+        if let Some(otherwise) = node.else_ability.as_deref_mut() {
+            bind_owned(otherwise, rebind);
+        }
+    }
+    if let Some(sub) = clause.sub_ability.as_deref_mut() {
+        bind_owned(sub, &rebind);
+    }
+    default_clause_instruction_actor(clause, default_actor);
+}
+
+/// CR 608.2c + CR 109.5: Default this pre-assembly instruction and its intrinsic
+/// body only. Explicit subjects and independently scoped definitions own their
+/// binding; separately parsed ClauseIr siblings have not been linked here.
+pub(super) fn default_clause_instruction_actor(
+    clause: &mut ParsedEffectClause,
+    actor: ControllerRef,
+) {
+    fn default_body(
+        node: &mut AbilityDefinition,
+        actor: &crate::types::ability::InstructionActorRef,
+    ) {
+        if node.player_scope.is_some() {
+            return;
+        }
+        let own = node
+            .instruction_actor
+            .get_or_insert_with(|| actor.clone())
+            .clone();
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            default_body(sub, &own);
+        }
+        if let Some(otherwise) = node.else_ability.as_deref_mut() {
+            default_body(otherwise, &own);
+        }
+    }
+    let own = clause
+        .instruction_actor
+        .get_or_insert_with(|| actor.into())
+        .clone();
+    if let Some(sub) = clause.sub_ability.as_deref_mut() {
+        default_body(sub, &own);
     }
 }
 
@@ -9536,6 +9584,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -9622,6 +9671,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -9692,6 +9742,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -9810,6 +9861,7 @@ pub(super) fn try_parse_bidirectional_prevent(
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),

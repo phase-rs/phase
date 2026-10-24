@@ -214,6 +214,7 @@ pub(super) fn try_split_multi_target_list(
         .rev()
         .fold(None, |chain, (clause, chooser)| {
             let mut def = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+            def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
             def.multi_target = clause.multi_target;
             def.target_chooser = chooser;
             def.sub_ability = chain;

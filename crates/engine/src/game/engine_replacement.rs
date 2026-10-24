@@ -510,6 +510,7 @@ fn handle_replacement_choice_inner(
                 // resumption time (CR 609.6: characteristics at time of dealing).
                 damage @ ProposedEvent::Damage {
                     source_id,
+                    source_identity,
                     is_combat,
                     ..
                 } => {
@@ -526,6 +527,9 @@ fn handle_replacement_choice_inner(
                     // the deferred lifelink bonus dropped by the source-derived ctx
                     // rebuild, so the resumed hit still redirects and a resumed redirect
                     // leg still gains the combined lifelink total.
+                    ctx.source_identity = source_identity;
+                    ctx.source_incarnation =
+                        source_identity.map(|identity| identity.reference.incarnation);
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
                     let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
@@ -2944,6 +2948,32 @@ pub(super) fn apply_post_replacement_effect(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let event_context = crate::game::targeting::resident_replacement_event(state);
+    apply_post_replacement_effect_with_event(
+        state,
+        effect_def,
+        subjects,
+        _spell_resolution,
+        event,
+        replacement_applied,
+        &event_context,
+        events,
+    )
+}
+
+fn apply_post_replacement_effect_with_event(
+    state: &mut GameState,
+    effect_def: &AbilityDefinition,
+    subjects: ContinuationSubjects,
+    // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
+    // cast-payment stamp is authoritative — this spell-resolution context is
+    // intentionally unused (issue #6440). Kept so call sites stay stable.
+    _spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    event: Option<&ReplacementEvent>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    event_context: &crate::types::ability::ReplacementEventContext,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     let ContinuationSubjects {
         affected: object_id,
         controller: replacement_controller,
@@ -3033,7 +3063,7 @@ pub(super) fn apply_post_replacement_effect(
                 resolved.set_scoped_player_recursive(scoped);
             }
             resolved.set_replacement_applied_recursive(replacement_applied);
-            return resolve_post_replacement_chain(state, &resolved, events);
+            return resolve_post_replacement_chain(state, &resolved, event_context, events);
         } else {
             return Some(WaitingFor::CopyTargetChoice {
                 player: controller,
@@ -3130,7 +3160,7 @@ pub(super) fn apply_post_replacement_effect(
         resolved.set_scoped_player_recursive(scoped);
     }
     resolved.set_replacement_applied_recursive(replacement_applied);
-    resolve_post_replacement_chain(state, &resolved, events)
+    resolve_post_replacement_chain(state, &resolved, event_context, events)
 }
 
 fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefinition) -> bool {
@@ -3173,8 +3203,11 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
 fn resolve_post_replacement_chain(
     state: &mut GameState,
     resolved: &ResolvedAbility,
+    event_context: &crate::types::ability::ReplacementEventContext,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let mut resolved = resolved.clone();
+    resolved.capture_replacement_event_recursive(event_context);
     // CR 117.2e: this is an internal execution sentinel, not a priority grant.
     // Isolate before running the chain: an inherited resolution choice would
     // otherwise park its synchronous tail, even if the first effect completed.
@@ -3184,7 +3217,7 @@ fn resolve_post_replacement_chain(
             player: state.priority_player,
         },
     );
-    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
+    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => {
@@ -3288,6 +3321,7 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
+    let event_context = crate::game::targeting::resident_replacement_event(state);
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
@@ -3297,21 +3331,28 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // sweeper must not treat a `Dispatching` resident as ownerless.
     let _live_dispatch = LiveDispatchGuard::enter();
     let waiting_for = match continuation {
-        PostReplacementContinuation::Resolved(resolved) => {
-            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
-        }
-        PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
+        PostReplacementContinuation::Resolved(resolved) => apply_post_replacement_resolved_effect(
             state,
-            &effect_def,
-            ContinuationSubjects {
-                affected: source,
-                controller: replacement_controller,
-            },
-            spell_resolution,
-            event.as_ref(),
+            &resolved,
             replacement_applied,
+            &event_context,
             events,
         ),
+        PostReplacementContinuation::Template(effect_def) => {
+            apply_post_replacement_effect_with_event(
+                state,
+                &effect_def,
+                ContinuationSubjects {
+                    affected: source,
+                    controller: replacement_controller,
+                },
+                spell_resolution,
+                event.as_ref(),
+                replacement_applied,
+                &event_context,
+                events,
+            )
+        }
     };
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
@@ -3520,11 +3561,12 @@ fn apply_post_replacement_resolved_effect(
     state: &mut GameState,
     resolved: &ResolvedAbility,
     replacement_applied: HashSet<AppliedReplacementKey>,
+    event_context: &crate::types::ability::ReplacementEventContext,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let mut resolved = resolved.clone();
     resolved.set_replacement_applied_recursive(replacement_applied);
-    resolve_post_replacement_chain(state, &resolved, events)
+    resolve_post_replacement_chain(state, &resolved, event_context, events)
 }
 
 /// CR 608.3: Complete post-resolution work for a permanent spell whose ETB
@@ -4866,6 +4908,7 @@ mod tests {
         // Sanity: calling apply_damage_after_replacement WITH a Damage event
         // does apply (this confirms the helper is the sole application path).
         let damage_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id,
             target: crate::types::ability::TargetRef::Object(target),
             amount: 0,

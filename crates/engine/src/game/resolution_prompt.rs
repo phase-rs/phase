@@ -580,6 +580,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         repeat_until,
         repeat_for,
         // ---- choice-free: bound `_` with a one-line justification ----
+        instruction_actor: _, // pure authority resolution; no actor-selection prompt
         condition: _, // resolution branch selector, pure eval (both branches gate-checked below)
         duration: _,  // continuous-effect lifetime, no prompt
         player_scope: _, // iteration fan-out, pure player-filter eval
@@ -806,6 +807,69 @@ mod tests {
         let mut divided = base.clone();
         divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
         assert!(!chain_offers_choice(&divided));
+    }
+
+    #[test]
+    fn instruction_actor_adds_no_prompt_and_preserves_child_and_else_choices() {
+        let base = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: fixed(1),
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(!chain_offers_choice(&base));
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = base.clone();
+            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            assert!(!chain_offers_choice(&marked), "{actor:?}");
+            let mut optional = base.clone();
+            optional.optional = true;
+            marked.sub_ability = Some(Box::new(optional.clone()));
+            assert!(chain_offers_choice(&marked));
+            marked.sub_ability = None;
+            marked.else_ability = Some(Box::new(optional));
+            assert!(chain_offers_choice(&marked));
+        }
+        let state = probe_board();
+        let plain = ability(
+            &state,
+            Effect::GainLife {
+                amount: fixed(1),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        let expected = ability_resolution_choice_freedom(&state, &plain, &mut budget());
+        assert!(matches!(
+            expected,
+            ResolutionChoiceFreedom::FreeUnlessReplacements(_)
+        ));
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut marked = plain.clone();
+            marked.instruction_actor = (Some(actor)).map(Into::into);
+            assert_eq!(
+                ability_resolution_choice_freedom(&state, &marked, &mut budget()),
+                expected
+            );
+            for branch in [false, true] {
+                let mut choice = plain.clone();
+                choice.optional = true;
+                if branch {
+                    marked.else_ability = Some(Box::new(choice));
+                } else {
+                    marked.sub_ability = Some(Box::new(choice));
+                }
+                assert_eq!(
+                    ability_resolution_choice_freedom(&state, &marked, &mut budget()),
+                    ResolutionChoiceFreedom::MayPrompt
+                );
+            }
+        }
     }
 
     /// Snapshot every axis the witness reads.
@@ -1502,6 +1566,7 @@ mod tests {
             );
             assert_eq!(
                 replacement::event_is_accounted(&ProposedEvent::Damage {
+                    source_identity: None,
                     source_id: source_id(&state),
                     target: TargetRef::Player(PlayerId(1)),
                     amount: count,

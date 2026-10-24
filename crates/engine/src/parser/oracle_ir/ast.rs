@@ -25,6 +25,10 @@ use crate::types::zones::Zone;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
     pub(crate) effect: Effect,
+    /// CR 608.2c + CR 109.5: Preserve this instruction's grammatical actor
+    /// before subject/scope lowering removes its printed subject.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) instruction_actor: Option<crate::types::ability::InstructionActorRef>,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
     ///
@@ -2175,6 +2179,7 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
         effect,
+        instruction_actor: None,
         duration: None,
         sub_ability: None,
         distribute: None,

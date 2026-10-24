@@ -542,6 +542,7 @@ fn candletrap_prevents_enchanted_creatures_combat_damage() {
 
     let mut events = Vec::new();
     let proposed = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: host,
         target: TargetRef::Player(P0),
         amount: 3,
@@ -789,6 +790,7 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
         .power = Some(5);
     let mut events = Vec::new();
     let proposed = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: fog_bank_id,
         target: TargetRef::Player(P1),
         amount: 5,
@@ -955,6 +957,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
     // Recipient half: combat damage TO the enchanted creature is prevented.
     let mut events = Vec::new();
     let to_host_combat = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: other_attacker,
         target: TargetRef::Object(host),
         amount: 4,
@@ -976,6 +979,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
     // Source half: combat damage BY the enchanted creature is prevented.
     let mut events = Vec::new();
     let by_host_combat = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: host,
         target: TargetRef::Player(P0),
         amount: 3,
@@ -998,6 +1002,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
     // NOT prevented — Gaseous Form's shield is combat-only.
     let mut events = Vec::new();
     let by_host_noncombat = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: host,
         target: TargetRef::Player(P0),
         amount: 3,
@@ -1254,6 +1259,7 @@ fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
     let other_source = scenario_attacker_on_built_runner(&mut runner, P0);
     let mut events = Vec::new();
     let proposed = engine::types::proposed_event::ProposedEvent::Damage {
+        source_identity: None,
         source_id: other_source,
         target: TargetRef::Object(host),
         amount: 5,

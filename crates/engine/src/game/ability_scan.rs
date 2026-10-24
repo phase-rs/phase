@@ -235,6 +235,7 @@ pub(crate) enum FilterReadContext {
 /// `target_constraints`).
 fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     let ResolvedAbility {
+        instruction_actor,
         // ---- read-bearing: scanned into `acc` below ----
         effect,
         sub_ability,
@@ -337,6 +338,11 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     }
     if let Some(player_scope) = player_scope {
         acc = acc.or(scan_player_filter(player_scope, mode));
+    }
+    if let Some(actor) = instruction_actor {
+        acc = acc.or(actor.classify(scan_controller_ref, |reference| {
+            scan_target_filter(reference, FilterReadContext::SnapshotOrEvent, mode)
+        }));
     }
     if let Some(starting_with) = starting_with {
         acc = acc.or(scan_controller_ref(starting_with));
@@ -5466,6 +5472,7 @@ pub(crate) fn duration_reads_projected_resource(duration: &Duration) -> bool {
 /// where a trigger-body cost surface has to be argued.
 fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     let AbilityDefinition {
+        instruction_actor,
         // ---- read-bearing ----
         effect,
         sub_ability,
@@ -5571,6 +5578,11 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     }
     if let Some(ps) = player_scope {
         acc = acc.or(scan_player_filter(ps, mode));
+    }
+    if let Some(actor) = instruction_actor {
+        acc = acc.or(actor.classify(scan_controller_ref, |reference| {
+            scan_target_filter(reference, FilterReadContext::SnapshotOrEvent, mode)
+        }));
     }
     if let Some(sw) = starting_with {
         acc = acc.or(scan_controller_ref(sw));
@@ -7575,6 +7587,53 @@ mod tests {
         };
         assert!(scan(AttackSubject::EventAttackers).event);
         assert!(!scan(AttackSubject::You).event);
+    }
+
+    #[test]
+    fn instruction_actor_scans_every_existing_controller_reference() {
+        let base = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        let baseline = resolved_ability_axes(&base, ScanMode::Conservative);
+        assert!(!baseline.event && !baseline.sibling && !baseline.projected);
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let expected = scan_controller_ref(&actor);
+            let mut resolved = base.clone();
+            resolved.instruction_actor = (Some(actor.clone())).map(Into::into);
+            let actual = resolved_ability_axes(&resolved, ScanMode::Conservative);
+            assert_eq!(
+                (
+                    actual.event,
+                    actual.sibling,
+                    actual.projected,
+                    actual.history
+                ),
+                (
+                    expected.event,
+                    expected.sibling,
+                    expected.projected,
+                    expected.history
+                ),
+                "{actor:?}"
+            );
+            let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            definition.instruction_actor = (Some(actor.clone())).map(Into::into);
+            let actual = ability_definition_axes(&definition, ScanMode::Conservative);
+            assert_eq!(
+                (
+                    actual.event,
+                    actual.sibling,
+                    actual.projected,
+                    actual.history
+                ),
+                (
+                    expected.event,
+                    expected.sibling,
+                    expected.projected,
+                    expected.history
+                ),
+                "definition {actor:?}"
+            );
+        }
+        assert!(scan_controller_ref(&ControllerRef::EventTargetController).event);
     }
 
     #[test]

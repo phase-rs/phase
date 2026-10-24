@@ -635,6 +635,7 @@ fn triggering_source_damage_stays_neutral() {
 /// the `Unresolved` assertion below would fail loudly.
 fn vanilla_damage_snapshot() -> DamageContextSnapshot {
     DamageContextSnapshot {
+        source_identity: None,
         source_id: ObjectId(1),
         source_incarnation: None,
         controller: AI,

@@ -85,6 +85,7 @@ pub(super) fn try_parse_text_change_clause(tp: TextPair<'_>) -> Option<ParsedEff
     };
     Some(ParsedEffectClause {
         unlowered_guard: None,
+        instruction_actor: None,
         effect: Effect::Choose {
             choice_type: ChoiceType::Labeled { options },
             persist: false,

@@ -48,6 +48,92 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     ));
 }
 
+/// SHAPE: grammatical actors are retained before owned-body assembly. Runtime
+/// counterparts use the ordinary cast and optional-choice pipeline.
+#[test]
+fn instruction_actor_defaults_preserve_explicit_scoped_and_controller_subjects() {
+    let def = parse_effect_chain("Each opponent may draw a card. For each opponent who doesn't, put a +1/+1 counter and a lifelink counter on target creature you control, then that player puts a +1/+1 counter on a creature they control.", AbilityKind::Spell);
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let counters: Vec<_> = std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
+        .filter(|d| matches!(d.effect.as_ref(), Effect::PutCounter { .. }))
+        .collect();
+    assert_eq!(
+        counters.len(),
+        3,
+        "both intrinsic children and the explicit subject are present"
+    );
+    assert_eq!(counters[0].instruction_actor, Some(ControllerRef::You));
+    assert_eq!(counters[1].instruction_actor, Some(ControllerRef::You));
+    assert_eq!(
+        counters[2].instruction_actor,
+        Some(ControllerRef::ScopedPlayer)
+    );
+
+    let subject_only = parse_effect_chain(
+        "Each opponent may draw a card. Each opponent who doesn't, you draw a card.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&subject_only);
+    let tail = subject_only
+        .sub_ability
+        .as_deref()
+        .expect("subject-only consequence");
+    assert_eq!(
+        tail.instruction_actor,
+        Some(ControllerRef::You),
+        "explicit you overrides the omitted-subject ScopedPlayer default"
+    );
+
+    for text in [
+        "Put a +1/+1 counter on target creature.",
+        "You draw a card.",
+    ] {
+        assert_eq!(instruction_consumer_actor(text), ConsumerActor::Controller);
+        assert_eq!(
+            reveal_choice_consumer_actor(text, None, None, false),
+            ConsumerActor::Controller
+        );
+        assert_eq!(
+            reveal_choice_consumer_actor(text, Some(&PlayerFilter::Opponent), None, false),
+            ConsumerActor::Other
+        );
+    }
+    for text in [
+        "That player draws a card.",
+        "Target creature deals 1 damage to any target.",
+        "not an instruction",
+    ] {
+        assert_eq!(instruction_consumer_actor(text), ConsumerActor::Other);
+    }
+}
+
+/// SHAPE companion to the ordinary explicit-subject and event-subject casts.
+#[test]
+fn decline_actor_defaults_do_not_rewrite_independent_explicit_references() {
+    for actor in [
+        ControllerRef::TriggeringPlayer,
+        ControllerRef::ParentTargetController,
+        ControllerRef::ParentTargetOwner,
+        ControllerRef::You,
+    ] {
+        let mut clause = parsed_clause(Effect::NoOp);
+        clause.instruction_actor = (Some(actor.clone())).map(Into::into);
+        let mut child = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        child.instruction_actor = (Some(actor.clone())).map(Into::into);
+        clause.sub_ability = Some(Box::new(child));
+        lower::rebind_clause_recipients_with(
+            &mut clause,
+            lower::rebind_decline_body_recipient,
+            ControllerRef::ScopedPlayer,
+        );
+        assert_eq!(clause.instruction_actor, Some(actor.clone()));
+        assert_eq!(
+            clause.sub_ability.as_ref().unwrap().instruction_actor,
+            Some(actor)
+        );
+    }
+}
+
 fn assert_attachment_chain_has_no_unimplemented(def: &AbilityDefinition) {
     let mut current = Some(def);
     while let Some(ability) = current {

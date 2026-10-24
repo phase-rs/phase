@@ -926,6 +926,7 @@ fn stash_post_replacement_continuation(
     controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
+    event_source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
     event_target: Option<TargetRef>,
 ) {
     state.install_post_replacement_drain(
@@ -934,6 +935,7 @@ fn stash_post_replacement_continuation(
             source: Some(source),
             applied,
             event_source,
+            event_source_identity,
             event_target,
             // CR 109.5: "you" in the continuation is the REPLACING ability's
             // controller. Carried beside `source` rather than derived from it,
@@ -2435,6 +2437,7 @@ fn redirect_damage_event(
     recipient: DamageRedirectTarget,
     redirect_amount: PreventionAmount,
     source_id: ObjectId,
+    source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
     target: TargetRef,
     damage_amount: u32,
     is_combat: bool,
@@ -2449,6 +2452,7 @@ fn redirect_damage_event(
     // shield (no opportunity was spent).
     if damage_amount == 0 {
         return ApplyResult::Modified(ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount: damage_amount,
@@ -2464,6 +2468,7 @@ fn redirect_damage_event(
     // recipient or mutating its shield: leave the proposed damage untouched.
     if matches!(redirect_amount, PreventionAmount::Next(_)) && !consume_after_redirect {
         return ApplyResult::Modified(ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount: damage_amount,
@@ -2498,6 +2503,7 @@ fn redirect_damage_event(
             // planeswalker, or a player who left the game) makes the redirection
             // do nothing, so the damage stays on the original recipient.
             ApplyResult::Modified(ProposedEvent::Damage {
+                source_identity,
                 source_id,
                 target: new_recipient.unwrap_or(target),
                 amount: damage_amount,
@@ -2540,6 +2546,7 @@ fn redirect_damage_event(
 
             if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
                 let redirected_event = ProposedEvent::Damage {
+                    source_identity,
                     source_id,
                     target: new_target,
                     amount: redirected_amount,
@@ -2572,6 +2579,7 @@ fn redirect_damage_event(
                 }
             } else {
                 return ApplyResult::Modified(ProposedEvent::Damage {
+                    source_identity,
                     source_id,
                     target,
                     amount: damage_amount,
@@ -2584,6 +2592,7 @@ fn redirect_damage_event(
                 return ApplyResult::Prevented;
             }
             ApplyResult::Modified(ProposedEvent::Damage {
+                source_identity,
                 source_id,
                 target,
                 amount: remaining_amount,
@@ -2607,6 +2616,7 @@ fn damage_done_applier(
         // before the event is destructured (mirrors the Branch 2 shield path).
         let applied_key = AppliedReplacementKey::for_event(&event, rid);
         if let ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount,
@@ -2676,6 +2686,7 @@ fn damage_done_applier(
                         // must not turn into an arbitrary default amount.
                         None => {
                             return ApplyResult::Modified(ProposedEvent::Damage {
+                                source_identity,
                                 source_id,
                                 target,
                                 amount,
@@ -2785,6 +2796,7 @@ fn damage_done_applier(
                 }
             }
             return ApplyResult::Modified(ProposedEvent::Damage {
+                source_identity,
                 source_id,
                 target,
                 amount: new_amount,
@@ -2807,6 +2819,7 @@ fn damage_done_applier(
     }) = shield_kind_for_rid(state, rid)
     {
         if let ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount: damage_amount,
@@ -2826,6 +2839,7 @@ fn damage_done_applier(
                 recipient,
                 redirect_amount,
                 source_id,
+                source_identity,
                 target,
                 damage_amount,
                 is_combat,
@@ -2859,6 +2873,7 @@ fn damage_done_applier(
     let reflects_per_event = shield_rider_reflects_per_event(state, rid);
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount: dmg,
@@ -2894,6 +2909,7 @@ fn damage_done_applier(
                         recipient,
                         PreventionAmount::All,
                         source_id,
+                        source_identity,
                         target,
                         dmg,
                         is_combat,
@@ -2911,6 +2927,7 @@ fn damage_done_applier(
                 // declining here cannot re-enter the same shield.
                 PreventionShieldRoute::Unmapped => {
                     return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_identity,
                         source_id,
                         target,
                         amount: dmg,
@@ -2970,6 +2987,7 @@ fn damage_done_applier(
                     prevented_amount = dmg.saturating_sub(remaining_damage);
                     if prevented_amount == 0 {
                         result = ApplyResult::Modified(ProposedEvent::Damage {
+                            source_identity,
                             source_id,
                             target: target.clone(),
                             amount: dmg,
@@ -2978,6 +2996,7 @@ fn damage_done_applier(
                         });
                     } else {
                         result = ApplyResult::Modified(ProposedEvent::Damage {
+                            source_identity,
                             source_id,
                             target: target.clone(),
                             amount: remaining_damage,
@@ -3008,6 +3027,7 @@ fn damage_done_applier(
                         let remaining_damage = dmg - n;
                         consume_prevention_shield(state, rid, None);
                         result = ApplyResult::Modified(ProposedEvent::Damage {
+                            source_identity,
                             source_id,
                             target: target.clone(),
                             amount: remaining_damage,
@@ -3079,6 +3099,7 @@ fn damage_done_applier(
     // consumption, since the event took no modification.)
     if matches!(shield_kind, Some(ShieldKind::PreventionOneShot)) {
         if let ProposedEvent::Damage {
+            source_identity,
             source_id,
             target,
             amount: dmg,
@@ -3088,6 +3109,7 @@ fn damage_done_applier(
         {
             if dmg == 0 {
                 return ApplyResult::Modified(ProposedEvent::Damage {
+                    source_identity,
                     source_id,
                     target,
                     amount: dmg,
@@ -3317,6 +3339,7 @@ fn apply_shield_counter_replacement(
         (
             ShieldCounterReplacementKind::Damage,
             ProposedEvent::Damage {
+                source_identity,
                 source_id,
                 target,
                 amount,
@@ -3325,6 +3348,7 @@ fn apply_shield_counter_replacement(
             },
         ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
             let event = ProposedEvent::Damage {
+                source_identity,
                 source_id,
                 target: target.clone(),
                 amount,
@@ -10148,6 +10172,12 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
+    let proposed_damage_source_identity = match &proposed {
+        ProposedEvent::Damage {
+            source_identity, ..
+        } => *source_identity,
+        _ => None,
+    };
     let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
         ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
@@ -10363,7 +10393,8 @@ fn apply_single_replacement(
                         new_event.affected_object_id().unwrap_or(rid.source),
                         ability_controller,
                         replacement_applied.clone(),
-                        None,
+                        proposed_damage_source,
+                        proposed_damage_source_identity,
                         // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
                         // player (the drawing player) so an "any other player may"
                         // execute (Zur's Weirding) can exclude them from the APNAP
@@ -10409,6 +10440,7 @@ fn apply_single_replacement(
                         ability_controller,
                         replacement_applied.clone(),
                         proposed_damage_source,
+                        proposed_damage_source_identity,
                         proposed_event_target.clone(),
                     );
                 }
@@ -12563,6 +12595,7 @@ fn continue_replacement_impl(
                         source: Some(rid.source),
                         applied: proposed.applied_set().clone(),
                         event_source: None,
+                        event_source_identity: None,
                         event_target: None,
                         // CR 109.5: same split as the mandatory stash — the
                         // zone-change drain rebinds `source` to the entering /
@@ -12837,6 +12870,7 @@ mod tests {
                 }
             } else {
                 ProposedEvent::Damage {
+                    source_identity: None,
                     source_id: ObjectId(50),
                     target: TargetRef::Object(object_id),
                     amount: 2,
@@ -13135,6 +13169,7 @@ mod tests {
         let result = replace_event(
             &mut state,
             ProposedEvent::Damage {
+                source_identity: None,
                 source_id: ObjectId(10),
                 target: TargetRef::Player(PlayerId(0)),
                 amount: 3,
@@ -14117,6 +14152,7 @@ mod tests {
             ),
             (
                 ProposedEvent::Damage {
+                    source_identity: None,
                     source_id: ObjectId(1),
                     target: TargetRef::Player(PlayerId(0)),
                     amount: 1,
@@ -14981,6 +15017,7 @@ mod tests {
         dmg_state.objects.insert(ObjectId(30), victim);
         dmg_state.battlefield.push_back(ObjectId(30));
         let dmg_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(1),
             target: crate::types::ability::TargetRef::Object(ObjectId(30)),
             amount: 2,
@@ -15303,6 +15340,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -15348,6 +15386,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -15398,6 +15437,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
@@ -15479,6 +15519,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
@@ -16210,6 +16251,7 @@ mod tests {
                 source_incarnation: None,
             });
             let event = ProposedEvent::Damage {
+                source_identity: None,
                 source_id: ObjectId(11),
                 target: TargetRef::Player(PlayerId(1)),
                 amount,
@@ -17501,6 +17543,7 @@ mod tests {
                     source: None,
                     applied: HashSet::new(),
                     event_source: None,
+                    event_source_identity: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     controller: Some(PlayerId(0)),
                 },
@@ -18075,6 +18118,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(99),
             target: TargetRef::Player(PlayerId(0)),
             amount: 5,
@@ -18138,6 +18182,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(99),
             target: TargetRef::Object(ObjectId(10)),
             amount: 5,
@@ -18165,6 +18210,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(99),
             target: TargetRef::Object(ObjectId(20)),
             amount: 3,
@@ -18250,6 +18296,7 @@ mod tests {
 
         // Create a damage proposed event
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -18286,6 +18333,7 @@ mod tests {
             });
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -18342,6 +18390,7 @@ mod tests {
             });
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -18394,6 +18443,7 @@ mod tests {
         let mut state = test_state_with_object(host, Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -19685,6 +19735,7 @@ mod tests {
 
     fn damage_event(amount: u32) -> ProposedEvent {
         ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount,
@@ -19824,6 +19875,7 @@ mod tests {
         state.battlefield.push_back(ObjectId(50));
 
         let noncombat_to_opp = || ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -19851,6 +19903,7 @@ mod tests {
 
         // NEGATIVE: combat damage is not amplified (NoncombatOnly scope).
         let combat = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -19877,6 +19930,7 @@ mod tests {
         state.objects.insert(ObjectId(60), own);
         state.battlefield.push_back(ObjectId(60));
         let to_own = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
@@ -20264,6 +20318,7 @@ mod tests {
 
         // Damage targets P0 (self) — should not match
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -20289,6 +20344,7 @@ mod tests {
 
         // Damage targets P1 (opponent) — should match
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -20326,6 +20382,7 @@ mod tests {
         state.battlefield.push_back(ObjectId(60));
 
         let proposed = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
@@ -20359,6 +20416,7 @@ mod tests {
         let registry = build_replacement_registry();
 
         let chosen_player_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -20371,6 +20429,7 @@ mod tests {
         );
 
         let unchosen_player_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -20422,6 +20481,7 @@ mod tests {
 
         let registry = build_replacement_registry();
         let chosen_permanent_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
@@ -20434,6 +20494,7 @@ mod tests {
         );
 
         let other_permanent_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(61)),
             amount: 3,
@@ -21416,6 +21477,7 @@ mod tests {
 
         // Damage to opponent (P1) — should match
         let proposed_opp = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -21430,6 +21492,7 @@ mod tests {
 
         // Damage to self (P0) — should NOT match
         let proposed_self = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -21455,6 +21518,7 @@ mod tests {
         state2.battlefield.push_back(ObjectId(60));
 
         let proposed_creature = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(60)),
             amount: 3,
@@ -21479,6 +21543,7 @@ mod tests {
         let registry = build_replacement_registry();
 
         let proposed_self = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -21491,6 +21556,7 @@ mod tests {
         );
 
         let proposed_opponent = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -24551,6 +24617,7 @@ mod tests {
 
         // Non-EmptyManaPool events never match.
         let damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(1),
             target: TargetRef::Player(PlayerId(0)),
             amount: 3,
@@ -24577,6 +24644,7 @@ mod tests {
         // also reject, but would also reject EmptyManaPool — so the
         // discrimination below is what actually proves promotion).
         let damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(1),
             target: TargetRef::Player(PlayerId(0)),
             amount: 1,
@@ -24866,6 +24934,7 @@ mod tests {
         // Positive reach-guard: the shield IS a candidate for a matching OBJECT
         // recipient, proving the gate is reached and the shield is otherwise live.
         let object_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(51)),
             amount: 3,
@@ -24883,6 +24952,7 @@ mod tests {
 
         // CR 109.1: the player-target event is refused.
         let player_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -24934,6 +25004,7 @@ mod tests {
 
         // The land does NOT match the creature-shaped valid_card filter.
         let land_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(30)),
             amount: 3,
@@ -24947,6 +25018,7 @@ mod tests {
 
         // The creature DOES match.
         let creature_event = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Object(ObjectId(31)),
             amount: 3,
@@ -24976,6 +25048,7 @@ mod tests {
         state.pending_damage_replacements.push(shield);
 
         let your_turn_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -24993,6 +25066,7 @@ mod tests {
             player: PlayerId(1),
         };
         let opp_turn_damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
@@ -25133,6 +25207,7 @@ mod tests {
             Zone::Battlefield,
         );
         let damage = ProposedEvent::Damage {
+            source_identity: None,
             source_id: source,
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
