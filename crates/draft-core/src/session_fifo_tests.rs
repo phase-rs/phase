@@ -3709,6 +3709,213 @@ fn shared_stack_legacy_snapshot_never_upgrades_to_fifo() {
     upgraded.validate_persisted_snapshot().unwrap();
 }
 
+/// The refusal a FIFO snapshot gets for carrying state that only the legacy
+/// flow keeps live.
+fn legacy_live_authority_refusal() -> DraftError {
+    DraftError::InvalidSnapshot {
+        reason: "FIFO contains legacy live authority".to_string(),
+    }
+}
+
+/// A healthy legacy Winston pod, started through the legacy reducer, so its
+/// shared stack is the one `StartDraft` deals.
+fn started_legacy_winston() -> DraftSession {
+    let mut started = legacy_winston(DraftSelectionPolicy::default(), DraftClockPolicy::default());
+    apply(
+        &mut started,
+        DraftAction::StartDraft,
+        Some(&winston_fixture_source()),
+    )
+    .unwrap();
+    started
+}
+
+/// A session after a serde round trip, the form an imported or restored
+/// snapshot arrives in.
+fn reimported(session: &DraftSession) -> DraftSession {
+    serde_json::from_str(&serde_json::to_string(session).unwrap()).unwrap()
+}
+
+/// `session` carrying `stack` as its shared stack, after a serde round trip.
+/// No other field is edited.
+fn reimported_with_stack(session: &DraftSession, stack: &SharedStackState) -> DraftSession {
+    let mut attached = session.clone();
+    attached.shared_stack = Some(stack.clone());
+    reimported(&attached)
+}
+
+#[test]
+fn fifo_lobby_snapshot_carrying_a_shared_stack_is_refused_before_generation() {
+    let fifo_lobby = lobby(with_pod_size(config(DraftKind::Premier, 6, 0, 0, 0), 2));
+    let winston = started_legacy_winston();
+    // Reach: the Winston pod is an admissible snapshot that carries a stack.
+    winston.validate_persisted_snapshot().unwrap();
+    let stack = winston.shared_stack.as_ref().unwrap();
+
+    // The imported snapshot is the FIFO Lobby carrying that stack after a
+    // serde round trip; its twin is the same Lobby round-tripped without it.
+    let imported = reimported_with_stack(&fifo_lobby, stack);
+    let twin = reimported(&fifo_lobby);
+    assert_eq!(imported.shared_stack.as_ref(), Some(stack));
+    assert_eq!(imported.config.flow, DraftFlow::FifoAsync);
+    assert_eq!(imported.status, Lobby);
+    let mut stripped = imported.clone();
+    stripped.shared_stack = None;
+    assert_eq!(stripped, twin);
+    twin.validate_persisted_snapshot().unwrap();
+
+    assert_eq!(
+        imported.validate_persisted_snapshot(),
+        Err(legacy_live_authority_refusal())
+    );
+    let before = serde_json::to_string(&imported).unwrap();
+    let mut candidate = imported.clone();
+    let source = Source {
+        size: 6,
+        effect_seat: None,
+    };
+    let counting = CountingSource::new(&source);
+    assert_eq!(
+        apply_at(
+            &mut candidate,
+            DraftAction::StartDraft,
+            Some(&counting),
+            1000
+        ),
+        Err(legacy_live_authority_refusal())
+    );
+    assert_eq!(counting.calls.get(), 0);
+    assert_eq!(candidate, imported);
+    assert_eq!(serde_json::to_string(&candidate).unwrap(), before);
+}
+
+#[test]
+fn started_fifo_snapshots_carrying_a_shared_stack_are_refused() {
+    let winston = started_legacy_winston();
+    let stack = winston.shared_stack.as_ref().unwrap();
+
+    // Drafting: a legal selection on the stackless twin is accepted, and the
+    // same selection on the snapshot carrying the stack is refused with the
+    // session unchanged.
+    let drafting = fixture(DraftKind::Premier, 6, 0, 0, 0, None);
+    let mut twin = reimported(&drafting);
+    twin.validate_persisted_snapshot().unwrap();
+    let action = pick_pass::legal_auto_selection(&twin, 0).unwrap();
+    assert_eq!(
+        accepted(&apply_at(&mut twin, action.clone(), None, 1100).unwrap()).len(),
+        1
+    );
+    let imported = reimported_with_stack(&drafting, stack);
+    assert_eq!(imported.shared_stack.as_ref(), Some(stack));
+    assert_eq!(
+        imported.validate_persisted_snapshot(),
+        Err(legacy_live_authority_refusal())
+    );
+    assert_refusal(&imported, action, 1100, legacy_live_authority_refusal());
+
+    // Review, Paused and Deckbuilding.
+    let mut review = fixture(DraftKind::Premier, 2, 0, 0, 1000, None);
+    drain_round(&mut review, 1100);
+    let mut paused = drafting.clone();
+    apply_at(
+        &mut paused,
+        DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        },
+        None,
+        1500,
+    )
+    .unwrap();
+    let mut deckbuilding = fixture(DraftKind::Premier, 2, 0, 0, 0, None);
+    drain_round(&mut deckbuilding, 1100);
+    drain_round(&mut deckbuilding, 1100);
+    for (status, session) in [
+        (Review, &review),
+        (Paused, &paused),
+        (Deckbuilding, &deckbuilding),
+    ] {
+        assert_eq!(session.status, status);
+        reimported(session).validate_persisted_snapshot().unwrap();
+        let imported = reimported_with_stack(session, stack);
+        assert_eq!(imported.shared_stack.as_ref(), Some(stack));
+        assert_eq!(
+            imported.validate_persisted_snapshot(),
+            Err(legacy_live_authority_refusal()),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn healthy_fifo_start_publishes_no_shared_stack() {
+    // The stackless twin of the refused Lobby snapshot starts as a healthy
+    // FIFO draft.
+    let mut started = reimported(&lobby(with_pod_size(
+        config(DraftKind::Premier, 6, 0, 0, 0),
+        2,
+    )));
+    started.validate_persisted_snapshot().unwrap();
+    let source = Source {
+        size: 6,
+        effect_seat: None,
+    };
+    let counting = CountingSource::new(&source);
+    apply_at(&mut started, DraftAction::StartDraft, Some(&counting), 1000).unwrap();
+    assert_eq!(counting.calls.get(), 4);
+    started.validate_persisted_snapshot().unwrap();
+    assert_eq!(started.status, Drafting);
+    assert!(started.shared_stack.is_none());
+    for seat in 0..2 {
+        assert!(started.head_pack(seat).is_some());
+        assert!(started.fifo.as_ref().unwrap().seats[usize::from(seat)]
+            .prompt
+            .is_some());
+        let view = filter_for_player(&started, seat);
+        assert!(view.fifo.is_some());
+        assert!(view.shared_stack.is_none());
+        assert!(view.play_first_chooser.is_none());
+    }
+    assert!(filter_for_spectator(&started, SpectatorVisibility::Public)
+        .shared_stack
+        .is_none());
+}
+
+#[test]
+fn legacy_winston_snapshot_is_admitted_and_takes_a_pile() {
+    let winston = started_legacy_winston();
+    winston.validate_persisted_snapshot().unwrap();
+    let mut imported = reimported(&winston);
+    imported.validate_persisted_snapshot().unwrap();
+    let state = imported.shared_stack.as_ref().unwrap();
+    let (active, cursor) = (state.active_seat, state.cursor);
+    let turn = filter_for_player(&imported, active)
+        .shared_stack
+        .expect("the active seat sees its pile turn");
+    assert_eq!(turn.active_seat, active);
+    let pool_before = imported.pools[usize::from(active)].len();
+
+    apply(
+        &mut imported,
+        DraftAction::SharedStackDecision {
+            seat: active,
+            pile: cursor,
+            decision: SharedStackPileDecision::Take,
+        },
+        None,
+    )
+    .unwrap();
+    imported.validate_persisted_snapshot().unwrap();
+    assert!(imported.pools[usize::from(active)].len() > pool_before);
+    let next = imported.shared_stack.as_ref().unwrap().active_seat;
+    assert_ne!(next, active);
+    let turn = filter_for_player(&imported, next)
+        .shared_stack
+        .expect("the next seat sees its pile turn");
+    assert_eq!(turn.active_seat, next);
+}
+
 #[test]
 fn omniscient_spectator_packs_follow_the_seat_list() {
     let pack_source = crate::pack_source::FixturePackSource {

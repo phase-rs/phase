@@ -644,6 +644,7 @@ impl DraftSession {
             || self.current_pack_origins.iter().any(Option::is_some)
             || (0..self.config.pod_size).any(|seat| self.seats_picked_this_round.get(seat))
             || self.pick_number != 0
+            || self.shared_stack.is_some()
         {
             return Err(snapshot_error("FIFO contains legacy live authority"));
         }
