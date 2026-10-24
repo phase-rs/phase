@@ -271,6 +271,70 @@ describe("LLM-driven AI seats", () => {
     controller.dispose();
   });
 
+  it("never touches the LLM path when a provider is configured but not selected as default opponent", async () => {
+    useLlmStore.getState().addProfile({
+      provider: "OpenAi",
+      model: "gpt-5",
+      apiKey: "my-key",
+      enabled: true,
+    });
+    expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+    expect(useLlmStore.getState().seatBindings[0]).toBeUndefined();
+
+    const heuristic = proposal(PASS, "heuristic");
+    const buildLlmDecisionRequest = vi.fn();
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
+  it("falls back to heuristic AI when default opponent was deselected, even if seat had prior LLM binding", async () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi",
+      model: "gpt-5",
+      apiKey: "my-key",
+      enabled: true,
+    });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    useLlmStore.getState().bindSeat(0, id);
+
+    // Deselect default opponent back to engine AI
+    useLlmStore.getState().setDefaultOpponentProfileId(null);
+    expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+
+    const heuristic = proposal(PASS, "heuristic");
+    const buildLlmDecisionRequest = vi.fn();
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
   it("routes a persisted default through request, transport, binding and dispatch for an unbound seat", async () => {
     const id = useLlmStore.getState().addProfile({
       provider: "OpenAi", model: "gpt-5", apiKey: "default-key", enabled: true,
