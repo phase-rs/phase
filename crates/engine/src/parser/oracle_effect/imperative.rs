@@ -4063,7 +4063,49 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
     }
 }
 
-pub(super) fn parse_hand_reveal_ast(
+pub(super) fn parse_hand_reveal_ast<'a>(
+    text: &'a str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Result<Option<HandRevealImperativeAst>, OracleError<'a>> {
+    let mut trial = ctx.clone();
+    let mut ast = parse_hand_reveal_ast_inner(text, lower, &mut trial);
+    if matches!(ast, Some(HandRevealImperativeAst::RevealAll { .. })) {
+        let (after, _) = alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))
+            .parse(lower)
+            .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?;
+        let (target, card_filter) = parse_hand_reveal_target_and_card_filter(after, &mut trial)
+            .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?;
+        ast = Some(HandRevealImperativeAst::RevealAll {
+            target,
+            card_filter,
+        });
+    }
+    if ast.is_some() {
+        *ctx = trial;
+    }
+    Ok(ast)
+}
+
+fn parse_hand_reveal_target_and_card_filter<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> Result<(TargetFilter, TargetFilter), OracleError<'a>> {
+    if let Ok((after_hand, target)) = parse_hand_possessive_target(input) {
+        if let Ok((choice, _)) =
+            (space0, tag::<_, _, OracleError<'_>>("and "), space0).parse(after_hand)
+        {
+            match super::parse_hand_choice_filter(choice, ctx)? {
+                Some(Some(filter)) => return Ok((target, filter)),
+                Some(None) => return Ok((target, TargetFilter::Typed(TypedFilter::card()))),
+                None => return Err(OracleError::new(input, nom::error::ErrorKind::Verify)),
+            }
+        }
+    }
+    Ok(parse_hand_reveal_target_and_card_filter_inner(input, ctx))
+}
+
+fn parse_hand_reveal_ast_inner(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
@@ -4190,7 +4232,7 @@ pub(super) fn parse_hand_reveal_ast(
 
     if nom_primitives::scan_contains(lower, "hand") {
         let (target, card_filter) =
-            parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
+            parse_hand_reveal_target_and_card_filter_inner(after_reveal_lower, ctx);
         // CR 701.20a: a counted reveal ("X cards from their hand", "a card at
         // random from their hand") reveals that many cards, not the whole hand.
         // Only the shape no typed recognizer above claimed reaches the count
@@ -4270,7 +4312,7 @@ fn parse_reveal_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((parse_subject_hand_owner, parse_hand_possessive_target)).parse(input)
 }
 
-fn parse_hand_reveal_target_and_card_filter(
+fn parse_hand_reveal_target_and_card_filter_inner(
     after_reveal_lower: &str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, TargetFilter) {
@@ -4278,30 +4320,6 @@ fn parse_hand_reveal_target_and_card_filter(
         .parse(after_reveal_lower.trim())
     {
         return (target, TargetFilter::None);
-    }
-
-    // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
-    // card from it" names the revealing player's hand directly, then the
-    // controller chooses a filtered card from it (Biting-Palm Ninja: "that player
-    // reveals their hand and you choose a nonland card from it."). The fused choose
-    // clause must populate `card_filter`; an empty `None` filter matches nothing, so
-    // without it the RevealHand chooses and exiles nothing (a silent no-op).
-    if let Ok((rest, target)) = parse_hand_possessive_target(after_reveal_lower) {
-        if let Ok((_, choose)) = preceded(
-            (space0, tag::<_, _, OracleError<'_>>("and "), space0),
-            nom::combinator::rest,
-        )
-        .parse(rest)
-        {
-            let chooses_card_from_it = nom_primitives::scan_contains(choose, "card from it")
-                && alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
-                    .parse(choose)
-                    .is_ok();
-
-            if chooses_card_from_it {
-                return (target, super::parse_choose_filter(choose, ctx));
-            }
-        }
     }
 
     if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
@@ -4774,7 +4792,32 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
-pub(super) fn parse_choose_ast(
+pub(super) fn parse_choose_ast<'a>(
+    text: &'a str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Result<Option<ChooseImperativeAst>, OracleError<'a>> {
+    let mut trial = ctx.clone();
+    let selected = if super::parse_hand_choice_command(lower).is_ok() {
+        super::parse_hand_choice_filter(lower, &mut trial)
+            .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?
+    } else {
+        None
+    };
+    let ast = match selected {
+        Some(Some(card_filter)) => Some(ChooseImperativeAst::RevealHandFilter {
+            card_filter,
+            choice_optional: super::sequence::reveal_choice_is_optional(lower),
+        }),
+        Some(None) | None => parse_choose_ast_inner(text, lower, &mut trial),
+    };
+    if ast.is_some() {
+        *ctx = trial;
+    }
+    Ok(ast)
+}
+
+fn parse_choose_ast_inner(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
@@ -4963,19 +5006,6 @@ pub(super) fn parse_choose_ast(
         return Some(ChooseImperativeAst::NamedChoice {
             choice_type,
             selection,
-        });
-    }
-
-    if nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input)).is_some()
-        && nom_primitives::scan_contains(lower, "card from it")
-    {
-        let choice_optional = nom_on_lower(text, lower, |input| {
-            value((), tag("you may choose ")).parse(input)
-        })
-        .is_some();
-        return Some(ChooseImperativeAst::RevealHandFilter {
-            card_filter: super::parse_choose_filter(lower, ctx),
-            choice_optional,
         });
     }
 
@@ -12862,7 +12892,31 @@ fn parse_mass_destroy_attached_to_declared_slot<'a>(
     parse_destroy_ast(text, lower, ctx)
 }
 
-pub(super) fn parse_imperative_family_ast(
+pub(super) fn parse_imperative_family_ast<'a>(
+    text: &'a str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Result<Option<ImperativeFamilyAst>, OracleError<'a>> {
+    let mut trial = ctx.clone();
+    let hand = parse_hand_reveal_ast(text, lower, &mut trial)?;
+    let ast = if let Some(hand) = hand {
+        Some(ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+            hand,
+        )))
+    } else if let Some(choice) = parse_choose_ast(text, lower, &mut trial)? {
+        Some(ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            choice,
+        )))
+    } else {
+        parse_imperative_family_ast_inner(text, lower, &mut trial)
+    };
+    if ast.is_some() {
+        *ctx = trial;
+    }
+    Ok(ast)
+}
+
+fn parse_imperative_family_ast_inner(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
@@ -13511,7 +13565,7 @@ pub(super) fn parse_imperative_family_ast(
         "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower, ctx)
+                parse_hand_reveal_ast_inner(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
@@ -13519,7 +13573,7 @@ pub(super) fn parse_imperative_family_ast(
         "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
             .or_else(|| {
-                parse_choose_ast(text, lower, ctx)
+                parse_choose_ast_inner(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast)))
             }),
 
@@ -14245,7 +14299,7 @@ pub(super) fn parse_imperative_family_ast(
         }
 
         // "look" → exiled/hand targets (step 4) → "look at the top" (step 5)
-        "look" => parse_hand_reveal_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch; exiled-card look must precede library-top search
+        "look" => parse_hand_reveal_ast_inner(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch; exiled-card look must precede library-top search
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             .or_else(|| {
                 parse_search_and_creation_ast(text, lower, ctx)
@@ -18175,7 +18229,8 @@ mod tests {
                 text,
                 &text.to_lowercase(),
                 &mut ParseContext::default(),
-            );
+            )
+            .expect("checked parser admission");
             assert!(
                 matches!(result,
                     Some(ImperativeFamilyAst::Put(PutImperativeAst::Unimplemented { gap: "put_counter_tail", ref fragment }))
@@ -18203,7 +18258,8 @@ mod tests {
                 text,
                 &text.to_lowercase(),
                 &mut ParseContext::default(),
-            );
+            )
+            .expect("checked parser admission");
             assert!(
                 matches!(result, Some(ImperativeFamilyAst::ZoneCounter(_))),
                 "{text}: {result:?}"
@@ -18238,7 +18294,8 @@ mod tests {
                 EffectKind::PutChosenCounter,
             ),
         ] {
-            let result = parse_imperative_family_ast(text, text, &mut ParseContext::default());
+            let result = parse_imperative_family_ast(text, text, &mut ParseContext::default())
+                .expect("checked parser admission");
             let Some(ImperativeFamilyAst::ZoneCounter(ast)) = result else {
                 panic!("{text}: {result:?}");
             };
@@ -22371,6 +22428,7 @@ mod tests {
         ] {
             let lower = text.to_lowercase();
             let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission")
                 .unwrap_or_else(|| panic!("{text:?} should parse to a turn-face-up effect"));
             match lower_imperative_family_effect(ast) {
                 Effect::TurnFaceUp { target } => {
@@ -22402,7 +22460,8 @@ mod tests {
         // effect. The general resolving-effect arm must NOT swallow it.
         for text in ["turn this permanent face up", "turn this creature face up"] {
             let lower = text.to_lowercase();
-            let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+            let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission");
             let is_turn_face_up = ast
                 .map(lower_imperative_family_effect)
                 .is_some_and(|e| matches!(e, Effect::TurnFaceUp { .. }));
@@ -22420,6 +22479,7 @@ mod tests {
         let text = "reveal target face-down permanent";
         let lower = text.to_lowercase();
         let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("reveal target object should parse");
         match lower_imperative_family_effect(ast) {
             Effect::Reveal { target } => {
@@ -22440,7 +22500,8 @@ mod tests {
     fn parse_additional_phase_after_this_main_phase_anchors_to_main() {
         let text = "After this main phase, there are two additional combat phases.";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(
             result.is_some(),
             "Should parse main-phase-anchored additional combats"
@@ -22465,7 +22526,8 @@ mod tests {
     fn parse_additional_phase_phase() {
         let text = "there is an additional combat phase after this phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(result.is_some(), "Should parse additional combat phase");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
@@ -22580,7 +22642,8 @@ mod tests {
         let text =
             "there is an additional combat phase after this phase followed by an additional main phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(result.is_some(), "Should parse additional combat + main");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
@@ -22602,7 +22665,8 @@ mod tests {
     fn parse_additional_upkeep_step() {
         let text = "get an additional upkeep step after this step";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(result.is_some(), "Should parse additional upkeep step");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
@@ -22623,7 +22687,8 @@ mod tests {
     fn parse_after_this_phase_additional_phase() {
         let text = "after this phase, there is an additional combat phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
@@ -22635,7 +22700,8 @@ mod tests {
     fn parse_obeka_that_many_additional_upkeep_steps_binds_event_amount() {
         let text = "you get that many additional upkeep steps after this phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         let effect = lower_imperative_family_effect(
             result.expect("Obeka consequent should parse as AdditionalPhase"),
         );
@@ -22661,6 +22727,7 @@ mod tests {
         let lower = text.to_lowercase();
         let effect = lower_imperative_family_effect(
             parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission")
                 .expect("fixed-count additional upkeep should parse"),
         );
         match effect {
@@ -22681,6 +22748,7 @@ mod tests {
         let lower = text.to_lowercase();
         let effect = lower_imperative_family_effect(
             parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission")
                 .expect("should parse singular additional upkeep"),
         );
         match effect {
@@ -22697,6 +22765,7 @@ mod tests {
         let lower = text.to_lowercase();
         lower_imperative_family_effect(
             parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission")
                 .unwrap_or_else(|| panic!("{text:?} should reach the additional-phase family")),
         )
     }
@@ -23649,7 +23718,8 @@ mod tests {
             source_core_types: vec![crate::types::card_type::CoreType::Sorcery],
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let ast =
+            parse_imperative_family_ast(text, &lower, &mut ctx).expect("checked parser admission");
         assert!(
             matches!(
                 &ast,
@@ -23720,7 +23790,8 @@ mod tests {
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let ast =
+            parse_imperative_family_ast(text, &lower, &mut ctx).expect("checked parser admission");
         assert!(
             matches!(
                 &ast,
@@ -23764,7 +23835,8 @@ mod tests {
             // No subject: an activated ability body has none.
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let ast =
+            parse_imperative_family_ast(text, &lower, &mut ctx).expect("checked parser admission");
         assert!(
             matches!(
                 &ast,
@@ -23809,7 +23881,8 @@ mod tests {
             source_core_types: vec![crate::types::card_type::CoreType::Artifact],
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let ast =
+            parse_imperative_family_ast(text, &lower, &mut ctx).expect("checked parser admission");
         let x = QuantityExpr::Ref {
             qty: QuantityRef::Variable {
                 name: "X".to_string(),
@@ -23839,6 +23912,7 @@ mod tests {
         let text = "turn any number of target tapped nontoken creatures face down";
         let lower = text.to_lowercase();
         let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("plural turn-face-down should parse");
         assert!(
             matches!(
@@ -23866,6 +23940,7 @@ mod tests {
         let text = "turn target creature face down";
         let lower = text.to_lowercase();
         let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("single turn-face-down should parse");
         let clause = lower_imperative_family_ast(ast);
         assert_eq!(
@@ -23885,7 +23960,8 @@ mod tests {
     fn turn_face_down_with_unmodeled_restriction_falls_through() {
         let text = "turn target creature with a morph ability face down";
         let lower = text.to_lowercase();
-        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(
             ast.is_none(),
             "an unmodeled target restriction must not silently widen the target; \
@@ -23895,7 +23971,8 @@ mod tests {
         // The unrestricted subject still parses to TurnFaceDown.
         let text = "turn target creature face down";
         let lower = text.to_lowercase();
-        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let ast = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(
             matches!(ast, Some(ImperativeFamilyAst::TurnFaceDown { .. })),
             "unrestricted 'target creature' must still parse to TurnFaceDown, got {ast:?}"
@@ -23947,7 +24024,8 @@ mod tests {
     fn parse_choose_one_of_them() {
         let text = "choose one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
@@ -23964,7 +24042,8 @@ mod tests {
     fn parse_choose_creature_they_control_and_exiles_it() {
         let text = "choose a creature they control and exiles it";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::Reparse { text }) => {
                 assert_eq!(text, "exile a creature you control");
@@ -23989,7 +24068,8 @@ mod tests {
     fn parse_choose_two_of_those_cards() {
         let text = "choose two of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 2);
@@ -24021,7 +24101,7 @@ mod tests {
         let text = "choose one of the exiled cards";
         let lower = text.to_lowercase();
         let mut ctx = exile_cost_ctx();
-        match parse_choose_ast(text, &lower, &mut ctx) {
+        match parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission") {
             Some(ChooseImperativeAst::FromTrackedSet {
                 count,
                 selection,
@@ -24046,7 +24126,7 @@ mod tests {
         let text = "an opponent chooses one of the exiled cards";
         let lower = text.to_lowercase();
         let mut ctx = exile_cost_ctx();
-        match parse_choose_ast(text, &lower, &mut ctx) {
+        match parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission") {
             Some(ChooseImperativeAst::FromTrackedSet {
                 chooser,
                 candidate_source,
@@ -24073,7 +24153,8 @@ mod tests {
     fn choose_one_of_the_exiled_cards_without_cost_context_is_not_claimed() {
         let text = "choose one of the exiled cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(
             !matches!(
                 result,
@@ -24096,7 +24177,7 @@ mod tests {
         let text = "an opponent chooses one of them";
         let lower = text.to_lowercase();
         let mut ctx = exile_cost_ctx();
-        match parse_choose_ast(text, &lower, &mut ctx) {
+        match parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission") {
             Some(ChooseImperativeAst::FromTrackedSet {
                 candidate_source, ..
             }) => assert_eq!(
@@ -24121,7 +24202,8 @@ mod tests {
         ] {
             let lower = text.to_lowercase();
             let mut ctx = exile_cost_ctx();
-            let result = parse_choose_ast(text, &lower, &mut ctx);
+            let result =
+                parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission");
             assert!(
                 !matches!(
                     result,
@@ -24140,7 +24222,8 @@ mod tests {
     fn parse_choose_anaphoric_opponent() {
         let text = "an opponent chooses one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
@@ -24154,7 +24237,8 @@ mod tests {
     fn parse_choose_anaphoric_you_choose() {
         let text = "you choose one of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
@@ -24173,7 +24257,8 @@ mod tests {
     fn parse_choose_nonland_card_exiled_this_way() {
         let text = "choose a nonland card exiled this way";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 count,
@@ -24217,7 +24302,8 @@ mod tests {
     fn parse_opponent_chooses_nonland_card_exiled_this_way() {
         let text = "an opponent chooses a nonland card exiled this way";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 count,
@@ -24245,7 +24331,8 @@ mod tests {
     fn parse_choose_card_exiled_this_way_still_tracked_set() {
         let text = "choose a card exiled this way";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 1);
@@ -24258,6 +24345,7 @@ mod tests {
     fn choose_exiled(text: &str) -> Option<ChooseImperativeAst> {
         let lower = text.to_lowercase();
         parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
     }
 
     /// CR 607.2a + CR 406.6: "choose a <type> card exiled with ~" (Koh, the Face
@@ -24354,7 +24442,8 @@ mod tests {
     fn parse_choose_up_to_two_of_them() {
         let text = "choose up to two of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
                 assert_eq!(count, 2);
@@ -24372,7 +24461,8 @@ mod tests {
         use crate::types::counter::{CounterMatch, CounterType};
         let text = "choose a suspended card you own";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 count,
@@ -24473,7 +24563,8 @@ mod tests {
     fn parse_choose_creature_card_in_your_hand() {
         let text = "choose a creature card in your hand";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 zones,
@@ -24503,7 +24594,7 @@ mod tests {
         let text = "choose a creature card in your hand without blitz";
         let lower = text.to_lowercase();
         let mut ctx = ParseContext::default();
-        let result = parse_choose_ast(text, &lower, &mut ctx);
+        let result = parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 zones,
@@ -24536,7 +24627,8 @@ mod tests {
     fn parse_choose_instant_or_sorcery_card_in_hand_or_graveyard() {
         let text = "choose an instant or sorcery card in your hand or graveyard";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 zones,
@@ -24559,7 +24651,8 @@ mod tests {
     fn parse_choose_targeted_players_graveyard_or_hand() {
         let text = "you choose a nonland card from that player's graveyard or hand";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone {
                 zones,
@@ -24588,7 +24681,8 @@ mod tests {
         // dropped the random axis, treating it as a deliberate player choice).
         let text = "choose a card at random in your graveyard";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::FromZone { selection, .. }) => {
                 assert_eq!(selection, CardSelectionMode::Random);
@@ -24603,7 +24697,9 @@ mod tests {
         // Diary) → anaphoric FromTrackedSet with CardSelectionMode::Random.
         let text = "choose one of them at random";
         let lower = text.to_lowercase();
-        match parse_choose_ast(text, &lower, &mut ParseContext::default()) {
+        match parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
+        {
             Some(ChooseImperativeAst::FromTrackedSet {
                 count, selection, ..
             }) => {
@@ -24620,7 +24716,9 @@ mod tests {
         // with TargetSelectionMode::Random.
         let text = "choose a player at random";
         let lower = text.to_lowercase();
-        match parse_choose_ast(text, &lower, &mut ParseContext::default()) {
+        match parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
+        {
             Some(ChooseImperativeAst::NamedChoice { selection, .. }) => {
                 assert_eq!(selection, TargetSelectionMode::Random);
             }
@@ -24639,7 +24737,7 @@ mod tests {
         let text = "choose a creature card at random from target opponent's graveyard";
         let lower = text.to_lowercase();
         let mut ctx = ParseContext::default();
-        match parse_choose_ast(text, &lower, &mut ctx) {
+        match parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission") {
             Some(ChooseImperativeAst::FromZone {
                 selection,
                 zone_owner,
@@ -24679,7 +24777,8 @@ mod tests {
         // Imperial Edict pattern: "choose a creature they control"
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::TargetOnly { target }) => {
                 // Should extract creature filter with controller
@@ -24787,7 +24886,8 @@ mod tests {
         let text =
             "choose from among the permanents they control an artifact, a creature, an enchantment, and a land";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -24820,7 +24920,8 @@ mod tests {
         // post-strip body reaching parse_choose_ast.
         let text = "choose a permanent they control of each permanent type";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -24852,7 +24953,8 @@ mod tests {
         // Cataclysmic Gearhulk: "choose an artifact, a creature, ... from among ..."
         let text = "choose an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -24894,7 +24996,8 @@ mod tests {
     fn parse_choose_from_among_gearhulk_pattern_with_comma() {
         let text = "choose an artifact, a creature, an enchantment, and a planeswalker, from among the nonland permanents they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -24925,7 +25028,8 @@ mod tests {
         use crate::types::ability::{FilterProp, TypeFilter};
         let text = "choose target artifact a player controls and target artifact card in that player's graveyard";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::TwoTargets {
                 target_a, target_b, ..
@@ -24977,7 +25081,8 @@ mod tests {
     fn parse_choose_two_targets_with_optional_dependent_second_slot() {
         let text = "choose target opponent and up to one target creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         let Some(ChooseImperativeAst::TwoTargets {
             target_a,
             target_a_multi_target,
@@ -25015,7 +25120,8 @@ mod tests {
         let lower = text.to_lowercase();
         assert!(
             !matches!(
-                parse_choose_ast(text, &lower, &mut ParseContext::default()),
+                parse_choose_ast(text, &lower, &mut ParseContext::default())
+                    .expect("checked parser admission"),
                 Some(ChooseImperativeAst::TwoTargets { .. })
             ),
             "the up-to-one connector must not consume a different cardinality"
@@ -25028,7 +25134,8 @@ mod tests {
             "choose target opponent and up to one target creature they control trailing garbage";
         let lower = text.to_lowercase();
         assert!(!matches!(
-            parse_choose_ast(text, &lower, &mut ParseContext::default()),
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission"),
             Some(ChooseImperativeAst::TwoTargets { .. })
         ));
     }
@@ -25039,7 +25146,8 @@ mod tests {
             "choose up to one target artifact, up to one target creature, and up to one target land";
         let lower = text.to_lowercase();
         assert!(!matches!(
-            parse_choose_ast(text, &lower, &mut ParseContext::default()),
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission"),
             Some(ChooseImperativeAst::TwoTargets { .. })
         ));
     }
@@ -25054,6 +25162,7 @@ mod tests {
             target_b,
             target_b_multi_target,
         }) = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
         else {
             panic!("expected the two-target Great Aerie head");
         };
@@ -25085,6 +25194,7 @@ mod tests {
         let lower = text.to_lowercase();
         let Some(ChooseImperativeAst::TwoTargets { target_b, .. }) =
             parse_choose_ast(text, &lower, &mut ParseContext::default())
+                .expect("checked parser admission")
         else {
             panic!("expected the two-target Mouth to Mouth head");
         };
@@ -25234,7 +25344,8 @@ mod tests {
     fn parse_choose_single_target_unchanged() {
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         match result {
             Some(ChooseImperativeAst::TargetOnly { .. })
             | Some(ChooseImperativeAst::Reparse { .. }) => {
@@ -25260,6 +25371,7 @@ mod tests {
         let text = "choose a source you control";
         let lower = text.to_lowercase();
         let ast = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("must parse choose-a-source-you-control");
         match ast {
             ChooseImperativeAst::DamageSource { ref source_filter } => {
@@ -25435,7 +25547,8 @@ mod tests {
         // refuse this and let single-target dispatch claim it.
         let text = "choose target creature and put a +1/+1 counter on it";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         // Any non-TwoTargets variant (TargetOnly with the creature filter, or
         // Reparse routing into the compound-action splitter) is fine — the
         // contract is just "no false positive on TwoTargets".
@@ -26815,6 +26928,7 @@ mod tests {
             "gain lifelink",
             &mut ParseContext::default(),
         )
+        .expect("checked parser admission")
         .expect("'gain lifelink' should parse");
         match ast {
             ImperativeFamilyAst::GainKeyword(effect) => assert!(
@@ -26834,6 +26948,7 @@ mod tests {
             "end the turn",
             &mut ParseContext::default(),
         )
+        .expect("checked parser admission")
         .expect("'end the turn' should parse");
         assert!(
             matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
@@ -26850,6 +26965,7 @@ mod tests {
             "end the combat phase",
             &mut ParseContext::default(),
         )
+        .expect("checked parser admission")
         .expect("'end the combat phase' should parse");
         assert!(
             matches!(
@@ -26866,6 +26982,7 @@ mod tests {
     fn gain_life_still_dispatches_to_numeric_life_gain() {
         let ast =
             parse_imperative_family_ast("gain 3 life", "gain 3 life", &mut ParseContext::default())
+                .expect("checked parser admission")
                 .expect("'gain 3 life' should parse");
         assert!(
             matches!(
@@ -26960,6 +27077,7 @@ mod tests {
         let text = "get +2/+0 and gain haste until end of turn";
         let mut ctx = ParseContext::default();
         let ast = parse_imperative_family_ast(text, &text.to_lowercase(), &mut ctx)
+            .expect("checked parser admission")
             .expect("pump+keyword body should parse");
         match ast {
             ImperativeFamilyAst::GainKeyword(effect) => {
@@ -26975,6 +27093,7 @@ mod tests {
         let text = "get +2/+0";
         let mut ctx = ParseContext::default();
         let ast = parse_imperative_family_ast(text, &text.to_lowercase(), &mut ctx)
+            .expect("checked parser admission")
             .expect("pump body should parse");
         assert!(
             matches!(
@@ -28192,6 +28311,7 @@ mod tests {
         // the same leaf.
         for input in ["planeswalk", "planeswalks"] {
             let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .expect("checked parser admission")
                 .unwrap_or_else(|| panic!("'{input}' should parse to a Planeswalk leaf"));
             assert!(
                 matches!(ast, ImperativeFamilyAst::Planeswalk),
@@ -28477,7 +28597,8 @@ mod tests {
         let input =
             "reveals a number of cards from their hand equal to the number of creature cards in your graveyard";
         let lower = input.to_lowercase();
-        let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+        let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         let Some(HandRevealImperativeAst::RevealPartial { count, .. }) = result else {
             panic!("{input}: expected RevealPartial, got {result:?}");
         };
@@ -28924,6 +29045,7 @@ mod tests {
     #[test]
     fn recruit_lowers_to_direct_discard_contingent_chain() {
         let ast = parse_imperative_family_ast("recruit", "recruit", &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("Recruit should parse as its standalone keyword action");
         let draw = lower_imperative_family_ast(ast);
         assert!(matches!(draw.effect, Effect::Draw { .. }));
@@ -28954,6 +29076,7 @@ mod tests {
     fn recruiter_is_not_recruit() {
         assert!(
             parse_imperative_family_ast("recruiter", "recruiter", &mut ParseContext::default())
+                .expect("checked parser admission")
                 .is_none(),
             "the anchored Recruit grammar must not accept a longer word"
         );
@@ -28972,7 +29095,8 @@ mod tests {
         ] {
             assert!(
                 !matches!(
-                    parse_imperative_family_ast(text, text, &mut ParseContext::default()),
+                    parse_imperative_family_ast(text, text, &mut ParseContext::default())
+                        .expect("checked parser admission"),
                     Some(ImperativeFamilyAst::Assimilate { .. })
                 ),
                 "the anchored Assimilate grammar must not accept {text:?}"
@@ -28984,7 +29108,8 @@ mod tests {
         let real = "assimilate target creature card from an opponent's graveyard";
         assert!(
             matches!(
-                parse_imperative_family_ast(real, real, &mut ParseContext::default()),
+                parse_imperative_family_ast(real, real, &mut ParseContext::default())
+                    .expect("checked parser admission"),
                 Some(ImperativeFamilyAst::Assimilate { .. })
             ),
             "reach-guard: the printed assimilate phrase must produce the Assimilate node"
@@ -29041,6 +29166,7 @@ mod tests {
     fn fixed_each_counter_removal_lowers_to_exact_tracked_set_selection() {
         let text = "remove a +1/+1 counter from each of two creatures you control";
         let ast = parse_imperative_family_ast(text, text, &mut ParseContext::default())
+            .expect("checked parser admission")
             .expect("fixed untargeted counter-removal phrase must parse");
         let clause = lower_imperative_family_ast(ast);
         let Effect::ChooseObjectsIntoTrackedSet {
@@ -29381,7 +29507,8 @@ mod tests {
                     prevent X of that damage, where X is a number from 1 to 3 chosen at random \
                     each time.";
         let lower = text.to_lowercase();
-        let parsed = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let parsed = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(matches!(
             parsed,
             Some(ImperativeFamilyAst::GainKeyword(Effect::Unimplemented { name, .. }))
@@ -29396,7 +29523,8 @@ mod tests {
     fn each_time_half_damage_formula_is_unimplemented_in_imperative_dispatch() {
         let text = "Each time a source would deal damage to you, prevent half that damage.";
         let lower = text.to_lowercase();
-        let parsed = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let parsed = parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+            .expect("checked parser admission");
         assert!(matches!(
             parsed,
             Some(ImperativeFamilyAst::GainKeyword(Effect::Unimplemented { name, .. }))

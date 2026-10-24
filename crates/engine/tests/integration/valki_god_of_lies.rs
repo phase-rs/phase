@@ -520,12 +520,14 @@ struct FreebooterFixture {
     freebooter: ObjectId,
     bounce: ObjectId,
     p1_divination: ObjectId,
+    p1_second: ObjectId,
+    p1_land: ObjectId,
     p1_bear: ObjectId,
 }
 
-/// Two players; Kitesail Freebooter ({1}{B} Bird Pirate 1/2, verbatim text) in
-/// P0's hand with the mana for it, a bounce instant in P0's hand, and one
-/// noncreature nonland card plus one creature card in P1's hand. Freebooter is
+/// Two players; Kitesail Freebooter ({1}{B} Human Pirate 1/2, verbatim text) in
+/// P0's hand with the mana for it, a bounce instant in P0's hand, and
+/// two eligible noncreature nonland cards plus land/creature decoys in P1's hand. Freebooter is
 /// cast and its ETB trigger (targeting P1) is left on the stack with P0 holding
 /// priority.
 fn freebooter_etb_on_stack() -> (FreebooterFixture, Vec<GameEvent>) {
@@ -544,7 +546,7 @@ fn freebooter_etb_on_stack() -> (FreebooterFixture, Vec<GameEvent>) {
             shards: vec![ManaCostShard::Black],
             generic: 1,
         })
-        .with_subtypes(vec!["Bird", "Pirate"]);
+        .with_subtypes(vec!["Human", "Pirate"]);
         card.id()
     };
     let bounce = scenario
@@ -560,6 +562,10 @@ fn freebooter_etb_on_stack() -> (FreebooterFixture, Vec<GameEvent>) {
         card.id()
     };
     let p1_bear = add_hand_creature(&mut scenario, P1, "Opp Bear", 2, 2, 2);
+    let p1_second = scenario
+        .add_spell_to_hand(P1, "Opp second eligible", true)
+        .id();
+    let p1_land = scenario.add_land_to_hand(P1, "Opp land").id();
     let mut runner = scenario.build();
 
     runner.cast(freebooter).target_player(P1).commit();
@@ -571,6 +577,8 @@ fn freebooter_etb_on_stack() -> (FreebooterFixture, Vec<GameEvent>) {
             freebooter,
             bounce,
             p1_divination,
+            p1_second,
+            p1_land,
             p1_bear,
         },
         events,
@@ -621,6 +629,8 @@ fn kitesail_freebooter_bounced_before_etb_resolves_reveals_but_exiles_nothing() 
         freebooter,
         bounce,
         p1_divination,
+        p1_second,
+        p1_land,
         p1_bear,
     } = fixture;
 
@@ -629,7 +639,7 @@ fn kitesail_freebooter_bounced_before_etb_resolves_reveals_but_exiles_nothing() 
         .act(GameAction::PassPriority)
         .expect("pass priority on the bounce");
     events.extend(result.events);
-    let prompts = answer_reveal_choices(&mut runner, &mut events, |cards| cards[0]);
+    let prompts = answer_reveal_choices(&mut runner, &mut events, |_| p1_second);
 
     assert_eq!(
         zone(&runner, freebooter),
@@ -646,10 +656,12 @@ fn kitesail_freebooter_bounced_before_etb_resolves_reveals_but_exiles_nothing() 
     );
     assert_eq!(
         prompts,
-        vec![(P0, vec![p1_divination])],
-        "exactly the one choice from P1's hand, offering its noncreature, nonland card"
+        vec![(P0, vec![p1_divination, p1_second])],
+        "the real choice excludes both creature and land"
     );
     assert_eq!(zone(&runner, p1_divination), Zone::Hand);
+    assert_eq!(zone(&runner, p1_second), Zone::Hand);
+    assert_eq!(zone(&runner, p1_land), Zone::Hand);
     assert_eq!(zone(&runner, p1_bear), Zone::Hand);
     assert!(
         links_from(&runner, freebooter).is_empty(),
@@ -667,27 +679,225 @@ fn kitesail_freebooter_etb_exiles_chosen_card_until_it_leaves() {
         freebooter,
         bounce,
         p1_divination,
+        p1_second,
+        p1_land,
         p1_bear,
     } = fixture;
 
-    let prompts = answer_reveal_choices(&mut runner, &mut events, |cards| cards[0]);
+    assert!(runner.state().objects[&freebooter]
+        .keywords
+        .contains(&Keyword::Flying));
+    assert_eq!(
+        runner.state().objects[&freebooter].card_types.subtypes,
+        vec!["Human", "Pirate"]
+    );
+    let prompts = answer_reveal_choices(&mut runner, &mut events, |_| p1_second);
     assert_eq!(
         prompts,
-        vec![(P0, vec![p1_divination])],
+        vec![(P0, vec![p1_divination, p1_second])],
         "P0 chooses from P1's noncreature, nonland cards only"
     );
     assert!(revealed_players(&events).contains(&P1));
-    assert_eq!(zone(&runner, p1_divination), Zone::Exile);
+    assert_eq!(zone(&runner, p1_second), Zone::Exile);
+    assert_eq!(zone(&runner, p1_divination), Zone::Hand);
+    assert_eq!(zone(&runner, p1_land), Zone::Hand);
     assert_eq!(zone(&runner, p1_bear), Zone::Hand);
     assert_eq!(until_leaves_links(&runner, freebooter).len(), 1);
 
     cast_spell_targeting(&mut runner, bounce, freebooter);
     assert_eq!(zone(&runner, freebooter), Zone::Hand);
     assert_eq!(
-        zone(&runner, p1_divination),
+        zone(&runner, p1_second),
         Zone::Hand,
         "CR 610.3: the card returns when Freebooter leaves"
     );
+}
+
+fn assert_freebooter_terminal(runner: &GameRunner) {
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().trigger_stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().owed_spell_final_part().is_none());
+}
+
+#[test]
+fn kitesail_freebooter_reentry_old_etb_current_and_legacy_keep_the_ended_interval() {
+    let mut scenario = GameScenario::new_n_player(2, 71);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, (0..4).map(|_| mana(ManaType::Black)).collect());
+    // Full pinned Leyline text supplies the lawful recast response window.
+    scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou may cast spells as though they had flash.");
+    let freebooter = scenario
+        .add_creature_to_hand_from_oracle(P0, "Kitesail Freebooter", 1, 2, KITESAIL_FULL)
+        .with_subtypes(vec!["Human", "Pirate"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(P0, "SHAPE bounce old birth", true, RETURN_TARGET_CREATURE)
+        .id();
+    let second_bounce = scenario
+        .add_spell_to_hand_from_oracle(P0, "SHAPE bounce new birth", true, RETURN_TARGET_CREATURE)
+        .id();
+    let first = scenario.add_spell_to_hand(P1, "First eligible", false).id();
+    let second = scenario.add_spell_to_hand(P1, "Second eligible", true).id();
+    let land = scenario.add_land_to_hand(P1, "Land decoy").id();
+    let creature = scenario
+        .add_creature_to_hand(P1, "Creature decoy", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(freebooter).target_player(P1).commit();
+    pass_until_etb_on_stack(&mut runner, freebooter);
+    let old_birth = runner.state().objects[&freebooter].incarnation;
+    runner.cast(bounce).target_object(freebooter).commit();
+    runner.resolve_top();
+    assert_eq!(zone(&runner, freebooter), Zone::Hand);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the old ETB is still independently on the stack"
+    );
+    runner.cast(freebooter).target_player(P1).commit();
+    pass_until_etb_on_stack(&mut runner, freebooter);
+    assert_ne!(runner.state().objects[&freebooter].incarnation, old_birth);
+    let mut events = vec![];
+    settle(&mut runner, &mut events);
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("new-birth choice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(cards, &vec![first, second]);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![second],
+        })
+        .unwrap();
+    settle(&mut runner, &mut events);
+    assert_eq!(zone(&runner, second), Zone::Exile);
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("old-birth reveal still resolves")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(cards, &vec![first]);
+    for state in super::contextual_hand_choice::restored_forms(runner.state()) {
+        let mut restored = GameRunner::from_state(state);
+        let mut invalid = restored.state().clone();
+        assert!(engine::apply(
+            &mut invalid,
+            P0,
+            GameAction::SelectCards {
+                cards: vec![second]
+            }
+        )
+        .is_err());
+        restored
+            .act(GameAction::SelectCards { cards: vec![first] })
+            .unwrap();
+        settle(&mut restored, &mut vec![]);
+        // CR 400.7 + CR 610.3b: the old interval cannot bind the reentered source.
+        assert_eq!(zone(&restored, first), Zone::Hand);
+        assert_eq!(zone(&restored, second), Zone::Exile);
+        assert_eq!(zone(&restored, land), Zone::Hand);
+        assert_eq!(zone(&restored, creature), Zone::Hand);
+        assert_eq!(until_leaves_links(&restored, freebooter).len(), 1);
+        assert_freebooter_terminal(&restored);
+        cast_spell_targeting(&mut restored, second_bounce, freebooter);
+        assert_eq!(zone(&restored, second), Zone::Hand);
+        assert!(until_leaves_links(&restored, freebooter).is_empty());
+        assert_freebooter_terminal(&restored);
+    }
+}
+
+#[test]
+fn kitesail_freebooter_two_sources_keep_original_chooser_and_exact_linked_returns() {
+    let mut scenario = GameScenario::new_n_player(2, 83);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, (0..4).map(|_| mana(ManaType::Black)).collect());
+    let sources: Vec<_> = (0..2)
+        .map(|_| {
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Kitesail Freebooter", 1, 2, KITESAIL_FULL)
+                .with_subtypes(vec!["Human", "Pirate"])
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Black],
+                })
+                .id()
+        })
+        .collect();
+    let bounce_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "SHAPE first return", true, RETURN_TARGET_CREATURE)
+        .id();
+    let bounce_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "SHAPE second return", true, RETURN_TARGET_CREATURE)
+        .id();
+    let control = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "SHAPE change current source controller",
+            true,
+            "Gain control of target creature.",
+        )
+        .id();
+    let candidates: Vec<_> = (0..3)
+        .map(|index| {
+            scenario
+                .add_spell_to_hand(P1, &format!("Eligible {index}"), true)
+                .id()
+        })
+        .collect();
+    let land = scenario.add_land_to_hand(P1, "Land decoy").id();
+    let mut runner = scenario.build();
+    runner.cast(sources[0]).target_player(P1).commit();
+    pass_until_etb_on_stack(&mut runner, sources[0]);
+    runner.cast(control).target_object(sources[0]).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&sources[0]].controller, P1);
+    assert_eq!(runner.state().objects[&sources[0]].owner, P0);
+    let mut events = vec![];
+    settle(&mut runner, &mut events);
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("original-controller hand choice")
+    };
+    assert_eq!(
+        *player, P0,
+        "CR 113.7a: the independent trigger retains its original controller"
+    );
+    assert_eq!(cards, &candidates);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![candidates[1]],
+        })
+        .unwrap();
+    settle(&mut runner, &mut events);
+    runner.cast(sources[1]).target_player(P1).resolve();
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!("second source hand choice")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(cards, &vec![candidates[0], candidates[2]]);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![candidates[2]],
+        })
+        .unwrap();
+    settle(&mut runner, &mut events);
+    cast_spell_targeting(&mut runner, bounce_a, sources[0]);
+    assert_eq!(zone(&runner, candidates[1]), Zone::Hand);
+    assert_eq!(zone(&runner, candidates[2]), Zone::Exile);
+    assert_eq!(zone(&runner, candidates[0]), Zone::Hand);
+    assert_eq!(zone(&runner, land), Zone::Hand);
+    cast_spell_targeting(&mut runner, bounce_b, sources[1]);
+    assert_eq!(zone(&runner, candidates[2]), Zone::Hand);
+    assert!(until_leaves_links(&runner, sources[0]).is_empty());
+    assert!(until_leaves_links(&runner, sources[1]).is_empty());
+    assert_freebooter_terminal(&runner);
 }
 
 struct ShirriffFixture {

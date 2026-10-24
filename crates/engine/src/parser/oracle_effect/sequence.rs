@@ -8627,7 +8627,7 @@ fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Opti
 
 /// CR 608.2d: a reveal-choice consumer phrased "[you] may choose/exile/discard"
 /// makes the post-reveal choice optional.
-fn reveal_choice_is_optional(lower: &str) -> bool {
+pub(super) fn reveal_choice_is_optional(lower: &str) -> bool {
     alt((
         tag::<_, _, OracleError<'_>>("you may choose "),
         tag("may choose "),
@@ -8685,11 +8685,11 @@ pub(super) fn parse_revealed_this_way_card_filter(lower: &str) -> Option<TargetF
     matches!(filter, TargetFilter::Typed(_)).then_some(filter)
 }
 
-pub(super) fn parse_followup_continuation_ast(
-    text: &str,
+pub(super) fn parse_followup_continuation_ast<'a>(
+    text: &'a str,
     previous_effect: &Effect,
     ctx: &mut ParseContext,
-) -> Option<ContinuationAst> {
+) -> Result<Option<ContinuationAst>, OracleError<'a>> {
     parse_followup_continuation_ast_with_search_destination(text, previous_effect, ctx, false)
 }
 
@@ -8697,7 +8697,42 @@ pub(super) fn parse_followup_continuation_ast(
 /// effect was produced by a structural `SearchDestination` continuation. The
 /// provenance is needed because multi-zone searches deliberately lower their
 /// move with `origin: None`.
-pub(super) fn parse_followup_continuation_ast_with_search_destination(
+pub(super) fn parse_followup_continuation_ast_with_search_destination<'a>(
+    text: &'a str,
+    previous_effect: &Effect,
+    ctx: &mut ParseContext,
+    previous_is_search_destination_exile: bool,
+) -> Result<Option<ContinuationAst>, OracleError<'a>> {
+    let mut trial = ctx.clone();
+    let ast = if let Effect::RevealHand { .. } = previous_effect {
+        match super::parse_hand_choice_filter(text, &mut trial)? {
+            Some(card_filter) => Some(ContinuationAst::RevealHandFilter {
+                card_filter,
+                choice_optional: reveal_choice_is_optional(&text.to_lowercase()),
+                binding: RevealChoiceBinding::FromIt,
+            }),
+            None => parse_followup_continuation_ast_inner(
+                text,
+                previous_effect,
+                &mut trial,
+                previous_is_search_destination_exile,
+            ),
+        }
+    } else {
+        parse_followup_continuation_ast_inner(
+            text,
+            previous_effect,
+            &mut trial,
+            previous_is_search_destination_exile,
+        )
+    };
+    if ast.is_some() {
+        *ctx = trial;
+    }
+    Ok(ast)
+}
+
+fn parse_followup_continuation_ast_inner(
     text: &str,
     previous_effect: &Effect,
     ctx: &mut ParseContext,
@@ -8723,42 +8758,6 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         }
         Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
             Some(ContinuationAst::SearchRevealResult)
-        }
-        Effect::RevealHand { .. }
-            if nom_primitives::scan_contains(&lower, "card from it")
-                || nom_primitives::scan_contains(&lower, "card from among")
-                || nom_primitives::scan_contains(&lower, "one of them")
-                || nom_primitives::scan_contains(&lower, "one of those") =>
-        {
-            let card_filter = if nom_primitives::scan_at_word_boundaries(&lower, |input| {
-                alt((
-                    tag::<_, _, OracleError<'_>>("one of them"),
-                    tag("one of those"),
-                ))
-                .parse(input)
-            })
-            .is_some()
-            {
-                None
-            } else if alt((
-                tag::<_, _, OracleError<'_>>("you may choose "),
-                tag("you choose "),
-                tag("may choose "),
-                tag("choose "),
-            ))
-            .parse(lower.as_str())
-            .is_ok()
-            {
-                Some(super::parse_choose_filter(&lower, ctx))
-            } else {
-                Some(super::parse_choose_filter_from_sentence(&lower, ctx))
-            };
-            let choice_optional = reveal_choice_is_optional(&lower);
-            Some(ContinuationAst::RevealHandFilter {
-                card_filter,
-                choice_optional,
-                binding: RevealChoiceBinding::FromIt,
-            })
         }
         // CR 608.2c + CR 701.20a: "<verb> a <type> card [they] revealed this way"
         // acts on a card chosen from the revealed hand — `apply_clause_continuation`
@@ -10664,7 +10663,8 @@ mod tests {
                 "Reveal it.",
                 &search.effect,
                 &mut ParseContext::default()
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::SearchRevealResult)
         );
     }
@@ -11921,7 +11921,8 @@ mod tests {
             "put it onto the battlefield",
             &previous,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
     }
 
@@ -11943,7 +11944,8 @@ mod tests {
             enters_modified_if: None,
         };
         let result =
-            parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
+            parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default())
+                .expect("checked parser admission");
         assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
     }
 
@@ -11973,7 +11975,8 @@ mod tests {
             "exile those cards face down",
         ] {
             assert_eq!(
-                parse_followup_continuation_ast(phrase, &previous, &mut ParseContext::default()),
+                parse_followup_continuation_ast(phrase, &previous, &mut ParseContext::default())
+                    .expect("checked parser admission"),
                 Some(ContinuationAst::ExileSearchResultFaceDown),
                 "expected face-down search continuation for {phrase:?}"
             );
@@ -11983,12 +11986,14 @@ mod tests {
                 "exile it face down with a hatching counter on it",
                 &previous,
                 &mut ParseContext::default()
-            ),
+            )
+            .expect("checked parser admission"),
             None,
             "a suffix-bearing clause must not be claimed by the plain face-down grammar"
         );
         assert_eq!(
-            parse_followup_continuation_ast("exile it", &previous, &mut ParseContext::default()),
+            parse_followup_continuation_ast("exile it", &previous, &mut ParseContext::default())
+                .expect("checked parser admission"),
             Some(ContinuationAst::SearchResultClauseHandled)
         );
     }
@@ -12764,7 +12769,8 @@ mod tests {
                 "then sacrifices the rest.",
                 &effect,
                 &mut ParseContext::default(),
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::ChooseAndSacrificeRestFilter {
                 sacrifice_filter: None,
             })
@@ -12795,7 +12801,8 @@ mod tests {
                 "the tokens are goaded for the rest of the game",
                 &token_effect,
                 &mut ParseContext::default(),
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::GoadLastCreated {
                 duration: Some(Duration::Permanent),
             })
@@ -12828,7 +12835,8 @@ mod tests {
                 "the tokens are goaded for as long as this Saga remains on the battlefield",
                 &token_effect,
                 &mut ParseContext::default(),
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::GoadLastCreated {
                 duration: Some(Duration::WhileHostOnBattlefield),
             })
@@ -12859,7 +12867,8 @@ mod tests {
                 "the token is goaded for the rest of the game",
                 &token_effect,
                 &mut ParseContext::default(),
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::GoadLastCreated {
                 duration: Some(Duration::Permanent),
             })
@@ -13068,7 +13077,8 @@ mod tests {
             "may choose a new target for that copy",
             &copy,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::CopyMayRetarget { all_copies: false })
@@ -13162,7 +13172,7 @@ mod tests {
             "Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.",
             &reveal,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert!(
             matches!(
                 result,
@@ -13184,7 +13194,8 @@ mod tests {
             "Put the rest on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13202,7 +13213,8 @@ mod tests {
             "Put the rest on the bottom of your library.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13220,7 +13232,8 @@ mod tests {
             "Put the rest into your graveyard.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13238,7 +13251,8 @@ mod tests {
             "Put the rest on the bottom of your library in a random order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13256,7 +13270,8 @@ mod tests {
             "Put them back in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13274,7 +13289,8 @@ mod tests {
             "Put the rest into your hand.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13292,7 +13308,8 @@ mod tests {
             "Put those cards on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
@@ -13313,7 +13330,7 @@ mod tests {
             "Put two of them into your hand and the rest on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -13341,7 +13358,7 @@ mod tests {
             "Put one of them into your hand and the rest on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -13374,7 +13391,8 @@ mod tests {
             "Put one of them into your hand and the other on the bottom of your library.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -13401,7 +13419,8 @@ mod tests {
             "Put two of them into your hand and the rest into your graveyard.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -13428,7 +13447,7 @@ mod tests {
             "Put any number of them into your hand and the rest on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -13457,7 +13476,8 @@ mod tests {
             "Put each of those cards into your hand.",
         ] {
             let dig = make_dig_effect();
-            let result = parse_followup_continuation_ast(text, &dig, &mut ParseContext::default());
+            let result = parse_followup_continuation_ast(text, &dig, &mut ParseContext::default())
+                .expect("checked parser admission");
             assert_eq!(
                 result,
                 Some(ContinuationAst::DigFromAmong {
@@ -13490,7 +13510,8 @@ mod tests {
             "Put all creature cards milled this way onto the battlefield tapped.",
             &mill,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             destination,
             enter_tapped,
@@ -13513,7 +13534,7 @@ mod tests {
             "Reveal up to one basic land card from among them, then put that card on top of your library and the rest on the bottom in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13586,7 +13607,7 @@ mod tests {
             "You may put an artifact, creature, or land card from among the milled cards into your hand.",
             &mill,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13623,7 +13644,8 @@ mod tests {
             "You may return a permanent card from among them to your hand.",
             &mill,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13654,7 +13676,8 @@ mod tests {
             "Return a card milled this way to your hand.",
             &mill,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13686,7 +13709,8 @@ mod tests {
             "Return any number of creature cards milled this way to your hand.",
             &mill,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13708,7 +13732,8 @@ mod tests {
             "Put any number of creature cards from among them into your hand.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -13730,7 +13755,8 @@ mod tests {
             "Puts each creature card from among them into your hand.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -14698,7 +14724,8 @@ mod tests {
             "Put all creature cards milled this way onto the battlefield face down.",
             &mill,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             face_down_profile,
@@ -15066,7 +15093,8 @@ mod tests {
             "Put the chosen cards into your graveyard and the rest into your hand.",
             &choose,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::ChoicePartitionDestinations {
@@ -15095,7 +15123,8 @@ mod tests {
             "Shuffle the chosen cards into your library and put the rest into your hand.",
             &choose,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::ChoicePartitionDestinations {
@@ -15114,7 +15143,8 @@ mod tests {
             "Put those cards on top in any order.",
             &shuffle,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
@@ -15130,7 +15160,8 @@ mod tests {
             "Put those cards on top of their owner's library in any order.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
@@ -15154,7 +15185,8 @@ mod tests {
             "Put the chosen cards on top of your library in any order.",
             &search,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
@@ -15178,7 +15210,8 @@ mod tests {
             "Exile the rest.",
             &search,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(result, Some(ContinuationAst::ExileSearchRemainder));
     }
 
@@ -15198,7 +15231,8 @@ mod tests {
                 "Exile the rest.",
                 &search,
                 &mut ParseContext::default(),
-            ),
+            )
+            .expect("checked parser admission"),
             None,
             "a single-zone search must not exile its library remainder"
         );
@@ -15217,7 +15251,7 @@ mod tests {
             "You may put one of those cards onto the battlefield if it has the same name as a permanent.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::DigFromAmong {
@@ -16942,7 +16976,8 @@ mod tests {
             "Exile one of them face down.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::ExileOneOfThemFaceDown {
@@ -16961,7 +16996,8 @@ mod tests {
             "Exile one of those cards face down.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert_eq!(
             result,
             Some(ContinuationAst::ExileOneOfThemFaceDown {
@@ -17024,7 +17060,8 @@ mod tests {
             "You may reveal it.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert!(
             !matches!(result, Some(ContinuationAst::ExileOneOfThemFaceDown { .. })),
             "a pure-peek 'you may reveal it' must not be fused into the Gonti exile continuation"
@@ -17040,7 +17077,8 @@ mod tests {
             "You may put any number of Equipment cards from among them onto the battlefield.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         let Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
@@ -17073,7 +17111,8 @@ mod tests {
             "Put two of them into your hand.",
             &dig,
             &mut ParseContext::default(),
-        );
+        )
+        .expect("checked parser admission");
         assert!(
             matches!(
                 result,
@@ -17162,7 +17201,7 @@ mod tests {
             "When you put one or more Equipment onto the battlefield this way, you may attach one of them to a Samurai you control.",
             &dig,
             &mut ParseContext::default(),
-        );
+        ).expect("checked parser admission");
         assert!(
             result.is_none(),
             "reflexive attach gate must not re-patch the Dig, got {result:?}"

@@ -7,6 +7,8 @@
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
+mod contextual_hand_choice;
+
 mod aang_compound_tail;
 mod abdel_adrian_animate_dead_altar_board;
 mod abigale_integration;

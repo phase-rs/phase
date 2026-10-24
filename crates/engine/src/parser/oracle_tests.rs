@@ -1,5 +1,1000 @@
 use super::*;
 
+mod contextual_hand_publication {
+    use super::*;
+    use crate::parser::oracle_ir::ast::{ContinuationAst, RevealChoiceBinding};
+    use crate::parser::oracle_ir::doc::{
+        OracleDocIr, OracleItemId, OracleNodeIr, OracleSourceSpan, OracleUnitId,
+    };
+    use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseId, EffectChainIr};
+    use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
+    use crate::types::ability::{
+        CardSelectionMode, ChosenGroupId, CounterTriggerFilter, ModalChoice, PtValue,
+        SubAbilityLink,
+    };
+    use crate::types::card::{CardFace, CleaveVariant};
+    use crate::types::card_type::{CardType, Supertype};
+    use crate::types::counter::CounterType;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::replacements::ReplacementEvent;
+
+    const DURESS: &str = "Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+    const LAY: &str = "Target opponent reveals their hand. You choose a nonlegendary, nonland card from it. That player discards that card.";
+    const THOUGHT: &str = "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.";
+    const DREAD: &str = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.";
+    const FREEBOOTER: &str = "Flying\nWhen this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.";
+    const NIGHTMARE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Destroy target creature an opponent controls with power 2 or less.\nII — Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.\nIII — Exile target opponent's graveyard.";
+    const MARDU: &str = "Choose one —\n• Mardu Charm deals 4 damage to target creature.\n• Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.\n• Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+    const LAST_RITES: &str = "Discard any number of cards. Target player reveals their hand, then you choose a nonland card from it for each card discarded this way. That player discards those cards.";
+    const BITING: &str = "Ninjutsu {2}{B}\nThis creature enters with a menace counter on it.\nWhenever this creature deals combat damage to a player, you may remove a menace counter from it. When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.";
+
+    fn ability(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    }
+    fn nonland() -> TypedFilter {
+        TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+    }
+    fn restrictive() -> TypedFilter {
+        TypedFilter::card()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+    }
+    fn pinned_legalities(name: &str) -> serde_json::Value {
+        let formats: &[&str] = match name {
+            "Duress" => &[
+                "alchemy",
+                "brawl",
+                "commander",
+                "duel",
+                "future",
+                "gladiator",
+                "historic",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "pauper",
+                "paupercommander",
+                "pioneer",
+                "predh",
+                "premodern",
+                "standard",
+                "standardbrawl",
+                "timeless",
+                "vintage",
+            ],
+            "Lay Bare the Heart" => &[
+                "commander",
+                "duel",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "pioneer",
+                "vintage",
+            ],
+            "Thoughtseize" => &[
+                "brawl",
+                "commander",
+                "duel",
+                "gladiator",
+                "historic",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "pioneer",
+                "predh",
+                "timeless",
+                "vintage",
+            ],
+            "Elspeth's Nightmare" => &[
+                "brawl",
+                "commander",
+                "duel",
+                "gladiator",
+                "historic",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "pioneer",
+                "timeless",
+                "vintage",
+            ],
+            "Dread Fugue" => &[
+                "brawl",
+                "commander",
+                "duel",
+                "gladiator",
+                "historic",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "penny",
+                "pioneer",
+                "timeless",
+                "vintage",
+            ],
+            "Kitesail Freebooter" | "Mardu Charm" => &[
+                "brawl",
+                "commander",
+                "duel",
+                "gladiator",
+                "historic",
+                "legacy",
+                "modern",
+                "oathbreaker",
+                "penny",
+                "pioneer",
+                "timeless",
+                "vintage",
+            ],
+            _ => unreachable!(),
+        };
+        serde_json::Value::Object(
+            formats
+                .iter()
+                .map(|format| ((*format).to_owned(), serde_json::json!("Legal")))
+                .collect(),
+        )
+    }
+    fn pinned_rulings(name: &str) -> Vec<crate::database::mtgjson::Ruling> {
+        let (date, texts): (&str, &[&str]) = match name {
+            "Kitesail Freebooter" => ("2020-06-23", &["If Kitesail Freebooter leaves the battlefield before its enters-the-battlefield ability resolves, the opponent will reveal their hand, but no card will be exiled."]),
+            "Thoughtseize" => ("2020-08-07", &["You lose 2 life even if the target player has no nonland cards in their hand to discard."]),
+            "Dread Fugue" => ("2021-11-19", &[
+                "A cleave cost is an alternative cost that's paid instead of the spell's mana cost. Casting a spell for its cleave cost doesn't change the spell's mana value.",
+                "If an effect allows you to “cast a spell without paying its mana cost,” you can't cast that spell for its cleave cost.",
+                "If you cast a spell for its cleave cost, that spell doesn't have any of the text in square brackets while it's on the stack.",
+                "You can't cast a spell for both its cleave cost and another alternative cost. For example, if an effect gives an Alchemist's Retrieval in your graveyard a flashback cost of {U}, you can't cast it from your graveyard for its cleave cost.",
+            ]),
+            "Elspeth's Nightmare" => ("2020-01-24", &[
+                "A chapter ability doesn’t trigger if a lore counter is put on a Saga that already had a number of lore counters greater than or equal to that chapter’s number. For example, the third lore counter put on a Saga causes the III chapter ability to trigger, but I and II won’t trigger again.",
+                "As a Saga enters the battlefield, its controller puts a lore counter on it. As your precombat main phase begins (immediately after your draw step), you put another lore counter on each Saga you control. Putting a lore counter on a Saga in either of these ways doesn’t use the stack.",
+                "Each symbol on the left of a Saga’s text box represents a chapter ability. A chapter ability is a triggered ability that triggers when a lore counter that is put on the Saga causes the number of lore counters on the Saga to become equal to or greater than the ability’s chapter number. Chapter abilities are put onto the stack and may be responded to.",
+                "If multiple chapter abilities trigger at the same time, their controller puts them on the stack in any order. If any of them require targets, those targets are chosen as you put the abilities on the stack, before any of those abilities resolve.",
+                "Once a chapter ability has triggered, the ability on the stack won’t be affected if the Saga gains or loses counters, or if it leaves the battlefield.",
+                "Once the number of lore counters on a Saga is greater than or equal to the greatest number among its chapter abilities, the Saga’s controller sacrifices it as soon as its chapter ability has left the stack, most likely by resolving or being countered. This state-based action doesn’t use the stack.",
+                "Removing lore counters won’t cause a previous chapter ability to trigger. If lore counters are removed from a Saga, the appropriate chapter abilities will trigger again when the Saga receives lore counters.",
+            ]),
+            _ => ("", &[]),
+        };
+        texts
+            .iter()
+            .map(|text| crate::database::mtgjson::Ruling {
+                date: date.into(),
+                text: (*text).into(),
+            })
+            .collect()
+    }
+    fn opponent() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+    fn sibling(mut definition: AbilityDefinition) -> AbilityDefinition {
+        definition.sub_link = SubAbilityLink::SequentialSibling;
+        definition
+    }
+
+    // These source expectations are authored from the literal printed bodies,
+    // before parsing. Source order and emission identity are separate values.
+    fn assert_document_geometry(doc: &OracleDocIr, expected: &CardFace, prepared: &str) {
+        let normalized = match expected.name.as_str() {
+            "Kitesail Freebooter" => FREEBOOTER.replace("this creature", "~"),
+            "Mardu Charm" => MARDU.replace("Mardu Charm", "~"),
+            _ => prepared.to_owned(),
+        };
+        // (item id, physical line, same-line ordinal, node kind). Saga's
+        // synthesized replacement is emitted after its three chapter triggers,
+        // but ordered beside chapter I by the canonical builder.
+        let specs: Vec<(u32, usize, u32, &str)> = match expected.name.as_str() {
+            "Dread Fugue" => vec![(0, 0, 0, "keyword"), (1, 1, 0, "spell")],
+            "Kitesail Freebooter" => vec![(0, 1, 0, "trigger")],
+            "Elspeth's Nightmare" => vec![
+                (0, 1, 0, "assembled"),
+                (3, 1, 1, "replacement"),
+                (1, 2, 0, "assembled"),
+                (2, 3, 0, "assembled"),
+            ],
+            "Mardu Charm" => vec![
+                (3, 0, 0, "modal"),
+                (0, 1, 0, "spell"),
+                (1, 2, 0, "spell"),
+                (2, 3, 0, "spell"),
+            ],
+            _ => vec![(0, 0, 0, "spell")],
+        };
+        assert_eq!(
+            doc.items.len(),
+            specs.len(),
+            "{} complete item vector",
+            expected.name
+        );
+        let lines: Vec<_> = normalized.lines().collect();
+        for (item, (id, line, ordinal, kind)) in doc.items.iter().zip(specs) {
+            let start: usize = lines[..line].iter().map(|line| line.len() + 1).sum();
+            let fragment = lines[line];
+            assert_eq!(item.id, OracleItemId(id));
+            assert_eq!(
+                item.source.id(),
+                OracleUnitId {
+                    item: OracleItemId(id),
+                    ordinal: 0
+                }
+            );
+            assert_eq!(item.source.fragment(), Some(fragment));
+            assert_eq!(
+                item.source.span(),
+                &OracleSourceSpan::exact(line, line, start, start + fragment.len(), ordinal)
+            );
+            match (kind, &item.node) {
+                ("keyword", OracleNodeIr::Keyword(keyword)) => assert_eq!(
+                    keyword,
+                    &Keyword::Cleave(ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![ManaCostShard::Black]
+                    })
+                ),
+                ("modal", OracleNodeIr::Modal(modal)) => {
+                    assert_eq!(Some(modal), expected.modal.as_ref())
+                }
+                ("replacement", OracleNodeIr::Replacement(replacement)) => {
+                    assert_eq!(replacement.source_text, "Saga ETB lore counter");
+                    assert_eq!(replacement.definition, expected.replacements[0]);
+                    assert!(
+                        replacement.execute_ir.is_none(),
+                        "canonical synthesized rule has an assembled execute body"
+                    );
+                }
+                (
+                    "assembled",
+                    OracleNodeIr::Trigger(TriggerNodeIr::Assembled {
+                        definition,
+                        source_text,
+                    }),
+                ) => {
+                    assert_eq!(source_text, fragment);
+                    assert_eq!(definition.as_ref(), &expected.triggers[line - 1]);
+                    // Saga's existing preprocessor owns assembled definitions,
+                    // not fictional nested TriggerBody chains. Independently
+                    // audit the canonical chain of each complete printed body.
+                    let body = match line {
+                        1 => "Destroy target creature an opponent controls with power 2 or less.",
+                        2 => DURESS,
+                        3 => "Exile target opponent's graveyard.",
+                        _ => unreachable!(),
+                    };
+                    let chain = crate::parser::oracle_effect::parse_effect_chain_ir(
+                        body,
+                        AbilityKind::Spell,
+                        &mut Default::default(),
+                    );
+                    assert_chain_geometry(
+                        &chain,
+                        body,
+                        if line == 2 { Some(restrictive()) } else { None },
+                    );
+                }
+                ("trigger", OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))) => {
+                    let Some(TriggerBody::EffectChain(chain)) = &trigger.body else {
+                        panic!("full Freebooter trigger chain");
+                    };
+                    let body = "target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield.";
+                    assert_chain_geometry(chain, body, Some(restrictive()));
+                }
+                ("spell", OracleNodeIr::Spell(spell)) => {
+                    let body = match expected.name.as_str() {
+                        "Mardu Charm" => match line {
+                            1 => "~ deals 4 damage to target creature.",
+                            2 => "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.",
+                            3 => DURESS,
+                            _ => unreachable!(),
+                        },
+                        "Dread Fugue" => if prepared == DREAD.replace('[', "").replace(']', "") { "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card." } else { "Target player reveals their hand. You choose a nonland card from it . That player discards that card." },
+                        _ => prepared,
+                    };
+                    assert_eq!(spell.source_text, body);
+                    let filter = match expected.name.as_str() {
+                        "Duress" | "Mardu Charm" if expected.name != "Mardu Charm" || line == 3 => {
+                            Some(restrictive())
+                        }
+                        "Lay Bare the Heart" => {
+                            Some(nonland().properties(vec![FilterProp::NotSupertype {
+                                value: Supertype::Legendary,
+                            }]))
+                        }
+                        "Thoughtseize" => Some(nonland()),
+                        "Dread Fugue" => {
+                            Some(if prepared == DREAD.replace('[', "").replace(']', "") {
+                                nonland().properties(vec![FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Fixed { value: 2 },
+                                }])
+                            } else {
+                                nonland()
+                            })
+                        }
+                        _ => None,
+                    };
+                    assert_chain_geometry(&spell.body, body, filter);
+                }
+                _ => panic!("{} expected {kind}, got {:?}", expected.name, item.node),
+            }
+        }
+    }
+
+    fn assert_chain_geometry(chain: &EffectChainIr, body: &str, filter: Option<TypedFilter>) {
+        let fragments: Vec<&str> = if filter.is_some() {
+            if body == THOUGHT {
+                vec!["Target player reveals their hand", "You choose a nonland card from it", "That player discards that card", "You lose 2 life"]
+            } else if body == LAY {
+                vec!["Target opponent reveals their hand", "You choose a nonlegendary, nonland card from it", "That player discards that card"]
+            } else if body == "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card." {
+                vec!["Target player reveals their hand", "You choose a nonland card from it with mana value 2 or less", "That player discards that card"]
+            } else if body == "Target player reveals their hand. You choose a nonland card from it . That player discards that card." {
+                vec!["Target player reveals their hand", "You choose a nonland card from it", "That player discards that card"]
+            } else if body == "target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield." {
+                vec!["target opponent reveals their hand", "You choose a noncreature, nonland card from it", "Exile that card until ~ leaves the battlefield"]
+            } else {
+                assert_eq!(body, DURESS);
+                vec!["Target opponent reveals their hand", "You choose a noncreature, nonland card from it", "That player discards that card"]
+            }
+        } else {
+            match body {
+                "Destroy target creature an opponent controls with power 2 or less." => vec!["Destroy target creature an opponent controls with power 2 or less"],
+                "Exile target opponent's graveyard." => vec!["Exile target opponent's graveyard"],
+                "~ deals 4 damage to target creature." => vec!["~ deals 4 damage to target creature"],
+                "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn." => vec!["Create two 1/1 white Warrior creature tokens", "They gain first strike until end of turn"],
+                _ => panic!("missing independently authored chain expectation: {body}"),
+            }
+        };
+        assert_eq!(chain.clauses.len(), fragments.len());
+        let mut cursor = 0;
+        for (index, (clause, fragment)) in chain.clauses.iter().zip(fragments).enumerate() {
+            // Geometry derives from literal body boundaries, never parser output.
+            let start = body[cursor..].find(fragment).expect("literal fragment") + cursor;
+            let end = start + fragment.len();
+            cursor = end;
+            assert_eq!(clause.id, ClauseId(index as u32));
+            assert_eq!(
+                clause.source.id(),
+                OracleUnitId {
+                    item: OracleItemId(0),
+                    ordinal: index as u32 + 1
+                }
+            );
+            assert_eq!(clause.source.fragment(), Some(fragment));
+            assert_eq!(
+                clause.source.span(),
+                &OracleSourceSpan::chain_relative(0, 0, start, end, index as u32)
+            );
+            let expected_disposition = if index == 1 && filter.is_some() {
+                ClauseDisposition::Continue {
+                    continuation: Some(ContinuationAst::RevealHandFilter {
+                        card_filter: filter.clone().map(TargetFilter::Typed),
+                        choice_optional: false,
+                        binding: RevealChoiceBinding::FromIt,
+                    }),
+                }
+            } else {
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                }
+            };
+            assert_eq!(clause.disposition, expected_disposition, "{fragment}");
+            assert_eq!(clause.declares_chosen_clause, None);
+            assert_eq!(clause.reads_chosen_clause, None);
+            assert_eq!(clause.declares_instruction_result, None);
+            assert_eq!(clause.reads_return_result, None);
+            assert_eq!(clause.token_definition_owner, None);
+            assert_eq!(
+                clause.target_reads,
+                crate::types::ability::TargetReadOrigin::OwnAnnouncement
+            );
+            assert!(!matches!(
+                clause.parsed.effect,
+                Effect::Unimplemented { .. }
+            ));
+            if let Some(filter) = &filter {
+                if index == 0 {
+                    assert!(matches!(
+                        &clause.parsed.effect,
+                        Effect::RevealHand {
+                            card_filter: TargetFilter::None,
+                            ..
+                        }
+                    ));
+                }
+                if index == 1 {
+                    assert!(
+                        matches!(&clause.parsed.effect, Effect::RevealHand { card_filter: TargetFilter::Typed(actual), .. } if actual == filter)
+                    );
+                }
+                if index == 2 && !body.starts_with("target opponent") {
+                    assert_eq!(
+                        clause.parsed.effect,
+                        Effect::DiscardCard {
+                            count: 1,
+                            target: TargetFilter::ParentTarget
+                        }
+                    );
+                }
+            }
+        }
+    }
+    fn hand_body(
+        target: TargetFilter,
+        filter: TypedFilter,
+        exile: bool,
+        life: bool,
+    ) -> AbilityDefinition {
+        let mut consumer = if exile {
+            ability(serde_json::from_value(serde_json::json!({"type":"ChangeZone","destination":"Exile","target":{"type":"ParentTarget"}})).unwrap()).duration(Duration::UntilHostLeavesPlay)
+        } else {
+            ability(Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::ParentTarget,
+            })
+        };
+        if life {
+            consumer.sub_ability = Some(Box::new(sibling(ability(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            }))));
+        }
+        let mut head = ability(Effect::RevealHand {
+            target,
+            card_filter: TargetFilter::Typed(filter),
+            count: None,
+            selection: CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: true,
+        })
+        .sub_ability(sibling(consumer));
+        head.declares_chosen_group = Some(ChosenGroupId(0x8000_0000));
+        head
+    }
+
+    // Complete, independently specified faces exist before any production parse.
+    fn cases() -> Vec<(crate::database::mtgjson::AtomicCard, CardFace)> {
+        let black = |generic| ManaCost::Cost {
+            generic,
+            shards: vec![ManaCostShard::Black],
+        };
+        let duress = hand_body(opponent(), restrictive(), false, false).description(DURESS.into());
+        let lay = hand_body(
+            opponent(),
+            nonland().properties(vec![FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }]),
+            false,
+            false,
+        )
+        .description(LAY.into());
+        let thought =
+            hand_body(TargetFilter::Player, nonland(), false, true).description(THOUGHT.into());
+        let dread_body = "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card.";
+        let dread = hand_body(
+            TargetFilter::Player,
+            nonland().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]),
+            false,
+            false,
+        )
+        .description(dread_body.into());
+        let cleave = hand_body(TargetFilter::Player, nonland(), false, false).description("Target player reveals their hand. You choose a nonland card from it . That player discards that card.".into());
+        let mut freebooter = TriggerDefinition::new(TriggerMode::ChangesZone).valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield]).execute(hand_body(opponent(), restrictive(), true, false)).description("When ~ enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield.".into());
+        freebooter.destination = Some(Zone::Battlefield);
+        let chapter_one = ability(Effect::Destroy {
+            target: TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: crate::types::ability::PtStat::Power,
+                        scope: crate::types::ability::PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 2 },
+                    }]),
+            ),
+            cant_regenerate: false,
+        });
+        let chapter_three = ability(serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll","origin":"Graveyard","destination":"Exile","filter":{"type":"Typed","type_filters":["Card"],"controller":"Opponent","properties":[]},"target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]}})).unwrap());
+        let chapters = [
+            chapter_one,
+            hand_body(opponent(), restrictive(), false, false),
+            chapter_three,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(TargetFilter::SelfRef)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(index as u32 + 1),
+                })
+                .saga_chapter(index as u32 + 1)
+                .execute(body)
+                .trigger_zones(vec![Zone::Battlefield])
+                .description(format!("Chapter {}", index + 1))
+        })
+        .collect();
+        let saga_etb = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(ability(Effect::PutCounter {
+                counter_type: CounterType::Lore,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description("Saga ETB lore counter".into());
+        let damage = ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 4 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .description("~ deals 4 damage to target creature.".into());
+        let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::ParentTarget).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }])], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
+        let modal = ModalChoice { min_choices: 1, max_choices: 1, mode_count: 3, mode_descriptions: vec!["~ deals 4 damage to target creature.".into(), "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into(), DURESS.into()], ..Default::default() };
+        let records = [
+            (
+                "Duress",
+                DURESS,
+                "33d405ea-7a9a-4970-b70f-9c05d90dd6f0",
+                "{B}",
+                black(0),
+                "Sorcery",
+                vec![],
+                None,
+                None,
+                vec![duress],
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None,
+            ),
+            (
+                "Lay Bare the Heart",
+                LAY,
+                "910f4339-9125-45b7-929f-57e1adb6ac3c",
+                "{1}{B}",
+                black(1),
+                "Sorcery",
+                vec![],
+                None,
+                None,
+                vec![lay],
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None,
+            ),
+            (
+                "Thoughtseize",
+                THOUGHT,
+                "edd8d1e8-be43-4c38-bb3a-83081fbaf0b5",
+                "{B}",
+                black(0),
+                "Sorcery",
+                vec![],
+                None,
+                None,
+                vec![thought],
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None,
+            ),
+            (
+                "Dread Fugue",
+                DREAD,
+                "efe4194a-b3c5-4308-abfe-553e035f5e64",
+                "{B}",
+                black(0),
+                "Sorcery",
+                vec![],
+                None,
+                None,
+                vec![dread],
+                vec![],
+                vec![],
+                vec![Keyword::Cleave(black(2))],
+                None,
+                Some(CleaveVariant {
+                    abilities: vec![cleave],
+                    ..Default::default()
+                }),
+            ),
+            (
+                "Kitesail Freebooter",
+                FREEBOOTER,
+                "8aa1bbc9-b047-4d68-93f4-728e40dafc5e",
+                "{1}{B}",
+                black(1),
+                "Creature",
+                vec!["Human", "Pirate"],
+                Some(1),
+                Some(2),
+                vec![],
+                vec![freebooter],
+                vec![],
+                vec![Keyword::Flying],
+                None,
+                None,
+            ),
+            (
+                "Elspeth's Nightmare",
+                NIGHTMARE,
+                "ff768016-67f8-409e-8359-9ed05bcb46d2",
+                "{2}{B}",
+                black(2),
+                "Enchantment",
+                vec!["Saga"],
+                None,
+                None,
+                vec![],
+                chapters,
+                vec![saga_etb],
+                vec![],
+                None,
+                None,
+            ),
+            (
+                "Mardu Charm",
+                MARDU,
+                "147eabab-9d93-4cf4-811b-0efa3b84c5b5",
+                "{R}{W}{B}",
+                ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![
+                        ManaCostShard::Red,
+                        ManaCostShard::White,
+                        ManaCostShard::Black,
+                    ],
+                },
+                "Instant",
+                vec![],
+                None,
+                None,
+                vec![
+                    damage,
+                    token,
+                    hand_body(opponent(), restrictive(), false, false).description(DURESS.into()),
+                ],
+                vec![],
+                vec![],
+                vec![],
+                Some(modal),
+                None,
+            ),
+        ];
+        records.into_iter().map(|(name, text, id, cost_text, cost, kind, subtypes, power, toughness, abilities, triggers, replacements, keywords, modal, cleave_variant)| {
+            let colors = if name == "Mardu Charm" { vec![ManaColor::Black, ManaColor::Red, ManaColor::White] } else { vec![ManaColor::Black] };
+            let types = match kind { "Sorcery" => CoreType::Sorcery, "Creature" => CoreType::Creature, "Enchantment" => CoreType::Enchantment, "Instant" => CoreType::Instant, _ => unreachable!() };
+            let expected = CardFace { name: name.into(), mana_cost: cost, card_type: CardType { core_types: vec![types], subtypes: subtypes.iter().map(|s| (*s).into()).collect(), supertypes: vec![] }, power: power.map(PtValue::Fixed), toughness: toughness.map(PtValue::Fixed), oracle_text: Some(text.into()), color_override: (name == "Mardu Charm").then(|| colors.clone()), color_identity: colors, scryfall_oracle_id: Some(id.into()), abilities, triggers, replacements, keywords, modal, cleave_variant, ..Default::default() };
+            let type_line = match name { "Kitesail Freebooter" => "Creature — Human Pirate", "Elspeth's Nightmare" => "Enchantment — Saga", _ => kind };
+            let mana_value = match name { "Duress" | "Thoughtseize" | "Dread Fugue" => 1, "Lay Bare the Heart" | "Kitesail Freebooter" => 2, _ => 3 };
+            let card = serde_json::from_value(serde_json::json!({"name":name,"text":text,"manaCost":cost_text,"manaValue":mana_value,"types":[kind],"type":type_line,"subtypes":subtypes,"supertypes":[],"colors":if name=="Mardu Charm" {vec!["B","R","W"]} else {vec!["B"]},"colorIdentity":if name=="Mardu Charm" {vec!["B","R","W"]} else {vec!["B"]},"keywords":if name=="Dread Fugue" {vec!["Cleave"]} else if name=="Kitesail Freebooter" {vec!["Flying"]} else {vec![]},"power":power.map(|n|n.to_string()),"toughness":toughness.map(|n|n.to_string()),"layout":if name=="Elspeth's Nightmare" {"saga"} else {"normal"},"identifiers":{"scryfallOracleId":id},"legalities":pinned_legalities(name),"rulings":pinned_rulings(name)})).unwrap();
+            (card, expected)
+        }).collect()
+    }
+
+    #[test]
+    fn contextual_hand_publication_complete_independent_faces_ir_lower_synthesis_both_loaders() {
+        let cases = cases();
+        let mut entries = serde_json::Map::new();
+        for (card, expected) in &cases {
+            let expected_parsed = ParsedAbilities {
+                abilities: expected.abilities.clone(),
+                triggers: expected.triggers.clone(),
+                statics: expected.static_abilities.clone(),
+                replacements: expected.replacements.clone(),
+                // Bare Flying is supplied by MTGJSON; the router emits no new
+                // keyword item. Cleave's printed parameter is extracted.
+                extracted_keywords: if expected.name == "Dread Fugue" {
+                    vec![Keyword::Cleave(ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![ManaCostShard::Black],
+                    })]
+                } else {
+                    vec![]
+                },
+                modal: expected.modal.clone(),
+                additional_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                solve_condition: None,
+                strive_cost: None,
+                parse_warnings: vec![],
+            };
+            let prepared = crate::database::synthesis::prepare_oracle_parser_input(card, false);
+            let prepared_expected = if expected.name == "Dread Fugue" {
+                DREAD.replace('[', "").replace(']', "")
+            } else {
+                expected.oracle_text.clone().unwrap()
+            };
+            assert_eq!(prepared.oracle_text, prepared_expected);
+            let mut doc = parse_oracle_ir(
+                &prepared.oracle_text,
+                &prepared.card_name,
+                &prepared.keyword_names,
+                &card.types,
+                &card.subtypes,
+            );
+            assert_eq!(doc.source_text, prepared_expected);
+            assert_document_geometry(&doc, expected, &prepared_expected);
+            let lowered = lower_oracle_ir(&mut doc);
+            assert_eq!(
+                serde_json::to_value(&lowered).unwrap(),
+                serde_json::to_value(&expected_parsed).unwrap(),
+                "{} entire independent ParsedAbilities schema",
+                expected.name
+            );
+            assert_eq!(
+                lowered.abilities, expected.abilities,
+                "{} full spells",
+                expected.name
+            );
+            assert_eq!(
+                lowered.triggers, expected.triggers,
+                "{} full triggers",
+                expected.name
+            );
+            assert_eq!(lowered.statics, expected.static_abilities);
+            assert_eq!(lowered.replacements, expected.replacements);
+            assert_eq!(
+                lowered.extracted_keywords,
+                expected_parsed.extracted_keywords
+            );
+            assert_eq!(lowered.modal, expected.modal);
+            assert_eq!(
+                (
+                    lowered.additional_cost,
+                    lowered.solve_condition,
+                    lowered.strive_cost
+                ),
+                (None, None, None)
+            );
+            assert!(
+                lowered.casting_options.is_empty()
+                    && lowered.casting_restrictions.is_empty()
+                    && lowered.parse_warnings.is_empty()
+            );
+            let face = crate::database::synthesis::build_oracle_face(
+                card,
+                expected.scryfall_oracle_id.clone(),
+            );
+            assert_eq!(&face, expected);
+            if expected.name == "Dread Fugue" {
+                let cleave_source = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it . That player discards that card.";
+                assert_eq!(prepared.cleave_oracle_text.as_deref(), Some(cleave_source));
+                assert!(prepared.has_cleave_variant);
+                let mut cleave_doc = parse_oracle_ir(
+                    cleave_source,
+                    &prepared.card_name,
+                    &prepared.keyword_names,
+                    &card.types,
+                    &card.subtypes,
+                );
+                let expected_cleave = ParsedAbilities {
+                    abilities: expected.cleave_variant.as_ref().unwrap().abilities.clone(),
+                    extracted_keywords: expected_parsed.extracted_keywords.clone(),
+                    ..Default::default()
+                };
+                assert_document_geometry(&cleave_doc, expected, cleave_source);
+                let cleave_lowered = lower_oracle_ir(&mut cleave_doc);
+                assert_eq!(
+                    serde_json::to_value(cleave_lowered).unwrap(),
+                    serde_json::to_value(expected_cleave).unwrap()
+                );
+            } else {
+                assert_eq!(prepared.cleave_oracle_text, None);
+                assert!(!prepared.has_cleave_variant);
+            }
+            let mut entry = serde_json::to_value(&face).unwrap();
+            entry["layout"] = serde_json::json!(card.layout);
+            entry["face_index"] = serde_json::json!(0);
+            entry["legalities"] = pinned_legalities(&expected.name);
+            entry["rulings"] = serde_json::to_value(pinned_rulings(&expected.name)).unwrap();
+            entries.insert(expected.name.to_lowercase(), entry);
+        }
+        for legacy in [false, true] {
+            let mut whole_entries = entries.clone();
+            if legacy {
+                for entry in whole_entries.values_mut() {
+                    for field in [
+                        "casting_options",
+                        "casting_restrictions",
+                        "solve_condition",
+                        "strive_cost",
+                        "additional_cost",
+                        "parse_warnings",
+                    ] {
+                        entry.as_object_mut().unwrap().remove(field);
+                    }
+                    for field in ["power", "toughness"] {
+                        if let Some(number) = entry[field]["value"].as_i64() {
+                            entry[field] = serde_json::json!(number.to_string());
+                        }
+                    }
+                }
+            }
+            let whole = serde_json::to_string(&whole_entries).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), whole.as_bytes()).unwrap();
+            assert_eq!(std::fs::read(file.path()).unwrap(), whole.as_bytes());
+            for database in [
+                crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+                crate::database::CardDatabase::from_export(file.path()).unwrap(),
+            ] {
+                let expected_keys: std::collections::BTreeSet<_> = cases
+                    .iter()
+                    .map(|(_, face)| face.name.to_lowercase())
+                    .collect();
+                assert_eq!(
+                    database
+                        .face_iter()
+                        .map(|(key, _)| key.to_owned())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    expected_keys
+                );
+                assert_eq!(database.card_count(), cases.len());
+                for (_, expected) in &cases {
+                    assert_eq!(database.get_face_by_name(&expected.name), Some(expected));
+                    assert_eq!(
+                        database.get_layout_kind(expected.scryfall_oracle_id.as_deref().unwrap()),
+                        None
+                    );
+                    assert_eq!(
+                        database
+                            .get_face_by_oracle_id(expected.scryfall_oracle_id.as_deref().unwrap()),
+                        Some(expected)
+                    );
+                    assert!(database.is_front_face_key(&expected.name.to_lowercase()));
+                    let reference = crate::types::card::PrintedCardRef {
+                        oracle_id: expected.scryfall_oracle_id.clone().unwrap(),
+                        face_name: expected.name.clone(),
+                    };
+                    assert_eq!(database.get_face_by_printed_ref(&reference), Some(expected));
+                    assert_eq!(database.get_other_face_by_printed_ref(&reference), None);
+                    assert_eq!(
+                        database.rulings_for(&expected.name),
+                        pinned_rulings(&expected.name)
+                    );
+                    let legalities = pinned_legalities(&expected.name);
+                    let expected_legalities: std::collections::HashMap<_, _> =
+                        crate::database::legality::LegalityFormat::ALL
+                            .into_iter()
+                            .filter(|format| legalities.get(format.as_key()).is_some())
+                            .map(|format| {
+                                (format, crate::database::legality::LegalityStatus::Legal)
+                            })
+                            .collect();
+                    assert_eq!(
+                        database.get_legalities(&expected.name),
+                        Some(&expected_legalities)
+                    );
+                    assert_eq!(
+                        database.legality_status(
+                            &expected.name,
+                            crate::database::legality::LegalityFormat::Commander
+                        ),
+                        Some(crate::database::legality::LegalityStatus::Legal)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_hand_full_last_rites_and_biting_palm_component_only() {
+        // Last Rites cardinality remains issue10273; Biting-Palm's reflexive producer is phase25.
+        let expected = TargetFilter::Typed(nonland());
+        let mut last = crate::parser::oracle_effect::parse_effect_chain_ir(
+            LAST_RITES,
+            AbilityKind::Spell,
+            &mut Default::default(),
+        );
+        assert_eq!(
+            last.clauses[0].source.fragment(),
+            Some("Discard any number of cards")
+        );
+        assert!(last.clauses.iter().any(|clause| clause
+            .source
+            .fragment()
+            .is_some_and(|source| source.contains("for each card discarded this way"))));
+        let fragments = [
+            "Discard any number of cards",
+            "Target player reveals their hand",
+            "you choose a nonland card from it for each card discarded this way",
+            "That player discards those cards",
+        ];
+        assert_eq!(last.clauses.len(), fragments.len());
+        let mut cursor = 0;
+        for (index, (clause, fragment)) in last.clauses.iter().zip(fragments).enumerate() {
+            let start = LAST_RITES[cursor..].find(fragment).unwrap() + cursor;
+            cursor = start + fragment.len();
+            assert_eq!(clause.id, ClauseId(index as u32));
+            assert_eq!(clause.source.fragment(), Some(fragment));
+            assert_eq!(
+                clause.source.span(),
+                &OracleSourceSpan::chain_relative(0, 0, start, cursor, index as u32)
+            );
+        }
+        assert_eq!(
+            last.clauses[2].disposition,
+            ClauseDisposition::Continue {
+                continuation: Some(ContinuationAst::RevealHandFilter {
+                    card_filter: Some(expected.clone()),
+                    choice_optional: false,
+                    binding: RevealChoiceBinding::FromIt
+                })
+            }
+        );
+        let lowered = crate::parser::oracle_effect::lower_effect_chain_ir(&mut last);
+        fn contains_filter(definition: &AbilityDefinition, expected: &TargetFilter) -> bool {
+            matches!(definition.effect.as_ref(), Effect::RevealHand { card_filter, .. } if card_filter == expected)
+                || definition
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|child| contains_filter(child, expected))
+        }
+        assert!(contains_filter(&lowered, &expected));
+        let parsed = parse_oracle_text(
+            BITING,
+            "Biting-Palm Ninja",
+            &["Ninjutsu".into()],
+            &["Creature".into()],
+            &["Human".into(), "Ninja".into()],
+        );
+        assert!(parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(|body| contains_filter(body, &expected)));
+        // Full reflexive source above; only the fused hand component is owned
+        // here. No whole Biting-Palm support or reflexive-delivery certificate.
+        let component = "that player reveals their hand and you choose a nonland card from it. Exile that card.";
+        assert!(BITING.ends_with(component));
+        let fused = crate::parser::oracle_effect::parse_effect_chain_ir(
+            component,
+            AbilityKind::Spell,
+            &mut Default::default(),
+        );
+        let fragments = [
+            "that player reveals their hand and you choose a nonland card from it",
+            "Exile that card",
+        ];
+        assert_eq!(fused.clauses.len(), fragments.len());
+        let mut cursor = 0;
+        for (index, (clause, fragment)) in fused.clauses.iter().zip(fragments).enumerate() {
+            let start = component[cursor..].find(fragment).unwrap() + cursor;
+            cursor = start + fragment.len();
+            assert_eq!(clause.id, ClauseId(index as u32));
+            assert_eq!(clause.source.fragment(), Some(fragment));
+            assert_eq!(
+                clause.source.span(),
+                &OracleSourceSpan::chain_relative(0, 0, start, cursor, index as u32)
+            );
+            assert_eq!(
+                clause.disposition,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None
+                }
+            );
+            assert_eq!(clause.reads_chosen_clause, None);
+            assert_eq!(clause.reads_return_result, None);
+        }
+        assert!(
+            matches!(&fused.clauses[0].parsed.effect, Effect::RevealHand { card_filter, .. } if card_filter == &expected)
+        );
+    }
+}
+
 mod nested_operand_publication {
     use super::*;
     use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};

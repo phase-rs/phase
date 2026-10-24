@@ -2809,6 +2809,22 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         );
     }
 
+    // CR 701.20e: a private look does not publish which hidden cards match
+    // the choice predicate, or how many match. Reuse the identity projection
+    // above so known cards, the owner, and authorized lookers keep real IDs.
+    if let WaitingFor::RevealChoice { cards, .. } = &mut filtered.waiting_for {
+        cards.retain(|id| !hidden_zone_change_ids.contains(id));
+        // Identity and pin redaction have already consumed the original look
+        // authority. Only the current prompt's filtered copy loses this carrier.
+        if !state
+            .private_look_player
+            .is_some_and(can_view_private_for_player)
+        {
+            filtered.private_look_ids.clear();
+            filtered.private_look_player = None;
+        }
+    }
+
     if let WaitingFor::ScryChoice {
         player, ref cards, ..
     } = state.waiting_for

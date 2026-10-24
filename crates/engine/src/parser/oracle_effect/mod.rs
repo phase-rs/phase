@@ -34832,7 +34832,16 @@ fn try_parse_exile_until_opponent_becomes_monarch_clause(
         .parse(tp.lower)
         .ok()?;
     let body = tp.slice(0, body_lower.len()).trim_end();
-    let ast = parse_imperative_family_ast(body.original, body.lower, ctx)?;
+    let ast = match parse_imperative_family_ast(body.original, body.lower, ctx) {
+        Ok(Some(ast)) => ast,
+        Ok(None) => return None,
+        Err(_) => {
+            return Some(parsed_clause(Effect::unimplemented(
+                "hand_card_description",
+                tp.original,
+            )))
+        }
+    };
     let mut clause = lower_imperative_family_ast(ast);
     if !matches!(
         clause.effect,
@@ -34896,7 +34905,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
-    if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
+    let imperative = match parse_imperative_family_ast(tp.original, tp.lower, ctx) {
+        Ok(ast) => ast,
+        Err(_) => {
+            return parsed_clause(Effect::unimplemented("hand_card_description", tp.original))
+        }
+    };
+    if let Some(ast) = imperative {
         let mut clause = lower_imperative_family_ast(ast);
         let application = for_each_subject_application(tp.original, &mut ctx.clone_throwaway());
         if matches!(clause.effect, Effect::Pump { .. }) {
@@ -35896,363 +35911,210 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
-/// Split a post-"choose" clause into the card-description phrase and any trailing
-/// restriction suffix after `"from it"` (e.g. `"with mana value 2 or less"`).
-/// CR 702.148a: cleave brackets are removed at build time, so the suffix here is
-/// plain text — `combine_choose_filter_parts` merges it and relies on
-/// `parse_search_filter`'s self-bounding terminator to drop any trailing sentence.
-fn choose_filter_parts(text: &str) -> (&str, &str) {
-    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among those")
-    {
-        return (before.trim(), suffix.trim());
-    }
-    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among them")
-    {
-        return (before.trim(), suffix.trim());
-    }
-    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from it") {
-        return (before.trim(), suffix.trim());
-    }
-    (text.trim(), "")
-}
-
-fn parse_choose_filter_leading_body(input: &str) -> &str {
-    type E<'a> = OracleError<'a>;
-    preceded(opt(alt((tag::<_, _, E>("a "), tag("an ")))), rest::<_, E>)
-        .parse(input.trim())
-        .map(|(_, body)| body.trim())
-        .unwrap_or(input.trim())
-}
-
-fn trailing_bare_article_only(input: &str) -> bool {
-    type E<'a> = OracleError<'a>;
-    opt(alt((
-        all_consuming(terminated(take_until::<_, _, E>(" an"), tag(" an"))),
-        all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
-    )))
-    .parse(input.trim())
-    .is_ok_and(|(_, article)| article.is_some())
-}
-
-/// Merge the pre-`from it` card phrase with the plain trailing restriction
-/// suffix that follows `"card from it"` (e.g. `"with mana value 2 or less"`).
-///
-/// CR 702.148a: Cleave's bracketed text is removed at build time before this
-/// parse runs (the base parse sees the bracket *content* without the bracket
-/// characters; the cleave-cost parse sees it removed entirely). So the suffix
-/// here is plain text, not a bracketed span. The merged string is handed to
-/// `parse_search_filter`, whose `search_filter_region` self-bounds at the first
-/// `". "`/`"."`, so any trailing sentence (Dread Fugue's "That player discards
-/// that card.") is naturally dropped without bracket-specific extraction.
-fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
-    let filter_part = parse_choose_filter_leading_body(filter_part);
-    let suffix = suffix_part.trim();
-    if suffix.is_empty() {
-        filter_part.to_string()
-    } else if filter_part.is_empty() {
-        suffix.to_string()
-    } else {
-        format!("{filter_part} {suffix}")
-    }
-}
-
-fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
-    // Extract type info between "choose" and "card from it"
-    // Handle both "choose X" and "you choose X" forms
-    let after_choose = alt((
-        tag::<_, _, OracleError<'_>>("you choose "),
-        tag("you may choose "),
-        tag("choose "),
-    ))
-    .parse(lower)
-    .map(|(rest, _)| rest)
-    .unwrap_or(lower);
-
-    // "one of them/those [cards]" — selection reference to parent target set
-    if tag::<_, _, OracleError<'_>>("one of th")
-        .parse(after_choose)
-        .is_ok()
-    {
-        return TargetFilter::ParentTarget;
-    }
-
-    let (filter_part, suffix_part) = choose_filter_parts(after_choose);
-    let combined = combine_choose_filter_parts(filter_part, suffix_part);
-
-    // Intentional: bare article "a [card]" or empty string means any card — not a parse failure
-    if combined.is_empty() || combined == "a" {
-        return TargetFilter::Any;
-    }
-
-    // CR 202.3: Delegate full card restrictions (type + mana value bounds, etc.) to the
-    // shared search-filter parser — cleave bracket suffixes after "from it" are merged above.
-    let search_filter = parse_search_filter(&combined, ctx);
-    if !is_unrestricted_card_filter(&search_filter) {
-        return search_filter;
-    }
-
-    let cleaned = filter_part;
-
-    // structural: not dispatch — segmenting pre-extracted type string on comma separator
-    // Comma-separated negation: "noncreature, nonland" → intersection of negations
-    if cleaned.contains(", ") {
-        let comma_parts: Vec<&str> = cleaned.split(", ").collect();
-        let mut tf = TypedFilter::card();
-        let mut all_resolved = true;
-        for part in &comma_parts {
-            if let Some(TargetFilter::Typed(part_tf)) = type_str_to_target_filter(part.trim()) {
-                // Merge Non(...) type filters and properties, skip the Card base
-                for t in part_tf.type_filters {
-                    if !matches!(t, TypeFilter::Card) {
-                        tf = tf.with_type(t);
-                    }
-                }
-                for p in part_tf.properties {
-                    tf.properties.push(p);
-                }
-            } else {
-                all_resolved = false;
-                break;
-            }
-        }
-        if all_resolved {
-            return TargetFilter::Typed(tf);
-        }
-    }
-
-    // Try full type phrase parsing first — handles compound patterns like
-    // "green or white creature", "nonland permanent", "spirit or arcane"
-    let (phrase_filter, phrase_rem) =
-        parse_type_phrase_folding_with_ctx(cleaned, &mut ctx.clone_player_antecedents());
-    if !matches!(phrase_filter, TargetFilter::Any) && phrase_rem.trim().is_empty() {
-        return phrase_filter;
-    }
-
-    let parts: Vec<&str> = cleaned.split(" or ").collect();
-    if parts.len() > 1 {
-        let filters: Vec<TargetFilter> = parts
-            .iter()
-            .filter_map(|p| type_str_to_target_filter(p.trim()))
-            .collect();
-        if filters.len() > 1 {
-            return TargetFilter::Or { filters };
-        }
-        if let Some(f) = filters.into_iter().next() {
-            return f;
-        }
-    }
-    if let Some(f) = type_str_to_target_filter(cleaned) {
-        return f;
-    }
-    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
-        context: "unrecognized type string".into(),
-        text: cleaned.into(),
-        line_index: 0,
-    });
-    TargetFilter::Any
-}
-
-fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
-    // Simple core types
-    let card_type = match s {
-        "artifact" => Some(TypeFilter::Artifact),
-        "creature" => Some(TypeFilter::Creature),
-        "enchantment" => Some(TypeFilter::Enchantment),
-        "instant" => Some(TypeFilter::Instant),
-        "sorcery" => Some(TypeFilter::Sorcery),
-        "planeswalker" => Some(TypeFilter::Planeswalker),
-        "land" => Some(TypeFilter::Land),
-        "permanent" => Some(TypeFilter::Permanent),
-        _ => None,
+/// The complete hand-card description retains its real noun across the link.
+/// The returned remainder belongs to an independent sentence or a parsed count.
+fn choose_filter_parts(text: &str) -> OracleResult<'_, (&str, &str)> {
+    let Some((before, _, after)) = nom_primitives::scan_preceded(text, |input| {
+        terminated(
+            alt((
+                tag::<_, _, OracleError<'_>>("from among those"),
+                tag("from among them"),
+                tag("from it"),
+            )),
+            peek(alt((
+                value((), space1),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        )
+        .parse(input)
+    }) else {
+        return Err(oracle_err(text));
     };
-    if let Some(ct) = card_type {
-        return Some(TargetFilter::Typed(TypedFilter::new(ct)));
-    }
-
-    // CR 205.2a: Negated card types — "nonland", "noncreature", etc.
-    if let Some(negated) = s.strip_prefix("non") {
-        // Card type negation
-        let inner = match negated {
-            "creature" => Some(TypeFilter::Creature),
-            "land" => Some(TypeFilter::Land),
-            "artifact" => Some(TypeFilter::Artifact),
-            "enchantment" => Some(TypeFilter::Enchantment),
-            "instant" => Some(TypeFilter::Instant),
-            "sorcery" => Some(TypeFilter::Sorcery),
-            "planeswalker" => Some(TypeFilter::Planeswalker),
-            _ => None,
-        };
-        if let Some(inner) = inner {
-            return Some(TargetFilter::Typed(
-                TypedFilter::card().with_type(TypeFilter::Non(Box::new(inner))),
-            ));
-        }
-        // CR 205.4a: Supertype negation — "nonbasic", "nonlegendary", "nonsnow"
-        let super_prop = match negated {
-            "basic" => Some(FilterProp::NotSupertype {
-                value: Supertype::Basic,
-            }),
-            "legendary" => Some(FilterProp::NotSupertype {
-                value: Supertype::Legendary,
-            }),
-            "snow" => Some(FilterProp::NotSupertype {
-                value: Supertype::Snow,
-            }),
-            _ => None,
-        };
-        if let Some(prop) = super_prop {
-            return Some(TargetFilter::Typed(
-                TypedFilter::card().properties(vec![prop]),
-            ));
-        }
-        return None;
-    }
-
-    // structural: not dispatch — splitting pre-extracted type string at word boundary
-    // Compound: "nonland permanent", "nonbasic land"
-    if let Some(pos) = s.find(' ') {
-        let (first, rest) = s.split_at(pos);
-        let rest = rest.trim();
-        // Handle "nonbasic land", "nonlegendary" as supertype negation + type
-        if let Some(negated_super) = first.strip_prefix("non") {
-            let super_prop = match negated_super {
-                "basic" => Some(FilterProp::NotSupertype {
-                    value: Supertype::Basic,
-                }),
-                "legendary" => Some(FilterProp::NotSupertype {
-                    value: Supertype::Legendary,
-                }),
-                "snow" => Some(FilterProp::NotSupertype {
-                    value: Supertype::Snow,
-                }),
-                _ => None,
-            };
-            if let Some(prop) = super_prop {
-                // Recurse for the base type
-                if let Some(TargetFilter::Typed(base_tf)) = type_str_to_target_filter(rest) {
-                    return Some(TargetFilter::Typed(base_tf.properties(vec![prop])));
-                }
-            }
-        }
-        // "nonland permanent" etc. — negated type modifier + base type
-        // Only merge Non(...) filters from the negation part, not the Card base
-        if let Some(TargetFilter::Typed(neg_tf)) = type_str_to_target_filter(first) {
-            if let Some(TargetFilter::Typed(base_tf)) = type_str_to_target_filter(rest) {
-                let mut combined = base_tf;
-                for tf in neg_tf.type_filters {
-                    if matches!(tf, TypeFilter::Non(_)) {
-                        combined = combined.with_type(tf);
-                    }
-                }
-                return Some(TargetFilter::Typed(combined));
-            }
-        }
-    }
-
-    None
+    let (outer, suffix) = take_till::<_, _, OracleError<'_>>(|ch| ch == '.').parse(after)?;
+    Ok((outer, (before.trim(), suffix.trim())))
 }
 
-/// True when a filter imposes no restriction beyond "any card" (including empty `Typed`).
-fn is_unrestricted_card_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(tf) => {
-            tf.type_filters.is_empty() && tf.properties.is_empty() && tf.controller.is_none()
-        }
-        _ => false,
+fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
+    if suffix_part.is_empty() {
+        filter_part.to_owned()
+    } else {
+        format!("{filter_part} {suffix_part}")
     }
 }
 
-fn parse_article_type_phrase_suffix<'a>(
+/// One strict authority for the complete noun-bearing owned descriptor.
+fn parse_hand_card_descriptor<'a>(
     input: &'a str,
-) -> nom::IResult<&'a str, &'a str, OracleError<'a>> {
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let mut trial = ctx.clone();
+    let (outer, (before, suffix)) = choose_filter_parts(input)?;
+    let (suffix, count_remainder) = if let Some((restriction, count)) =
+        nom_primitives::scan_split_at_phrase(suffix, |i| {
+            tag::<_, _, OracleError<'_>>("for each ").parse(i)
+        }) {
+        let (body, _) = tag::<_, _, OracleError<'_>>("for each ").parse(count)?;
+        if super::oracle_quantity::parse_for_each_clause_expr_with_context(body, &trial).is_none() {
+            return Err(nom::Err::Failure(OracleError::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        (restriction.trim(), Some(count))
+    } else {
+        (suffix, None)
+    };
+    let (_, body) = preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
+        rest,
+    )
+    .parse(before)?;
+    // CR 109.2a: this is a Card description in the revealed hand, never a bare adjective.
+    if nom_primitives::scan_at_word_boundaries(body, |i| {
+        terminated(
+            tag::<_, _, OracleError<'_>>("card"),
+            peek(alt((value((), space1), value((), eof)))),
+        )
+        .parse(i)
+    })
+    .is_none()
+    {
+        return Err(nom::Err::Failure(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let combined = combine_choose_filter_parts(body, suffix);
+    let (filter, remainder) = parse_type_phrase_folding_with_ctx(&combined, &mut trial);
+    if matches!(filter, TargetFilter::Any | TargetFilter::None)
+        || all_consuming(space0::<_, OracleError<'_>>)
+            .parse(remainder)
+            .is_err()
+    {
+        return Err(nom::Err::Failure(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    *ctx = trial;
+    Ok((count_remainder.unwrap_or(outer), filter))
+}
+
+fn parse_hand_choice_command(input: &str) -> OracleResult<'_, &str> {
     alt((
-        preceded(tag::<_, _, OracleError<'_>>(" an "), rest),
-        preceded(tag(" a "), rest),
+        tag::<_, _, OracleError<'_>>("you may choose "),
+        tag("you choose "),
+        tag("may choose "),
+        tag("choose "),
     ))
     .parse(input)
 }
 
-/// Type phrase after the last article in text that precedes `"card from"` (e.g. `"nonland"`,
-/// `"creature with mana value 3 or less"`, or empty for bare `"a card from it"`).
-fn type_phrase_before_card_from(before_card: &str) -> &str {
-    let trimmed = before_card.trim();
+fn parse_choose_filter<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (body, _) = parse_hand_choice_command(input)?;
+    nom::combinator::cut(|body| parse_hand_card_descriptor(body, ctx)).parse(body)
+}
 
-    if trailing_bare_article_only(trimmed) {
-        return "";
+/// Consume the actual actor/verb envelope, then the same complete descriptor.
+fn parse_choose_filter_from_sentence<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (body, _) = parse_hand_choice_sentence_command(input)?;
+    nom::combinator::cut(|body| parse_hand_card_descriptor(body, ctx)).parse(body)
+}
+
+fn parse_hand_choice_sentence_command(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("that player "),
+                tag("they "),
+                tag("you "),
+                tag("an opponent "),
+            ))),
+            opt(tag("may ")),
+            alt((
+                tag("exiles "),
+                tag("exile "),
+                tag("discards "),
+                tag("discard "),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// No-match, complete inherited anaphor, complete described choice and refusal
+/// remain distinct. Every client uses this production as its admission test.
+fn parse_hand_choice_filter<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Result<Option<Option<TargetFilter>>, OracleError<'a>> {
+    let lower = text.to_lowercase();
+    let input = lower.trim();
+    let choice_body = parse_hand_choice_command(input)
+        .map(|(body, _)| body)
+        .or_else(|_| parse_hand_choice_sentence_command(input).map(|(body, _)| body));
+    if choice_body.is_err() {
+        return Ok(None);
     }
-
-    let mut last = trimmed;
-    let mut cursor = 0;
-    while cursor < trimmed.len() {
-        let slice = &trimmed[cursor..];
-        if let Some((_rel_before, phrase, _rest)) =
-            nom_primitives::scan_preceded(slice, parse_article_type_phrase_suffix)
+    if let Ok(body) = choice_body {
+        if preceded(
+            tag::<_, _, OracleError<'_>>("one of "),
+            alt((tag("them"), tag("those"), terminated(tag("th"), eof))),
+        )
+        .parse(body)
+        .is_ok()
         {
-            last = phrase.trim();
-            cursor += 1;
-        } else {
-            break;
+            let complete = all_consuming(terminated(
+                (
+                    tag::<_, _, OracleError<'_>>("one of "),
+                    alt((tag("them"), tag("those"))),
+                    opt(tag(" cards")),
+                ),
+                (space0, opt(tag(".")), space0),
+            ))
+            .parse(body)
+            .is_ok();
+            return if complete {
+                Ok(Some(None))
+            } else {
+                Err(OracleError::new(text, nom::error::ErrorKind::Verify))
+            };
         }
     }
-    last
-}
-
-fn choose_filter_search_text(phrase: &str) -> String {
-    if nom_primitives::scan_contains(phrase, "card") {
-        phrase.to_string()
-    } else {
-        format!("{phrase} card")
-    }
-}
-
-/// Extract card type filter from a sub-ability sentence containing "card from it/among".
-/// Handles forms like "exile a nonland card from it", "discard a creature card from it".
-fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
-    let before_card = match take_until::<_, _, OracleError<'_>>("card from")
-        .parse(lower)
-        .ok()
-    {
-        Some((_, before)) => before,
-        None => {
-            ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
-                context: "choose-from-sentence missing 'card from'".into(),
-                text: lower.trim().into(),
-                line_index: 0,
-            });
-            return TargetFilter::Any;
-        }
-    };
-    // Use the full type phrase before "card from" (e.g. "nonland", "creature with mana
-    // value 3 or less"), not only the last word.
-    let phrase = type_phrase_before_card_from(before_card);
-    if phrase.is_empty() || phrase == "a" {
-        return TargetFilter::Any;
-    }
-    let search_text = choose_filter_search_text(phrase);
-    let filter = parse_search_filter(&search_text, ctx);
-    if !is_unrestricted_card_filter(&filter) {
-        return filter;
-    }
-    // Legacy single-word fallback for short descriptors ("nonland", "creature").
-    let word = phrase.rsplit(' ').next().unwrap_or(phrase);
-    if let Some(negated) = word.strip_prefix("non") {
-        if let Some(TargetFilter::Typed(tf)) = type_str_to_target_filter(negated) {
-            if let Some(primary) = tf.get_primary_type().cloned() {
-                return TargetFilter::Typed(
-                    TypedFilter::card().with_type(TypeFilter::Non(Box::new(primary))),
-                );
-            }
-        }
-    }
-    type_str_to_target_filter(word).unwrap_or_else(|| {
-        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
-            context: "unrecognized choose-from-sentence type".into(),
-            text: phrase.into(),
-            line_index: 0,
-        });
-        TargetFilter::Any
+    let owned_link = nom_primitives::scan_at_word_boundaries(input, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("from it"),
+            tag("from among them"),
+            tag("from among those"),
+            terminated(tag("from"), eof),
+        ))
+        .parse(i)
     })
+    .is_some();
+    if !owned_link {
+        return Ok(None);
+    }
+    let mut trial = ctx.clone();
+    let result = if parse_hand_choice_command(input).is_ok() {
+        parse_choose_filter(input, &mut trial)
+    } else {
+        parse_choose_filter_from_sentence(input, &mut trial)
+    };
+    match result {
+        Ok((_, filter)) => {
+            *ctx = trial;
+            Ok(Some(Some(filter)))
+        }
+        Err(_) => Err(OracleError::new(text, nom::error::ErrorKind::Verify)),
+    }
 }
 
 /// Check if an effect exiles objects (candidate for tracked set recording).
@@ -42554,7 +42416,7 @@ fn adjacent_search_result_owners(
                 &previous.parsed.effect,
                 &mut trial
             ),
-            Some(ContinuationAst::SearchRevealResult)
+            Ok(Some(ContinuationAst::SearchRevealResult))
         ) {
             return None;
         }
@@ -43009,6 +42871,9 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: a refused conditional can own only the next source chunk's
     // alternative. Keep its identity outside the scrubbed executable metadata.
     let mut pending_rejected_search_guard: Option<ClauseId> = None;
+    // A refused hand choice publishes no selected object. Keep its source id
+    // until a later real producer establishes a new selected-card authority.
+    let mut failed_hand_choice: Option<ClauseId> = None;
     // CR 608.2c: "Repeat the following process N times." appears as its own
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
@@ -45945,6 +45810,7 @@ fn parse_effect_chain_ir_body(
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
+        let hand_trial_baseline = ctx.clone();
         // CR 608.2c + CR 109.4 (issue #1670): Path-independent consumption-clear
         // of the single-shot "its controller" antecedent. The chunk consumed the
         // seeded scope above when `chunk_ctx.relative_player_scope` cloned
@@ -47472,7 +47338,7 @@ fn parse_effect_chain_ir_body(
             if !matches!(previous.parsed.effect, Effect::SearchLibrary { .. })
                 || !matches!(
                     parse_followup_continuation_ast(normalized_text, &previous.parsed.effect, ctx),
-                    Some(ContinuationAst::SearchRevealResult)
+                    Ok(Some(ContinuationAst::SearchRevealResult))
                 )
             {
                 return None;
@@ -47527,6 +47393,47 @@ fn parse_effect_chain_ir_body(
             }
         }
         'source_clause: {
+            let refused_hand = matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "hand_card_description");
+            let selected_disposal = matches!(
+                &clause.effect,
+                Effect::DiscardCard {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                } | Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            );
+            let lower = normalized_text.to_lowercase();
+            let selected_anaphor = selected_disposal
+                && nom_primitives::scan_preceded(&lower, |input| {
+                    let (operand, _) = alt((
+                        tag::<_, _, OracleError<'_>>("discards "),
+                        tag("discard "),
+                        tag("exiles "),
+                        tag("exile "),
+                    ))
+                    .parse(input)?;
+                    let (target, remainder) =
+                        super::oracle_target::parse_anaphoric_target_ref(operand, true)
+                            .ok_or_else(|| oracle_err(operand))?;
+                    Ok((remainder, target))
+                })
+                .is_some();
+            if refused_hand || (failed_hand_choice.is_some() && selected_anaphor) {
+                *ctx = hand_trial_baseline.clone();
+                unimplemented_clause(
+                    &mut builder,
+                    "hand_card_description",
+                    normalized_text,
+                    chunk.boundary_after,
+                );
+                if refused_hand {
+                    failed_hand_choice = builder.clauses().last().map(|clause| clause.id);
+                }
+                break 'source_clause;
+            }
             if let Some((fragment, body)) = rejected_search_guard.filter(|_| {
                 delayed_condition.is_none()
                     && player_scope.is_none()
@@ -47561,16 +47468,41 @@ fn parse_effect_chain_ir_body(
                     .replace_with_gap("search_result_condition");
                 break 'source_clause;
             }
-            let mut followup_continuation = effective_prev_effect
-                .as_ref()
-                .and_then(|eff| {
-                    sequence::parse_followup_continuation_ast_with_search_destination(
+            let nearest_followup = match effective_prev_effect.as_ref() {
+                Some(effect) => sequence::parse_followup_continuation_ast_with_search_destination(
+                    normalized_text,
+                    effect,
+                    ctx,
+                    effective_prev_is_search_destination_exile,
+                ),
+                None => Ok(None),
+            };
+            let nearest_followup = match nearest_followup {
+                Ok(value) => value,
+                Err(_) => {
+                    *ctx = hand_trial_baseline.clone();
+                    unimplemented_clause(
+                        &mut builder,
+                        "hand_card_description",
                         normalized_text,
-                        eff,
-                        ctx,
-                        effective_prev_is_search_destination_exile,
-                    )
-                })
+                        chunk.boundary_after,
+                    );
+                    failed_hand_choice = builder.clauses().last().map(|clause| clause.id);
+                    break 'source_clause;
+                }
+            };
+            if matches!(
+                nearest_followup,
+                Some(ContinuationAst::RevealHandFilter { .. })
+            ) || matches!(&clause.effect, Effect::RevealHand { card_filter, .. } if !matches!(card_filter, TargetFilter::None))
+                || matches!(
+                    &clause.effect,
+                    Effect::ChooseFromZone { .. } | Effect::TargetOnly { .. }
+                )
+            {
+                failed_hand_choice = None;
+            }
+            let mut followup_continuation = nearest_followup
                 .or_else(|| {
                     // CR 608.2c: when the nearest non-absorbed clause is
                     // lookback-transparent (e.g. `Sacrifice` — Birthing Ritual),
@@ -47588,12 +47520,18 @@ fn parse_effect_chain_ir_body(
                     }
                     non_absorbed.iter().skip(1).find_map(|c| {
                         let deeper = effective_effect_of(c);
+                        if !matches!(deeper, Effect::Dig { .. } | Effect::Mill { .. }) {
+                            return None;
+                        }
                         match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
-                            Some(
+                            Ok(Some(
                                 continuation @ (ContinuationAst::DigFromAmong { .. }
                                 | ContinuationAst::PutRest { .. }),
-                            ) => Some(continuation),
-                            _ => None,
+                            )) => Some(continuation),
+                            Ok(_) => None,
+                            Err(_) => unreachable!(
+                                "checked hand refusal requires a RevealHand predecessor"
+                            ),
                         }
                     })
                 })
@@ -47635,13 +47573,16 @@ fn parse_effect_chain_ir_body(
                             Effect::RevealUntil { .. } => {
                                 match parse_followup_continuation_ast(normalized_text, &deeper, ctx)
                                 {
-                                    Some(
+                                    Ok(Some(
                                         continuation @ (ContinuationAst::RevealUntilAllToZone {
                                             ..
                                         }
                                         | ContinuationAst::PutRest { .. }),
-                                    ) => Some(continuation),
-                                    _ => None,
+                                    )) => Some(continuation),
+                                    Ok(_) => None,
+                                    Err(_) => unreachable!(
+                                        "checked hand refusal requires a RevealHand predecessor"
+                                    ),
                                 }
                             }
                             _ => None,

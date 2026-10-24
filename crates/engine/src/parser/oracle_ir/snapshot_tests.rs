@@ -7,6 +7,130 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn contextual_hand_complete_ir_and_lowered_semantics_before_snapshot() {
+    use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, CardSelectionMode, ChosenGroupId, ControllerRef, Effect,
+        SubAbilityLink, TargetFilter, TypeFilter, TypedFilter,
+    };
+    const SOURCE: &str = "Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+    // SHAPE: complete independent defaults and the whole chosen-card chain.
+    let filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    );
+    let mut discard = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DiscardCard {
+            count: 1,
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    discard.sub_link = SubAbilityLink::SequentialSibling;
+    let mut head = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RevealHand {
+            target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            card_filter: filter.clone(),
+            count: None,
+            selection: CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: true,
+        },
+    )
+    .sub_ability(discard)
+    .description(SOURCE.into());
+    head.declares_chosen_group = Some(ChosenGroupId(0x8000_0000));
+    let expected = ParsedAbilities {
+        abilities: vec![head],
+        triggers: vec![],
+        statics: vec![],
+        replacements: vec![],
+        extracted_keywords: vec![],
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: vec![],
+    };
+    let mut doc = parse_oracle_ir(SOURCE, "Duress", &[], &["Sorcery".into()], &[]);
+    assert_eq!(doc.source_text, SOURCE);
+    assert_eq!(doc.items.len(), 1);
+    let item = &doc.items[0];
+    assert_eq!(item.id, OracleItemId(0));
+    assert_eq!(item.source.fragment(), Some(SOURCE));
+    assert_eq!(item.source.span().precision, SpanPrecision::Exact);
+    assert_eq!(
+        item.source.span(),
+        &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(0, 0, 0, SOURCE.len(), 0)
+    );
+    let OracleNodeIr::Spell(spell) = &item.node else {
+        panic!("complete spell IR")
+    };
+    assert_eq!(spell.body.clauses.len(), 3);
+    assert!(
+        matches!(spell.body.clauses[1].disposition.followup(), Some(crate::parser::oracle_ir::ast::ContinuationAst::RevealHandFilter { card_filter: Some(actual), .. }) if actual == &filter)
+    );
+    let fragments = [
+        "Target opponent reveals their hand",
+        "You choose a noncreature, nonland card from it",
+        "That player discards that card",
+    ];
+    let mut cursor = 0;
+    for (index, (clause, fragment)) in spell.body.clauses.iter().zip(fragments).enumerate() {
+        assert_eq!(
+            clause.id,
+            crate::parser::oracle_ir::effect_chain::ClauseId(index as u32)
+        );
+        assert_eq!(clause.source.span().precision, SpanPrecision::ChainRelative);
+        let start = SOURCE[cursor..].find(fragment).unwrap() + cursor;
+        cursor = start + fragment.len();
+        assert_eq!(clause.source.fragment(), Some(fragment));
+        assert_eq!(
+            clause.source.span(),
+            &crate::parser::oracle_ir::doc::OracleSourceSpan::chain_relative(
+                0,
+                0,
+                start,
+                cursor,
+                index as u32
+            )
+        );
+        let disposition = if index == 1 {
+            crate::parser::oracle_ir::effect_chain::ClauseDisposition::Continue {
+                continuation: Some(
+                    crate::parser::oracle_ir::ast::ContinuationAst::RevealHandFilter {
+                        card_filter: Some(filter.clone()),
+                        choice_optional: false,
+                        binding: crate::parser::oracle_ir::ast::RevealChoiceBinding::FromIt,
+                    },
+                ),
+            }
+        } else {
+            crate::parser::oracle_ir::effect_chain::ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            }
+        };
+        assert_eq!(clause.disposition, disposition);
+        assert_eq!(clause.declares_chosen_clause, None);
+        assert_eq!(clause.reads_chosen_clause, None);
+        assert_eq!(clause.reads_return_result, None);
+        assert_eq!(clause.declares_instruction_result, None);
+    }
+    let actual = lower_oracle_ir(&mut doc);
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    insta::assert_json_snapshot!("contextual_hand_complete_ir", doc);
+    insta::assert_json_snapshot!("contextual_hand_complete_lowered", actual);
+}
+
+#[test]
 fn nested_two_complete_sources_ir_and_lowered() {
     use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
     use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};

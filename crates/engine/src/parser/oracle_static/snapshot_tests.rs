@@ -7,6 +7,106 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn contextual_hand_static_routing_has_complete_supported_positive_reaches() {
+    const HAND: &str = "Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.";
+    let expected_static = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(TypedFilter::creature()))
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }])
+        .description("Creatures have flying.".into());
+    assert_eq!(
+        parse_static_line("Creatures have flying."),
+        Some(expected_static.clone())
+    );
+    let filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    );
+    let mut discard = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DiscardCard {
+            count: 1,
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    discard.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+    let mut reveal = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RevealHand {
+            target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            card_filter: filter.clone(),
+            count: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal: true,
+        },
+    )
+    .sub_ability(discard)
+    .description(HAND.into());
+    reveal.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(0x8000_0000));
+    let expected = crate::parser::oracle::ParsedAbilities {
+        abilities: vec![reveal],
+        triggers: vec![],
+        statics: vec![],
+        replacements: vec![],
+        extracted_keywords: vec![],
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: vec![],
+    };
+    let mut doc =
+        crate::parser::oracle::parse_oracle_ir(HAND, "Duress", &[], &["Sorcery".into()], &[]);
+    let actual = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert_eq!(doc.items.len(), 1);
+    let crate::parser::oracle_ir::doc::OracleNodeIr::Spell(spell) = &doc.items[0].node else {
+        panic!("supported hand reaches spell IR");
+    };
+    assert_eq!(spell.body.clauses.len(), 3);
+    assert!(
+        matches!(spell.body.clauses[1].disposition.followup(), Some(crate::parser::oracle_ir::ast::ContinuationAst::RevealHandFilter { card_filter: Some(actual), choice_optional: false, binding: crate::parser::oracle_ir::ast::RevealChoiceBinding::FromIt }) if actual == &filter)
+    );
+    assert_eq!(actual.abilities.len(), 1);
+    assert!(
+        actual.statics.is_empty()
+            && actual.triggers.is_empty()
+            && actual.replacements.is_empty()
+            && actual.extracted_keywords.is_empty()
+    );
+    let head = &actual.abilities[0];
+    let expected_filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    );
+    assert!(
+        matches!(head.effect.as_ref(), Effect::RevealHand { card_filter, .. } if card_filter == &expected_filter)
+    );
+    assert!(matches!(
+        head.sub_ability.as_ref().unwrap().effect.as_ref(),
+        Effect::DiscardCard {
+            count: 1,
+            target: TargetFilter::ParentTarget
+        }
+    ));
+    assert!(head.sub_ability.as_ref().unwrap().sub_ability.is_none());
+    assert!(!crate::parser::oracle::has_unimplemented(head));
+    assert!(parse_static_line(HAND).is_none());
+    insta::assert_json_snapshot!("contextual_hand_static_positive", expected_static);
+    insta::assert_json_snapshot!("contextual_hand_static_routing_ir", doc);
+    insta::assert_json_snapshot!("contextual_hand_static_routing_lowered", actual);
+}
+
+#[test]
 fn nested_comparator_static_semantics_before_snapshot() {
     // SHAPE: synthetic grammar controls, CR 109.2 + CR 109.2a + CR 202.3.
     for (source, quantity) in [

@@ -5,6 +5,249 @@ use super::lower::{
 use super::sequence::split_clause_sequence;
 use super::*;
 use crate::parser::oracle::has_unimplemented as has_unimplemented_ability;
+use crate::parser::oracle_ir::ast::{
+    ChooseImperativeAst, HandRevealImperativeAst, ImperativeAst, ImperativeFamilyAst,
+};
+use crate::parser::oracle_ir::context::ChosenColorQualifierScope;
+
+#[test]
+fn contextual_hand_complete_nouns_and_post_link_restrictions() {
+    // SHAPE: the actual Card noun owns every adjective (CR 109.2a).
+    let nonland = TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)));
+    let restricted = TypedFilter::card()
+        .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+        .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)));
+    for (source, expected) in [
+        ("you choose a noncreature, nonland card from it", restricted),
+        (
+            "you choose a nonlegendary, nonland card from it",
+            nonland.clone().properties(vec![FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }]),
+        ),
+        (
+            "you choose a nonland card from it with mana value 2 or less",
+            nonland.clone().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]),
+        ),
+        ("you choose a card from among them", TypedFilter::card()),
+        ("you choose a nonland card from among those", nonland),
+    ] {
+        let mut ctx = ParseContext::default();
+        let (remainder, actual) =
+            parse_choose_filter(source, &mut ctx).expect("complete owned Card descriptor");
+        assert_eq!(remainder, "");
+        assert_eq!(actual, TargetFilter::Typed(expected), "{source}");
+        assert!(ctx.diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn contextual_hand_refusal_is_transactional_in_each_real_client() {
+    let previous = Effect::RevealHand {
+        target: TargetFilter::Player,
+        card_filter: TargetFilter::None,
+        count: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        choice_optional: false,
+        reveal: true,
+    };
+    // SHAPE: the typed qualifier performs a real intended context write. Each
+    // adapter must commit it on success and discard it after a later refusal.
+    let expected_filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+            .properties(vec![FilterProp::IsChosenColor]),
+    );
+    for client in 0..3 {
+        let mut ctx = ParseContext::default();
+        ctx.chosen_color_qualifier = ChosenColorQualifierScope::ChainBound;
+        ctx.relative_player_scope = Some(ControllerRef::Opponent);
+        assert_eq!(ctx.pending_printed_color_choice, None);
+        let before = format!("{ctx:?}");
+        let command = "you choose a nonland card of the color of your choice from it";
+        let fused = format!("reveals their hand and {command}");
+        let actual = match client {
+            0 => match parse_imperative_family_ast(command, command, &mut ctx)
+                .unwrap()
+                .unwrap()
+            {
+                ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+                    ChooseImperativeAst::RevealHandFilter {
+                        card_filter,
+                        choice_optional: false,
+                    },
+                )) => card_filter,
+                other => panic!("required checked choice: {other:?}"),
+            },
+            1 => match parse_imperative_family_ast(&fused, &fused, &mut ctx)
+                .unwrap()
+                .unwrap()
+            {
+                ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+                    HandRevealImperativeAst::RevealAll { card_filter, .. },
+                )) => card_filter,
+                other => panic!("required fused reveal: {other:?}"),
+            },
+            _ => match parse_followup_continuation_ast(command, &previous, &mut ctx)
+                .unwrap()
+                .unwrap()
+            {
+                ContinuationAst::RevealHandFilter {
+                    card_filter: Some(filter),
+                    choice_optional: false,
+                    binding: RevealChoiceBinding::FromIt,
+                } => filter,
+                other => panic!("required continuation: {other:?}"),
+            },
+        };
+        assert_eq!(actual, expected_filter);
+        assert_eq!(ctx.pending_printed_color_choice, Some(ChoiceType::color()));
+        ctx.pending_printed_color_choice = None;
+        assert_eq!(
+            format!("{ctx:?}"),
+            before,
+            "only the intended field changed"
+        );
+        for input in [
+            "you choose a nonland card of the color of your choice from it inexplicably",
+            "dance inexplicably",
+        ] {
+            let result = match client {
+                0 => parse_imperative_family_ast(input, input, &mut ctx)
+                    .map(|value| value.is_some())
+                    .map_err(|_| ()),
+                1 => {
+                    let input = if input == "dance inexplicably" {
+                        input.to_owned()
+                    } else {
+                        format!("reveals their hand and {input}")
+                    };
+                    let result = parse_imperative_family_ast(&input, &input, &mut ctx);
+                    result.map(|value| value.is_some()).map_err(|_| ())
+                }
+                _ => parse_followup_continuation_ast(input, &previous, &mut ctx)
+                    .map(|value| value.is_some())
+                    .map_err(|_| ()),
+            };
+            if input == "dance inexplicably" {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(
+                format!("{ctx:?}"),
+                before,
+                "failed/no-match trial rolls back every field"
+            );
+        }
+    }
+    let complete = parse_effect_chain("Target player reveals their hand. You choose a nonland card of the color of your choice from it. That player discards that card.", AbilityKind::Spell);
+    assert!(!has_unimplemented_ability(&complete));
+    assert!(
+        matches!(complete.effect.as_ref(), Effect::Choose { choice_type, .. } if choice_type == &ChoiceType::color())
+    );
+    let reveal = complete
+        .sub_ability
+        .as_deref()
+        .expect("color chooser precedes the reveal consumer");
+    assert!(
+        matches!(reveal.effect.as_ref(), Effect::RevealHand { card_filter, .. } if card_filter == &expected_filter)
+    );
+    assert!(matches!(
+        reveal.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::DiscardCard {
+            target: TargetFilter::ParentTarget,
+            count: 1
+        }
+    ));
+    for bad in [
+        "choose a nonland from it",
+        "choose a noncreature, unknowable card from it",
+        "choose a nonland card from it inexplicably",
+        "choose a nonland card or from it",
+        "choose a nonland card from",
+        "choose one of th",
+    ] {
+        let mut ctx = ParseContext::default();
+        ctx.relative_player_scope = Some(ControllerRef::Opponent);
+        let before = format!("{ctx:?}");
+        assert!(
+            parse_imperative_family_ast(bad, bad, &mut ctx).is_err(),
+            "{bad}"
+        );
+        assert_eq!(format!("{ctx:?}"), before, "imperative failed trial: {bad}");
+        assert!(
+            parse_followup_continuation_ast(bad, &previous, &mut ctx).is_err(),
+            "{bad}"
+        );
+        assert_eq!(format!("{ctx:?}"), before, "followup failed trial: {bad}");
+        let fused = format!("reveals their hand and you {bad}");
+        assert!(
+            parse_imperative_family_ast(&fused, &fused, &mut ctx).is_err(),
+            "{fused}"
+        );
+        assert_eq!(format!("{ctx:?}"), before, "fused failed trial: {bad}");
+        // Same callers positively reach the complete restricted choice.
+        assert!(parse_imperative_family_ast(
+            "choose a nonland card from it",
+            "choose a nonland card from it",
+            &mut ctx
+        )
+        .unwrap()
+        .is_some());
+        assert!(parse_followup_continuation_ast(
+            "choose a nonland card from it",
+            &previous,
+            &mut ctx
+        )
+        .unwrap()
+        .is_some());
+    }
+}
+
+#[test]
+fn contextual_hand_failed_choice_gaps_only_its_dependent_disposal() {
+    let source = "Target opponent reveals their hand. You choose a noncreature, unknowable card from it. That player discards that card. Draw a card.";
+    let ir = parse_effect_chain_ir(source, AbilityKind::Spell, &mut ParseContext::default());
+    let fragments: Vec<_> = ir
+        .clauses
+        .iter()
+        .filter_map(|clause| {
+            matches!(clause.parsed.effect, Effect::Unimplemented { .. })
+                .then(|| clause.source.fragment().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        fragments,
+        vec![
+            "You choose a noncreature, unknowable card from it",
+            "That player discards that card"
+        ]
+    );
+    assert!(matches!(
+        ir.clauses.first().unwrap().parsed.effect,
+        Effect::RevealHand {
+            card_filter: TargetFilter::None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ir.clauses.last().unwrap().parsed.effect,
+        Effect::Draw { .. }
+    ));
+    let valid = parse_effect_chain("Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card. Draw a card.", AbilityKind::Spell);
+    assert!(!has_unimplemented_ability(&valid));
+    assert!(matches!(
+        *valid.effect,
+        Effect::RevealHand {
+            card_filter: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+}
 
 #[test]
 fn nested_vestige_complete_card_keeps_independent_dedicated_ltb_header_and_body() {
@@ -35600,8 +35843,11 @@ fn seek_land_and_nonland_cards_lowers_to_chain() {
 #[test]
 fn choose_from_sentence_bare_card_from_it_is_any_card() {
     let mut ctx = ParseContext::default();
-    let filter = parse_choose_filter_from_sentence("that player exiles a card from it", &mut ctx);
-    assert_eq!(filter, TargetFilter::Any);
+    let (remainder, filter) =
+        parse_choose_filter_from_sentence("that player exiles a card from it", &mut ctx)
+            .expect("complete card choice");
+    assert_eq!(remainder, "");
+    assert_eq!(filter, TargetFilter::Typed(TypedFilter::card()));
     assert!(
         ctx.diagnostics.is_empty(),
         "bare card choice should not emit target fallback diagnostics: {:?}",
@@ -35674,7 +35920,9 @@ fn parse_choose_filter_merges_trailing_cmc_suffix() {
     let mut ctx = ParseContext::default();
     let lower =
             "you choose a nonland card from it with mana value 2 or less. that player discards that card.";
-    let filter = parse_choose_filter(lower, &mut ctx);
+    let (remainder, filter) =
+        parse_choose_filter(lower, &mut ctx).expect("complete post-link restriction");
+    assert_eq!(remainder, ". that player discards that card.");
     assert!(
         matches!(
             &filter,
@@ -83036,7 +83284,8 @@ fn scoped_reveal_from_it_choice_by_scoped_player_declines_to_a_gap() {
                 &root.effect,
                 &mut ParseContext::default(),
                 false,
-            ),
+            )
+            .expect("checked parser admission"),
             Some(ContinuationAst::RevealHandFilter {
                 binding: RevealChoiceBinding::FromIt,
                 ..
@@ -83179,7 +83428,8 @@ fn assert_revealed_this_way_arm_claims(root: &AbilityDefinition, consumer: &str)
             &root.effect,
             &mut ParseContext::default(),
             false,
-        ),
+        )
+        .expect("checked parser admission"),
         Some(ContinuationAst::RevealHandFilter {
             binding: RevealChoiceBinding::RevealedThisWay,
             ..
@@ -83436,7 +83686,7 @@ fn kitesail_freebooter_unscoped_from_it_choice_is_unchanged() {
     assert!(non_controller_gaps(execute).is_empty());
     assert_json_eq(
         execute,
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":["Card",{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"declares_chosen_group":2147483648,"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
         "Kitesail Freebooter's ETB",
     );
 }
