@@ -17,13 +17,16 @@
 //! * THUMB REGRESSIONS (fail on revert): won-flip observers across repeated keep prompts
 //!   (Zndrsplt, Okaun) and a zone-change observer when the kept win's flip run completes
 //!   and the parent continuation pauses on a draw replacement (Strongbox + dredge).
+//! * LOGICAL-OWNER REGRESSION: Joint Exploration's resumed scry passes an Enduring
+//!   Renewal creature move before pausing on optional land placement. Konrad observes
+//!   that move once, using the queued context as the collection witness (no ledger claim).
 //! * PRESERVATION PINS: the copy tests (copy-owned SpellCopied observers are not re-parked
 //!   while CopyRetarget is pending), Strongbox without a draw replacement, no-Thumb runs,
 //!   an opponent's Thumb, and the final-action collector's single-kept-flip path.
 //!
 //! Every card is built from its verbatim Oracle text (MTGJSON `AtomicCards.json`). RNG
 //! outcomes are pinned after the trigger is on the stack, using the `seed_for` + pin
-//! pattern of `choose_flip_context_coverage.rs`; each runtime test asserts the observed
+//! pattern of `choose_flip_context_coverage.rs`; each coin runtime test asserts the observed
 //! `CoinFlipped` sequence as its reach guard.
 
 use engine::game::coverage::card_face_has_unimplemented_parts;
@@ -1024,4 +1027,159 @@ fn strongbox_zone_observer(dredge: bool) {
         1,
         "CR 603.2c: Strongbox's sacrifice triggers exactly one opponent life loss"
     );
+}
+
+/// CR 603.2c + CR 608.2c: a logical zone owner queues Konrad during the resumed
+/// scry slice, before Joint Exploration pauses again on its kicked instruction.
+/// The owner does not claim the consumed ledger, so parking must honor the
+/// queued zone-change witness rather than collect a second copy.
+#[test]
+fn scry_continuation_deduplicates_logically_owned_zone_observer_before_later_prompt() {
+    let mut scenario = two_player_table();
+    scenario.add_enchantment_from_oracle(P0, "Enduring Renewal",
+        "Play with your hand revealed.\nIf you would draw a card, reveal the top card of your library instead. If it's a creature card, put it into your graveyard. Otherwise, draw a card.\nWhenever a creature is put into your graveyard from the battlefield, return it to your hand.");
+    let observer = scenario.add_creature_from_oracle(P0, "Syr Konrad, the Grim", 5, 4,
+        "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, Syr Konrad deals 1 damage to each opponent.\n{1}{B}: Each player mills a card. (They each put the top card of their library into their graveyard.)").id();
+    let creature = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let land = scenario.add_land_to_hand(P0, "Forest").id();
+    let spell = scenario.add_spell_to_hand(P0, "Joint Exploration", true)
+        .from_oracle_text_with_keywords(&["Kicker"], "Kicker {G} (You may pay an additional {G} as you cast this spell.)\nScry 2, then draw a card. If this spell was kicked, you may put a land card from your hand onto the battlefield.")
+        .with_mana_cost(ManaCost::Cost { generic: 1, shards: vec![ManaCostShard::Blue] }).id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Colorless, ManaType::Blue, ManaType::Green]
+            .into_iter()
+            .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    // Fixture placement only; the observed move is produced by the draw replacement.
+    move_to_zone(runner.state_mut(), creature, Zone::Library, &mut Vec::new());
+    runner.state_mut().players[0]
+        .library
+        .retain(|id| *id != creature);
+    runner.state_mut().players[0].library.push_front(creature);
+    let life_before = runner.state().players[1].life;
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast printed Joint Exploration");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalCostChoice { .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("pay printed kicker");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay Joint Exploration");
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    let mut events = resolve_combat_trigger(&mut runner, spell);
+    let WaitingFor::ScryChoice { player, cards } = runner.state().waiting_for.clone() else {
+        panic!(
+            "required Joint Exploration scry: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(cards.len(), 2);
+    assert!(cards.contains(&creature));
+    events.extend(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![creature],
+            })
+            .expect("keep the creature and bottom the other scry card")
+            .events,
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == spell
+        ),
+        "required later kicked land-placement prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&land].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+    let is_observed_move = |event: &GameEvent| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Graveyard, .. }
+                if *object_id == creature
+        )
+    };
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| is_observed_move(event))
+            .count(),
+        1,
+        "reach guard: the replacement really moved the revealed creature"
+    );
+    let queued = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .filter(|context| {
+            context.pending.source_id == observer
+                && context.trigger_events.iter().any(is_observed_move)
+        })
+        .count();
+    assert!(
+        queued > 0,
+        "reach guard: Konrad observed the real zone move"
+    );
+    assert_eq!(
+        runner.state().consumed_before_priority_trigger_events.len(),
+        0,
+        "this logical owner supplies a queued witness, not a consumed-ledger claim"
+    );
+    assert_eq!(
+        runner.state().players[1].life,
+        life_before,
+        "CR 603.3: the queued observer waits for the parent resolution"
+    );
+    events.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("decline the later land placement")
+            .events,
+    );
+    events.extend(drain_trigger_ordering(&mut runner));
+    let placed = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == observer)
+        .count();
+    assert!(
+        placed > 0,
+        "reach guard: the queued observer reached the stack"
+    );
+    events.extend(drive_to_rest(&mut runner));
+    assert_eq!(
+        life_before - runner.state().players[1].life,
+        1,
+        "CR 603.2c: one creature move deals one Konrad damage; queued={queued}, placed={placed}"
+    );
+    assert_eq!(queued, 1);
+    assert_eq!(placed, 1);
+    assert_eq!(runner.state().objects[&land].zone, Zone::Hand);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
 }
