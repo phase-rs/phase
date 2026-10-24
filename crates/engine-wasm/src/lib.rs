@@ -2536,6 +2536,320 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     }
 }
 
+/// Immutable exact-JSON state owned by wasm-bindgen, not an authoritative restore.
+///
+/// Optional baseline arguments consume their handles. Call `clone_handle` before
+/// transferring a baseline if the caller needs to retain it.
+#[wasm_bindgen]
+pub struct StateCodecHandle {
+    state: state_codec::WireState,
+}
+
+impl StateCodecHandle {
+    fn from_json_inner(bytes: &[u8]) -> Result<Self, state_codec::CodecError> {
+        state_codec::WireState::from_json(bytes).map(|state| Self { state })
+    }
+
+    fn json_bytes_inner(&self) -> Vec<u8> {
+        self.state.as_bytes().to_vec()
+    }
+
+    fn json_inner(&self) -> String {
+        self.state.as_json().to_owned()
+    }
+
+    fn hash_inner(&self) -> String {
+        state_codec::state_hash(&self.state).to_string()
+    }
+
+    fn clone_handle_inner(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl StateCodecHandle {
+    /// Return the exact retained JSON bytes, without parsing through JavaScript.
+    pub fn json_bytes(&self) -> Vec<u8> {
+        self.json_bytes_inner()
+    }
+
+    /// Return the exact retained JSON value as text, including internal whitespace.
+    pub fn json(&self) -> String {
+        self.json_inner()
+    }
+
+    /// Return the full SHA-256 digest of the retained JSON bytes as lowercase hex.
+    pub fn hash(&self) -> String {
+        self.hash_inner()
+    }
+
+    /// Cheaply share immutable state before transferring a baseline handle.
+    pub fn clone_handle(&self) -> StateCodecHandle {
+        self.clone_handle_inner()
+    }
+}
+
+/// Validate raw JSON bytes and retain their exact value span, not outer whitespace.
+///
+/// This does not deserialize or validate an authoritative engine state.
+#[wasm_bindgen]
+pub fn state_codec_from_json(bytes: &[u8]) -> Result<StateCodecHandle, JsValue> {
+    StateCodecHandle::from_json_inner(bytes).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+fn state_codec_for_viewer_inner(
+    viewer: Option<u8>,
+) -> Result<Option<StateCodecHandle>, state_codec::CodecError> {
+    GAME_STATE.with(|cell| {
+        let Some(state) = cell.take() else {
+            return Ok(None);
+        };
+        let filtered = match viewer {
+            Some(viewer) => filter_state_for_viewer(&state, PlayerId(viewer)),
+            None => engine::game::visibility::filter_state_for_unseated_viewer(&state),
+        };
+        let result = state_codec::WireState::from_game_state(&filtered)
+            .map(|state| Some(StateCodecHandle { state }));
+        cell.set(Some(state));
+        result
+    })
+}
+
+/// Serialize the current game's engine-filtered viewer state, without changing it.
+///
+/// A seat selects that player's projection; 255 selects the server's spectator
+/// sentinel. An omitted viewer selects the engine's unseated public projection.
+/// Returns an error when no game is initialized. No derived-view envelope is added.
+#[wasm_bindgen]
+pub fn state_codec_for_viewer(viewer: Option<u8>) -> Result<StateCodecHandle, JsValue> {
+    state_codec_for_viewer_inner(viewer)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .ok_or_else(|| JsValue::from_str(NOT_INITIALIZED_ERR))
+}
+
+fn state_codec_encode_inner(
+    state: &StateCodecHandle,
+    baseline: Option<StateCodecHandle>,
+) -> Result<Vec<u8>, state_codec::CodecError> {
+    state_codec::encode(baseline.as_ref().map(|handle| &handle.state), &state.state)?.to_bytes()
+}
+
+/// Encode a FULL frame. FULL ignores every baseline, including another audience's.
+///
+/// Passing a baseline consumes that handle; call `clone_handle` before transfer
+/// to retain it. The state argument is borrowed and remains usable.
+#[wasm_bindgen]
+pub fn state_codec_encode(
+    state: &StateCodecHandle,
+    baseline: Option<StateCodecHandle>,
+) -> Result<Vec<u8>, JsValue> {
+    state_codec_encode_inner(state, baseline).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+fn state_codec_decode_inner(
+    bytes: &[u8],
+    baseline: Option<StateCodecHandle>,
+) -> Result<StateCodecHandle, state_codec::CodecError> {
+    let frame = state_codec::Frame::from_bytes(bytes)?;
+    state_codec::decode(baseline.as_ref().map(|handle| &handle.state), &frame)
+        .map(|state| StateCodecHandle { state })
+}
+
+/// Decode frame bytes into exact JSON, never through the engine's state decoder.
+///
+/// FULL ignores every baseline. Passing a baseline consumes that handle; call
+/// `clone_handle` before transfer to retain it. Malformed frames return errors.
+#[wasm_bindgen]
+pub fn state_codec_decode(
+    bytes: &[u8],
+    baseline: Option<StateCodecHandle>,
+) -> Result<StateCodecHandle, JsValue> {
+    state_codec_decode_inner(bytes, baseline).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[cfg(test)]
+mod codec_bridge_tests {
+    use super::*;
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+
+    fn install_hidden_state() -> (GameState, [ObjectId; 2]) {
+        clear_game_state();
+        let mut state = GameState::new_two_player(88);
+        let private = [PlayerId(0), PlayerId(1)].map(|owner| {
+            engine::game::zones::create_object(
+                &mut state,
+                CardId(900 + u64::from(owner.0)),
+                owner,
+                format!("Private hand {}", owner.0),
+                Zone::Hand,
+            )
+        });
+        engine::game::zones::create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Private library".to_owned(),
+            Zone::Library,
+        );
+        GAME_STATE.with(|cell| cell.set(Some(state.clone())));
+        (state, private)
+    }
+
+    fn live_handle(viewer: Option<u8>) -> StateCodecHandle {
+        state_codec_for_viewer_inner(viewer)
+            .expect("serialize live projection")
+            .expect("installed game")
+    }
+
+    #[test]
+    fn codec_viewer_selection_matches_engine_filters_without_mutating_game() {
+        let (state, private) = install_hidden_state();
+        let original = serde_json::to_vec(&state).unwrap();
+        let audiences = [Some(0), Some(1), Some(u8::MAX), None];
+        let mut bytes = Vec::new();
+        for viewer in audiences {
+            let projected = match viewer {
+                Some(viewer) => filter_state_for_viewer(&state, PlayerId(viewer)),
+                None => engine::game::visibility::filter_state_for_unseated_viewer(&state),
+            };
+            let expected = serde_json::to_vec(&projected).unwrap();
+            let handle = live_handle(viewer);
+            assert_eq!(handle.json_bytes_inner(), expected, "audience {viewer:?}");
+            assert_eq!(handle.json_inner().as_bytes(), expected);
+            assert_eq!(
+                handle.hash_inner(),
+                state_codec::state_hash(
+                    &state_codec::WireState::from_game_state(&projected).unwrap()
+                )
+                .to_string()
+            );
+            bytes.push(expected);
+        }
+        let own = filter_state_for_viewer(&state, PlayerId(0));
+        let other = filter_state_for_viewer(&state, PlayerId(1));
+        let unseated = engine::game::visibility::filter_state_for_unseated_viewer(&state);
+        assert_eq!(own.objects[&private[0]].name, "Private hand 0");
+        assert_eq!(other.objects[&private[1]].name, "Private hand 1");
+        assert_ne!(own.objects[&private[1]].name, "Private hand 1");
+        assert_ne!(other.objects[&private[0]].name, "Private hand 0");
+        for (index, object_id) in private.iter().enumerate() {
+            assert_ne!(
+                unseated.objects[object_id].name,
+                state.objects[&private[index]].name
+            );
+        }
+        assert_ne!(bytes[0], bytes[1]);
+        assert_ne!(bytes[0], bytes[2]);
+        assert_ne!(bytes[0], bytes[3]);
+        assert_ne!(bytes[2], bytes[3]);
+        assert_eq!(
+            GAME_STATE.with(|cell| {
+                let current = cell.take().expect("export retains game");
+                let bytes = serde_json::to_vec(&current).unwrap();
+                cell.set(Some(current));
+                bytes
+            }),
+            original
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn codec_full_frames_ignore_absent_prior_unrelated_and_other_audience_baselines() {
+        let (mut prior, _) = install_hidden_state();
+        let current = live_handle(Some(0));
+        prior.players[0].life -= 1;
+        let prior = StateCodecHandle {
+            state: state_codec::WireState::from_game_state(&filter_state_for_viewer(
+                &prior,
+                PlayerId(0),
+            ))
+            .unwrap(),
+        };
+        let unrelated = StateCodecHandle::from_json_inner(br#"{"unrelated":[1,null]}"#).unwrap();
+        let other_audience = live_handle(None);
+        let full = state_codec_encode_inner(&current, None).unwrap();
+        for baseline in [None, Some(prior), Some(unrelated), Some(other_audience)] {
+            if let Some(baseline) = &baseline {
+                assert_ne!(baseline.state.as_bytes(), current.state.as_bytes());
+            }
+            let encoded = state_codec_encode_inner(
+                &current,
+                baseline.as_ref().map(StateCodecHandle::clone_handle_inner),
+            )
+            .unwrap();
+            assert_eq!(encoded, full);
+            let decoded = state_codec_decode_inner(&encoded, baseline).unwrap();
+            assert_eq!(decoded.json_bytes_inner(), current.json_bytes_inner());
+            assert_eq!(decoded.hash_inner(), current.hash_inner());
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn codec_raw_json_bytes_text_and_hash_remain_exact() {
+        let json = r#"{ "z":18446744073709551615, "a":{"n":1e9999,"n":2}, "unicode":"雪" }"#;
+        let handle = StateCodecHandle::from_json_inner(format!(" \n{json}\t").as_bytes()).unwrap();
+        assert_eq!(handle.json_bytes_inner(), json.as_bytes());
+        assert_eq!(handle.json_inner(), json);
+        assert_eq!(
+            handle.hash_inner(),
+            state_codec::state_hash(&state_codec::WireState::from_json(json.as_bytes()).unwrap())
+                .to_string()
+        );
+        let frame = state_codec_encode_inner(&handle, None).unwrap();
+        assert_eq!(
+            state_codec_decode_inner(&frame, None)
+                .unwrap()
+                .json_bytes_inner(),
+            json.as_bytes()
+        );
+    }
+
+    #[test]
+    fn codec_cloned_baseline_survives_owned_transfer() {
+        let retained = StateCodecHandle::from_json_inner(br#"{"old":[1,2,3]}"#).unwrap();
+        let current = StateCodecHandle::from_json_inner(br#"{"new":[4,5,6]}"#).unwrap();
+        let original = retained.json_bytes_inner();
+        let original_hash = retained.hash_inner();
+        let frame =
+            state_codec_encode_inner(&current, Some(retained.clone_handle_inner())).unwrap();
+        let decoded =
+            state_codec_decode_inner(&frame, Some(retained.clone_handle_inner())).unwrap();
+        assert_eq!(retained.json_bytes_inner(), original);
+        assert_eq!(retained.hash_inner(), original_hash);
+        assert_eq!(decoded.json_bytes_inner(), current.json_bytes_inner());
+    }
+
+    #[test]
+    fn codec_malformed_json_and_frames_return_errors() {
+        for bytes in [b"{".as_slice(), b"null garbage", b"\"\xff\""] {
+            assert!(StateCodecHandle::from_json_inner(bytes).is_err());
+        }
+        for bytes in [
+            b"{".as_slice(),
+            br#"{"type":"Delta","data":{"state":{}}}"#,
+            br#"{"type":"Full","data":{}}"#,
+            br#"{"type":"Full","data":{"state":null}} trailing"#,
+            b"\"\xff\"",
+        ] {
+            assert!(state_codec_decode_inner(bytes, None).is_err());
+        }
+    }
+
+    #[test]
+    fn codec_uninitialized_viewer_returns_no_handle_without_installing_game() {
+        clear_game_state();
+        assert!(state_codec_for_viewer_inner(None).unwrap().is_none());
+        assert!(state_codec_for_viewer_inner(Some(0)).unwrap().is_none());
+        assert!(GAME_STATE.with(|cell| cell.take().is_none()));
+    }
+}
+
 /// Get the legal actions, auto-pass recommendation, spell costs, and the CR 118.3
 /// "can't pay this cost right now" read-out for the current game state.
 /// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost>,

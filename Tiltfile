@@ -95,6 +95,7 @@ CLIENT_ENGINE_INPUTS = [
 AI_SRC = ['crates/phase-ai/src/']
 AI_TESTS = ['crates/phase-ai/tests/']
 WASM_SRC = ['crates/engine-wasm/src/']
+CODEC_SRC = ['crates/state-codec/src/']
 DRAFT_CORE_SRC = ['crates/draft-core/src/']
 DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 
@@ -113,7 +114,7 @@ local_resource('wasm',
     # Tilt execs the argv array directly, so bash receives the script text as one
     # untouched element. On Mac/Linux this is equally valid and equally a no-op.
     cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh'],
-    deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
+    deps = ENGINE_SRC + AI_SRC + WASM_SRC + CODEC_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
     ignore = TMP_IGNORE,
     allow_parallel = True,
     labels = ['build'],

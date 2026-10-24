@@ -772,6 +772,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "state-codec",
  "wasm-bindgen",
 ]
 
