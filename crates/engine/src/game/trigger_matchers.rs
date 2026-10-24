@@ -1286,6 +1286,7 @@ fn zone_change_clause_matches(
                     from,
                     filter,
                     &ctx,
+                    Some(record),
                 )
             }
             (false, _) => super::filter::matches_target_filter_on_zone_change_record_licensed(

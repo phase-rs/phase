@@ -1348,12 +1348,23 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Reveal {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: None,
         };
     }
 
-    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    // CR 701.20a + CR 107.3a: "Reveal <N|X> <card phrase> from your hand" — a
+    // counted, typed reveal. X stays symbolic so the value announced while
+    // casting or activating is the number revealed (Martyr cycle).
+    if let Ok((body, _)) = tag::<_, _, E<'_>>("reveal ").parse(lower.as_str()) {
+        if let Some(cost) = parse_reveal_from_hand_cost_body(body) {
+            return cost;
+        }
+    }
+
+    // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
+    // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
+    // reveals, trailing relative clauses such as "that share a color").
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
@@ -1366,7 +1377,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 .trim();
             let (filter, _) = parse_target(&format!("target {filter_raw}"));
             return AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
             };
         }
@@ -1476,6 +1487,31 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
+}
+
+/// CR 701.20a + CR 107.3a: Strict grammar for a counted reveal-from-hand
+/// cost body (the lowercase text after "reveal "):
+/// `<a|an|N|x> <card phrase> from your hand`. The card phrase delegates to
+/// `parse_discard_card_filter`, the shared hand-card noun authority, so a
+/// color ("red cards") or type ("Dragon card") restricts what can pay.
+/// `None` for an untyped noun, a trailing clause, or any other shape —
+/// the caller's fallback keeps handling those.
+fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (_, (count, noun)) = all_consuming((
+        terminated(
+            nom_quantity::parse_quantity_expr_number,
+            tag::<_, _, E<'_>>(" "),
+        ),
+        terminated(take_until(" from your hand"), tag(" from your hand")),
+    ))
+    .parse(body)
+    .ok()?;
+    let filter = parse_discard_card_filter(noun)?;
+    Some(AbilityCost::Reveal {
+        count,
+        filter: Some(filter),
+    })
 }
 
 /// CR 701.9a + CR 701.9b: Strict grammar for a hand-discard cost body (the
@@ -4785,8 +4821,84 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Reveal this card from your hand"),
             AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None
+            }
+        );
+    }
+
+    /// CR 701.20a + CR 107.3a: the Martyr cycle's "Reveal X <color> cards
+    /// from your hand" keeps X symbolic (the announced value) and restricts
+    /// the reveal to the named color. Verbatim cost text for all five cards.
+    #[test]
+    fn cost_reveal_x_colored_cards_keeps_x_symbolic_and_color() {
+        use crate::types::mana::ManaColor;
+        let cases = [
+            (
+                "{2}, Reveal X red cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Red,
+            ),
+            (
+                "{1}, Reveal X black cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Black,
+            ),
+            (
+                "{2}, Reveal X blue cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Blue,
+            ),
+            (
+                "{1}, Reveal X white cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::White,
+            ),
+            (
+                "{1}, Reveal X green cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Green,
+            ),
+        ];
+        for (text, generic, color) in cases {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic,
+                            },
+                        },
+                        AbilityCost::Reveal {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name: "X".into() },
+                            },
+                            filter: Some(TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .properties(vec![FilterProp::HasColor { color }]),
+                            )),
+                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 701.20a: a fixed-count typed reveal keeps its count of one and its
+    /// type filter through the strict grammar.
+    #[test]
+    fn cost_reveal_typed_card_from_hand_keeps_fixed_count() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a Dragon card from your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Dragon".to_string())
+                )),
             }
         );
     }

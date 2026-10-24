@@ -83,17 +83,18 @@ use super::{
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
     inject_printed_color_choice_filter, intrinsic_continuation_effect, mark_uses_tracked_set,
-    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
+    nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
-    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
-    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
-    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
+    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
+    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
+    rewrite_that_type_mana_instead, singular_battlefield_recall, stamp_delayed_returns,
+    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
+    PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -3792,14 +3793,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     // self-move antecedent binds to the source object; plural
                     // and mass-publisher recalls keep the chain tracked set.
                     let singular_self_recall = singular_battlefield_recall(&source_text_lower)
-                        && nearest_publisher_is_self_move(&defs);
+                        .then(|| nearest_self_move_destination(&defs))
+                        .flatten();
                     let plural_library_recall = plural_library_shuffle_recall(&source_text_lower);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         // Per-def branch: only a battlefield-recall-shaped leg
                         // enters the carve-out; sibling defs of the same clause
                         // keep today's tracked-set rewrite.
-                        if singular_self_recall
+                        if singular_self_recall.is_some()
                             && matches!(
                                 &*current.effect,
                                 Effect::ChangeZone {
@@ -3810,6 +3812,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             )
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
+                        } else if let (Some(origin), Effect::CreateDelayedTrigger { .. }) =
+                            (singular_self_recall, &*current.effect)
+                        {
+                            rewrite_delayed_singular_recall_to_self(&mut current.effect, origin);
                         } else {
                             if plural_library_recall {
                                 rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
@@ -4931,7 +4937,10 @@ mod arena_tests {
     use crate::parser::oracle_nom::context::ParseContext;
     #[cfg(feature = "cli")]
     use crate::types::ability::OpponentMayScope;
-    use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
+    use crate::types::ability::{
+        AttachmentReferent, DelayedTriggerCondition, FilterProp, ReplacementDefinition,
+        TargetFilter,
+    };
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::EtbTapState;
@@ -6215,11 +6224,12 @@ mod arena_tests {
 
     /// CR 608.2c + CR 301.5: "Destroy target creature with flying and all Equipment
     /// attached to that creature" must not lose the Equipment leg to the keyword
-    /// suffix, and the attachment relation has no filter form, so the leg fails
-    /// closed rather than destroying every Equipment. Paired positive: a
-    /// determiner-led second leg without the relation lowers to a second destroy.
+    /// suffix. The relation is the filter form `FilterProp::AttachedTo`, so the
+    /// leg lowers as an announced head plus one mass destroy whose population
+    /// unions the host and its attachments. Paired positive: a determiner-led
+    /// second leg without the relation lowers to a second destroy.
     #[test]
-    fn keyword_suffix_determiner_leg_is_kept_or_fails_closed() {
+    fn keyword_suffix_determiner_leg_keeps_the_attached_set() {
         let destroys = |text: &str| -> (usize, bool) {
             let parsed = crate::parser::parse_oracle_text(
                 text,
@@ -6248,9 +6258,62 @@ mod arena_tests {
             (2, false),
             "reach guard: the determiner-led leg survives the keyword suffix"
         );
-        let (_, has_gap) = destroys(
-            "Destroy target creature with flying and all Equipment attached to that creature.",
+        // CR 115.1 + CR 701.3a: the attached-set compound class parses as a
+        // head that announces the creature plus ONE mass destroy whose
+        // population unions the announced host with the Equipment attached to
+        // it — asserted structurally below, so a regression that dropped the
+        // announcing head (destroying every flyer) cannot pass.
+        let attached_set =
+            "Destroy target creature with flying and all Equipment attached to that creature.";
+        let parsed = crate::parser::parse_oracle_text(
+            attached_set,
+            "Leg Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
         );
-        assert!(has_gap, "the attachment relation must fail closed");
+        let chain: Vec<&Effect> =
+            std::iter::successors(parsed.abilities.first(), |node| node.sub_ability.as_deref())
+                .map(|node| &*node.effect)
+                .collect();
+        assert!(
+            matches!(chain.first(), Some(Effect::TargetOnly { .. })),
+            "the announced head is a TargetOnly slot: {chain:?}"
+        );
+        let Some(Effect::DestroyAll { target, .. }) = chain.get(1) else {
+            panic!("one mass destroy follows the head: {chain:?}");
+        };
+        assert_eq!(
+            chain
+                .iter()
+                .filter(|effect| matches!(effect, Effect::DestroyAll { .. }))
+                .count(),
+            1,
+            "exactly one mass destroy in the chain: {chain:?}"
+        );
+        let TargetFilter::Or { filters } = target else {
+            panic!("the population unions host and attachments: {target:?}");
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|leg| matches!(leg, TargetFilter::ParentTarget)),
+            "the announced host is in the population: {target:?}"
+        );
+        assert!(
+            filters.iter().any(|leg| {
+                matches!(
+                    leg,
+                    TargetFilter::Typed(tf)
+                        if tf.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::AttachedTo {
+                                to: AttachmentReferent::Host { filter }
+                            } if matches!(**filter, TargetFilter::ParentTarget)
+                        ))
+                )
+            }),
+            "the attached set carries the Host relation: {target:?}"
+        );
     }
 }

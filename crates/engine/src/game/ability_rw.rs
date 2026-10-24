@@ -1982,6 +1982,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ControlsCommander { .. }
         | TriggerCondition::ChosenLabelIs { .. }
@@ -2550,6 +2551,12 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::AttachedTo {
             to: AttachmentReferent::DeclaredTarget { .. },
         } => false,
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`;
+        // whether it carries a frozen event-context tag is exactly whether that
+        // filter does — recurse rather than assert.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => legacy_target_filter(filter),
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -2854,6 +2861,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::AttachedTo {
             to: AttachmentReferent::DeclaredTarget { .. },
         } => true,
+        // CR 701.3a: the filter-matched host axis is member-bound exactly when
+        // its inner `TargetFilter` is — recurse, mirroring the nested-filter arms
+        // above (`CanEnchant`/`DistinctFrom`/`Targets`).
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => member_bound_target_filter(filter),
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -7137,6 +7150,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep

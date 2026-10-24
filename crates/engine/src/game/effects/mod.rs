@@ -9,19 +9,20 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
-    CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
-    FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
-    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
-    ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
+    AttachmentReferent, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, ChosenAttribute,
+    ChosenTargetSlots, CommanderOwnership, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, Duration,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
+    EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp, ForEachCategoryAction,
+    ForwardedResultContext, ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectScope,
+    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
+    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
+    TargetReadOrigin, TargetRef, ThisWayCause, TrackedAnaphorSource, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -9552,6 +9553,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::LostLifeLastTurn
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ManaColorSpent { .. }
         | TriggerCondition::ManaSpentCondition { .. }
@@ -15340,6 +15342,31 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
     }
 }
 
+/// CR 608.2c + CR 601.2c: Whether [`resolved_object_filter`] should concretize
+/// this effect's POSITIVE parent-target population legs through
+/// `filter::concretize_mass_population_parent_legs`.
+///
+/// The `mass_population_target` gate is load-bearing: without it the concretion
+/// would also rewrite the filters that `attach.rs`'s predicates evaluate
+/// (`explicit_attachment_target_chosen`, `host_slot_announced`,
+/// `battlefield_ids_matching_filter`, `host_choice_admissible_for_attachment_references`,
+/// `resolve_bound_attachment_targets`) — 124 corpus `Attach` nodes carry a
+/// positive `ParentTarget` in `target`/`attachment`, none of them a mass
+/// population, and their current "this candidate is not the parent" answers gate
+/// host prompts and determined-set binding.
+///
+/// `DamageAll` is excluded on top of that gate. Comet Storm's printed "each of
+/// them" is the UNION of two announced slots (`TargetOnly{Any}` →
+/// `TargetOnly{Another}` → `DamageAll{ParentTarget}`) while the concretion can
+/// see only the immediate parent's mirrored `targets`; rewriting it would change
+/// a `supported:true` card from "affects no referent" to "affects exactly one of
+/// two" — a known-wrong, untested change. The union repair is a separate unit
+/// (a chain-wide `targeting::parent_chain_referents` concretion), and no class
+/// card uses `DamageAll`.
+pub(crate) fn mass_population_concretizes_parent_legs(effect: &Effect) -> bool {
+    mass_population_target(effect).is_some() && !matches!(effect, Effect::DamageAll { .. })
+}
+
 /// CR 608.2c + CR 608.2k: True when the filter names a parent-target anaphor OR
 /// an event subject, at any depth.
 ///
@@ -15440,12 +15467,19 @@ pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
                 // hit, Radiance's "each OTHER creature that shares a color with it")
                 // reads the parent's chosen target, so the enclosing effect must
                 // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::DistinctFrom { reference }
-                            if filter_refs_parent_target(reference)
-                    )
+                || typed.properties.iter().any(|prop| match prop {
+                    FilterProp::DistinctFrom { reference } => {
+                        filter_refs_parent_target(reference)
+                    }
+                    // CR 701.3a: a mass object set defined by attachment to the
+                    // parent referent ("destroy all Auras attached to that
+                    // creature") names the parent inside the host filter, so
+                    // propagation, delayed-trigger snapshotting and loop
+                    // rebinding must see it.
+                    FilterProp::AttachedTo {
+                        to: AttachmentReferent::Host { filter },
+                    } => filter_refs_parent_target(filter),
+                    _ => false,
                 })
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -15503,12 +15537,19 @@ pub(crate) const EVENT_SUBJECT_ANAPHORS: [TargetFilter; 2] =
 /// snapshot pass exists to prevent.
 fn filter_refs_event_subject(filter: &TargetFilter, anaphor: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
-            matches!(
-                prop,
-                FilterProp::DistinctFrom { reference }
-                    if filter_refs_event_subject(reference, anaphor)
-            )
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
+            FilterProp::DistinctFrom { reference } => filter_refs_event_subject(reference, anaphor),
+            // CR 608.2k + CR 701.3a: a mass object set defined by attachment to
+            // the trigger event's subject or its object slot ("destroy all Auras
+            // attached to that creature") names the event referent inside the
+            // host filter. Missing this arm is the exact Ohran Viper failure the
+            // event-subject set exists to prevent: the phase-delayed payload
+            // would take no creation snapshot and resolve against the later
+            // phase event, affecting nothing.
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => filter_refs_event_subject(filter, anaphor),
+            _ => false,
         }),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
@@ -16527,14 +16568,27 @@ fn rebind_iterated_counter_kind(
 /// (`delayed_trigger::bind_event_subject_nodes`), zone-change triggers
 /// (`triggers::seed_event_context_parent_targets`), and forwarded-result
 /// rebinding (`bind_forwarded_result_targets_for_legacy_effect`).
+///
+/// A mass-population scan additionally concretizes its POSITIVE
+/// `ParentTarget`/`ParentTargetSlot` legs through
+/// `filter::concretize_mass_population_parent_legs`, gated on
+/// [`mass_population_concretizes_parent_legs`] so every non-mass consumer of
+/// this function (the `Attach` predicates, `GoadAll`, stack readers,
+/// `GenericEffect` broadcasts) stays byte-identical.
 pub(crate) fn resolved_object_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> TargetFilter {
-    filter::normalize_contextual_filter_with_liveness(target_filter, &ability.targets, &|id| {
-        ability.target_pin_is_current(id, state)
-    })
+    let normalized =
+        filter::normalize_contextual_filter_with_liveness(target_filter, &ability.targets, &|id| {
+            ability.target_pin_is_current(id, state)
+        });
+    if mass_population_concretizes_parent_legs(&ability.effect) {
+        filter::concretize_mass_population_parent_legs(state, ability, &normalized)
+    } else {
+        normalized
+    }
 }
 
 fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
@@ -62027,6 +62081,214 @@ mod untargeted_target_only_choice_tests {
                     .map(|context| context.targets.is_empty())
             });
         assert_eq!(stamped, Some(true));
+    }
+}
+
+/// CR 608.2k + CR 701.3a + CR 601.2c: unit rows for the walker/binder recursions
+/// (P15a/P15b) and the mass-population concretion gate (P17).
+#[cfg(test)]
+mod attached_set_walker_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AttachmentReferent, FilterProp, ResolvedAbility, TargetFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn host_prop(filter: TargetFilter) -> FilterProp {
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host {
+                filter: Box::new(filter),
+            },
+        }
+    }
+
+    fn typed_with(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![prop],
+            ..TypedFilter::default()
+        })
+    }
+
+    fn creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// P15(a): both parent-target walkers see `AttachedTo { Host }`.
+    #[test]
+    fn p15a_parent_target_walkers_recurse_into_the_host_filter() {
+        let filter = typed_with(host_prop(TargetFilter::ParentTarget));
+        assert!(filter_refs_parent_target(&filter));
+        assert!(delayed_trigger::filter_refs_parent_object_anaphor(&filter));
+
+        // Paired negative: a plain `Any`/`Typed` holds no anaphor.
+        assert!(!filter_refs_parent_target(&TargetFilter::Any));
+        assert!(!delayed_trigger::filter_refs_parent_object_anaphor(
+            &TargetFilter::Any
+        ));
+        // Nested under `Or` is still found.
+        let nested = TargetFilter::Or {
+            filters: vec![TargetFilter::Any, filter.clone()],
+        };
+        assert!(filter_refs_parent_target(&nested));
+    }
+
+    /// P15(b): the event-subject walker sees `AttachedTo { Host }` (RF3-3).
+    #[test]
+    fn p15b_event_subject_walker_recurses_into_the_host_filter() {
+        let triggering = typed_with(host_prop(TargetFilter::TriggeringSource));
+        assert!(filter_refs_event_subject(
+            &triggering,
+            &TargetFilter::TriggeringSource
+        ));
+        let event_target = typed_with(host_prop(TargetFilter::EventTarget));
+        assert!(filter_refs_event_subject(
+            &event_target,
+            &TargetFilter::EventTarget
+        ));
+        assert!(!filter_refs_event_subject(
+            &event_target,
+            &TargetFilter::TriggeringSource
+        ));
+        // Hostile: an explicit typed host names no event anaphor.
+        let typed_host = typed_with(host_prop(TargetFilter::Typed(TypedFilter::creature())));
+        assert!(!filter_refs_event_subject(
+            &typed_host,
+            &TargetFilter::TriggeringSource
+        ));
+        // Nested under `Not` is still rebound.
+        let negated = TargetFilter::Not {
+            filter: Box::new(triggering),
+        };
+        assert!(filter_refs_event_subject(
+            &negated,
+            &TargetFilter::TriggeringSource
+        ));
+    }
+
+    /// P17: the concretion gate — `DestroyAll` concretizes a positive parent
+    /// leg; `DamageAll` and every non-mass effect stay byte-identical.
+    #[test]
+    fn p17_mass_concretion_is_gated_and_excludes_damage_all() {
+        let mut state = GameState::new_two_player(42);
+        let host = creature(&mut state, PlayerId(0));
+        let targets = vec![TargetRef::Object(host)];
+        let destroy = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            targets.clone(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolved_object_filter(&state, &destroy, &TargetFilter::ParentTarget),
+            TargetFilter::SpecificObject { id: host },
+            "P17a: DestroyAll's positive parent leg concretizes"
+        );
+
+        let damage = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::ParentTarget,
+                player_filter: None,
+                damage_source: None,
+            },
+            targets.clone(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolved_object_filter(&state, &damage, &TargetFilter::ParentTarget),
+            TargetFilter::ParentTarget,
+            "P17b: DamageAll stays byte-identical (the exclusion)"
+        );
+
+        let attach = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::ParentTarget,
+                target: TargetFilter::SelfRef,
+                selection: crate::types::ability::AttachSelection::Targeted,
+            },
+            targets,
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolved_object_filter(&state, &attach, &TargetFilter::ParentTarget),
+            TargetFilter::ParentTarget,
+            "P17c: a non-mass effect is not rewritten"
+        );
+
+        // A Host prop nested in a Typed filter is never descended by the
+        // concretion (it only rewrites the top-level population legs).
+        let host_filter = typed_with(host_prop(TargetFilter::ParentTarget));
+        assert_eq!(
+            resolved_object_filter(&state, &destroy, &host_filter),
+            host_filter
+        );
+
+        assert!(mass_population_concretizes_parent_legs(&destroy.effect));
+        assert!(!mass_population_concretizes_parent_legs(&damage.effect));
+        assert!(!mass_population_concretizes_parent_legs(&attach.effect));
+    }
+
+    /// P2b: an EMPTY parent set concretizes to `TargetFilter::None` (matches
+    /// nothing), never `Any` — the deliberate mirror of the `Not`
+    /// normalization. `Any` here would widen "that creature and its Auras" to
+    /// every Aura on the board when no referent was announced (CR 608.2b +
+    /// CR 608.2c).
+    #[test]
+    fn p2b_empty_parent_set_concretizes_to_none_not_any() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let concretized = crate::game::filter::concretize_mass_population_parent_legs(
+            &state,
+            &ability,
+            &TargetFilter::ParentTarget,
+        );
+        assert_eq!(
+            concretized,
+            TargetFilter::None,
+            "an empty referent set matches nothing"
+        );
+        assert_ne!(
+            concretized,
+            TargetFilter::Any,
+            "an empty referent set must never widen"
+        );
+        assert_eq!(
+            resolved_object_filter(&state, &ability, &TargetFilter::ParentTarget),
+            TargetFilter::None,
+            "the mass-scan authority agrees with the direct concretion"
+        );
     }
 }
 

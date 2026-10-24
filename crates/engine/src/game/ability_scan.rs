@@ -4378,6 +4378,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         }
         TriggerCondition::TributeNotPaid => Axes::NONE,
         TriggerCondition::CastDuringPhase { phases: _ } => Axes::NONE,
+        TriggerCondition::CurrentPhaseIs { phases: _ } => Axes::NONE,
         TriggerCondition::CastTimingPermission { permission: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
         }
@@ -4990,6 +4991,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         FilterProp::PtComparison { value, .. } => scan_quantity_expr(value, mode),
 
         // --- Box<TargetFilter>-bearing: recurse (a nested Typed could be projected).
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // any player-resource read it carries is reached by the same recursion.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::CanEnchant { target } => scan_target_filter(target, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DifferentNameFrom { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DistinctFrom { reference } => scan_target_filter(reference, FilterReadContext::LiveBoardCensus, mode),
@@ -5780,6 +5786,7 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
             selection: _,
             self_scope: _,
         } => scan_quantity_expr(count, mode),
+        AbilityCost::Reveal { count, filter: _ } => scan_quantity_expr(count, mode),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
             .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c, mode))),
@@ -5810,7 +5817,6 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }

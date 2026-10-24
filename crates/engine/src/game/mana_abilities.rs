@@ -5538,7 +5538,9 @@ fn tap_creature_cost_choice(
                 state,
                 id,
                 filter,
-                &FilterContext::from_source(state, source_id)
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                &FilterContext::from_source_with_controller(source_id, player)
                     .with_granting_object(ability.granting_object),
             )
         })
@@ -5768,7 +5770,10 @@ fn tap_selected_creature_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id).with_granting_object(granter),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected creature does not satisfy mana ability cost".to_string(),
@@ -5804,7 +5809,10 @@ fn discard_selected_card_for_mana_cost(
             state,
             chosen_id,
             target_filter,
-            &FilterContext::from_source(state, source_id).with_granting_object(granter),
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            &FilterContext::from_source_with_controller(source_id, player)
+                .with_granting_object(granter),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Selected card does not satisfy mana ability discard cost".to_string(),
@@ -5838,7 +5846,10 @@ fn sacrifice_selected_permanent_for_mana_cost(
         state,
         chosen_id,
         filter,
-        &FilterContext::from_source(state, source_id).with_granting_object(granter),
+        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+        // activated ability).
+        &FilterContext::from_source_with_controller(source_id, player)
+            .with_granting_object(granter),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent does not match the sacrifice cost filter".to_string(),

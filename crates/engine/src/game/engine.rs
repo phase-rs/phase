@@ -9424,6 +9424,7 @@ fn resume_pending_continuation_pass(
         if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -9431,6 +9432,7 @@ fn resume_pending_continuation_pass(
         {
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -9453,9 +9455,11 @@ fn resume_pending_continuation_pass(
         {
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
+                effects::counters::resume_copy_target_entry_completions(state, events)?;
             }
         }
         // CR 614.12a + CR 111.1: An entry replacement's required choices are made

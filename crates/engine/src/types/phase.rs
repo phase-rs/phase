@@ -136,6 +136,34 @@ impl PhaseGroup {
             PhaseGroup::Ending => Phase::Cleanup,
         }
     }
+
+    /// CR 500.1: the steps of a phase of this group, in turn order. A main
+    /// phase has no steps, so it is its own single entry (CR 505.2).
+    ///
+    /// The single authority for "the steps of a phase": callers that need
+    /// the whole combat phase (CR 506.1) read `PhaseGroup::Combat.steps()`
+    /// instead of re-listing the five steps.
+    pub fn steps(self) -> &'static [Phase] {
+        match self {
+            // CR 501.1: untap, upkeep, draw.
+            PhaseGroup::Beginning => &[Phase::Untap, Phase::Upkeep, Phase::Draw],
+            // CR 505.1 + CR 505.2: the precombat main phase has no steps; it is its own single entry.
+            PhaseGroup::PrecombatMain => &[Phase::PreCombatMain],
+            // CR 506.1: beginning of combat, declare attackers, declare
+            // blockers, combat damage, end of combat.
+            PhaseGroup::Combat => &[
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ],
+            // CR 505.1 + CR 505.2: the postcombat main phase has no steps; it is its own single entry.
+            PhaseGroup::PostcombatMain => &[Phase::PostCombatMain],
+            // CR 512.1: end, cleanup.
+            PhaseGroup::Ending => &[Phase::End, Phase::Cleanup],
+        }
+    }
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: what an effect adds to a turn. The turn
@@ -275,6 +303,50 @@ mod tests {
             Phase::Cleanup,
         ];
         assert_eq!(phases.len(), 12);
+    }
+
+    /// CR 500.1: a group's steps are exactly the steps `Phase::group` assigns
+    /// to it, in turn order, and every step belongs to exactly one group.
+    #[test]
+    fn phase_group_steps_agree_with_phase_group() {
+        let phases = [
+            Phase::Untap,
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End,
+            Phase::Cleanup,
+        ];
+        let groups = [
+            PhaseGroup::Beginning,
+            PhaseGroup::PrecombatMain,
+            PhaseGroup::Combat,
+            PhaseGroup::PostcombatMain,
+            PhaseGroup::Ending,
+        ];
+        for group in groups {
+            for phase in phases {
+                assert_eq!(
+                    group.steps().contains(&phase),
+                    phase.group() == group,
+                    "{group:?} / {phase:?}"
+                );
+            }
+            let steps = group.steps();
+            assert!(
+                steps.windows(2).all(|pair| pair[0] < pair[1]),
+                "{group:?} steps are in turn order"
+            );
+            assert_eq!(steps.last().copied(), Some(group.last_step()), "{group:?}");
+        }
+        let total: usize = groups.iter().map(|g| g.steps().len()).sum();
+        assert_eq!(total, phases.len());
     }
 
     /// CR 500.1: each group's last step is the latest step of that group in

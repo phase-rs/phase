@@ -3,9 +3,9 @@ use std::ops::ControlFlow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -7742,6 +7742,67 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 603.7a + CR 500.1: clause-final "at the beginning of {your next <step> |
+/// that player's next <step> | the <step> on your next turn}" for one named step.
+/// The player is a placeholder rewritten from `binding` at delayed-trigger
+/// creation; "on your next turn" skips the creation turn's step, and
+/// CR 608.2c: "that player" is the owner of the object the parent moved.
+fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+    use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
+    // A grouped name ("main phase") is two steps, so it is left to the table.
+    let step = || {
+        map_opt(
+            super::conditions::parse_phase_name_set,
+            |phases| match phases.as_slice() {
+                [phase] => Some(*phase),
+                _ => None,
+            },
+        )
+    };
+    let (rest, (binding, gate, phase)) = terminated(
+        preceded(
+            tag("at the beginning of "),
+            alt((
+                map(preceded(tag("your next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::Controller,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(preceded(tag("that player's next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::ParentTargetOwner,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(
+                    delimited(tag("the "), step(), tag(" on your next turn")),
+                    |phase| {
+                        (
+                            DelayedTriggerPlayerBinding::Controller,
+                            TurnGate::AfterCreationTurn,
+                            phase,
+                        )
+                    },
+                ),
+            )),
+        ),
+        eof,
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player: crate::types::player::PlayerId(0),
+            gate,
+            binding,
+        },
+    ))
+}
+
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
@@ -7754,6 +7815,15 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
+    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
+        &lower,
+        parse_player_next_step_suffix,
+    )
+    .filter(|(offset, ..)| *offset > 0)
+    {
+        let end = text.len() - (lower.len() - offset);
+        return (text[..end].trim_end_matches(',').trim(), Some(condition));
+    }
     for (suffix, condition) in [
         (
             " at the beginning of the next end step",
@@ -7791,54 +7861,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
-        // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
-        // at the beginning of your next end step" uses this suffix shape; the
-        // player placeholder is rewritten to `ability.controller` at resolve
-        // time alongside the main-phase and upkeep variants.
-        (
-            " at the beginning of your next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        // CR 608.2c: anaphoric "that player's next end step" — "that player"
-        // refers to a chained effect's target's OWNER, not the ability's
-        // controller (The Eternal Wanderer's +1: "Return that card to the
-        // battlefield under its owner's control at the beginning of that
-        // player's next end step"; Faramir, Prince of Ithilien uses the same
-        // surface phrase for a DIFFERENT referent — a chosen player — and
-        // remains its own unimplemented gap, not covered by this arm). Must
-        // precede the bare "your next end step" arm textually distinct
-        // (neither is a suffix of the other), so ordering here is not
-        // load-bearing, but is kept adjacent for readability.
-        (
-            " at the beginning of that player's next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
-            },
-        ),
-        // CR 513.2 + CR 603.7a: reordered "…, sacrifice that token at the
-        // beginning of the end step on your next turn" (Kav Landseeker). Suffix
-        // companion of the prefix arm. Skip-current via `AfterCreationTurn`
-        // (rewritten to `After(creation_turn)` at resolve). Diverges from the
-        // Greasefang "your next end step" suffix above ("the end step on" vs
-        // "your next end step"); neither suffix is a tail of the other.
-        (
-            " at the beginning of the end step on your next turn",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::AfterCreationTurn,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
         // turn granted by the parent clause (the controller's next turn), so
         // the controller's next end step. Suffix companion of the prefix arm
@@ -7848,15 +7870,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             " at the beginning of that turn's end step",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        (
-            " at the beginning of your next upkeep",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
@@ -12996,9 +13009,9 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::ManaDynamic { quantity: amount } => {
             bind_where_x_quantity(amount, where_x_expression, unbound);
         }
-        // CR 701.9: "discard X cards, where X is …" — the discard count is a
-        // `QuantityExpr` and must track the same where-X binding.
-        AbilityCost::Discard { count, .. } => {
+        // CR 701.9 / CR 701.20a: discard/reveal counts are QuantityExpr and
+        // track the same where-X binding ("discard X cards, where X is …").
+        AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, unbound);
         }
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -13047,7 +13060,6 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
@@ -16471,6 +16483,37 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    /// CR 701.20a + CR 107.3i: a reveal count is a `QuantityExpr` slot, so a
+    /// trailing "where X is …" binds it exactly as it binds a discard count.
+    #[test]
+    fn where_x_binds_reveal_cost_count() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::mana::ManaColor;
+        let expression = "the number of cards in your hand";
+        let expected = parse_where_x_quantity_expression(expression)
+            .expect("the where-X expression is representable");
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let mut cost = AbilityCost::Reveal {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+            filter: Some(filter.clone()),
+        };
+        let mut unbound = None;
+        super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
+        assert_eq!(unbound, None);
+        assert_eq!(
+            cost,
+            AbilityCost::Reveal {
+                count: expected,
+                filter: Some(filter),
+            }
         );
     }
 

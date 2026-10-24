@@ -992,6 +992,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::DeclaredTarget { slot },
             } => parts.push(format!("attached to target #{slot}")),
+            // CR 701.3a: the filter-matched host axis — "attached to <host>".
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => parts.push(format!("attached to {}", fmt_target(filter))),
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -4975,6 +4979,10 @@ fn fmt_trigger_condition(
         TC::CastDuringPhase { phases } => {
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
+        }
+        TC::CurrentPhaseIs { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("during {}", parts.join(" or "))
         }
         TC::CastTimingPermission { .. } => "cast with timing permission".into(),
         TC::ManaColorSpent { color, minimum } => {
@@ -10388,6 +10396,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::DefendingPlayerControlsNone { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ManaColorSpent { .. }
         | TriggerCondition::ManaSpentCondition { .. }
@@ -17352,6 +17361,30 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(!obj.has_unimplemented_mechanics());
         obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
         assert!(obj.has_unimplemented_mechanics());
+    }
+
+    /// CR 603.10a + CR 704.5n: Rhuk's deferred dies leg must surface as an
+    /// engine-visible gap, not as a silently supported ordinary Attach — the
+    /// coverage authority reads the trigger's effect, never the PR prose.
+    #[test]
+    fn rhuk_dies_leg_reports_the_departure_attachment_gap() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.",
+            "Rhuk, Hexgold Nabber",
+            &["Trample".to_string(), "Haste".to_string()],
+            &["Legendary".to_string()],
+            &["Creature".to_string()],
+        );
+        let mut face = make_face();
+        face.name = "Rhuk, Hexgold Nabber".to_string();
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains("departure_attachment_relation")),
+            "the deferred dies leg must be an engine-visible gap: {gaps:?}"
+        );
     }
 
     fn make_face() -> CardFace {
