@@ -4381,8 +4381,8 @@ enum EventQuantityError {
     /// The expression is not statically resolvable from the event amount
     /// (a `QuantityExpr::Ref` other than `EventContextAmount`).
     NotStatic,
-    /// A step of the computation does not fit an `i32`. CR 101.3: the result
-    /// is unrepresentable, so it is reported, never clamped or wrapped.
+    /// A step of the computation does not fit an `i32`. This is an engine
+    /// numeric-capacity limit, so it is reported, never clamped or wrapped.
     Overflow,
 }
 
@@ -4484,10 +4484,11 @@ fn try_resolve_event_replacement_quantity(
     }
 }
 
-/// CR 101.3: a replacement's computed life quantity is unrepresentable. Record
-/// it for the life settle step (which skips or rejects the impossible change)
-/// and leave the event unchanged: the pipeline stops at the loop head, so the
-/// unchanged event is never the final amount.
+/// A replacement's computed life quantity exceeds the engine's numeric range.
+/// Record it for life settlement: an open public-action ingress window
+/// rejects and restores that action, while legacy or outside-boundary resolution
+/// uses its compatibility skip. Leave the event unchanged because the pipeline
+/// stops at the loop head, so that value never becomes the final amount.
 fn record_life_quantity_overflow(
     state: &mut GameState,
     rid: ReplacementId,
@@ -4529,8 +4530,8 @@ fn gain_life_applier(
             applied,
         } = event
         {
-            // CR 101.3: a `Times` / `Plus` result past `u32` is unrepresentable,
-            // so it is recorded for the settle step instead of clamped.
+            // Engine numeric capacity: a `Times` / `Plus` result past `u32`
+            // is recorded for the settle step instead of clamped.
             // `Minus` floors at zero, which is not an overflow.
             let checked = match modification {
                 QuantityModification::Times { factor } => amount.checked_mul(factor),
@@ -4585,7 +4586,7 @@ fn gain_life_applier(
             }
             return ApplyResult::Modified(event);
         }
-        // CR 101.3: the computed quantity is unrepresentable.
+        // The computed quantity exceeds the engine's numeric capacity.
         Err(EventQuantityOverflow) => return record_life_quantity_overflow(state, rid, event),
         Ok(None) => {}
     }
@@ -4715,8 +4716,8 @@ fn lose_life_applier(
         else {
             return ApplyResult::Modified(event);
         };
-        // CR 101.3: a `Times` / `Plus` result past `u32` is unrepresentable,
-        // so it is recorded for the settle step instead of clamped. `Minus`
+        // Engine numeric capacity: a `Times` / `Plus` result past `u32` is
+        // recorded for the settle step instead of clamped. `Minus`
         // floors at zero, which is not an overflow.
         let checked = match modification {
             QuantityModification::Times { factor } => amount.checked_mul(factor),
@@ -4767,8 +4768,8 @@ fn lose_life_applier(
                         applied: applied.clone(),
                     });
                 }
-                // CR 101.3: the computed quantity is unrepresentable. Return
-                // explicitly so this arm never depends on the later
+                // The computed quantity exceeds the engine's numeric capacity.
+                // Return explicitly so this arm never depends on the later
                 // fall-through checks.
                 Err(EventQuantityError::Overflow) => {
                     return record_life_quantity_overflow(state, rid, event);
@@ -12684,13 +12685,13 @@ fn pipeline_loop(
     record_proposed_event(&proposed);
 
     loop {
-        // CR 101.3 (CR 614.6: the modified event's impossible instruction is
-        // ignored): an applier recorded that the modified life event is
-        // unrepresentable. The engine cuts the CR 616.1f repetition short here:
-        // no further replacement can make an unrepresentable event meaningful,
-        // and no further ordering prompt is asked. The life settle step takes the
-        // record. This also covers the choice-resumed path, which re-enters this
-        // loop through `pipeline_loop`.
+        // Engine numeric capacity: an applier recorded that the modified life
+        // event is unrepresentable. Stop this pipeline before applying further
+        // replacements or asking another ordering prompt; the life settle step
+        // takes the record and the public action owner rejects and restores.
+        // Outside a public boundary, the existing compatibility policy logs and
+        // skips it. This also covers the choice-resumed path, which re-enters
+        // this loop through `pipeline_loop`.
         if state.replacement_quantity_overflow.is_some() {
             break;
         }
@@ -16959,7 +16960,7 @@ mod tests {
         Some(crate::types::game_state::ReplacementQuantityOverflow { source })
     }
 
-    /// CR 101.3: a `Times` / `Plus` or computed gain that does not fit is
+    /// A `Times` / `Plus` or computed gain beyond engine numeric capacity is
     /// recorded for the settle step and the event is left unchanged (never
     /// clamped to `u32::MAX` or wrapped through `i32`).
     #[test]
@@ -17274,8 +17275,8 @@ mod tests {
         assert_eq!(state.replacement_quantity_overflow, None);
     }
 
-    /// CR 101.3 + CR 616.1f: the loop stops at the replacement whose result is
-    /// unrepresentable. One source carries three `Times { 30000 }` loss
+    /// The engine-capacity guard stops the loop at the replacement whose result
+    /// is unrepresentable. One source carries three `Times { 30000 }` loss
     /// multipliers (commuting, so no ordering prompt and the pipeline applies
     /// them in turn); the first takes 100,000 to 3,000,000,000 (fits a `u32`),
     /// the second overflows and is the last one applied (it is marked applied

@@ -27700,9 +27700,10 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
-    /// Whether an unrepresentable final life edit on resume rejects the answer
-    /// (the event came from an action-ingress `try_*` entry) or is skipped as
-    /// impossible (ordinary resolution). Absent in older payloads.
+    /// Whether an engine-unrepresentable final life edit on resume rejects the
+    /// public action and restores its entry state (`Reject`), or uses the
+    /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
+    /// Older payloads omit this field and retain that compatibility policy.
     #[serde(
         default,
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
@@ -27720,10 +27721,10 @@ pub enum UnrepresentablePolicy {
     Reject,
     /// Compatibility fallback for ordinary resolution outside a public action
     /// boundary and for older serialized payloads. This is an engine numeric
-    /// capacity limit, NOT a rule: the change cannot be recorded, so it is
-    /// logged once, skipped, and the instruction continues as if it applied
-    /// with amount 0. Public action boundaries reject the action and restore
-    /// their entry state instead.
+    /// capacity limit, not a rules outcome: the change cannot be recorded, so it
+    /// is logged once and skipped without a life mutation. An open ingress
+    /// window instead records failure so the public boundary rejects the action
+    /// and restores its entry state.
     #[default]
     IgnoreImpossible,
 }
@@ -33258,8 +33259,8 @@ impl GameState {
     }
 
     /// The policy a life event parked right now must be stamped with: `Reject`
-    /// while an action-ingress window is open (the event belongs to that
-    /// ingress action), otherwise ordinary resolution.
+    /// while an action-ingress window is open (the event belongs to that public
+    /// action), otherwise legacy/outside-boundary compatibility behavior.
     pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
         if self.ingress_life_window.is_some() {
             UnrepresentablePolicy::Reject

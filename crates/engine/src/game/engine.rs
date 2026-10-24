@@ -6326,7 +6326,14 @@ fn drive_one_shortcut_cycle(
         // would make `run_post_action_pipeline` re-scan prior beats' events and re-fire
         // already-consumed triggers.
         let mut beat_events: Vec<GameEvent> = Vec::new();
-        match pass_priority_once_with_pipeline(&mut work, &mut beat_events, None) {
+        let pipeline = pass_priority_once_with_pipeline(&mut work, &mut beat_events, None);
+        // CR 732.2a: the driven beat runs on a private work clone, but its life-ingress marker
+        // belongs to the enclosing public Accept action. A low-level life settle may record the
+        // failure while returning `Ok`; do not let a later `Abort`/fallback discard that marker.
+        if let Some(player) = boundary_life_change_failure(&work) {
+            return Err(EngineError::LifeChangeUnrepresentable { player });
+        }
+        match pipeline {
             // Cross-lethal: COMMIT + STOP. The GameOver event + transition are already in
             // `work`/`beat_events`. The record is read because a best-of-three's match
             // transition has already replaced the wait.
@@ -6415,7 +6422,14 @@ fn drive_one_shortcut_cycle(
                 waiting_for: other, ..
             }) => {
                 ev.append(&mut beat_events);
-                match inject_pinned_answer(&mut work, template, iteration, &other) {
+                let answer = inject_pinned_answer(&mut work, template, iteration, &other);
+                // The injector's low-level action can also have recorded an unrepresentable life
+                // change in this work clone without returning an error. Preserve it at the same
+                // public-cycle seam before an ordinary injector refusal maps to `Abort`.
+                if let Some(player) = boundary_life_change_failure(&work) {
+                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                }
+                match answer {
                     Ok(mut answer_events) => {
                         // CR 704.5a + CR 104.1: an answer can let the state-based sweep end the
                         // game, and nothing is performed after it.
@@ -22289,6 +22303,156 @@ mod stage2_injector_tests {
         let template = two_drainer_template(drainer_a, P1, drainer_b, P2);
         let cap = auto_pass_loop_max_iterations(&committed);
         (committed, boundary, template, cap)
+    }
+
+    /// Attach a ring-road proposal to the existing real two-drainer board and keep all
+    /// declaration validation live by publishing the template's two target points.
+    fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
+        use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
+        use crate::analysis::resource::BoardDelta;
+        use crate::types::ability::TargetRef;
+
+        let (mut state, _, template, _) = two_drainer_rig();
+        let points = template
+            .decisions
+            .iter()
+            .map(|decision| match decision {
+                PinnedDecision::Targets { slot, .. } => DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Targets {
+                        legal_targets: vec![TargetRef::Player(P1), TargetRef::Player(P2)],
+                        min_targets: 1,
+                        max_targets: 1,
+                        ordered: false,
+                    },
+                },
+                other => panic!("the two-drainer fixture only publishes targets: {other:?}"),
+            })
+            .collect();
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: None,
+            certificate: LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
+                mandatory: false,
+                residual_board_delta: BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: build_shortcut_schema(points, IterationCount::Fixed(3), None),
+            declaration: None,
+            road: crate::analysis::loop_check::OfferRoad::Ring,
+            period: Default::default(),
+        };
+        (state, template)
+    }
+
+    /// The real two-drainer ring board's representable lethal take is the reach guard. The
+    /// hostile public take has one less unit of loss-counter headroom than that cycle consumes,
+    /// probing whether a work-clone failure can be lost through an Abort/fallback. This is a
+    /// single-cycle probe; later-cycle whole-action rollback is covered by the recorded Replay row.
+    #[test]
+    fn public_ring_take_rejects_unrepresentable_life_before_fallback() {
+        fn declare(state: &mut GameState, template: DecisionTemplate, count: u32) {
+            assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
+            apply(
+                state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(count),
+                    template: Some(template),
+                },
+            )
+            .expect("the published target points admit the fixture's declaration");
+            let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+                panic!("the declaration reaches the real public response window");
+            };
+            assert!(matches!(
+                take_route(state, proposal, count),
+                TakeRoute::Ring
+            ));
+            assert!(proposal.period.is_empty());
+        }
+
+        fn accept_until_done(state: &mut GameState) -> Result<(), EngineError> {
+            for _ in 0..4 {
+                let player = match &state.waiting_for {
+                    WaitingFor::RespondToShortcut { player, .. } => *player,
+                    _ => return Ok(()),
+                };
+                apply(
+                    state,
+                    player,
+                    GameAction::RespondToShortcut {
+                        response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                    },
+                )?;
+            }
+            panic!("the three-opponent response window must finish within four accepts")
+        }
+
+        let (mut control, control_template) = two_drainer_ring_offer();
+        let p2_life_before = life(&control, P2);
+        let p2_counter_before = control
+            .players
+            .iter()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn;
+        declare(&mut control, control_template, 1);
+        accept_until_done(&mut control).expect("the real lethal ring cycle is representable");
+        let p2_life_lost = u32::try_from(p2_life_before - life(&control, P2))
+            .expect("the positive control loses a nonnegative amount");
+        let p2_counter_delta = control
+            .players
+            .iter()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn
+            - p2_counter_before;
+        assert!(p2_life_lost > 0, "reach guard: the real cycle drains P2");
+        assert_eq!(
+            p2_counter_delta, p2_life_lost,
+            "reach guard: the positive cycle records its P2 life loss in the per-turn counter"
+        );
+
+        let (mut hostile, hostile_template) = two_drainer_ring_offer();
+        hostile
+            .players
+            .iter_mut()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn = u32::MAX - (p2_counter_delta - 1);
+        declare(&mut hostile, hostile_template, 1);
+        let mut rejection = None;
+        for _ in 0..4 {
+            let player = match &hostile.waiting_for {
+                WaitingFor::RespondToShortcut { player, .. } => *player,
+                _ => break,
+            };
+            let entry = hostile.clone();
+            match apply(
+                &mut hostile,
+                player,
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                },
+            ) {
+                Ok(_) => {}
+                Err(error @ EngineError::LifeChangeUnrepresentable { player: P2 }) => {
+                    assert_eq!(hostile, entry, "the final public Accept restores its entry");
+                    rejection = Some(error);
+                    break;
+                }
+                Err(error) => panic!("expected typed P2 loss-counter rejection, got {error:?}"),
+            }
+        }
+        assert!(
+            rejection.is_some(),
+            "reach guard: the public ring drive must reject rather than fall back when its P2 loss exceeds the remaining headroom"
+        );
     }
 
     /// Test F (production-path twin, item 4): drive a primed 3p targeted loop through the REAL

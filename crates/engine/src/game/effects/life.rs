@@ -48,12 +48,12 @@ pub struct LifeChangeUnrepresentable {
 }
 
 impl LifeChangeUnrepresentable {
-    /// The single place the ordinary (skip) policy logs a discarded change.
+    /// The single place the compatibility skip policy logs a discarded change.
     fn log_discarded(self, site: &'static str) {
         tracing::warn!(
             player = self.player.0,
             site,
-            "unrepresentable life change skipped as impossible"
+            "engine-unrepresentable life change skipped by compatibility policy"
         );
     }
 }
@@ -111,7 +111,7 @@ pub(crate) fn within_ingress_life_window<T>(
     (result, window)
 }
 
-/// CR 119.1: Gain life — increase the player's life total.
+/// CR 119.3: Gain life — adjust the player's life total.
 pub fn resolve_gain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -245,8 +245,9 @@ fn proposed_life_loss(
 }
 
 /// Collapses an ordinary-policy core result to the ordinary entries' contract.
-/// `IgnoreImpossible` never produces `Unrepresentable` (the settle step skips
-/// instead), so that arm is a defensive skip, not a reachable outcome.
+/// `IgnoreImpossible` never returns `Unrepresentable` from settlement: with an
+/// ingress window it records failure for the public boundary, and without one
+/// it uses the logged compatibility skip. This remains a defensive arm.
 fn ordinary_life_outcome(result: Result<u32, LifeChangeError>) -> Result<u32, ReplacementDeferred> {
     match result {
         Ok(applied) => Ok(applied),
@@ -254,7 +255,7 @@ fn ordinary_life_outcome(result: Result<u32, LifeChangeError>) -> Result<u32, Re
         Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
             debug_assert!(
                 false,
-                "the ordinary life policy skips an unrepresentable change instead of reporting it"
+                "IgnoreImpossible settlement records ingress failure or skips without returning an error"
             );
             unrepresentable.log_discarded("ordinary life entry");
             Ok(0)
@@ -368,9 +369,11 @@ fn apply_life_change_core(
 /// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
 /// the player must choose which applies first (CR 616.1).
 ///
-/// Ordinary resolution: a final gain the engine cannot represent is skipped
-/// and the rest of the instruction runs (`UnrepresentablePolicy::IgnoreImpossible`).
-/// Action-ingress callers use [`try_apply_life_gain`] instead.
+/// An engine-unrepresentable result is not a CR 101.3 impossibility. With an
+/// open ingress window, the owning public action rejects and restores its entry
+/// state; outside one, ordinary resolution and legacy parked records retain the
+/// compatibility behavior of logging and skipping the change. Direct action-
+/// ingress callers use [`try_apply_life_gain`] to reject it explicitly.
 pub fn apply_life_gain(
     state: &mut GameState,
     player_id: PlayerId,
@@ -455,10 +458,12 @@ fn drain_substitution_continuation(
 ///
 /// Order before anything observable: a recorded replacement-quantity overflow,
 /// then the amount must fit an `i32` delta, then the checked scalar edit (life
-/// total and gained-this-turn counter) must succeed. An unrepresentable result is handled per `policy`:
-/// `Reject` returns the typed error; `IgnoreImpossible` skips this change
-/// (no mutation, no `LifeChanged`) and reports `Ok(0)`, recording the failure
-/// instead when an ingress window is open (the ingress caller then rejects).
+/// total and gained-this-turn counter) must succeed. An unrepresentable result
+/// is handled per `policy`: `Reject` returns the typed error;
+/// `IgnoreImpossible` reports `Ok(0)` without a `LifeChanged`. An open ingress
+/// window records the failure for the owning public boundary to reject and
+/// restore; without one, ordinary resolution and legacy parked records use the
+/// logged compatibility skip.
 fn settle_life_gain(
     state: &mut GameState,
     event: ProposedEvent,
@@ -498,7 +503,7 @@ fn settle_life_gain(
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
-        // CR 119.1: read back after the edit, so a run of life changes carries
+        // CR 119.3: read back after the edit, so a run of life changes carries
         // each intermediate total rather than only the final snapshot's.
         new_total: LifeTotalReading(
             state
@@ -545,10 +550,11 @@ fn ingress_window_has_failed(state: &GameState) -> bool {
 }
 
 /// The failure branch of a settle step, per policy. `Reject` hands the typed
-/// error to the caller. `IgnoreImpossible` reports `Ok(0)` for the skipped
-/// change: inside an open ingress window the failure is recorded for the
-/// ingress caller (the window turns it into a rejection); otherwise this is
-/// ordinary resolution and the change is logged once and skipped.
+/// error to the caller. `IgnoreImpossible` reports `Ok(0)` for an
+/// engine-unrepresentable change. An open ingress window records the failure so
+/// its public action boundary rejects and restores; with no window, ordinary
+/// resolution and legacy parked records log and skip it for compatibility. This
+/// fallback is an engine-capacity policy, not CR 101.3 impossibility.
 fn settle_unrepresentable(
     state: &mut GameState,
     unrepresentable: LifeChangeUnrepresentable,
@@ -575,10 +581,12 @@ fn settle_unrepresentable(
 /// Consumes a replacement-quantity overflow recorded while this life event was
 /// replaced. The overflowed result exceeds the engine's numeric range, so it
 /// takes the same failure branch as any other engine-unrepresentable life
-/// change (`Reject` returns the error, `IgnoreImpossible` skips only this
-/// change as the compatibility fallback). This is a capacity limit, not a
-/// CR 101.3 impossibility. Taken first so the record is always cleared, even
-/// when an ingress window has already failed. `None` when nothing was recorded.
+/// change: `Reject` returns the typed error; `IgnoreImpossible` returns `Ok(0)`
+/// and either records failure for an open ingress window to reject and restore,
+/// or logs and skips under the outside-boundary compatibility policy. This is
+/// a capacity limit, not a CR 101.3 impossibility. Taken first so the record is
+/// always cleared, even when an ingress window has already failed. `None` when
+/// nothing was recorded.
 fn settle_quantity_overflow(
     state: &mut GameState,
     pid: PlayerId,
@@ -595,9 +603,10 @@ fn settle_quantity_overflow(
     })
 }
 
-/// Applies a post-replacement `ProposedEvent::LifeGain` to the game state under
-/// the ordinary policy (an engine-unrepresentable result is skipped by the
-/// compatibility fallback outside a public action boundary).
+/// Applies a post-replacement `ProposedEvent::LifeGain` under the compatibility
+/// policy. An open ingress window records an engine-unrepresentable result for
+/// the public boundary to reject and restore; without one, ordinary resolution
+/// and legacy parked records log and skip it for compatibility.
 ///
 /// Extracted from `apply_life_gain`'s Execute arm so the same mutation can be
 /// invoked by `resolve_gain`. Caller is responsible for emitting `EffectResolved`.
@@ -616,9 +625,10 @@ pub fn apply_life_gain_after_replacement(
 
 /// Resume-path settle for a parked life gain: applies the event the player's
 /// `ChooseReplacement` answer delivered under the policy the parked record was
-/// stamped with. `Reject` returns the typed error (the answer is rejected and
-/// the boundary restores the record and its prompt); `IgnoreImpossible` never
-/// returns `Err`.
+/// stamped with. `Reject` returns the typed error so the boundary restores the
+/// record and prompt. `IgnoreImpossible` reports `Ok(0)`; an open ingress
+/// window still makes its public action reject and restore, while a legacy
+/// payload resumed without one retains the logged compatibility skip.
 pub(crate) fn settle_life_gain_after_choice(
     state: &mut GameState,
     event: ProposedEvent,
@@ -628,28 +638,32 @@ pub(crate) fn settle_life_gain_after_choice(
     settle_life_gain(state, event, policy, events)
 }
 
-/// Ordinary-policy settle result as a plain amount; `IgnoreImpossible` never
-/// reports `Err`, so that arm is a defensive skip.
+/// Compatibility-policy settle result as a plain amount. `IgnoreImpossible`
+/// records ingress failure for the public owner to reject and restore, or uses
+/// the logged skip outside a boundary; the `Err` arm is defensive.
 fn ordinary_settled_amount(result: Result<u32, LifeChangeUnrepresentable>) -> u32 {
     result.unwrap_or_else(|unrepresentable| {
         debug_assert!(
             false,
-            "the ordinary life policy skips an unrepresentable change instead of reporting it"
+            "compatibility settlement records ingress failure or skips outside a boundary"
         );
         unrepresentable.log_discarded("ordinary life settle");
         0
     })
 }
 
-/// CR 119.3: An effect that causes a player to lose life subtracts that much
+/// CR 119.3: An effect that causes a player to lose life adjusts the total by
+/// subtracting that much
 /// from the player's life total.
 /// Returns the actual amount of life lost (may differ due to replacements like doubling).
 /// Returns `Err(ReplacementDeferred)` whenever the replacement/substitution
 /// pipeline pauses for player input.
 ///
-/// Ordinary resolution: a final loss the engine cannot represent is skipped
-/// and the rest of the instruction runs (`UnrepresentablePolicy::IgnoreImpossible`).
-/// Action-ingress callers use [`try_apply_life_loss`] instead.
+/// A final loss beyond the engine's numeric capacity is not a CR 101.3
+/// impossibility. An open ingress window makes the owning public action reject
+/// and restore; without one, ordinary resolution and legacy parked records use
+/// the logged compatibility skip. Direct action-ingress callers use
+/// [`try_apply_life_loss`] to reject explicitly.
 pub fn apply_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
@@ -761,9 +775,10 @@ fn settle_life_loss(
     Ok(loss_amount)
 }
 
-/// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state
-/// under the ordinary policy (an engine-unrepresentable result is skipped by
-/// the compatibility fallback outside a public action boundary).
+/// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` under the
+/// compatibility policy. An open ingress window records an engine-unrepresentable
+/// result for the public boundary to reject and restore; without one, ordinary
+/// resolution and legacy parked records log and skip it for compatibility.
 ///
 /// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
 /// emitting `EffectResolved`.
@@ -1475,7 +1490,7 @@ mod tests {
             .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
     }
 
-    /// CR 119.1 + CR 119.3: every `LifeChanged` reports the player's life total
+    /// CR 119.3: every `LifeChanged` reports the player's life total
     /// as it stands once that one change is applied — not the total after the
     /// whole action. A run of changes is therefore replayable one at a time,
     /// which is what lets a presentation layer show intermediate totals without
@@ -2408,9 +2423,10 @@ mod tests {
             LifeChangeError::Unrepresentable(LifeChangeUnrepresentable { player })
         }
 
-        /// The ordinary entries skip an unrepresentable change (nothing mutated,
-        /// no `LifeChanged`); the `try_*` ingress entries report it. One below the
-        /// limit both apply. A nested window is restored untouched on close.
+        /// Outside an ingress window, ordinary-policy helpers use the
+        /// compatibility skip (no mutation or `LifeChanged`); `try_*` entries
+        /// report an unrepresentable result. One below the limit both apply. A
+        /// nested window is restored untouched on close.
         #[test]
         fn ordinary_entries_skip_and_try_entries_reject_unrepresentable_results() {
             let mut state = GameState::new_two_player(42);
@@ -2557,11 +2573,11 @@ mod tests {
             (runner, events, hand_before)
         }
 
-        /// Ordinary resolution of an impossible gain fails explicitly: the action
-        /// is rejected and restored, so neither the impossible gain nor the rest
-        /// of the instruction ("draw a card") commits.
+        /// A public resolution whose gain exceeds engine capacity fails
+        /// explicitly: the action is rejected and restored, so neither the gain
+        /// nor the rest of the instruction ("draw a card") commits.
         #[test]
-        fn ordinary_resolution_rejects_the_impossible_gain_and_rolls_back() {
+        fn public_resolution_rejects_the_unrepresentable_gain_and_rolls_back() {
             // Control: one below the limit — 1 doubled to 2 reaches i32::MAX.
             let (runner, events, hand_before) =
                 activate_serpent_gain(i32::MAX - 2, &["Rhox Faithmender"]);
@@ -2576,12 +2592,11 @@ mod tests {
             assert_eq!(runner.state().players[0].hand.len(), hand_before + 1);
             assert!(gain_life_effect_resolved(&events));
 
-            // Impossible: i32::MAX - 1 + 2 overflows; the resolving action is
-            // rejected, so neither the gain nor the draw commits and the caller
-            // sees the explicit failure.
+            // Engine-unrepresentable: i32::MAX - 1 + 2 overflows; the public
+            // action is rejected, so neither the gain nor the draw commits.
             let (runner, events, hand_before) =
                 activate_serpent_gain(i32::MAX - 1, &["Rhox Faithmender"]);
-            let error = events.expect_err("the impossible gain must reject the action");
+            let error = events.expect_err("the unrepresentable gain must reject the action");
             assert!(
                 matches!(
                     error,
@@ -2607,11 +2622,11 @@ mod tests {
             ));
         }
 
-        /// A parked ordinary life event that resumes into an impossible change
-        /// rejects the answering action and restores its prompt; it never commits
-        /// the impossible gain or the rest of the instruction.
+        /// A parked life event that resumes beyond engine capacity rejects the
+        /// answering public action and restores its prompt; it never commits the
+        /// gain or the rest of the instruction.
         #[test]
-        fn ordinary_parked_gain_rejects_the_impossible_resume_and_keeps_the_prompt() {
+        fn parked_gain_rejects_unrepresentable_resume_and_keeps_the_prompt() {
             let doublers = ["Rhox Faithmender", "Boon Reflection"];
             for (start_life, applies) in [(i32::MAX - 4, true), (i32::MAX - 3, false)] {
                 let (mut runner, result, hand_before) =
@@ -2668,7 +2683,8 @@ mod tests {
                     assert_eq!(runner.life(P0), i32::MAX, "1 doubled twice is 4");
                     assert_eq!(life_changed_count(&events), 1);
                 } else {
-                    let error = rejected.expect("the impossible resume must reject its answer");
+                    let error =
+                        rejected.expect("the unrepresentable resume must reject its answer");
                     assert!(
                         matches!(
                             error,
@@ -3009,7 +3025,7 @@ mod tests {
         }
 
         /// The sibling difference helper: an `i32` overflow is the receiver's
-        /// impossible change and reports `None` (never a substitute zero), while
+        /// unrepresentable change and reports `None` (never a substitute zero), while
         /// a representable difference — including `i32::MIN` — passes through.
         #[test]
         fn life_total_difference_reports_overflow_as_failure() {

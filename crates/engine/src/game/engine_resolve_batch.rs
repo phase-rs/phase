@@ -1075,8 +1075,9 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
-        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission,
+        DelayedTriggerCondition, Effect, ManaContribution, ManaProduction, QuantityExpr,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::{CardType, CoreType};
@@ -1109,6 +1110,72 @@ mod tests {
                 )),
             },
         }
+    }
+
+    fn delayed_trigger_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                        effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn life_gain_entry(id: u64, controller: PlayerId, amount: u32) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed {
+                            value: amount as i32,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn life_batch_entries(amount: u32) -> Vec<StackEntry> {
+        // Stack entries are stored bottom-to-top: the delayed-trigger install is
+        // the first successful item, followed by the representability boundary.
+        vec![
+            life_gain_entry(22, PlayerId(0), amount),
+            delayed_trigger_entry(21, PlayerId(0)),
+        ]
+    }
+
+    fn active_restored_state(stack: Vec<StackEntry>) -> GameState {
+        let mut state = priority_state(PlayerId(0), stack);
+        super::super::engine::install_stack_resolution_session(
+            &mut state,
+            [PlayerId(0), PlayerId(1)].into_iter().collect(),
+            StackResolutionBudget::Unlimited,
+            StackResolutionPolicy::Committed,
+            Default::default(),
+        );
+        state
     }
 
     fn draw_entry(id: u64, controller: PlayerId) -> StackEntry {
@@ -1631,6 +1698,175 @@ mod tests {
             ],
             "the collapsed prefix remains reproducible through ordinary actions"
         );
+    }
+
+    fn assert_no_delayed_installation(
+        parent: super::super::lifecycle::ActionLifecycleGuard,
+        label: &str,
+    ) {
+        let facts = parent
+            .take_outer_facts()
+            .expect("the test owns the outer prospective frame");
+        assert_eq!(
+            facts.delayed_installations().count(),
+            0,
+            "{label}: a rejected public call must not merge accepted-prefix facts"
+        );
+    }
+
+    fn assert_delayed_installation_merged(
+        parent: super::super::lifecycle::ActionLifecycleGuard,
+        label: &str,
+    ) {
+        let facts = parent
+            .take_outer_facts()
+            .expect("the test owns the outer prospective frame");
+        assert_eq!(
+            facts
+                .delayed_installations()
+                .map(|(_, source, controller)| (source, controller))
+                .collect::<Vec<_>>(),
+            vec![(ObjectId(21), PlayerId(0))],
+            "{label}: the representable public call must merge its real delayed-trigger install"
+        );
+    }
+
+    #[test]
+    fn ready_prefix_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = ready_state(life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let entry = state.clone();
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let error = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        )
+        .expect_err("the later gain must reject after the earlier delayed trigger installed");
+
+        assert!(matches!(
+            error,
+            EngineError::LifeChangeUnrepresentable {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(
+            state, entry,
+            "the rejected call restores its full Ready entry state, including revision, journal, RNG, consent, and session"
+        );
+        assert_no_delayed_installation(parent, "Ready-prefix overflow");
+    }
+
+    #[test]
+    fn ready_prefix_merges_lifecycle_facts_for_a_representable_pair() {
+        let mut state = ready_state(life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        )
+        .expect("the adjacent counter value is representable");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX - 1);
+        assert_delayed_installation_merged(parent, "Ready-prefix control");
+    }
+
+    #[test]
+    fn fast_forward_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let entry = state.clone();
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let error = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect_err("the later gain must reject after the earlier delayed trigger installed");
+
+        assert!(matches!(
+            error,
+            EngineError::LifeChangeUnrepresentable {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(
+            state, entry,
+            "the rejected call restores its full public entry state, including revision, journal, RNG, and stack"
+        );
+        assert_no_delayed_installation(parent, "fast-forward overflow");
+    }
+
+    #[test]
+    fn fast_forward_merges_lifecycle_facts_for_a_representable_pair() {
+        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect("the adjacent counter value is representable");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX - 1);
+        assert_delayed_installation_merged(parent, "fast-forward control");
+    }
+
+    #[test]
+    fn restored_resume_rolls_back_after_later_overflow_for_active_and_legacy_states() {
+        for legacy in [false, true] {
+            let make_state = || {
+                if legacy {
+                    ready_state(life_batch_entries(2))
+                } else {
+                    active_restored_state(life_batch_entries(2))
+                }
+            };
+            let expected_class = if legacy {
+                RestoredStackAutomation::LegacyResolveAllReady
+            } else {
+                RestoredStackAutomation::ActiveSession
+            };
+
+            let mut rejected = make_state();
+            assert_eq!(
+                classify_restored_stack_automation(&rejected),
+                expected_class
+            );
+            rejected.players[0].life_gained_this_turn = u32::MAX - 1;
+            let entry = rejected.clone();
+            let parent = super::super::lifecycle::enter_action_frame();
+            let error = resume_restored_stack_automation(&mut rejected)
+                .expect_err("the resumed runner must reject the later counter overflow");
+
+            assert!(matches!(
+                error,
+                EngineError::LifeChangeUnrepresentable {
+                    player: PlayerId(0)
+                }
+            ));
+            assert_eq!(
+                rejected, entry,
+                "legacy={legacy}: restore-resume must restore the whole pre-materialization state"
+            );
+            assert_no_delayed_installation(parent, "restored-resume overflow");
+
+            let mut control = make_state();
+            control.players[0].life_gained_this_turn = u32::MAX - 3;
+            let parent = super::super::lifecycle::enter_action_frame();
+            resume_restored_stack_automation(&mut control)
+                .expect("the adjacent counter value is representable");
+            assert!(
+                control.stack.is_empty(),
+                "legacy={legacy}: both entries resolve"
+            );
+            assert_delayed_installation_merged(parent, "restored-resume control");
+        }
     }
 
     #[test]

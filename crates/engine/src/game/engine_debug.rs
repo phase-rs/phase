@@ -3593,76 +3593,221 @@ mod tests {
             assert_eq!(p1p1(&runner, mate), 0);
         }
 
-        /// CR 608.2c: an interactive branch answer that resolves an impossible
-        /// life change rejects the answer's action and restores the branch
-        /// prompt, so the choice is not lost and nothing partially commits.
+        /// CR 608.2c + CR 614.6: an unrepresentable branch answer restores the
+        /// live prompt and interaction; a legal alternate branch may re-pause,
+        /// then its nested choice and the replacement tail each resolve once.
         #[test]
-        fn debug_branch_answer_rejects_unrepresentable_life_and_keeps_the_prompt() {
-            let mut scenario = scenario();
-            scenario.with_life(P0, i32::MAX - 1);
-            let mut runner = debug_runner(scenario);
-            let lich = create_object(
-                runner.state_mut(),
-                CardId(9_703),
-                P0,
-                "Interactive Lich".to_string(),
-                Zone::Battlefield,
-            );
-            let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
-                AbilityDefinition::new(
+        fn interactive_lich_branch_rejects_loss_overflow_then_resumes_valid_nested_choice() {
+            let setup = |life_lost_this_turn| {
+                let mut scenario = scenario();
+                scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
+                let mut runner = debug_runner(scenario);
+                runner.state_mut().players[0].life_lost_this_turn = life_lost_this_turn;
+                let lich = create_object(
+                    runner.state_mut(),
+                    CardId(9_703),
+                    P0,
+                    "Interactive Lich".to_string(),
+                    Zone::Battlefield,
+                );
+                let loss = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::LoseLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                        target: None,
+                    },
+                );
+                let nested = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChooseOneOf {
                         chooser: PlayerFilter::Controller,
                         branches: vec![AbilityDefinition::new(
                             AbilityKind::Spell,
-                            Effect::GainLife {
-                                amount: QuantityExpr::Fixed { value: 2 },
-                                player: TargetFilter::Controller,
+                            Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
                             },
                         )],
                         kind: ChooseOneOfKind::Ordinary,
                     },
-                ),
-            );
-            {
-                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
-                obj.replacement_definitions = vec![substitution.clone()].into();
-                obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
-            }
+                );
+                let tail = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![loss, nested],
+                            kind: ChooseOneOfKind::Ordinary,
+                        },
+                    )
+                    .sub_ability(tail),
+                );
+                {
+                    let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
+                    obj.replacement_definitions = vec![substitution.clone()].into();
+                    obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
+                }
+                (runner, lich)
+            };
 
-            act_ok(&mut runner, gain(P0, 4));
-            assert!(
-                matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::ChooseOneOfBranch { .. }
-                ),
-                "reach guard: the substitution must park its branch prompt, got {:?}",
-                runner.state().waiting_for
+            // Positive control: the loss branch completes with its tail once.
+            let (mut control, control_lich) = setup(0);
+            let control_hand = control.state().players[0].hand.len();
+            act_ok(&mut control, gain(P0, 4));
+            assert!(matches!(
+                control.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. }
+            ));
+            control
+                .act(GameAction::ChooseBranch { index: 0 })
+                .expect("the representable loss branch completes");
+            assert_eq!(life(&control, P0), 18);
+            assert_eq!(control.state().players[0].life_lost_this_turn, 2);
+            assert_eq!(control.state().players[0].hand.len(), control_hand + 1);
+            assert!(matches!(
+                control.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(
+                control.state().objects[&control_lich]
+                    .replacement_definitions
+                    .len(),
+                1
             );
-            // The branch's own gain must not be substituted again, or the answer
-            // would only re-park the same prompt instead of reaching the overflow.
-            {
-                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
-                obj.replacement_definitions = Vec::new().into();
-                obj.base_replacement_definitions = std::sync::Arc::new(Vec::new());
-            }
-            let revision = runner.state().state_revision;
-            let pending_before = runner.state().pending_replacement.clone();
+
+            // Hostile path: a real life-loss counter overflow rejects the answer
+            // without deleting the replacement source to force the outcome.
+            let (mut runner, lich) = setup(u32::MAX - 1);
+            let initial_hand = runner.state().players[0].hand.len();
+            act_ok(&mut runner, gain(P0, 4));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. }
+            ));
+            assert_eq!(
+                runner.state().objects[&lich].replacement_definitions.len(),
+                1
+            );
+            let prompt_entry = runner.state().clone();
 
             let error = runner
                 .act(GameAction::ChooseBranch { index: 0 })
-                .expect_err("the branch's impossible gain must reject the answer");
+                .expect_err("the loss branch overflows the life-lost counter");
             assert_not_representable(&error);
-            assert_eq!(life(&runner, P0), i32::MAX - 1);
-            assert_eq!(runner.state().state_revision, revision);
-            assert_eq!(runner.state().pending_replacement, pending_before);
+            assert_eq!(
+                runner.state(),
+                &prompt_entry,
+                "the rejection restores the prompt, interaction authority, replacement, and all game state"
+            );
+            assert_eq!(
+                runner.state().objects[&lich].replacement_definitions.len(),
+                1
+            );
+
+            runner
+                .act(GameAction::ChooseBranch { index: 1 })
+                .expect("the alternate branch remains available after rejection");
             assert!(
                 matches!(
                     runner.state().waiting_for,
                     WaitingFor::ChooseOneOfBranch { .. }
                 ),
-                "the rejected answer must restore its branch prompt, got {:?}",
-                runner.state().waiting_for
+                "the valid alternate opens its nested choice"
+            );
+            assert_eq!(life(&runner, P0), 20);
+            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX - 1);
+            assert_eq!(runner.state().players[0].hand.len(), initial_hand);
+
+            runner
+                .act(GameAction::ChooseBranch { index: 0 })
+                .expect("the nested draw resolves and drains the replacement tail");
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(runner.state().players[0].hand.len(), initial_hand + 2);
+            assert_eq!(life(&runner, P0), 20);
+            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX - 1);
+            assert!(!runner.state().has_post_replacement_drain());
+            assert_eq!(
+                runner.state().objects[&lich].replacement_definitions.len(),
+                1
+            );
+        }
+
+        /// Older parked replacement payloads omit the policy and deserialize
+        /// as `IgnoreImpossible`; a resumed public action still rejects and
+        /// restores on the ingress life window's recorded failure.
+        #[test]
+        fn legacy_pending_replacement_policy_still_rejects_public_overflow() {
+            let mut scenario = scenario();
+            scenario.with_life(P0, i32::MAX - 1);
+            add_card(&mut scenario, P0, "Boon Reflection");
+            add_card(&mut scenario, P0, "Leyline of Hope");
+            let mut runner = debug_runner(scenario);
+
+            act_ok(&mut runner, gain(P0, 3));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let mut legacy_json = serde_json::to_value(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .expect("the ordering prompt owns a pending replacement"),
+            )
+            .expect("pending replacement serializes");
+            legacy_json
+                .as_object_mut()
+                .expect("pending replacement serializes as an object")
+                .remove("unrepresentable_life_change");
+            runner.state_mut().pending_replacement = Some(
+                serde_json::from_value::<PendingReplacement>(legacy_json)
+                    .expect("old payload shape deserializes"),
+            );
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .unrepresentable_life_change,
+                UnrepresentablePolicy::IgnoreImpossible
+            );
+
+            let mut rejected = false;
+            for _ in 0..4 {
+                let prompt_entry = runner.state().clone();
+                match runner.act(GameAction::ChooseReplacement { index: 0 }) {
+                    Ok(_)
+                        if matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ) =>
+                    {
+                        continue
+                    }
+                    Ok(_) => panic!("the overflowed legacy gain must not complete"),
+                    Err(error) => {
+                        assert_not_representable(&error);
+                        assert_eq!(runner.state(), &prompt_entry);
+                        rejected = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                rejected,
+                "the old policy must not turn public overflow into success"
             );
         }
 
