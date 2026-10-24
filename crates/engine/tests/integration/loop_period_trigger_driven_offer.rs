@@ -1106,7 +1106,7 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
     }
     assert!(
         rejected_after_progress,
-        "the third-cycle counter overflow must reject after an earlier cycle fit"
+        "the later-cycle counter overflow must reject after an earlier cycle fit"
     );
 }
 
