@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "full"
+  ],
+  "reason": "Full terminal deliveries carry an optional recipient-filtered final view (CurrentTerminalDelivery.final_view) for crash-safe cleanup and recovery. A previous Full peer drops the defaulted field and loses the retained terminal view, so the exact-match handshake must refuse it. P2P frames and Lobby messages are unchanged."
+}

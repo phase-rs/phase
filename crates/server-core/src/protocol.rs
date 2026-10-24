@@ -276,6 +276,10 @@ pub struct CurrentTerminalDelivery {
     pub delivery_id: TerminalDeliveryId,
     pub credential: TerminalCredential,
     pub display: TerminalMatchDisplay,
+    /// Recipient-filtered final Full state with its server-derived projection.
+    /// Raw JSON preserves object-key order across durable delivery retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_view: Option<Box<serde_json::value::RawValue>>,
 }
 
 /// Bootstrap proof held by a reconnecting player before the regular Full
@@ -1617,9 +1621,21 @@ mod tests {
                     reason: "Match conceded".to_string(),
                     ranked_result: None,
                 },
+                final_view: Some(
+                    serde_json::value::RawValue::from_string(
+                        r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                ),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""terminalRevision":9"#));
+        assert!(json.contains(r#""deliveryId":"delivery-0""#));
+        assert!(json.contains(
+            r#""finalView":{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+        ));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::TerminalBootstrapResult {
@@ -1628,6 +1644,10 @@ mod tests {
                 assert_eq!(delivery.key.generation, 4);
                 assert_eq!(delivery.terminal_revision, 9);
                 assert_eq!(delivery.delivery_id.0, "delivery-0");
+                assert_eq!(
+                    delivery.final_view.as_ref().unwrap().get(),
+                    r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                );
             }
             _ => panic!("wrong variant"),
         }
