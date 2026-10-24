@@ -81,10 +81,8 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
 /// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
 /// abilities. Other removal operands keep their existing same-variant scope.
 pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
-    match removed {
-        Keyword::Hexproof => candidate.kind() == KeywordKind::Hexproof,
-        _ => std::mem::discriminant(candidate) == std::mem::discriminant(removed),
-    }
+    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
 }
 
 /// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
