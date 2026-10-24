@@ -13,6 +13,985 @@ const COLLISION: &str = "Choose one —\n• Collision Course deals X damage to 
 // Pinned MTGJSON 2026-10-04, Oracle aceea999-90ab-472c-86a7-48af1542cbcf.
 const VESTIGE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
 
+/// CR 608.2c: a synthetic complete grammar control proves the independent
+/// post-choice Draw survives accept and decline exactly once.
+#[test]
+fn nested_optional_put_resumes_independent_draw_once_after_accept_or_decline() {
+    for actor in [P0, P1] {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_spell_to_hand_from_oracle(actor, "Synthetic nested optional with independent tail", true,
+                "Draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped. Draw a card.")
+                .with_mana_cost(ManaCost::generic(1)).id();
+            scenario.add_land(actor, "Battlefield land one");
+            scenario.add_land(actor, "Battlefield land two");
+            let default = scenario.add_land_to_hand(actor, "Initial Hand land").id();
+            scenario.with_library_top(actor, &["Independent tail draw", "Reserve"]);
+            let drawn = scenario
+                .add_spell_to_library_top(actor, "Newly drawn independent permanent", false)
+                .as_artifact()
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            scenario.with_mana_pool(
+                actor,
+                vec![ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )],
+            );
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = actor;
+            runner.state_mut().priority_player = actor;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: actor };
+            let before = runner.state().players[actor.0 as usize].library.len();
+            let outcome = runner.cast(source).commit().stop_at_optional().resolve();
+            assert!(
+                matches!(outcome.final_waiting_for(), WaitingFor::OptionalEffectChoice { player, source_id, .. } if *player == actor && *source_id == source)
+            );
+            assert_eq!(
+                runner.state().players[actor.0 as usize].library.len(),
+                before - 1
+            );
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap();
+            if accept {
+                let WaitingFor::EffectZoneChoice { player, cards, .. } =
+                    &runner.state().waiting_for
+                else {
+                    panic!("complete synthetic continuation selection")
+                };
+                assert_eq!(*player, actor);
+                assert_eq!(
+                    cards
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [default, drawn].into_iter().collect()
+                );
+                let action = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards == &vec![drawn])).unwrap();
+                runner.act(action).unwrap();
+                assert_eq!(runner.state().objects[&drawn].zone, Zone::Battlefield);
+                assert!(runner.state().objects[&drawn].tapped);
+            } else {
+                assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+            }
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                runner.state().players[actor.0 as usize].library.len(),
+                before - 2
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+        }
+    }
+}
+
+/// CR 109.5 + CR 113.7a + CR 400.7 + CR 608.2h: two independent departed
+/// sources retain their trigger controller and old birth while the land count is live.
+#[test]
+fn vestige_two_sources_new_birth_control_changes_live_lands_and_retired_reply() {
+    use engine::types::identifiers::ObjectIncarnationRef;
+    for actor in [P0, P1] {
+        let owner = if actor == P0 { P1 } else { P0 };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut sources = vec![];
+        let mut steals = vec![];
+        let mut bounces = vec![];
+        for _ in 0..2 {
+            sources.push(
+                scenario
+                    .add_creature_to_hand_from_oracle(owner, "Anticausal Vestige", 7, 5, VESTIGE)
+                    .with_mana_cost(ManaCost::generic(6))
+                    .from_oracle_text_with_keywords(&["Warp"], VESTIGE)
+                    .id(),
+            );
+            steals.push(
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        actor,
+                        "Synthetic paid source control",
+                        true,
+                        "Gain control of target creature.",
+                    )
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id(),
+            );
+            bounces.push(
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        owner,
+                        "Synthetic paid source bounce",
+                        true,
+                        "Return target creature to its owner's hand.",
+                    )
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id(),
+            );
+        }
+        for player in [P0, P1] {
+            scenario.add_enchantment_from_oracle(
+                player,
+                "Synthetic flash authority",
+                "You may cast creature spells as though they had flash.",
+            );
+            scenario.with_mana_pool(
+                player,
+                (0..30)
+                    .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+        }
+        let first_land = scenario.add_land(actor, "Live land one").id();
+        scenario.add_land(actor, "Live land two");
+        scenario.add_land(actor, "Live land three");
+        let destroy_land = scenario
+            .add_spell_to_hand_from_oracle(
+                owner,
+                "Synthetic paid live population change",
+                true,
+                "Destroy target land.",
+            )
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let zero = scenario
+            .add_land_to_hand(actor, "Private actor Hand land zero")
+            .id();
+        let high = scenario
+            .add_artifact_to_hand_from_oracle(
+                actor,
+                "Private actor MV3 excluded after live change",
+                "",
+            )
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        let first_draw = scenario
+            .add_spell_to_library_top(actor, "Private second occurrence reserve", false)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let second_draw = scenario
+            .add_spell_to_library_top(actor, "Private first occurrence reserve", false)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let foreign = scenario
+            .add_artifact_to_hand_from_oracle(owner, "Private source owner Hand decoy", "")
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = owner;
+        runner.state_mut().priority_player = owner;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: owner };
+        let mut captured = vec![];
+        for i in 0..2 {
+            let _ = runner.cast(sources[i]).commit();
+            runner.resolve_top();
+            let _ = runner.cast(steals[i]).target_object(sources[i]).commit();
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&sources[i]].controller, actor);
+            captured.push(ObjectIncarnationRef::from_object(
+                &runner.state().objects[&sources[i]],
+            ));
+        }
+        for i in 0..2 {
+            let _ = runner.cast(bounces[i]).target_object(sources[i]).commit();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.act(GameAction::PassPriority).unwrap();
+            assert_eq!(runner.state().objects[&sources[i]].zone, Zone::Hand);
+        }
+        // Public recast before either LTB resolves: current source controller
+        // and birth now differ from its captured departed controller/birth.
+        let _ = runner.cast(sources[0]).commit();
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&sources[0]].controller, owner);
+        assert!(runner.state().objects[&sources[0]].incarnation > captured[0].incarnation);
+        let _ = runner.cast(destroy_land).target_object(first_land).commit();
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&first_land].zone, Zone::Graveyard);
+        let triggers: Vec<_> = runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| sources.contains(&entry.source_id))
+            .collect();
+        assert_eq!(triggers.len(), 2);
+        for trigger in triggers {
+            let i = sources
+                .iter()
+                .position(|id| *id == trigger.source_id)
+                .unwrap();
+            assert_eq!(trigger.controller, actor);
+            assert_eq!(
+                trigger
+                    .ability()
+                    .unwrap()
+                    .trigger_source
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .reference,
+                captured[i]
+            );
+        }
+        let mut retired_reply = None;
+        for (occurrence, newly_drawn) in [second_draw, first_draw].into_iter().enumerate() {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } = runner.state().waiting_for
+            else {
+                panic!("each captured LTB draws before its own optional child")
+            };
+            assert_eq!(player, actor);
+            assert_eq!(source_id, sources[1 - occurrence]);
+            assert_eq!(runner.state().objects[&newly_drawn].zone, Zone::Hand);
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            let WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                source_id: selected_source,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("each occurrence owns a fresh bounded Hand choice")
+            };
+            assert_eq!((*player, *selected_source), (actor, source_id));
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [zero, newly_drawn].into_iter().collect()
+            );
+            assert!(!cards.contains(&high) && !cards.contains(&foreign));
+            if let Some(old) = &retired_reply {
+                assert!(
+                    runner.act(old.clone()).is_err(),
+                    "old selected object is no longer in this occurrence's legal Hand set"
+                );
+            }
+            let response = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards == &vec![newly_drawn])).unwrap();
+            retired_reply = Some(response.clone());
+            runner.act(response).unwrap();
+            let selected = &runner.state().objects[&newly_drawn];
+            assert_eq!(
+                (selected.zone, selected.controller, selected.tapped),
+                (Zone::Battlefield, actor, true)
+            );
+        }
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&sources[0]].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&sources[0]].controller, owner);
+        assert_eq!(runner.state().objects[&sources[1]].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&high].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&foreign].zone, Zone::Hand);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().trigger_stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+        );
+    }
+}
+
+/// CR 608.2g: genuine targeted and own-graveyard siblings still cast a complete
+/// spell during resolution. These synthetic controls do not claim Spectral support.
+#[test]
+fn refused_spectral_window_preserves_public_cast_siblings_draw_and_flying_body() {
+    use engine::types::ability::{Effect, QuantityExpr, TargetFilter};
+    use engine::types::game_state::CastOfferKind;
+    use engine::types::keywords::Keyword;
+    const CAST: &str = "You may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    const SPECTRAL: &str = "Flying\nWhen this creature enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    for actor in [P0, P1] {
+        let other = if actor == P0 { P1 } else { P0 };
+        for targeted in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let text = if targeted {
+                "You may cast target instant card from your graveyard without paying its mana cost."
+            } else {
+                "You may cast up to one instant spell from your graveyard without paying its mana cost."
+            };
+            let parent = scenario
+                .add_spell_to_hand_from_oracle(
+                    actor,
+                    "Synthetic supported graveyard cast",
+                    true,
+                    text,
+                )
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            let child = scenario
+                .add_spell_to_graveyard(actor, "Distinct complete graveyard Draw", true)
+                .from_oracle_text("Draw a card.")
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            let foreign = scenario
+                .add_spell_to_graveyard(other, "Foreign graveyard decoy", true)
+                .from_oracle_text("Draw a card.")
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            scenario.with_library_top(actor, &["New child draw", "Reserve one", "Reserve two"]);
+            scenario.with_mana_pool(
+                actor,
+                vec![ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )],
+            );
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = actor;
+            runner.state_mut().priority_player = actor;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: actor };
+            if targeted {
+                let _ = runner.cast(parent).target_object(child).commit();
+            } else {
+                let _ = runner.cast(parent).commit();
+            }
+            runner.resolve_top();
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == actor)
+            );
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            if !targeted {
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::CastOffer { player, kind: CastOfferKind::FreeCastWindow { .. } } if player == actor)
+                );
+                let choose = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::FreeCastWindowChoice { selection: Some(selected) } if *selected == child)).expect("real own-GY offered child");
+                assert!(!engine::ai_support::legal_actions(runner.state()).iter().any(|action| matches!(action, GameAction::FreeCastWindowChoice { selection: Some(selected) } if *selected == foreign)));
+                runner.act(choose).unwrap();
+            }
+            assert_eq!(runner.state().objects[&child].zone, Zone::Stack);
+            let before = runner.state().players[actor.0 as usize].library.len();
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                runner.state().players[actor.0 as usize].library.len(),
+                before - 1
+            );
+            assert_eq!(runner.state().objects[&child].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&foreign].zone, Zone::Graveyard);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().resolution_stack.is_empty()
+            );
+        }
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Full synthetic source, explicitly distinct from the named card.
+        let text = format!("{CAST} Draw a card.");
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            &text,
+            "Synthetic refused operation plus independent Draw",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(
+            *parsed.abilities[0].effect,
+            Effect::unimplemented("untargeted_dynamic_graveyard_cast_with_rider", CAST)
+        );
+        assert_eq!(
+            *parsed.abilities[0].sub_ability.as_ref().unwrap().effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller
+            }
+        );
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                actor,
+                "Synthetic refused operation plus independent Draw",
+                true,
+                &text,
+            )
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let spectral = scenario
+            .add_creature_to_hand_from_oracle(actor, "Spectral Arcanist", 3, 2, SPECTRAL)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .with_subtypes(vec!["Spirit", "Wizard"])
+            .from_oracle_text_with_keywords(&["Flying"], SPECTRAL)
+            .id();
+        scenario.with_library_top(actor, &["Independent Draw", "Reserve one", "Reserve two"]);
+        scenario.with_mana_pool(
+            actor,
+            (0..7)
+                .map(|index| {
+                    ManaUnit::new(
+                        if index == 0 {
+                            ManaType::Blue
+                        } else {
+                            ManaType::Colorless
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = actor;
+        runner.state_mut().priority_player = actor;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: actor };
+        runner
+            .cast(spell)
+            .decline_optional()
+            .resolve()
+            .assert_hand_drawn(actor, 1);
+        runner.cast(spectral).decline_optional().resolve();
+        let body = &runner.state().objects[&spectral];
+        assert_eq!(
+            (body.zone, body.power, body.toughness),
+            (Zone::Battlefield, Some(3), Some(2))
+        );
+        assert!(body.keywords.contains(&Keyword::Flying));
+        assert!(
+            body.card_types.subtypes.contains(&"Spirit".into())
+                && body.card_types.subtypes.contains(&"Wizard".into())
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().trigger_stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+        );
+    }
+}
+
+/// CR 109.2 + CR 202.3e + CR 608.2c + CR 608.2h: the live BF count bounds
+/// a resolution-time Hand choice after the mandatory draw, including Hand X=0.
+#[test]
+fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceiling() {
+    use engine::game::engine::apply;
+    use engine::game::scenario::GameRunner;
+    use engine::game::turn_control::authorized_submitter;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, EffectScope, ReplacementDefinition, TapStateChange,
+        TargetFilter,
+    };
+    use engine::types::actions::AlternativeCastDecision;
+    use engine::types::game_state::{ActivePlayerControl, CastingVariant};
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::replacements::ReplacementEvent;
+    for actor in [P0, P1] {
+        let other = if actor == P0 { P1 } else { P0 };
+        for warped in [false, true] {
+            for lands in [2, 3] {
+                // multi / decline / no legal permanent / sole immediate /
+                // one entry modifier / ambiguous two-modifier entry.
+                for branch in 0..6 {
+                    if lands == 3 && branch != 0 {
+                        continue;
+                    }
+                    let controlled = branch == 0 && lands == 2;
+                    let submitter = if controlled { other } else { actor };
+                    let mut scenario = GameScenario::new();
+                    scenario.at_phase(Phase::PreCombatMain);
+                    let source = scenario
+                        .add_creature_to_hand_from_oracle(
+                            actor,
+                            "Anticausal Vestige",
+                            7,
+                            5,
+                            VESTIGE,
+                        )
+                        .with_mana_cost(ManaCost::generic(6))
+                        .with_subtypes(vec!["Eldrazi"])
+                        .from_oracle_text_with_keywords(&["Warp"], VESTIGE)
+                        .id();
+                    for _ in 0..lands {
+                        scenario.add_land(actor, "Controlled battlefield land");
+                    }
+                    let grave_land = scenario
+                        .add_spell_to_graveyard(actor, "Unrelated graveyard land", false)
+                        .as_land()
+                        .id();
+                    let foreign = scenario
+                        .add_creature_to_hand(other, "Foreign hand decoy", 2, 2)
+                        .with_mana_cost(ManaCost::generic(2))
+                        .id();
+                    let offhand = scenario
+                        .add_creature_to_graveyard(actor, "Offhand decoy", 2, 2)
+                        .with_mana_cost(ManaCost::generic(2))
+                        .id();
+                    let high = scenario
+                        .add_creature_to_hand(actor, "Above live ceiling", 4, 4)
+                        .with_mana_cost(ManaCost::generic(lands + 1))
+                        .id();
+                    let nonpermanent = scenario
+                        .add_spell_to_hand_from_oracle(
+                            actor,
+                            "Hand instant decoy",
+                            true,
+                            "Draw a card.",
+                        )
+                        .with_mana_cost(ManaCost::generic(1))
+                        .id();
+                    let mut expected = vec![];
+                    if branch != 2 && branch != 3 {
+                        expected.push(
+                            scenario
+                                .add_land_to_hand(actor, "Private Hand land zero")
+                                .id(),
+                        );
+                        expected.push(
+                            scenario
+                                .add_artifact_to_hand_from_oracle(
+                                    actor,
+                                    "Private Hand artifact",
+                                    "",
+                                )
+                                .with_mana_cost(ManaCost::generic(lands))
+                                .id(),
+                        );
+                        expected.push(
+                            scenario
+                                .add_creature_to_hand(actor, "Private Hand X permanent", 1, 1)
+                                .with_mana_cost(ManaCost::Cost {
+                                    generic: 0,
+                                    shards: vec![ManaCostShard::X],
+                                })
+                                .id(),
+                        );
+                    }
+                    scenario
+                        .with_library_top(actor, &["Private reserve one", "Private reserve two"]);
+                    let drawn = scenario
+                        .add_spell_to_library_top(
+                            actor,
+                            "Private newly drawn bounded creature",
+                            false,
+                        )
+                        .with_mana_cost(ManaCost::generic(lands))
+                        .as_creature()
+                        .id();
+                    if branch != 2 {
+                        expected.push(drawn);
+                    }
+                    let remove = scenario
+                        .add_spell_to_hand_from_oracle(
+                            actor,
+                            "Synthetic paid departure",
+                            true,
+                            "Destroy target creature.",
+                        )
+                        .with_mana_cost(ManaCost::generic(1))
+                        .id();
+                    let mut modifiers = vec![];
+                    for i in 0..if branch == 4 {
+                        1
+                    } else if branch == 5 {
+                        2
+                    } else {
+                        0
+                    } {
+                        let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .valid_card(TargetFilter::Named {
+                                name: "Private newly drawn bounded creature".into(),
+                            })
+                            .destination_zone(Zone::Battlefield)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::SetTapState {
+                                    target: TargetFilter::SelfRef,
+                                    scope: EffectScope::Single,
+                                    state: TapStateChange::Tap,
+                                },
+                            ));
+                        modifiers.push(
+                            scenario
+                                .add_creature(other, &format!("Synthetic entry modifier {i}"), 0, 1)
+                                .with_replacement_definition(replacement)
+                                .id(),
+                        );
+                    }
+                    scenario.with_mana_pool(
+                        actor,
+                        (0..20)
+                            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                            .collect(),
+                    );
+                    let mut runner = scenario.build();
+                    {
+                        let state = runner.state_mut();
+                        state.active_player = actor;
+                        state.priority_player = submitter;
+                        state.waiting_for = WaitingFor::Priority { player: actor };
+                        if controlled {
+                            state.turn_decision_controller = Some(submitter);
+                            state.turn_decision_control_timestamp = Some(1);
+                            state.active_full_turn_control = Some(ActivePlayerControl {
+                                controller: submitter,
+                                timestamp: 1,
+                            });
+                        }
+                        let object = state.objects.get_mut(&drawn).unwrap();
+                        if branch == 2 {
+                            object.card_types.core_types =
+                                vec![engine::types::card_type::CoreType::Sorcery];
+                            object.base_card_types = object.card_types.clone();
+                        } else {
+                            object.power = Some(2);
+                            object.base_power = Some(2);
+                            object.toughness = Some(2);
+                            object.base_toughness = Some(2);
+                        }
+                    }
+                    if warped {
+                        pay_warp_through_public_actions(&mut runner, actor, source);
+                    } else {
+                        let cast = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == source)).unwrap();
+                        runner.act(cast).unwrap();
+                        runner
+                            .act(GameAction::ChooseAlternativeCast {
+                                choice: AlternativeCastDecision::Normal,
+                            })
+                            .unwrap();
+                        assert!(matches!(
+                            runner.state().stack.last().unwrap().kind,
+                            StackEntryKind::Spell {
+                                casting_variant: CastingVariant::Normal,
+                                actual_mana_spent: 6,
+                                ..
+                            }
+                        ));
+                        runner.advance_until_stack_empty();
+                    }
+                    let captured =
+                        ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
+                    assert_eq!(
+                        (
+                            runner.state().objects[&source].power,
+                            runner.state().objects[&source].toughness
+                        ),
+                        (Some(7), Some(5))
+                    );
+                    let before_draw = runner.state().players[actor.0 as usize].library.len();
+                    if warped {
+                        assert_eq!(runner.state().delayed_triggers.len(), 1);
+                        assert_eq!(
+                            runner.state().delayed_triggers[0]
+                                .ability
+                                .trigger_source
+                                .as_ref()
+                                .unwrap()
+                                .identity
+                                .reference,
+                            captured
+                        );
+                        runner.advance_to_end_step();
+                        runner.advance_until_stack_empty();
+                        assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+                        assert!(runner.state().objects[&source].casting_permissions.iter().any(|permission| matches!(permission, engine::types::ability::CastingPermission::WarpExile { castable_after_turn } if *castable_after_turn == runner.state().turn_number)));
+                    } else {
+                        let _ = runner.cast(remove).target_object(source).commit();
+                        runner.act(GameAction::PassPriority).unwrap();
+                        runner.act(GameAction::PassPriority).unwrap();
+                        let trigger = runner
+                            .state()
+                            .stack
+                            .iter()
+                            .find(|entry| entry.source_id == source)
+                            .expect("real queued LTB");
+                        assert_eq!(trigger.controller, actor);
+                        assert_eq!(
+                            trigger
+                                .ability()
+                                .unwrap()
+                                .trigger_source
+                                .as_ref()
+                                .unwrap()
+                                .identity
+                                .reference,
+                            captured
+                        );
+                        runner.advance_until_stack_empty();
+                        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+                    }
+                    assert_eq!(
+                        runner.state().objects[&source].incarnation,
+                        captured.incarnation + 1
+                    );
+                    assert_eq!(
+                        runner.state().players[actor.0 as usize].library.len(),
+                        before_draw - 1
+                    );
+                    assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+                    if branch == 2 {
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::Priority { .. }
+                        ));
+                        assert!(
+                            runner.state().stack.is_empty()
+                                && runner.state().trigger_stack.is_empty()
+                                && runner.state().resolution_stack.is_empty()
+                        );
+                        continue;
+                    }
+                    assert!(
+                        matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, source_id, .. } if player == actor && source_id == source)
+                    );
+                    assert_eq!(
+                        runner
+                            .state()
+                            .active_optional_effect_frame()
+                            .unwrap()
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .unwrap()
+                            .identity
+                            .reference,
+                        captured
+                    );
+                    assert_warp_draw_privacy(runner.state(), actor, drawn, source);
+                    for optional_state in warp_restore_forms(runner.state()) {
+                        let mut optional = GameRunner::from_state(optional_state);
+                        let response = engine::ai_support::legal_actions(optional.state()).into_iter().find(|action| matches!(action, GameAction::DecideOptionalEffect { accept } if *accept == (branch != 1))).unwrap();
+                        assert_eq!(optional.state().waiting_for.acting_player(), Some(actor));
+                        assert_eq!(authorized_submitter(optional.state()), Some(submitter));
+                        assert!(apply(
+                            optional.state_mut(),
+                            if submitter == actor { other } else { actor },
+                            response.clone()
+                        )
+                        .is_err());
+                        apply(optional.state_mut(), submitter, response).unwrap();
+                        if branch == 1 {
+                            optional.advance_until_stack_empty();
+                            assert_eq!(optional.state().objects[&drawn].zone, Zone::Hand);
+                            assert_warp_draw_privacy(optional.state(), actor, drawn, source);
+                            assert!(matches!(
+                                optional.state().waiting_for,
+                                WaitingFor::Priority { .. }
+                            ));
+                            assert!(
+                                optional.state().stack.is_empty()
+                                    && optional.state().trigger_stack.is_empty()
+                                    && optional.state().resolution_stack.is_empty()
+                            );
+                            continue;
+                        }
+                        if branch == 3 {
+                            assert_eq!(optional.state().objects[&drawn].zone, Zone::Battlefield);
+                            assert!(optional.state().objects[&drawn].tapped);
+                            assert!(matches!(
+                                optional.state().waiting_for,
+                                WaitingFor::Priority { .. }
+                            ));
+                            assert!(
+                                optional.state().stack.is_empty()
+                                    && optional.state().trigger_stack.is_empty()
+                                    && optional.state().resolution_stack.is_empty()
+                            );
+                            continue;
+                        }
+                        let WaitingFor::EffectZoneChoice {
+                            player,
+                            cards,
+                            count,
+                            min_count,
+                            up_to,
+                            source_id,
+                            zone,
+                            destination,
+                            enter_tapped,
+                            ..
+                        } = &optional.state().waiting_for
+                        else {
+                            panic!("actual bounded Hand selection")
+                        };
+                        assert_eq!(
+                            (
+                                *player,
+                                *source_id,
+                                *count,
+                                *min_count,
+                                *up_to,
+                                *zone,
+                                *destination
+                            ),
+                            (
+                                actor,
+                                source,
+                                1,
+                                0,
+                                false,
+                                Zone::Hand,
+                                Some(Zone::Battlefield)
+                            )
+                        );
+                        assert!(enter_tapped.is_tapped());
+                        assert_eq!(
+                            cards
+                                .iter()
+                                .copied()
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            expected.iter().copied().collect()
+                        );
+                        assert_ne!(
+                            cards[0], drawn,
+                            "newly drawn legal card is a nondefault choice"
+                        );
+                        assert_warp_draw_privacy(optional.state(), actor, drawn, source);
+                        for selection_state in warp_restore_forms(optional.state()) {
+                            let mut selection = GameRunner::from_state(selection_state);
+                            for illegal in [high, nonpermanent, foreign, offhand, grave_land] {
+                                assert!(selection
+                                    .act(GameAction::SelectCards {
+                                        cards: vec![illegal]
+                                    })
+                                    .is_err());
+                            }
+                            let choose = engine::ai_support::legal_actions(selection.state()).into_iter().find(|action| matches!(action, GameAction::SelectCards { cards } if cards == &vec![drawn])).expect("actual AI-issued nondefault newly drawn selection");
+                            assert!(apply(
+                                selection.state_mut(),
+                                if submitter == actor { other } else { actor },
+                                choose.clone()
+                            )
+                            .is_err());
+                            let birth = selection.state().objects[&drawn].incarnation;
+                            let delivered =
+                                apply(selection.state_mut(), submitter, choose.clone()).unwrap();
+                            // CR 614.12 + CR 614.12a: prospective entry modifiers
+                            // choose before the selected permanent actually arrives.
+                            if branch == 5 {
+                                assert!(
+                                    matches!(
+                                        selection.state().waiting_for,
+                                        WaitingFor::ReplacementChoice {
+                                            candidate_count: 2,
+                                            ..
+                                        }
+                                    ),
+                                    "two actual entry modifiers require a real ordering choice"
+                                );
+                            }
+                            let arrivals = if matches!(
+                                selection.state().waiting_for,
+                                WaitingFor::ReplacementChoice { .. }
+                            ) {
+                                warp_restore_forms(selection.state())
+                            } else {
+                                vec![selection.state().clone()]
+                            };
+                            for arrival in arrivals {
+                                let mut selection = GameRunner::from_state(arrival);
+                                let mut events = delivered.events.clone();
+                                assert_warp_draw_privacy(
+                                    selection.state(),
+                                    actor,
+                                    expected[0],
+                                    source,
+                                );
+                                for _ in 0..3 {
+                                    if !matches!(
+                                        selection.state().waiting_for,
+                                        WaitingFor::ReplacementChoice { .. }
+                                    ) {
+                                        break;
+                                    }
+                                    let pending =
+                                        selection.state().pending_replacement.as_ref().unwrap();
+                                    assert!(pending
+                                        .candidates
+                                        .iter()
+                                        .all(|id| modifiers.contains(&id.source)));
+                                    let index = pending.candidates.len() - 1;
+                                    let selected_replacement_source =
+                                        pending.candidates[index].source;
+                                    let response = engine::ai_support::legal_actions(selection.state()).into_iter().find(|action| matches!(action, GameAction::ChooseReplacement { index: candidate } if *candidate == index)).unwrap();
+                                    let applied = selection.act(response).unwrap();
+                                    assert!(applied.events.iter().any(|event| matches!(event, engine::types::events::GameEvent::ReplacementApplied { source_id, .. } if *source_id == selected_replacement_source)));
+                                    events.extend(applied.events);
+                                }
+                                selection.advance_until_stack_empty();
+                                // CR 110.2a: the instructed player controls the entrant.
+                                let selected = &selection.state().objects[&drawn];
+                                assert_eq!(
+                                    (
+                                        selected.zone,
+                                        selected.controller,
+                                        selected.incarnation,
+                                        selected.tapped
+                                    ),
+                                    (Zone::Battlefield, actor, birth + 1, true)
+                                );
+                                assert_eq!(events.iter().filter(|event| matches!(event, engine::types::events::GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), to: Zone::Battlefield, .. } if *object_id == drawn)).count(), 1);
+                                assert_eq!(
+                                    selection.state().players[actor.0 as usize].library.len(),
+                                    before_draw - 1,
+                                    "no duplicate mandatory draw"
+                                );
+                                assert!(
+                                    selection.act(choose.clone()).is_err(),
+                                    "retired selection cannot be replayed"
+                                );
+                                assert_eq!(selection.state().objects[&high].zone, Zone::Hand);
+                                assert_eq!(selection.state().objects[&foreign].zone, Zone::Hand);
+                                assert_eq!(
+                                    selection.state().objects[&offhand].zone,
+                                    Zone::Graveyard
+                                );
+                                assert_warp_draw_privacy(
+                                    selection.state(),
+                                    actor,
+                                    expected[0],
+                                    source,
+                                );
+                                assert!(matches!(
+                                    selection.state().waiting_for,
+                                    WaitingFor::Priority { .. }
+                                ));
+                                assert!(
+                                    selection.state().stack.is_empty()
+                                        && selection.state().trigger_stack.is_empty()
+                                        && selection.state().resolution_stack.is_empty()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn pay_warp_through_public_actions(
     runner: &mut engine::game::scenario::GameRunner,
     caster: engine::types::player::PlayerId,
@@ -20,7 +999,7 @@ fn pay_warp_through_public_actions(
 ) {
     use engine::types::actions::AlternativeCastDecision;
     use engine::types::game_state::{AlternativeCastKeyword, CastingVariant};
-    if runner.state().priority_player != caster {
+    if runner.state().waiting_for.acting_player() != Some(caster) {
         runner.act(GameAction::PassPriority).unwrap();
     }
     let before = runner.state().players[caster.0 as usize].mana_pool.total();
@@ -118,6 +1097,21 @@ fn warp_restore_forms(
             }
             ResolutionFrame::PostReplacement(frame) => {
                 v1["post_replacement_drains"] = serde_json::to_value(frame).unwrap();
+            }
+            ResolutionFrame::OptionalEffect(frame) => {
+                assert!(
+                    frame.trigger_events.len() <= 1,
+                    "v1 has only the singular LTB event slot"
+                );
+                assert!(
+                    frame.return_result_occurrence.is_none(),
+                    "v1 cannot represent instruction-result history"
+                );
+                v1["pending_optional_effect"] = serde_json::to_value(&frame.ability).unwrap();
+                v1["pending_optional_trigger_event"] =
+                    serde_json::to_value(&frame.trigger_event).unwrap();
+                v1["pending_optional_trigger_match_count"] =
+                    serde_json::to_value(frame.trigger_match_count).unwrap();
             }
             other => {
                 panic!("fixture must explicitly encode its actual historical owner: {other:?}")
@@ -415,6 +1409,36 @@ fn assert_warp_draw_privacy(
         let payload = &direct["state"]["objects"][drawn.0.to_string()];
         assert_eq!(payload["name"], serde_json::json!(object.name));
         assert_eq!(payload["card_id"], serde_json::json!(object.card_id));
+        // CR 402.3: a private Hand choice cannot expose another player's card identities.
+        if let WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            zone: Zone::Hand,
+            ..
+        } = &state.waiting_for
+        {
+            assert_eq!(*player, owner);
+            let WaitingFor::EffectZoneChoice {
+                cards: projected, ..
+            } = &filtered.waiting_for
+            else {
+                panic!("private selection retains its public prompt shape")
+            };
+            assert_eq!(
+                projected,
+                &if sees_private {
+                    cards.clone()
+                } else {
+                    vec![ObjectId(0); cards.len()]
+                }
+            );
+            for envelope in [&direct, &prefiltered] {
+                assert_eq!(
+                    envelope["state"]["waiting_for"]["cards"],
+                    serde_json::to_value(projected).unwrap()
+                );
+            }
+        }
         if !sees_private {
             assert!(
                 !direct.to_string().contains(&actual.name),

@@ -1,5 +1,30 @@
 use super::anthem::*;
 
+#[test]
+fn nested_comparator_static_has_complete_independent_population_and_defaults() {
+    // SHAPE: synthetic grammar controls, CR 109.2 + CR 109.2a + CR 202.3.
+    for (source, quantity) in [
+        ("Creatures with mana value less than or equal to the number of lands you control have flying.",
+         QuantityRef::ObjectCount { filter: TargetFilter::Typed(TypedFilter {
+             type_filters: vec![TypeFilter::Land], controller: Some(ControllerRef::You), properties: vec![],
+         }) }),
+        ("Creatures with mana value less than or equal to the number of cards in your graveyard have flying.",
+         QuantityRef::ZoneCardCount { zone: crate::types::ability::ZoneRef::Graveyard,
+             scope: crate::types::ability::CountScope::Controller, card_types: vec![], filter: None }),
+    ] {
+        let expected = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE, value: QuantityExpr::Ref { qty: quantity },
+            }])))
+            .modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::Flying }])
+            .description(source.into());
+        let actual = parse_static_line_multi(source);
+        assert_eq!(actual, vec![expected.clone()]);
+        assert_eq!(parse_static_line(source), Some(expected));
+        assert!(parse_static_line(&source.replace(" have flying", " inexplicably have flying")).is_none());
+    }
+}
+
 // SHAPE: complete independent static vectors from the pinned relative quantities.
 #[test]
 fn relative_numeric_statics_retain_complete_head_and_modifier_kind() {

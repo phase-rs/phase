@@ -7,6 +7,183 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn nested_two_complete_sources_ir_and_lowered() {
+    use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
+    use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, TargetChoiceTiming, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+    const VESTIGE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
+    const SPECTRAL: &str = "Flying\nWhen this creature enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    const GAP: &str = "you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    // SHAPE: independent typed defaults plus the complete printed operation;
+    // CR 603.6c + CR 608.2c: the mandatory LTB Draw owns its optional continuation.
+    let put: Effect = serde_json::from_value(serde_json::json!({
+        "type":"ChangeZone","origin":"Hand","destination":"Battlefield","enter_tapped":true,
+        "target":{"type":"Typed","type_filters":["Permanent"],"controller":"You","properties":[
+            {"type":"Cmc","comparator":"LE","value":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":["Land"],"controller":"You","properties":[]}}}},
+            {"type":"InZone","zone":"Hand"}
+        ]}
+    })).unwrap();
+    let body = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .sub_ability(
+        AbilityDefinition::new(AbilityKind::Spell, put)
+            .optional()
+            .target_choice_timing(TargetChoiceTiming::Resolution),
+    );
+    let vestige = TriggerDefinition::new(TriggerMode::LeavesBattlefield).valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile]).execute(body)
+        .description("When ~ leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.".into());
+    let mut spectral = TriggerDefinition::new(TriggerMode::ChangesZone).valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield]).execute(AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("untargeted_dynamic_graveyard_cast_with_rider", GAP)).optional())
+        .optional().description("When ~ enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.".into());
+    spectral.destination = Some(Zone::Battlefield);
+    for (index, (name, source, hints, subtypes, trigger, keyword)) in [
+        (
+            "Anticausal Vestige",
+            VESTIGE,
+            vec!["Warp".into()],
+            vec!["Eldrazi".into()],
+            vestige,
+            Keyword::Warp(ManaCost::generic(4)),
+        ),
+        (
+            "Spectral Arcanist",
+            SPECTRAL,
+            vec!["Flying".into()],
+            vec!["Spirit".into(), "Wizard".into()],
+            spectral,
+            Keyword::Flying,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected = ParsedAbilities {
+            abilities: vec![],
+            triggers: vec![trigger],
+            statics: vec![],
+            replacements: vec![],
+            extracted_keywords: vec![keyword.clone()],
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: vec![],
+        };
+        let mut doc = parse_oracle_ir(source, name, &hints, &["Creature".into()], &subtypes);
+        assert_eq!(doc.source_text, source);
+        assert_eq!(doc.items.len(), 2);
+        for (line, item) in doc.items.iter().enumerate() {
+            assert_eq!(item.id, OracleItemId(line as u32));
+            let span = item.source.span();
+            assert_eq!(
+                (
+                    span.first_line,
+                    span.last_line,
+                    span.ordinal_within_span,
+                    span.precision
+                ),
+                (line, line, 0, SpanPrecision::Exact)
+            );
+            assert_eq!(item.source.fragment(), source.lines().nth(line));
+            assert_eq!(
+                &source[span.start_byte..span.end_byte],
+                source.lines().nth(line).unwrap()
+            );
+            if line == index {
+                let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(ir)) = &item.node else {
+                    panic!("native typed trigger")
+                };
+                let mut header = expected.triggers[0].clone();
+                header.execute = None;
+                header.description = None;
+                header.optional = false;
+                assert_eq!(ir.partial_def, header);
+                assert_eq!(ir.condition, header.mode);
+                assert_eq!(
+                    ir.source_text,
+                    expected.triggers[0].description.as_deref().unwrap()
+                );
+                assert_eq!(ir.modifiers.optional, index == 1);
+                assert_eq!(ir.modifiers.optional_player, None);
+                assert_eq!(ir.modifiers.unless_pay, None);
+                assert_eq!(ir.modifiers.intervening_if, None);
+                assert_eq!(ir.modifiers.trigger_subject, TargetFilter::SelfRef);
+                assert_eq!(ir.modifiers.first_time_limit, None);
+                assert_eq!(ir.modifiers.constraint, None);
+                assert!(!ir.modifiers.has_up_to);
+                assert_eq!(
+                    ir.modifiers.illegal_targets_disposition,
+                    crate::types::ability::IllegalTargetsDisposition::DoesNotResolve
+                );
+                assert_eq!(ir.modifiers.relative_player_scope, None);
+                let body_source = if index == 0 {
+                    "draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped."
+                } else {
+                    GAP
+                };
+                assert_eq!(ir.modifiers.effect_lower, body_source.to_ascii_lowercase());
+                assert!(ir.die_results.is_empty());
+                let Some(TriggerBody::EffectChain(chain)) = &ir.body else {
+                    panic!("whole effect chain")
+                };
+                let fragments = if index == 0 {
+                    vec!["draw a card", "you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped"]
+                } else {
+                    vec![GAP]
+                };
+                assert_eq!(chain.clauses.len(), fragments.len());
+                for (id, (clause, fragment)) in chain.clauses.iter().zip(fragments).enumerate() {
+                    assert_eq!(
+                        clause.id,
+                        crate::parser::oracle_ir::effect_chain::ClauseId(id as u32)
+                    );
+                    assert_eq!(clause.source.fragment(), Some(fragment));
+                    assert_eq!(clause.source.span().precision, SpanPrecision::ChainRelative);
+                    assert_eq!(
+                        &body_source
+                            [clause.source.span().start_byte..clause.source.span().end_byte],
+                        fragment
+                    );
+                    let execute = expected.triggers[0].execute.as_ref().unwrap();
+                    let effect = if index == 0 && id == 1 {
+                        execute.sub_ability.as_ref().unwrap().effect.as_ref()
+                    } else {
+                        execute.effect.as_ref()
+                    };
+                    let mut expected_clause =
+                        crate::parser::oracle_ir::ast::parsed_clause(effect.clone());
+                    expected_clause.optional = index == 0 && id == 1;
+                    assert_eq!(clause.parsed, expected_clause);
+                }
+            } else {
+                assert!(matches!(&item.node, OracleNodeIr::Keyword(actual) if actual == &keyword));
+            }
+        }
+        let lowered = lower_oracle_ir(&mut doc);
+        assert_eq!(
+            serde_json::to_value(&lowered).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        insta::assert_json_snapshot!(format!("nested_complete_{index}_ir"), doc);
+        insta::assert_json_snapshot!(format!("nested_complete_{index}_lowered"), lowered);
+    }
+}
+
+#[test]
 fn relative_eight_full_sources_ir_and_lowered() {
     use crate::types::ability::{ContinuousModification, TypeFilter};
     let sources = [

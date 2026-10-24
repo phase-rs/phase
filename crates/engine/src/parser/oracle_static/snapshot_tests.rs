@@ -7,6 +7,32 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn nested_comparator_static_semantics_before_snapshot() {
+    // SHAPE: synthetic grammar controls, CR 109.2 + CR 109.2a + CR 202.3.
+    for (source, quantity) in [
+        ("Creatures with mana value less than or equal to the number of lands you control have flying.",
+         QuantityRef::ObjectCount { filter: TargetFilter::Typed(TypedFilter {
+             type_filters: vec![TypeFilter::Land], controller: Some(ControllerRef::You), properties: vec![],
+         }) }),
+        ("Creatures with mana value less than or equal to the number of cards in your graveyard have flying.",
+         QuantityRef::ZoneCardCount { zone: crate::types::ability::ZoneRef::Graveyard,
+             scope: crate::types::ability::CountScope::Controller, card_types: vec![], filter: None }),
+    ] {
+        let expected = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE, value: QuantityExpr::Ref { qty: quantity },
+            }])))
+            .modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::Flying }])
+            .description(source.into());
+        let actual = parse_static_line_multi(source);
+        assert_eq!(actual, vec![expected.clone()]);
+        assert_eq!(parse_static_line(source), Some(expected));
+        assert!(parse_static_line(&source.replace(" have flying", " inexplicably have flying")).is_none());
+        insta::assert_json_snapshot!(format!("nested_comparator_static_{}", if source == "Creatures with mana value less than or equal to the number of lands you control have flying." { "battlefield" } else { "graveyard" }), actual);
+    }
+}
+
+#[test]
 fn relative_complete_cda_attached_and_cost_statics() {
     let sources = [
         "~'s power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.",

@@ -31206,29 +31206,29 @@ fn cast_untyped_rest_names_a_restriction(rest: &str) -> bool {
 fn parse_cast_type_list(rest: &str) -> Option<TargetFilter> {
     type E<'a> = OracleError<'a>;
     let (rest, _) = opt(tag::<_, _, E>("target ")).parse(rest).ok()?;
-    let (rest, quantifier) = opt(parse_cast_quantifier_prefix).parse(rest).ok()?;
-    // Strip optional "a "/"an " article (longest-first).
-    let (rest, _) = opt(alt((tag::<_, _, E>("an "), tag("a "))))
-        .parse(rest)
-        .ok()?;
+    let (_, (filter, legs, quantifier)) = parse_cast_type_list_core(rest).ok()?;
+    (legs > 1 || quantifier.is_some()).then_some(filter)
+}
 
-    let (rest, first) = parse_cast_type_leg(rest).ok()?;
-    let (rest, more) = many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg))
-        .parse(rest)
-        .ok()?;
+fn parse_cast_type_list_core(rest: &str) -> OracleResult<'_, (TargetFilter, usize, Option<()>)> {
+    let (rest, quantifier) = opt(parse_cast_quantifier_prefix).parse(rest)?;
+    // Strip optional "a "/"an " article (longest-first).
+    let (rest, _) = opt(alt((tag("an "), tag("a ")))).parse(rest)?;
+
+    let (rest, first) = parse_cast_type_leg(rest)?;
+    let (rest, more) =
+        many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg)).parse(rest)?;
     // CR 109.2b: the head noun is mandatory, so a bare type list with no noun
     // ("instant or sorcery" alone) still falls through to the normal parser
     // path.
-    let (_rest, ()) = parse_cast_head_noun(rest).ok()?;
+    let (rest, ()) = parse_cast_head_noun(rest)?;
 
     // CR 601.3: one leg with no quantifier is ordinary type-phrase territory —
     // `parse_type_phrase_folding` already handles it and can carry
     // controller/property legs this helper never builds. Reject, exactly as
     // before this helper was composed.
-    if more.is_empty() && quantifier.is_none() {
-        return None;
-    }
-    Some(cast_type_legs_filter(first, more))
+    let legs = more.len() + 1;
+    Ok((rest, (cast_type_legs_filter(first, more), legs, quantifier)))
 }
 
 /// CR 601.3 + CR 205.2b: the filter a cast type list names, built from its legs
@@ -42675,6 +42675,166 @@ fn clause_player_choice_count(clause: &ParsedEffectClause) -> u8 {
         })
 }
 
+fn source_cast_body(lower: &str) -> Option<String> {
+    let (_, _, _, body) = strip_optional_effect_prefix(lower);
+    let (body, _) = opt(tag::<_, _, OracleError<'_>>("you "))
+        .parse(body.as_str())
+        .ok()?;
+    let (body, _) = tag::<_, _, OracleError<'_>>("cast ").parse(body).ok()?;
+    Some(body.to_owned())
+}
+
+fn parse_indefinite_graveyard_domain(input: &str) -> OracleResult<'_, ()> {
+    let (_, _) = peek(tag("from a ")).parse(input)?;
+    let (properties, controller, consumed) =
+        super::oracle_target::parse_zone_suffix(input).ok_or_else(|| oracle_err(input))?;
+    if controller.is_some()
+        || properties
+            != vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]
+    {
+        return Err(oracle_err(input));
+    }
+    Ok((&input[consumed..], ()))
+}
+
+/// The grammar owns this attempted operation before any target/choice context
+/// is committed. CR 608.2c + CR 614.1a: its later exile rider changes the cast.
+fn owns_untargeted_dynamic_graveyard_cast(body: &str) -> bool {
+    let untargeted = preceded(
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        not(tag("target ")),
+    )
+    .parse(body)
+    .is_ok();
+    if !untargeted {
+        return false;
+    }
+    let Some((descriptor, _, operand)) = nom_primitives::scan_preceded(
+        body,
+        super::oracle_target::parse_dynamic_mana_value_descriptor,
+    ) else {
+        return false;
+    };
+    let Some((_, _, cost)) =
+        nom_primitives::scan_preceded(operand, parse_indefinite_graveyard_domain)
+    else {
+        return false;
+    };
+    // A genuine complete noun is preferred. An attempted malformed descriptor
+    // still owns its shell, so a failed type leg cannot publish a broad cast.
+    let noun = descriptor.trim_end();
+    let complete_noun = all_consuming(parse_cast_type_list_core).parse(noun).is_ok();
+    let attempted_noun =
+        nom_primitives::scan_at_word_boundaries(noun, parse_cast_head_noun_word).is_some();
+    if !complete_noun && !attempted_noun {
+        return false;
+    }
+    let complete_operand = super::oracle_target::parse_mana_value_suffix(
+        &body[descriptor.len()..],
+        &mut ParseContext::default(),
+    )
+    .is_some();
+    let complete_cost = all_consuming(preceded(
+        space0,
+        terminated(
+            tag::<_, _, OracleError<'_>>("without paying its mana cost"),
+            (opt(tag(".")), space0),
+        ),
+    ))
+    .parse(cost)
+    .is_ok();
+    (complete_operand && complete_cost)
+        || nom_primitives::scan_at_word_boundaries(
+            cost,
+            tag::<_, _, OracleError<'_>>("without paying "),
+        )
+        .is_some()
+}
+
+fn is_exile_graveyard_rider_attempt(lower: &str) -> bool {
+    if parse_spell_graveyard_replacement_rider(lower)
+        == Some(SpellStackToGraveyardReplacement::Exile)
+    {
+        return true;
+    }
+    // Retain an unknown exile suffix inside the same refused component.
+    (
+        tag::<_, _, OracleError<'_>>("if that spell would be put into "),
+        take_until(", "),
+        tag(", "),
+        tag("exile "),
+    )
+        .parse(lower)
+        .is_ok()
+}
+
+fn refuse_untargeted_dynamic_graveyard_windows(
+    full_text: &str,
+    chunks: Vec<ClauseChunk>,
+) -> (Vec<ClauseChunk>, Vec<bool>) {
+    let mut ranges = Vec::with_capacity(chunks.len());
+    let mut cursor = 0;
+    for chunk in &chunks {
+        // Locate already-issued fragments monotonically; recognition below is
+        // grammar-based. Repeated fragments never rewind source provenance.
+        let located =
+            take_until::<_, _, OracleError<'_>>(chunk.text.as_str()).parse(&full_text[cursor..]);
+        let range = match located {
+            Ok((_, prefix)) => {
+                let start = cursor + prefix.len();
+                cursor = start + chunk.text.len();
+                Some(start..cursor)
+            }
+            Err(_) => None,
+        };
+        ranges.push(range);
+    }
+    let mut refused = vec![false; chunks.len()];
+    let mut merged_end = vec![None; chunks.len()];
+    let mut skipped = vec![false; chunks.len()];
+    let mut nearest = None;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let lower = chunk.text.to_ascii_lowercase();
+        if let Some(body) = source_cast_body(&lower) {
+            let owned = owns_untargeted_dynamic_graveyard_cast(&body);
+            refused[index] = owned;
+            nearest = Some((index, owned));
+        } else if is_exile_graveyard_rider_attempt(&lower) {
+            if let Some((producer, true)) = nearest.take() {
+                refused[index] = true;
+                if producer + 1 == index {
+                    if let (Some(first), Some(last)) = (&ranges[producer], &ranges[index]) {
+                        let mut end = last.end;
+                        if let Ok((after, _)) =
+                            tag::<_, _, OracleError<'_>>(".").parse(&full_text[end..])
+                        {
+                            end = full_text.len() - after.len();
+                        }
+                        merged_end[producer] = Some((index, first.start..end));
+                        skipped[index] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    let mut owned_result = Vec::new();
+    for (index, mut chunk) in chunks.iter().cloned().enumerate() {
+        if skipped[index] {
+            continue;
+        }
+        if let Some((last, range)) = &merged_end[index] {
+            chunk.text = full_text[range.clone()].to_owned();
+            chunk.boundary_after = chunks[*last].boundary_after;
+        }
+        result.push(chunk);
+        owned_result.push(refused[index]);
+    }
+    (result, owned_result)
+}
+
 fn parse_effect_chain_ir_body(
     text: &str,
     kind: AbilityKind,
@@ -42824,6 +42984,8 @@ fn parse_effect_chain_ir_body(
     // Runs BEFORE `compute_sentence_where_x`, which is chunk-INDEX-keyed and must see the
     // final vector.
     let chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
+    let (chunks, refused_graveyard_windows) =
+        refuse_untargeted_dynamic_graveyard_windows(full_text, chunks);
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
     // one clause in a sentence binds X ("... and you gain X life, where X is <expr>"),
@@ -42957,6 +43119,15 @@ fn parse_effect_chain_ir_body(
         PtValue,
     )> = None;
     'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        if refused_graveyard_windows[chunk_idx] {
+            unimplemented_clause(
+                &mut builder,
+                "untargeted_dynamic_graveyard_cast_with_rider",
+                &chunk.text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -48269,6 +48440,40 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
 /// `Option<ControllerRef>` with no room for the fail-closed `UnboundAnaphor`
 /// state; `parse_put_ast` stores the full spec on the IR and the lowering site
 /// decides between a bound controller and an honest `Effect::unimplemented`.
+fn parse_complete_dynamic_put_entry_tail(input: &str) -> OracleResult<'_, ()> {
+    fn counters(input: &str) -> OracleResult<'_, ()> {
+        let (counters, span) = parse_with_counters_suffix_spanned(input);
+        match span {
+            Some(span) if span.start == 0 && !counters.is_empty() => Ok((&input[span.end..], ())),
+            _ => Err(oracle_err(input)),
+        }
+    }
+    let qualifier = |input| {
+        terminated(
+            value(
+                (),
+                alt((tag("tapped"), tag("attacking"), tag("transformed"))),
+            ),
+            peek(alt((
+                value((), space1),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        )
+        .parse(input)
+    };
+    let (rest, _) = many0(preceded(
+        space0,
+        preceded(
+            opt(tag("and ")),
+            alt((qualifier, value((), parse_control_clause), counters)),
+        ),
+    ))
+    .parse(input)?;
+    let (rest, _) = (space0, opt(tag(".")), space0, eof).parse(rest)?;
+    Ok((rest, ()))
+}
+
 fn try_parse_put_zone_change_parts(
     lower: &str,
     text: &str,
@@ -48370,11 +48575,31 @@ fn try_parse_put_zone_change_parts(
             };
             let pool_bound = plural_pool.is_some();
             let is_mass = is_mass || pool_bound;
+            let dynamic_descriptor = nom_primitives::scan_at_word_boundaries(
+                before.lower,
+                super::oracle_target::parse_dynamic_mana_value_descriptor,
+            )
+            .is_some();
+            // CR 608.2c: the owned dynamic Put must consume its descriptor AND
+            // entry rider before any executable ChangeZone is constructed.
+            if dynamic_descriptor && parse_complete_dynamic_put_entry_tail(after.lower).is_err() {
+                return None;
+            }
             let target = match plural_pool {
                 Some(pool) => pool,
                 None => {
-                    let parsed =
-                        parse_target_with_ctx(target_text, &mut ctx.clone_player_antecedents()).0;
+                    let (parsed, remainder) =
+                        parse_target_with_ctx(target_text, &mut ctx.clone_player_antecedents());
+                    if dynamic_descriptor
+                        && (matches!(parsed, TargetFilter::Any)
+                            || !remainder.trim().is_empty()
+                            || !crate::game::filter::filter_contains_filter_prop(
+                                &parsed,
+                                &|prop| matches!(prop, FilterProp::Cmc { .. }),
+                            ))
+                    {
+                        return None;
+                    }
                     // CR 608.2c: a definite plural subject ("the nonland cards
                     // revealed this way") restricts the anaphor's set to its named
                     // type. The determiner is not part of the type phrase, so when

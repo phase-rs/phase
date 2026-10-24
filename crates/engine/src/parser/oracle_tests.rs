@@ -1,5 +1,307 @@
 use super::*;
 
+mod nested_operand_publication {
+    use super::*;
+    use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
+    use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
+    use crate::types::ability::{PtValue, TargetChoiceTiming};
+    use crate::types::card::CardFace;
+    use crate::types::card_type::CardType;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+
+    const VESTIGE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
+    const SPECTRAL: &str = "Flying\nWhen this creature enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    const PUT: &str = "you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped";
+    const REFUSED: &str = "you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+
+    fn expected_body() -> AbilityDefinition {
+        // CR 608.2c + CR 608.2d: mandatory Draw precedes the optional resolution choice.
+        let put = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(TypedFilter {
+                                        type_filters: vec![TypeFilter::Land],
+                                        controller: Some(ControllerRef::You),
+                                        properties: vec![],
+                                    }),
+                                },
+                            },
+                        },
+                        FilterProp::InZone { zone: Zone::Hand },
+                    ],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+        .optional()
+        .target_choice_timing(TargetChoiceTiming::Resolution);
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(put)
+    }
+
+    // Independent complete constructors precede every production parse. Typed
+    // defaults assert absent categories, costs, modes, targets and metadata too.
+    fn cases() -> Vec<(crate::database::mtgjson::AtomicCard, CardFace)> {
+        let vestige = TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+            .valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile])
+            .execute(expected_body()).description("When ~ leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.".into());
+        let mut spectral = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield])
+            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("untargeted_dynamic_graveyard_cast_with_rider", REFUSED)).optional())
+            .optional().description("When ~ enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.".into());
+        spectral.destination = Some(Zone::Battlefield);
+        [
+            ("Anticausal Vestige", VESTIGE, "aceea999-90ab-472c-86a7-48af1542cbcf", "{6}", ManaCost::generic(6), 7, 5, vec!["Eldrazi"], vec![], vec![Keyword::Warp(ManaCost::generic(4))], vestige, vec!["Warp"]),
+            ("Spectral Arcanist", SPECTRAL, "aba60536-ffbd-480c-8e8f-9639bdc53d4b", "{3}{U}", ManaCost::Cost { generic: 3, shards: vec![ManaCostShard::Blue] }, 3, 2, vec!["Spirit", "Wizard"], vec![ManaColor::Blue], vec![Keyword::Flying], spectral, vec!["Flying"]),
+        ].into_iter().map(|(name, text, id, cost_text, cost, power, toughness, subtypes, colors, keywords, trigger, hints)| {
+            let expected = CardFace { name: name.into(), mana_cost: cost, card_type: CardType { core_types: vec![CoreType::Creature], subtypes: subtypes.iter().map(|s| (*s).into()).collect(), supertypes: vec![] }, power: Some(PtValue::Fixed(power)), toughness: Some(PtValue::Fixed(toughness)), oracle_text: Some(text.into()), keywords, triggers: vec![trigger], color_identity: colors, scryfall_oracle_id: Some(id.into()), ..Default::default() };
+            let card = serde_json::from_value(serde_json::json!({"name":name,"manaCost":cost_text,"manaValue":if power==7 {6}else{4},"types":["Creature"],"type":if power==7 {"Creature — Eldrazi"}else{"Creature — Spirit Wizard"},"subtypes":subtypes,"supertypes":[],"colors":if power==7 {vec![]}else{vec!["U"]},"colorIdentity":if power==7 {vec![]}else{vec!["U"]},"power":power.to_string(),"toughness":toughness.to_string(),"text":text,"keywords":hints,"layout":"normal","identifiers":{"scryfallOracleId":id},"legalities":{"commander":"Legal"}})).unwrap();
+            (card, expected)
+        }).collect()
+    }
+
+    #[test]
+    fn nested_complete_faces_prepare_ir_lower_synthesis_current_legacy_both_whole_loaders() {
+        let cases = cases();
+        let mut exports = serde_json::Map::new();
+        let mut expected_faces: Vec<_> = cases.iter().map(|(_, face)| face.clone()).collect();
+        for (index, (card, expected)) in cases.iter().enumerate() {
+            let prepared = crate::database::synthesis::prepare_oracle_parser_input(card, false);
+            assert_eq!(prepared.oracle_text, card.text.as_deref().unwrap());
+            let mut doc = parse_oracle_ir(
+                &prepared.oracle_text,
+                &prepared.card_name,
+                &prepared.keyword_names,
+                &card.types,
+                &card.subtypes,
+            );
+            let raw = card.text.as_deref().unwrap();
+            assert_eq!(doc.source_text, raw);
+            assert_eq!(doc.items.len(), 2);
+            for (line, item) in doc.items.iter().enumerate() {
+                assert_eq!(item.id, OracleItemId(line as u32));
+                let span = item.source.span();
+                assert_eq!(
+                    (
+                        span.first_line,
+                        span.last_line,
+                        span.ordinal_within_span,
+                        span.precision
+                    ),
+                    (line, line, 0, SpanPrecision::Exact)
+                );
+                let fragment = raw.lines().nth(line).unwrap();
+                assert_eq!(item.source.fragment(), Some(fragment));
+                assert_eq!(&raw[span.start_byte..span.end_byte], fragment);
+                assert!(
+                    item_ability(item).is_none()
+                        && item_static(item).is_none()
+                        && item_replacement(item).is_none()
+                );
+                if line == index {
+                    assert_eq!(item_trigger(item).as_deref(), Some(&expected.triggers[0]));
+                } else {
+                    let OracleNodeIr::Keyword(keyword) = &item.node else {
+                        panic!("fixed keyword source association: {item:#?}")
+                    };
+                    assert_eq!(keyword, &expected.keywords[0]);
+                }
+            }
+            if index == 0 {
+                let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &doc.items[0].node
+                else {
+                    panic!("native trigger decomposition")
+                };
+                let mut partial = TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+                    .valid_card(TargetFilter::SelfRef)
+                    .trigger_zones(vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile]);
+                partial.execute = None;
+                assert_eq!(trigger.partial_def, partial);
+                assert_eq!(trigger.condition, TriggerMode::LeavesBattlefield);
+                assert_eq!(
+                    trigger.source_text,
+                    expected.triggers[0].description.as_deref().unwrap()
+                );
+                assert_eq!(trigger.modifiers, crate::parser::oracle_ir::trigger::TriggerModifiers {
+                    optional: false, optional_player: None, unless_pay: None, intervening_if: None, trigger_subject: TargetFilter::SelfRef, first_time_limit: None, constraint: None, has_up_to: false,
+                    illegal_targets_disposition: crate::types::ability::IllegalTargetsDisposition::DoesNotResolve,
+                    effect_lower: "draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.".into(), relative_player_scope: None,
+                });
+                assert!(trigger.die_results.is_empty());
+                let Some(TriggerBody::EffectChain(chain)) = &trigger.body else {
+                    panic!("whole typed body")
+                };
+                assert_eq!(chain.clauses.len(), 2);
+                for (i, (clause, fragment)) in
+                    chain.clauses.iter().zip(["draw a card", PUT]).enumerate()
+                {
+                    assert_eq!(
+                        clause.id,
+                        crate::parser::oracle_ir::effect_chain::ClauseId(i as u32)
+                    );
+                    assert_eq!(clause.source.fragment(), Some(fragment));
+                    assert_eq!(clause.source.span().precision, SpanPrecision::ChainRelative);
+                    let body = expected_body();
+                    let effect = if i == 0 {
+                        *body.effect
+                    } else {
+                        *body.sub_ability.unwrap().effect
+                    };
+                    let mut expected_clause = crate::parser::oracle_ir::ast::parsed_clause(effect);
+                    expected_clause.optional = i == 1;
+                    assert_eq!(clause.parsed, expected_clause);
+                    let body_source = format!("draw a card, then {PUT}.");
+                    assert_eq!(
+                        &body_source
+                            [clause.source.span().start_byte..clause.source.span().end_byte],
+                        fragment
+                    );
+                }
+                let raw_trigger = crate::parser::oracle_trigger::parse_trigger_line(
+                    raw.lines().next().unwrap(),
+                    "Anticausal Vestige",
+                );
+                let mut raw_expected = expected.triggers[0].clone();
+                raw_expected.description = Some(raw.lines().next().unwrap().into());
+                assert_eq!(raw_trigger, raw_expected);
+            }
+            let lowered = lower_oracle_ir(&mut doc);
+            assert_eq!(lowered.abilities, expected.abilities);
+            assert_eq!(lowered.triggers, expected.triggers);
+            assert_eq!(lowered.statics, expected.static_abilities);
+            assert_eq!(lowered.replacements, expected.replacements);
+            assert_eq!(lowered.extracted_keywords, expected.keywords);
+            assert_eq!(lowered.modal, None);
+            assert_eq!(lowered.additional_cost, None);
+            assert_eq!(lowered.solve_condition, None);
+            assert_eq!(lowered.strive_cost, None);
+            assert!(
+                lowered.casting_options.is_empty()
+                    && lowered.casting_restrictions.is_empty()
+                    && lowered.parse_warnings.is_empty()
+            );
+            let face = crate::database::synthesis::build_oracle_face(
+                card,
+                card.identifiers.scryfall_oracle_id.clone(),
+            );
+            assert_eq!(&face, expected);
+            assert_eq!(
+                crate::game::coverage::card_face_gaps(&face).is_empty(),
+                index == 0
+            );
+            let mut entry = serde_json::to_value(&face).unwrap();
+            entry["layout"] = serde_json::json!("normal");
+            entry["face_index"] = serde_json::json!(0);
+            entry["legalities"] = serde_json::json!({"commander":"Legal"});
+            exports.insert(expected.name.to_lowercase(), entry);
+        }
+        // Complete synthetic grammar controls share the SAME whole export.
+        for (index, (source, quantity)) in [
+            ("Creatures with mana value less than or equal to the number of lands you control have flying.", QuantityRef::ObjectCount { filter: TargetFilter::Typed(TypedFilter { type_filters: vec![TypeFilter::Land], controller: Some(ControllerRef::You), properties: vec![] }) }),
+            ("Creatures with mana value less than or equal to the number of cards in your graveyard have flying.", QuantityRef::ZoneCardCount { zone: crate::types::ability::ZoneRef::Graveyard, scope: crate::types::ability::CountScope::Controller, card_types: vec![], filter: None }),
+        ].into_iter().enumerate() {
+            let name = format!("Synthetic complete nested comparator {index}");
+            let id = format!("00000000-0000-0000-0000-00000000000{}", index + 1);
+            let definition = StaticDefinition::continuous().affected(TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc { comparator: Comparator::LE, value: QuantityExpr::Ref { qty: quantity } }]))).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::Flying }]).description(source.into());
+            let expected = CardFace { name: name.clone(), mana_cost: ManaCost::generic(0), card_type: CardType { core_types: vec![CoreType::Enchantment], subtypes: vec![], supertypes: vec![] }, oracle_text: Some(source.into()), static_abilities: vec![definition.clone()], scryfall_oracle_id: Some(id.clone()), ..Default::default() };
+            let card: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({"name":name,"types":["Enchantment"],"type":"Enchantment","subtypes":[],"supertypes":[],"manaCost":"{0}","manaValue":0,"colors":[],"colorIdentity":[],"text":source,"layout":"normal","identifiers":{"scryfallOracleId":id}})).unwrap();
+            let prepared = crate::database::synthesis::prepare_oracle_parser_input(&card, false);
+            let mut doc = parse_oracle_ir(&prepared.oracle_text, &prepared.card_name, &prepared.keyword_names, &card.types, &card.subtypes);
+            assert_eq!(doc.items.len(), 1);
+            let item = &doc.items[0];
+            assert_eq!(item.id, OracleItemId(0));
+            assert_eq!(item_static(item), Some(&definition));
+            assert!(item_trigger(item).is_none() && item_ability(item).is_none() && item_replacement(item).is_none());
+            assert_eq!(item.source.fragment(), Some(source));
+            assert_eq!((item.source.span().first_line, item.source.span().ordinal_within_span, item.source.span().precision), (0, 0, SpanPrecision::Exact));
+            let parsed = lower_oracle_ir(&mut doc);
+            assert_eq!(parsed.statics, vec![definition]);
+            assert!(parsed.abilities.is_empty() && parsed.triggers.is_empty() && parsed.replacements.is_empty() && parsed.extracted_keywords.is_empty() && parsed.casting_restrictions.is_empty() && parsed.casting_options.is_empty() && parsed.parse_warnings.is_empty());
+            assert_eq!((parsed.modal, parsed.additional_cost, parsed.solve_condition, parsed.strive_cost), (None, None, None, None));
+            assert_eq!(crate::database::synthesis::build_oracle_face(&card, Some(id)), expected);
+            let mut entry = serde_json::to_value(&expected).unwrap();
+            entry["layout"] = serde_json::json!("normal"); entry["face_index"] = serde_json::json!(0);
+            exports.insert(expected.name.to_lowercase(), entry);
+            expected_faces.push(expected);
+        }
+        for legacy in [false, true] {
+            let mut entries = exports.clone();
+            if legacy {
+                for value in entries.values_mut() {
+                    for key in [
+                        "casting_options",
+                        "casting_restrictions",
+                        "solve_condition",
+                        "strive_cost",
+                        "additional_cost",
+                        "parse_warnings",
+                    ] {
+                        value.as_object_mut().unwrap().remove(key);
+                    }
+                    for key in ["power", "toughness"] {
+                        if let Some(number) = value[key]["value"].as_i64() {
+                            value[key] = serde_json::json!(number.to_string());
+                        }
+                    }
+                    // Nondefault SelfRef/functioning zones/complete body remain present.
+                }
+            }
+            let whole = serde_json::to_string(&entries).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), whole.as_bytes()).unwrap();
+            for database in [
+                crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+                crate::database::CardDatabase::from_export(file.path()).unwrap(),
+            ] {
+                for expected in &expected_faces {
+                    assert_eq!(database.get_face_by_name(&expected.name), Some(expected));
+                    assert_eq!(
+                        database.get_layout_kind(expected.scryfall_oracle_id.as_deref().unwrap()),
+                        None
+                    );
+                    let indexed: serde_json::Value = serde_json::from_str(
+                        &database
+                            .export_subset_json(&[expected.name.clone()].into_iter().collect()),
+                    )
+                    .unwrap();
+                    let value = &indexed[expected.name.to_lowercase()];
+                    assert_eq!(value["face_index"], 0);
+                    assert_eq!(value["layout"], serde_json::Value::Null);
+                    assert_eq!(
+                        serde_json::from_value::<CardFace>(value.clone()).unwrap(),
+                        *expected
+                    );
+                }
+            }
+        }
+    }
+}
+
 mod relative_population_publication {
     use super::*;
     use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};

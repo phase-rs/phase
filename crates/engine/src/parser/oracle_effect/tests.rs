@@ -7,6 +7,335 @@ use super::*;
 use crate::parser::oracle::has_unimplemented as has_unimplemented_ability;
 
 #[test]
+fn nested_vestige_complete_card_keeps_independent_dedicated_ltb_header_and_body() {
+    const SOURCE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
+    // CR 603.6c + CR 608.2c: the dedicated self-LTB header owns mandatory
+    // Draw, with only the following resolution-time Put optional.
+    let body = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(TypedFilter {
+                                        type_filters: vec![TypeFilter::Land],
+                                        controller: Some(ControllerRef::You),
+                                        properties: vec![],
+                                    }),
+                                },
+                            },
+                        },
+                        FilterProp::InZone { zone: Zone::Hand },
+                    ],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+        .optional()
+        .target_choice_timing(TargetChoiceTiming::Resolution),
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile])
+        .execute(body)
+        .description("When ~ leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.".into());
+    let expected = crate::parser::oracle::ParsedAbilities {
+        abilities: vec![],
+        triggers: vec![trigger],
+        statics: vec![],
+        replacements: vec![],
+        extracted_keywords: vec![Keyword::Warp(ManaCost::generic(4))],
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: vec![],
+    };
+    let actual = crate::parser::parse_oracle_text(
+        SOURCE,
+        "Anticausal Vestige",
+        &["Warp".into()],
+        &["Creature".into()],
+        &["Eldrazi".into()],
+    );
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+}
+
+#[test]
+fn nested_put_owns_complete_descriptor_and_entry_tail() {
+    // SHAPE: CR 608.2c: all of the descriptor and entry rider belong to Put.
+    let source = "Put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped";
+    let parsed = parse_effect_chain(source, AbilityKind::Spell);
+    assert!(!has_unimplemented_ability(&parsed), "{parsed:#?}");
+    let Effect::ChangeZone {
+        target,
+        origin,
+        destination,
+        enter_tapped,
+        ..
+    } = parsed.effect.as_ref()
+    else {
+        panic!("complete Put: {parsed:#?}")
+    };
+    assert_eq!(*origin, Some(Zone::Hand));
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enter_tapped, crate::types::zones::EtbTapState::Tapped);
+    assert_eq!(
+        target,
+        &TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                controller: Some(ControllerRef::You),
+                                properties: vec![]
+                            })
+                        }
+                    }
+                },
+                FilterProp::InZone { zone: Zone::Hand }
+            ],
+        })
+    );
+    for malformed in [
+        source.replace("lands you control", "mysteries you control"),
+        source.replace("from your hand", "from your mystery"),
+        source.replace("onto the battlefield", "unknown onto the battlefield"),
+        format!("{source} inexplicably"),
+        source.replace("permanent card", "mystery card"),
+    ] {
+        let mut context = ParseContext::default();
+        let trial = parse_effect_chain_with_context(&malformed, AbilityKind::Spell, &mut context);
+        assert!(
+            has_unimplemented_ability(&trial),
+            "whole failed Put: {malformed}: {trial:#?}"
+        );
+        assert!(
+            !matches!(*trial.effect, Effect::ChangeZone { .. }),
+            "no executable broad prefix"
+        );
+        assert_eq!(context.target_chooser, None);
+    }
+}
+
+#[test]
+fn untargeted_dynamic_graveyard_cast_refuses_exact_whole_source_windows() {
+    // SHAPE: CR 608.2c + CR 614.1a: the dependent replacement modifies its cast.
+    const CAST: &str = "You may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost";
+    const RIDER: &str = "If that spell would be put into a graveyard, exile it instead";
+    const GAP: &str = "untargeted_dynamic_graveyard_cast_with_rider";
+    for between in [". ", ". Draw a card. "] {
+        let source = format!("{CAST}{between}{RIDER}.");
+        let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut ParseContext::default());
+        let expected_fragments = if between == ". " {
+            vec![source.as_str()]
+        } else {
+            vec![CAST, "Draw a card", RIDER]
+        };
+        assert_eq!(ir.clauses.len(), expected_fragments.len(), "{ir:#?}");
+        for (index, (clause, fragment)) in ir.clauses.iter().zip(expected_fragments).enumerate() {
+            assert_eq!(clause.id, ClauseId(index as u32));
+            assert_eq!(clause.source.fragment(), Some(fragment));
+            let span = clause.source.span();
+            assert_eq!(&source[span.start_byte..span.end_byte], fragment);
+            assert!(!span.is_exact(), "clause source is chain-relative");
+            if fragment == "Draw a card" {
+                assert_eq!(
+                    clause.parsed.effect,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller
+                    }
+                );
+            } else {
+                assert_eq!(clause.parsed.effect, Effect::unimplemented(GAP, fragment));
+            }
+        }
+    }
+    for malformed in [
+        CAST.replace("Spirits you control", "mysteries you control"),
+        CAST.replace("instant or sorcery", "instant or mysterious"),
+        CAST.replace(
+            "without paying its mana cost",
+            "without paying its mana cost inexplicably",
+        ),
+        CAST.replace("spell with", "spell unknown with"),
+        CAST.replace("from a graveyard", "from a graveyard inexplicably"),
+    ] {
+        let source = format!("{malformed}. {RIDER}. Draw a card.");
+        let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2);
+        assert_eq!(
+            ir.clauses[0].parsed.effect,
+            Effect::unimplemented(GAP, format!("{malformed}. {RIDER}."))
+        );
+        assert!(matches!(ir.clauses[1].parsed.effect, Effect::Draw { .. }));
+    }
+    // Two printed producers: the singular rider belongs to the second one.
+    let twice = format!("{CAST}. {CAST}. {RIDER}. Draw a card.");
+    let ir = parse_effect_chain_ir(&twice, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 3);
+    let second = format!("{CAST}. {RIDER}.");
+    let mut next_offset = 0;
+    for (index, (clause, fragment)) in ir
+        .clauses
+        .iter()
+        .zip([CAST, second.as_str(), "Draw a card"])
+        .enumerate()
+    {
+        assert_eq!(clause.id, ClauseId(index as u32));
+        assert_eq!(clause.source.fragment(), Some(fragment));
+        let span = clause.source.span();
+        assert!(span.start_byte >= next_offset);
+        assert_eq!(&twice[span.start_byte..span.end_byte], fragment);
+        next_offset = span.end_byte;
+        assert_eq!(
+            clause.parsed.effect,
+            if index < 2 {
+                Effect::unimplemented(GAP, fragment)
+            } else {
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }
+            }
+        );
+    }
+    for suffix in [" inexplicably", " except mysteriously"] {
+        let source = format!("{CAST}. {RIDER}{suffix}. Draw a card.");
+        let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2);
+        assert_eq!(
+            ir.clauses[0].parsed.effect,
+            Effect::unimplemented(GAP, format!("{CAST}. {RIDER}{suffix}."))
+        );
+        assert_eq!(
+            ir.clauses[1].parsed.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller
+            }
+        );
+    }
+    // A genuinely different nearest producer cannot donate its rider to the
+    // first gap. This does not certify support for the singular exile rider.
+    let targeted =
+        "You may cast target instant card from your graveyard without paying its mana cost";
+    let source = format!("{CAST}. {targeted}. {RIDER}. Draw a card.");
+    let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses[0].source.fragment(), Some(CAST));
+    assert_eq!(
+        ir.clauses[0].parsed.effect,
+        Effect::unimplemented(GAP, CAST)
+    );
+    assert_eq!(ir.clauses[1].source.fragment(), Some(targeted));
+    assert!(matches!(
+        ir.clauses[1].parsed.effect,
+        Effect::CastFromZone { .. }
+    ));
+    assert_eq!(
+        ir.clauses.last().unwrap().parsed.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller
+        }
+    );
+    let mut context = ParseContext::default();
+    let before = format!("{context:?}");
+    let ambiguous = CAST.replace(
+        "an instant or sorcery spell",
+        "an instant spell or another sorcery spell",
+    );
+    let ambiguous_source = format!("{ambiguous}. {RIDER}. Draw a card.");
+    let ambiguous_ir = parse_effect_chain_ir(&ambiguous_source, AbilityKind::Spell, &mut context);
+    assert_eq!(ambiguous_ir.clauses.len(), 2);
+    assert_eq!(
+        ambiguous_ir.clauses[0].parsed.effect,
+        Effect::unimplemented(GAP, format!("{ambiguous}. {RIDER}."))
+    );
+    assert_eq!(
+        ambiguous_ir.clauses[1].parsed.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller
+        }
+    );
+    assert_eq!(format!("{context:?}"), before);
+    // Synthetic ambiguous atomic instruction has TWO cast verbs. Neither
+    // printed producer can borrow an executable prefix from the other.
+    let two_producers = format!("{CAST} or you may cast an instant spell with mana value less than or equal to the number of lands you control from a graveyard without paying its mana cost. {RIDER}.");
+    let ambiguous_source = format!("{two_producers} Draw a card.");
+    let ambiguous_ir = parse_effect_chain_ir(&ambiguous_source, AbilityKind::Spell, &mut context);
+    assert_eq!(ambiguous_ir.clauses.len(), 2);
+    for (index, (clause, fragment)) in ambiguous_ir
+        .clauses
+        .iter()
+        .zip([two_producers.as_str(), "Draw a card"])
+        .enumerate()
+    {
+        assert_eq!(clause.id, ClauseId(index as u32));
+        assert_eq!(clause.source.fragment(), Some(fragment));
+        let span = clause.source.span();
+        assert_eq!(&ambiguous_source[span.start_byte..span.end_byte], fragment);
+        assert_eq!(
+            clause.parsed.effect,
+            if index == 0 {
+                Effect::unimplemented(GAP, fragment)
+            } else {
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }
+            }
+        );
+    }
+    assert_eq!(format!("{context:?}"), before);
+    let source = format!("{CAST}. {RIDER}.");
+    let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut context);
+    assert_eq!(ir.clauses.len(), 1);
+    assert_eq!(ir.clauses[0].id, ClauseId(0));
+    assert_eq!(
+        format!("{context:?}"),
+        before,
+        "refused trials publish no target, chooser, anaphor or diagnostic context"
+    );
+}
+
+#[test]
 fn relative_collision_firebolt_and_stoke_keep_complete_spell_vectors() {
     // SHAPE: expectations derive from each complete pinned instruction.
     let collision = "Choose one —\n• Collision Course deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.\n• Destroy target artifact.";

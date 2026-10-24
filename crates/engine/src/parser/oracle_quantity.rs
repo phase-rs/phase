@@ -30,6 +30,46 @@ mod retained_spell_history_tests {
     use super::*;
 
     #[test]
+    fn nested_operand_legacy_complete_delegates_keep_battlefield_and_zoned_cards_distinct() {
+        // SHAPE: CR 109.2 + CR 109.2a: unzoned permanents and zoned cards differ.
+        for (source, expected) in [
+            (
+                "the number of lands you control",
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                },
+            ),
+            (
+                "the number of cards in your graveyard",
+                QuantityRef::ZoneCardCount {
+                    zone: crate::types::ability::ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                    card_types: vec![],
+                    filter: None,
+                },
+            ),
+        ] {
+            assert_eq!(parse_quantity_ref(source), Some(expected.clone()));
+            assert_eq!(
+                parse_cda_quantity(source),
+                Some(QuantityExpr::Ref { qty: expected })
+            );
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            assert!(parse_cda_quantity_with_context(
+                &format!("{source} inexplicably"),
+                &mut context
+            )
+            .is_none());
+            assert_eq!(format!("{context:?}"), before);
+        }
+    }
+
+    #[test]
     fn relative_population_legacy_and_cda_delegates_are_complete() {
         // SHAPE: the legacy entry points retain the same complete noun class.
         let expected = QuantityRef::ObjectCount {

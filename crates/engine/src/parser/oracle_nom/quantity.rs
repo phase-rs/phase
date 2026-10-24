@@ -96,6 +96,292 @@ pub fn parse_quantity_ref_complete(input: &str) -> OracleResult<'_, QuantityRef>
     all_consuming(parse_quantity_ref).parse(input)
 }
 
+/// Parse a complete controlled population before a caller-owned outer domain.
+/// CR 109.2 + CR 608.2c: the outer card's zone does not qualify the inner noun.
+/// Ordinary quantities, including explicitly zoned card counts, decline this
+/// adapter so their existing quantity productions retain their own extent.
+pub(crate) fn parse_quantity_ref_before_outer_domain<'a, O, F>(
+    input: &'a str,
+    mut outer_domain: F,
+) -> OracleResult<'a, QuantityRef>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, O>,
+{
+    let (_, _) = tag("the number of ").parse(input)?;
+    let mut owned_failure = None;
+    let found = super::primitives::scan_at_word_boundaries(input, |suffix| {
+        let (_, _) = peek(tag("from ")).parse(suffix)?;
+        let operand = input[..input.len() - suffix.len()].trim_end();
+        let owned_controller = super::primitives::scan_at_word_boundaries(operand, |candidate| {
+            map_opt(parse_controller_phrase, |phrase| {
+                match (phrase.subject, phrase.tense) {
+                    (ControllerSubject::Direct(controller), ControllerTense::Present)
+                        if admits_quantity_controller(&controller, phrase.form) =>
+                    {
+                        Some(controller)
+                    }
+                    _ => None,
+                }
+            })
+            .parse(candidate)
+        });
+        let quantity = match all_consuming(parse_quantity_ref).parse(operand) {
+            Ok((_, qty @ QuantityRef::ObjectCount { .. })) => qty,
+            Ok(_) => return Err(oracle_err(input)),
+            Err(error) if owned_controller.is_some() => {
+                owned_failure = Some(match error {
+                    nom::Err::Error(error) | nom::Err::Failure(error) => nom::Err::Failure(error),
+                    nom::Err::Incomplete(needed) => nom::Err::Incomplete(needed),
+                });
+                return Err(oracle_err(suffix));
+            }
+            Err(_) => return Err(oracle_err(input)),
+        };
+        let QuantityRef::ObjectCount { filter } = &quantity else {
+            unreachable!()
+        };
+        if !quantity_filter_has_meaningful_content(filter)
+            || owned_controller.as_ref() != quantity_filter_controller(filter)
+            || owned_controller.is_none()
+        {
+            owned_failure = Some(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+            return Err(oracle_err(suffix));
+        }
+        match outer_domain(suffix) {
+            Ok((after, _)) if after.len() < suffix.len() => Ok((suffix, (suffix, quantity))),
+            Ok(_) => {
+                owned_failure = Some(nom::Err::Failure(nom::error::Error::new(
+                    suffix,
+                    nom::error::ErrorKind::Many0,
+                )));
+                Err(oracle_err(suffix))
+            }
+            Err(nom::Err::Error(error) | nom::Err::Failure(error)) => {
+                owned_failure = Some(nom::Err::Failure(error));
+                Err(oracle_err(suffix))
+            }
+            Err(nom::Err::Incomplete(needed)) => {
+                owned_failure = Some(nom::Err::Incomplete(needed));
+                Err(oracle_err(suffix))
+            }
+        }
+    });
+    found.ok_or_else(|| owned_failure.unwrap_or_else(|| oracle_err(input)))
+}
+
+#[cfg(test)]
+mod outer_domain_quantity_tests {
+    use super::*;
+
+    fn hand_boundary(input: &str) -> OracleResult<'_, &str> {
+        tag("from your hand").parse(input)
+    }
+
+    #[test]
+    fn bounded_operand_keeps_post_controller_relative_and_base_property() {
+        // SHAPE: the entire nominal population, not a controller-ending prefix.
+        for (words, controller) in [
+            ("you control", ControllerRef::You),
+            (
+                "the chosen player controls",
+                ControllerRef::SourceChosenPlayer,
+            ),
+            ("defending player controls", ControllerRef::DefendingPlayer),
+            ("your opponents control", ControllerRef::Opponent),
+        ] {
+            let source = format!("the number of other creatures {words} that are Spirits and/or enchantments from your hand, tail");
+            let expected = QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![
+                        TypeFilter::AnyOf(vec![
+                            TypeFilter::Subtype("Spirit".into()),
+                            TypeFilter::Enchantment,
+                        ]),
+                        TypeFilter::Creature,
+                    ],
+                    controller: Some(controller),
+                    properties: vec![FilterProp::Another],
+                }),
+            };
+            assert_eq!(
+                parse_quantity_ref_before_outer_domain(&source, hand_boundary),
+                Ok(("from your hand, tail", expected))
+            );
+        }
+        let expected = QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![
+                    FilterProp::Another,
+                    FilterProp::PtComparison {
+                        stat: crate::types::ability::PtStat::Power,
+                        scope: crate::types::ability::PtValueScope::Base,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }),
+        };
+        assert_eq!(
+            parse_quantity_ref_before_outer_domain(
+                "the number of other creatures you control with base power 1 from your hand",
+                hand_boundary
+            ),
+            Ok(("from your hand", expected))
+        );
+        let expected = QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Named {
+                    name: "from nowhere".into(),
+                }],
+            }),
+        };
+        assert_eq!(
+            parse_quantity_ref_before_outer_domain(
+                "the number of permanents named from nowhere you control from your hand",
+                hand_boundary
+            ),
+            Ok(("from your hand", expected))
+        );
+    }
+
+    #[test]
+    fn controlled_operand_keeps_whole_population_and_exact_outer_remainder() {
+        // SHAPE: CR 109.2: the unzoned controlled noun denotes permanents.
+        for (controller_text, controller) in [
+            ("you control", ControllerRef::You),
+            (
+                "the chosen player controls",
+                ControllerRef::SourceChosenPlayer,
+            ),
+            ("defending player controls", ControllerRef::DefendingPlayer),
+            ("your opponents control", ControllerRef::Opponent),
+        ] {
+            let operand = format!("the number of lands {controller_text}");
+            let input = format!("{operand} from your hand, retained");
+            assert_eq!(
+                parse_quantity_ref_before_outer_domain(&input, hand_boundary),
+                Ok((
+                    "from your hand, retained",
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Land],
+                            controller: Some(controller),
+                            properties: vec![],
+                        }),
+                    }
+                ))
+            );
+        }
+        for (operand, type_filters, properties) in [
+            (
+                "the number of green creatures you control",
+                vec![TypeFilter::Creature],
+                vec![FilterProp::HasColor {
+                    color: crate::types::mana::ManaColor::Green,
+                }],
+            ),
+            (
+                "the number of other legendary creatures you control",
+                vec![TypeFilter::Creature],
+                vec![
+                    FilterProp::Another,
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Legendary,
+                    },
+                ],
+            ),
+            (
+                "the number of creatures you control that are Spirits and/or enchantments",
+                vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Spirit".into()),
+                        TypeFilter::Enchantment,
+                    ]),
+                    TypeFilter::Creature,
+                ],
+                vec![],
+            ),
+            (
+                "the number of permanents named food fight you control",
+                vec![TypeFilter::Permanent],
+                vec![FilterProp::Named {
+                    name: "food fight".into(),
+                }],
+            ),
+            (
+                "the number of artifacts and/or creatures you control",
+                vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])],
+                vec![],
+            ),
+        ] {
+            let expected = QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }),
+            };
+            assert_eq!(
+                parse_quantity_ref_before_outer_domain(
+                    &format!("{operand} from your hand"),
+                    hand_boundary
+                ),
+                Ok(("from your hand", expected))
+            );
+        }
+    }
+
+    #[test]
+    fn owned_malformed_operand_and_nullable_boundary_cannot_escape() {
+        let positive = "the number of lands you control from your hand";
+        assert!(parse_quantity_ref_before_outer_domain(positive, hand_boundary).is_ok());
+        for input in [
+            "the number of lands you control from your mystery",
+            "the number of mysteries you control from your hand",
+            "the number of creatures you control that are Spirits and/or from your hand",
+            "the number of creatures you control that are unknown from your hand",
+            "the number of lands you control unexplained from your hand",
+            "the number of lands you control an opponent controls from your hand",
+            "the number of creatures you control that are Spirits or have from your hand",
+            "the number of creatures you control that are Spirits and from your hand",
+        ] {
+            assert!(
+                matches!(
+                    parse_quantity_ref_before_outer_domain(input, hand_boundary),
+                    Err(nom::Err::Failure(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(matches!(
+            parse_quantity_ref_before_outer_domain(positive, |i| Ok((i, ()))),
+            Err(nom::Err::Failure(_))
+        ));
+        for input in [
+            "the number of cards in your graveyard from your hand",
+            "the amount of life you gained this turn from your hand",
+        ] {
+            assert!(
+                matches!(
+                    parse_quantity_ref_before_outer_domain(input, hand_boundary),
+                    Err(nom::Err::Error(_))
+                ),
+                "ordinary quantity retains its own grammar: {input}"
+            );
+        }
+    }
+}
+
 pub fn parse_for_each_clause_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, mut qty) = parse_for_each_clause_ref_complete_deferred(input)?;
     // CR 608.2k: a caller reaching this entry has no antecedent for a deferred

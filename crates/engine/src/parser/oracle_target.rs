@@ -1,6 +1,120 @@
 use std::str::FromStr;
 
 #[cfg(test)]
+mod nested_operand_extent_tests {
+    use super::*;
+
+    #[test]
+    fn nested_comparators_preserve_genuine_inner_card_zone_and_outer_hand() {
+        // SHAPE: CR 109.2a: this explicitly zoned inner card population is genuine.
+        for (words, comparator) in [
+            ("equal to", Comparator::EQ),
+            ("less than or equal to", Comparator::LE),
+            ("greater than or equal to", Comparator::GE),
+        ] {
+            let input = format!(
+                "with mana value {words} the number of cards in your graveyard from your hand"
+            );
+            let expected = FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: crate::types::ability::ZoneRef::Graveyard,
+                        scope: crate::types::ability::CountScope::Controller,
+                        card_types: vec![],
+                        filter: None,
+                    },
+                },
+            };
+            let (actual, consumed) =
+                parse_mana_value_suffix(&input, &mut ParseContext::default()).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(&input[consumed..], "from your hand");
+        }
+    }
+
+    #[test]
+    fn dynamic_comparators_leave_outer_domain_out_of_complete_operand() {
+        // SHAPE: CR 109.2 + CR 202.3: the BF population is the comparand.
+        for (comparison, comparator, offset) in [
+            ("less than or equal to", Comparator::LE, 0),
+            ("greater than or equal to", Comparator::GE, 0),
+            ("equal to", Comparator::EQ, 0),
+            ("less than", Comparator::LE, -1),
+            ("greater than", Comparator::GE, 1),
+        ] {
+            for (noun, kind, zone) in [
+                ("lands", TypeFilter::Land, "from your hand"),
+                (
+                    "Spirits",
+                    TypeFilter::Subtype("Spirit".into()),
+                    "from a graveyard",
+                ),
+            ] {
+                let input = format!(
+                    "with mana value {comparison} the number of {} you control {zone}",
+                    noun.to_lowercase()
+                );
+                let (actual, consumed) =
+                    parse_mana_value_suffix(&input, &mut ParseContext::default()).unwrap();
+                let reference = QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![kind],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    },
+                };
+                let value = if offset == 0 {
+                    reference
+                } else {
+                    QuantityExpr::Offset {
+                        inner: Box::new(reference),
+                        offset,
+                    }
+                };
+                assert_eq!(actual, FilterProp::Cmc { comparator, value });
+                assert_eq!(&input[consumed..], zone);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_operand_strict_failures_do_not_retry_an_unbounded_quantity() {
+        for comparison in [
+            "less than or equal to",
+            "greater than or equal to",
+            "equal to",
+        ] {
+            let positive = format!(
+                "with mana value {comparison} the number of lands you control from your hand"
+            );
+            assert!(parse_mana_value_suffix(&positive, &mut ParseContext::default()).is_some());
+            for operand in [
+                "lands you control from your mystery",
+                "mysteries you control from your hand",
+                "creatures you control that are Spirits and/or from your hand",
+                "lands you control unexplained from your hand",
+                "lands an opponent controls from your hand",
+                "lands you controlled from your hand",
+                "lands you don't control from your hand",
+                "creatures you control that are Spirits or have from your hand",
+            ] {
+                let input = format!("with mana value {comparison} the number of {operand}");
+                let mut context = ParseContext::default();
+                let before = format!("{context:?}");
+                assert!(
+                    parse_mana_value_suffix(&input, &mut context).is_none(),
+                    "{input}"
+                );
+                assert_eq!(format!("{context:?}"), before);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod u14_quality_tests {
     use super::*;
 
@@ -193,7 +307,7 @@ mod prior_controller_population_tests {
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::character::complete::{multispace0, one_of, satisfy, space1};
+use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
@@ -7081,6 +7195,36 @@ fn parse_suffix_subject_head(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+fn parse_mana_value_comparison(input: &str) -> OracleResult<'_, (Comparator, i32)> {
+    let (rest, direction) = alt((
+        value(Comparator::EQ, tag("equal to ")),
+        value(Comparator::LE, tag("less than")),
+        value(Comparator::GE, tag("greater than")),
+    ))
+    .parse(input)?;
+    if direction == Comparator::EQ {
+        return Ok((rest, (direction, 0)));
+    }
+    let (rest, equal) = opt(preceded(space0, tag("or equal to"))).parse(rest)?;
+    let (rest, _) = space0.parse(rest)?;
+    let offset = match (direction, equal.is_some()) {
+        (_, true) => 0,
+        (Comparator::LE, false) => -1,
+        (Comparator::GE, false) => 1,
+        _ => unreachable!(),
+    };
+    Ok((rest, (direction, offset)))
+}
+
+/// Recognize the attempted dynamic descriptor even when its noun fails later.
+pub(crate) fn parse_dynamic_mana_value_descriptor(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_suffix_subject_head(input)?;
+    let (input, _) = alt((tag("mana value "), tag("converted mana cost "))).parse(input)?;
+    let (input, _) = parse_mana_value_comparison(input)?;
+    let (input, _) = peek(tag("the number of ")).parse(input)?;
+    Ok((input, ()))
+}
+
 /// Parse "with/that have/that each have mana value N or less" / "… or greater"
 /// suffixes, dynamic "with mana value less than or equal to that [type]"
 /// patterns, the elliptical possessive "with that spell's mana value" form, and
@@ -7262,21 +7406,32 @@ pub(crate) fn parse_mana_value_suffix(
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
     type Vbe<'a> = OracleError<'a>;
     let try_dynamic = |rest: &str, is_le: bool| -> Option<(FilterProp, usize)> {
-        let kw_tag = if is_le { "less than" } else { "greater than" };
-        let (a, _) = tag::<_, _, Vbe>(kw_tag).parse(rest).ok()?;
-        let a = a.trim_start();
-        let (is_equal, a) = if let Ok((a2, _)) = tag::<_, _, Vbe>("or equal to").parse(a) {
-            (true, a2.trim_start())
-        } else {
-            (false, a)
-        };
+        let (a, (comparator, offset)) = parse_mana_value_comparison(rest).ok()?;
+        if comparator
+            != if is_le {
+                Comparator::LE
+            } else {
+                Comparator::GE
+            }
+        {
+            return None;
+        }
         // CR 120.3: Anaphoric "that <noun>" forms — bind to the trigger context.
         // CR 119.3: Non-anaphoric quantity-ref forms — bind to a static or
         // game-state quantity ("the number of lands you control",
         // "the number of cards in your graveyard", "the amount of life you
         // gained this turn", etc.). The two forms are mutually exclusive at
         // this position; try anaphoric first, then fall through.
-        let (qty, after) = if let Ok((a2, _)) = tag::<_, _, Vbe>("that ").parse(a) {
+        let bounded = match nom_quantity::parse_quantity_ref_before_outer_domain(a, |i| {
+            preceded(peek(tag("from ")), parse_zone_suffix_nom).parse(i)
+        }) {
+            Ok(parsed) => Some(parsed),
+            Err(nom::Err::Error(_)) => None,
+            Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
+        };
+        let (qty, after) = if let Some((after, qty)) = bounded {
+            (qty, after)
+        } else if let Ok((a2, _)) = tag::<_, _, Vbe>("that ").parse(a) {
             // CR 120.3: "that damage" — the damage amount captured by the trigger
             // (DamageDone events stamp `EventContextAmount`).
             if let Ok((a3, _)) = tag::<_, _, Vbe>("damage").parse(a2) {
@@ -7341,23 +7496,9 @@ pub(crate) fn parse_mana_value_suffix(
                 }
             }
         };
-        let prop = match (is_le, is_equal) {
-            (true, true) => FilterProp::Cmc {
-                comparator: Comparator::LE,
-                value: make_value(0),
-            },
-            (true, false) => FilterProp::Cmc {
-                comparator: Comparator::LE,
-                value: make_value(-1),
-            },
-            (false, true) => FilterProp::Cmc {
-                comparator: Comparator::GE,
-                value: make_value(0),
-            },
-            (false, false) => FilterProp::Cmc {
-                comparator: Comparator::GE,
-                value: make_value(1),
-            },
+        let prop = FilterProp::Cmc {
+            comparator,
+            value: make_value(offset),
         };
         Some((prop, text.len() - after.len()))
     };
@@ -7374,6 +7515,39 @@ pub(crate) fn parse_mana_value_suffix(
     // ("that damage"), and game-state counts ("the number of lands you
     // control") share the same quantity grammar as CDA/static parsing.
     if let Ok((after_equal_to, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(rest) {
+        match nom_quantity::parse_quantity_ref_before_outer_domain(after_equal_to, |i| {
+            preceded(peek(tag("from ")), parse_zone_suffix_nom).parse(i)
+        }) {
+            Ok((after, qty)) => {
+                return Some((
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref { qty },
+                    },
+                    text.len() - after.len(),
+                ))
+            }
+            Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
+            Err(nom::Err::Error(_)) => {}
+        }
+        // CR 109.2a: the ordinary zoned-card grammar consumes its own inner
+        // `in` domain; a following outer `from` remains with the selected card.
+        if let Ok((after, qty @ QuantityRef::ZoneCardCount { .. })) =
+            nom_quantity::parse_quantity_ref(after_equal_to)
+        {
+            if preceded(peek(tag("from ")), parse_zone_suffix_nom)
+                .parse(after.trim_start())
+                .is_ok()
+            {
+                return Some((
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref { qty },
+                    },
+                    text.len() - after.trim_start().len(),
+                ));
+            }
+        }
         let (after_punct, raw_phrase) =
             take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
                 .parse(after_equal_to)
