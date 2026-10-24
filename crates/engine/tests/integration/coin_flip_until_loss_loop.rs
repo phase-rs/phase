@@ -14,11 +14,12 @@
 //!   `three_faces_are_supported` and `combat_trigger_on_the_stack_is_a_complete_until_loss_run`
 //!   reject the old parser's unsupported stub. The no-Thumb runtime already looped
 //!   through the first loss and paid one trigger per won flip.
-//! * THUMB REGRESSIONS: preserve won-flip observers across repeated keep prompts
-//!   and zone-change observers when a parent continuation pauses after the flip.
-//!   Copy tests distinguish copy-owned observers while CopyRetarget is pending.
-//! * PRESERVATION PINS: the remaining runtime tests cover no-Thumb runs, flipper
-//!   scoping, and the final-action collector's single-kept-flip path.
+//! * THUMB REGRESSIONS (fail on revert): won-flip observers across repeated keep prompts
+//!   (Zndrsplt, Okaun) and a zone-change observer when the kept win's flip run completes
+//!   and the parent continuation pauses on a draw replacement (Strongbox + dredge).
+//! * PRESERVATION PINS: the copy tests (copy-owned SpellCopied observers are not re-parked
+//!   while CopyRetarget is pending), Strongbox without a draw replacement, no-Thumb runs,
+//!   an opponent's Thumb, and the final-action collector's single-kept-flip path.
 //!
 //! Every card is built from its verbatim Oracle text (MTGJSON `AtomicCards.json`). RNG
 //! outcomes are pinned after the trigger is on the stack, using the `seed_for` + pin
@@ -166,6 +167,15 @@ fn two_player_table() -> GameScenario {
     scenario
 }
 
+fn order_identity(runner: &mut GameRunner, trigger_count: usize) -> Vec<GameEvent> {
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..trigger_count).collect(),
+        })
+        .expect("identity trigger order is accepted")
+        .events
+}
+
 /// Pass priority until the stack is empty and the table is at rest, draining any
 /// `OrderTriggers` prompt with the identity order (the triggers in these tests that share a
 /// controller are indistinguishable). Returns every event produced on the way.
@@ -174,12 +184,7 @@ fn drive_to_rest(runner: &mut GameRunner) -> Vec<GameEvent> {
     for _ in 0..60 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OrderTriggers { triggers, .. } => {
-                let result = runner
-                    .act(GameAction::OrderTriggers {
-                        order: (0..triggers.len()).collect(),
-                    })
-                    .expect("identity trigger order is accepted");
-                events.extend(result.events);
+                events.extend(order_identity(runner, triggers.len()));
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
                 assert!(
@@ -208,14 +213,7 @@ fn resolve_combat_trigger(runner: &mut GameRunner, combat_id: ObjectId) -> Vec<G
     for _ in 0..20 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OrderTriggers { triggers, .. } => {
-                events.extend(
-                    runner
-                        .act(GameAction::OrderTriggers {
-                            order: (0..triggers.len()).collect(),
-                        })
-                        .expect("identity trigger order is accepted")
-                        .events,
-                );
+                events.extend(order_identity(runner, triggers.len()));
             }
             WaitingFor::Priority { .. }
                 if runner
@@ -734,14 +732,7 @@ fn thumb_copy_magecraft(retarget: bool) {
                 );
             }
             WaitingFor::OrderTriggers { triggers, .. } => {
-                events.extend(
-                    runner
-                        .act(GameAction::OrderTriggers {
-                            order: (0..triggers.len()).collect(),
-                        })
-                        .expect("order cast triggers")
-                        .events,
-                );
+                events.extend(order_identity(&mut runner, triggers.len()));
             }
             _ => break,
         }
@@ -823,14 +814,7 @@ fn keep_mixed_coin(runner: &mut GameRunner, want: bool) -> Vec<GameEvent> {
 fn drain_trigger_ordering(runner: &mut GameRunner) -> Vec<GameEvent> {
     let mut events = Vec::new();
     while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
-        events.extend(
-            runner
-                .act(GameAction::OrderTriggers {
-                    order: (0..triggers.len()).collect(),
-                })
-                .expect("order simultaneous triggers")
-                .events,
-        );
+        events.extend(order_identity(runner, triggers.len()));
     }
     events
 }
