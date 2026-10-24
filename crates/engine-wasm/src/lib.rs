@@ -3136,9 +3136,10 @@ fn load_minimal_test_card_database() {
 /// Shared native/WASM fixture for a serialized legacy Resolve All Ready state.
 #[cfg(test)]
 fn legacy_ready_state() -> GameState {
+    use engine::types::actions::ResolveAllScope;
     use engine::types::game_state::{
-        ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot,
-        ResolveAllScope, StackEntry, StackEntryKind, StackResolutionBudget,
+        ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry,
+        StackEntryKind, StackResolutionBudget,
     };
 
     let mut state = GameState::new_two_player(7);
