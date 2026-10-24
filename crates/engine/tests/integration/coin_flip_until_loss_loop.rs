@@ -3,24 +3,22 @@
 //!
 //! Zndrsplt, Eye of Wisdom; Okaun, Eye of Chaos; and Toothy and Zndrsplt all carry
 //! "At the beginning of combat on your turn, flip a coin until you lose a flip." with no
-//! reward clause. At the base commit the parser lowered every until-loss run with an
+//! reward clause. Before the earlier parser fix, the parser lowered every until-loss run with an
 //! `Effect::unimplemented("flip_coin_until_lose_stub", ..)` as its `win_effect`, which only
 //! a following clause, absorbed by `consolidate_die_and_coin_defs`, could replace, so all
 //! three cards were marked unsupported.
 //!
 //! What this file proves, and what it does not:
 //!
-//! * REVERT-FAILING (parse / support): `three_faces_parse_the_combat_run_complete`,
+//! * HISTORICAL PARSER REGRESSIONS: `three_faces_parse_the_combat_run_complete`,
 //!   `three_faces_are_supported` and `combat_trigger_on_the_stack_is_a_complete_until_loss_run`
-//!   fail against the base parser. The base runtime already looped to the first loss and
-//!   already paid one trigger per won flip, so for this change a behavior-level revert
-//!   failure does not exist: the stub's branch was skipped as an `Unimplemented` effect and
-//!   recorded nothing observable. The revert-failing proof is the parser output and the
-//!   support authority, not the runtime.
-//! * PRESERVATION PINS (every other test): each "passes at BASE; derived from Oracle text +
-//!   CR" and carries the derived value in its doc comment. They pin the runtime half of the
-//!   claim (one trigger per won flip, flipper only) so a later change to the run or the
-//!   matcher cannot regress it. The Krark's Thumb interaction is not covered by this file.
+//!   reject the old parser's unsupported stub. The no-Thumb runtime already looped
+//!   through the first loss and paid one trigger per won flip.
+//! * THUMB REGRESSIONS: K1 and K2 preserve won-flip observers across repeated keep
+//!   prompts; they fail without the keep-response parking fix. K9 distinguishes
+//!   copy-owned observers from ordinary observers while CopyRetarget is pending.
+//! * PRESERVATION PINS: the remaining runtime tests cover no-Thumb runs, flipper
+//!   scoping, and the final-action collector's single-kept-flip path.
 //!
 //! Every card is built from its verbatim Oracle text (MTGJSON `AtomicCards.json`). RNG
 //! outcomes are pinned after the trigger is on the stack, using the `seed_for` + pin
@@ -32,13 +30,14 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{CoinFlipResult, CoinFlipRun, Effect, TargetFilter};
+use engine::types::ability::{CoinFlipResult, CoinFlipRun, Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameRng, RandomDraw, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameRng, RandomDraw, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
@@ -48,6 +47,7 @@ use rand::Rng;
 const ZNDRSPLT: &str = "Partner with Okaun, Eye of Chaos (When this creature enters, target player may put Okaun into their hand from their library, then shuffle.)\nAt the beginning of combat on your turn, flip a coin until you lose a flip.\nWhenever a player wins a coin flip, draw a card.";
 const OKAUN: &str = "Partner with Zndrsplt, Eye of Wisdom (When this creature enters, target player may put Zndrsplt into their hand from their library, then shuffle.)\nAt the beginning of combat on your turn, flip a coin until you lose a flip.\nWhenever a player wins a coin flip, double Okaun's power and toughness until end of turn.";
 const TOOTHY: &str = "Whenever you win a coin flip, put a +1/+1 counter on Toothy and Zndrsplt.\nAt the beginning of combat on your turn, flip a coin until you lose a flip.\nWhen Toothy and Zndrsplt leaves the battlefield, draw a card for each +1/+1 counter on Toothy and Zndrsplt.";
+const KRARK: &str = "If you would flip a coin, instead flip two coins and ignore one.";
 
 const ZNDRSPLT_NAME: &str = "Zndrsplt, Eye of Wisdom";
 const OKAUN_NAME: &str = "Okaun, Eye of Chaos";
@@ -568,4 +568,407 @@ fn the_run_resolves_after_its_source_left_the_battlefield() {
         hand_before,
         "the departed source draws nothing"
     );
+}
+
+/// K1. CR 603.2c + CR 603.3: each kept win triggers once, after the run completes.
+#[test]
+fn krarks_thumb_run_triggers_once_per_kept_win_after_the_run() {
+    let mut scenario = two_player_table();
+    let zndrsplt = add_zndrsplt(&mut scenario, P0);
+    scenario.add_artifact_from_oracle(P0, "Krark's Thumb", KRARK);
+    let mut runner = to_beginning_of_combat(scenario);
+    let before = hand_size(&runner, P0);
+    let combat_id = runner.state().stack.back().expect("combat trigger").id;
+    pin(&mut runner, &[W, L, W, L, L, W]);
+    let mut events = resolve_combat_trigger(&mut runner, combat_id);
+    let mut prompts = 0;
+    for want in [W, W, L] {
+        let WaitingFor::CoinFlipKeepChoice {
+            player,
+            results,
+            keep_count,
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "required Thumb keep prompt: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert_eq!(keep_count, 1);
+        assert_eq!(results.len(), 2);
+        assert_ne!(results[0], results[1], "reach guard: mixed pair");
+        prompts += 1;
+        assert_eq!(
+            flips(&events).len(),
+            prompts - 1,
+            "only answered flips emit events"
+        );
+        // CR 603.3: the reached prompt is still inside the combat resolution.
+        assert_eq!(hand_size(&runner, P0), before);
+        assert!(!runner.state().stack.iter().any(|entry| {
+            entry.source_id == zndrsplt
+                && matches!(
+                    entry.ability().map(|a| &a.effect),
+                    Some(Effect::Draw { .. })
+                )
+        }));
+        let index = results.iter().position(|&result| result == want).unwrap();
+        let result = runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![index],
+            })
+            .expect("valid keep response");
+        assert_eq!(flips(&result.events), vec![(P0, want)]);
+        events.extend(result.events);
+    }
+    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        events.extend(
+            runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("order identical draw triggers")
+                .events,
+        );
+    }
+    let draw_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == zndrsplt
+                && matches!(
+                    entry.ability().map(|a| &a.effect),
+                    Some(Effect::Draw { .. })
+                )
+        })
+        .count();
+    events.extend(drive_to_rest(&mut runner));
+    assert_eq!(prompts, 3);
+    assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
+    let draws = hand_size(&runner, P0) - before;
+    assert_eq!(draws, 2, "CR 603.2c: one draw per surviving won flip");
+    assert_eq!(draw_triggers, 2);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+/// K9. CR 707.10 + CR 603.2c: a copy is not cast; Magecraft sees cast + copy once each.
+#[test]
+fn krarks_thumb_copy_retarget_draws_once_for_cast_and_once_for_copy() {
+    thumb_copy_magecraft(true);
+}
+
+#[test]
+fn krarks_thumb_copy_keeps_targets_without_duplicate_magecraft() {
+    thumb_copy_magecraft(false);
+}
+
+fn thumb_copy_magecraft(retarget: bool) {
+    let mut scenario = two_player_table();
+    scenario.add_creature(P0, "Krark, the Thumbless", 2, 2)
+        .from_oracle_text_with_keywords(&["Partner"], "Whenever you cast an instant or sorcery spell, flip a coin. If you lose the flip, return that spell to its owner's hand. If you win the flip, copy that spell, and you may choose new targets for the copy.\nPartner (You can have two commanders if both have partner.)");
+    scenario.add_artifact_from_oracle(P0, "Krark's Thumb", KRARK);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Archmage Emeritus",
+        2,
+        2,
+        "Magecraft — Whenever you cast or copy an instant or sorcery spell, draw a card.",
+    );
+    let a = scenario.add_creature(P1, "Creature A", 2, 2).id();
+    let b = scenario.add_creature(P1, "Creature B", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unsummon",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    // The cast driver cannot stop on cast-trigger ordering; announce publicly.
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce Unsummon")
+        .events;
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(a)),
+            })
+            .expect("target creature A")
+            .events,
+    );
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pay Unsummon's mana")
+                .events,
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "cast committed"
+    );
+    let before = hand_size(&runner, P0);
+    pin(&mut runner, &[W, L]);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+    ));
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                assert!(
+                    !runner.state().stack.is_empty(),
+                    "cast trigger must reach a keep prompt"
+                );
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("resolve cast triggers")
+                        .events,
+                );
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                events.extend(
+                    runner
+                        .act(GameAction::OrderTriggers {
+                            order: (0..triggers.len()).collect(),
+                        })
+                        .expect("order cast triggers")
+                        .events,
+                );
+            }
+            _ => break,
+        }
+    }
+    let WaitingFor::CoinFlipKeepChoice {
+        player,
+        results,
+        keep_count,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("required Thumb prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(player, P0);
+    assert_eq!(keep_count, 1);
+    assert_eq!(results.len(), 2);
+    assert_ne!(results[0], results[1]);
+    let result = runner
+        .act(GameAction::SelectCoinFlips {
+            keep_indices: vec![results.iter().position(|&won| won).unwrap()],
+        })
+        .expect("keep the winning coin");
+    assert_eq!(flips(&result.events), vec![(P0, W)]);
+    let WaitingFor::CopyRetarget { copy_id, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "required copy retarget prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ne!(copy_id, spell, "the copy has a distinct stack identity");
+    events.extend(result.events);
+    let action = if retarget {
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(b)),
+        }
+    } else {
+        GameAction::KeepAllCopyTargets
+    };
+    events.extend(runner.act(action).expect("answer CopyRetarget").events);
+    events.extend(drive_to_rest(&mut runner));
+    let copies = events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::SpellCopied { .. }))
+        .count();
+    let draws = hand_size(&runner, P0) - before;
+    assert_eq!(
+        flips(&events),
+        vec![(P0, W)],
+        "the copy must not trigger another Krark flip"
+    );
+    assert_eq!(copies, 1);
+    assert!(events.iter().any(|event| matches!(
+        event, GameEvent::SpellCopied { original_id, .. } if *original_id == spell
+    )));
+    let cast_ids: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cast_ids, vec![spell], "CR 707.10: the copy is not cast");
+    assert_eq!(runner.state().objects[&a].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&b].zone,
+        if retarget {
+            Zone::Hand
+        } else {
+            Zone::Battlefield
+        }
+    );
+    assert_eq!(draws, 2, "Magecraft observes exactly the cast and the copy");
+}
+
+fn keep_mixed_coin(runner: &mut GameRunner, want: bool) -> Vec<GameEvent> {
+    let WaitingFor::CoinFlipKeepChoice {
+        player,
+        results,
+        keep_count,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("required Thumb prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(player, P0);
+    assert_eq!(keep_count, 1);
+    assert_eq!(results.len(), 2);
+    assert_ne!(results[0], results[1], "reach guard: mixed pair");
+    let events = runner
+        .act(GameAction::SelectCoinFlips {
+            keep_indices: vec![results.iter().position(|&won| won == want).unwrap()],
+        })
+        .expect("keep the requested coin")
+        .events;
+    assert_eq!(flips(&events), vec![(P0, want)]);
+    events
+}
+
+/// K2. CR 603.2c + CR 701.10b: each kept win doubles the current P/T at resolution.
+#[test]
+fn krarks_thumb_okaun_doubles_separately_after_the_run() {
+    let mut scenario = two_player_table();
+    let okaun = add_okaun(&mut scenario, P0);
+    scenario.add_artifact_from_oracle(P0, "Krark's Thumb", KRARK);
+    let mut runner = to_beginning_of_combat(scenario);
+    let combat_id = runner.state().stack.back().expect("combat trigger").id;
+    pin(&mut runner, &[W, L, W, L, L, W]);
+    let mut events = resolve_combat_trigger(&mut runner, combat_id);
+    for want in [W, W, L] {
+        events.extend(keep_mixed_coin(&mut runner, want));
+        let object = &runner.state().objects[&okaun];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(3), Some(3)),
+            "CR 603.3: doubling waits until the run completes"
+        );
+    }
+    while let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        events.extend(
+            runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("order the two doubling triggers")
+                .events,
+        );
+    }
+    assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
+    assert_eq!(runner.state().stack.len(), 2, "one doubling per kept win");
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|entry| entry.source_id == okaun));
+    for expected in [6, 12] {
+        let trigger_id = runner.state().stack.back().expect("doubling trigger").id;
+        events.extend(resolve_combat_trigger(&mut runner, trigger_id));
+        runner.state_mut().layers_dirty.mark_full();
+        evaluate_layers(runner.state_mut());
+        let object = &runner.state().objects[&okaun];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(expected), Some(expected))
+        );
+    }
+    events.extend(drive_to_rest(&mut runner));
+    assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
+}
+
+/// K4. CR 603.2c + CR 705.2: the final-action collector sees only the kept result.
+#[test]
+fn krarks_thumb_single_flip_final_collector_fires_once() {
+    for want in [W, L] {
+        let mut scenario = two_player_table();
+        add_zndrsplt(&mut scenario, P0);
+        scenario.add_artifact_from_oracle(P0, "Krark's Thumb", KRARK);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Stitch in Time",
+                false,
+                "Flip a coin. If you win the flip, take an extra turn after this one.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Colorless, ManaType::Blue, ManaType::Red]
+                .into_iter()
+                .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.cast(spell).commit();
+        let before = hand_size(&runner, P0);
+        pin(&mut runner, &[W, L]);
+        let mut events = resolve_combat_trigger(&mut runner, spell);
+        events.extend(keep_mixed_coin(&mut runner, want));
+        events.extend(drive_to_rest(&mut runner));
+        assert_eq!(flips(&events), vec![(P0, want)]);
+        assert_eq!(hand_size(&runner, P0) - before, usize::from(want));
+        assert_eq!(
+            runner.state().phase,
+            Phase::PreCombatMain,
+            "do not advance to the extra turn"
+        );
+    }
+}
+
+/// K5. CR 705.2: the opponent's Thumb does not replace the active player's flips.
+#[test]
+fn opponents_thumb_preserves_unprompted_until_loss_run() {
+    let mut scenario = two_player_table();
+    add_zndrsplt(&mut scenario, P0);
+    let thumb = scenario
+        .add_artifact_from_oracle(P1, "Krark's Thumb", KRARK)
+        .id();
+    let mut runner = to_beginning_of_combat(scenario);
+    assert_eq!(runner.state().objects[&thumb].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&thumb].controller, P1);
+    let before = hand_size(&runner, P0);
+    pin(&mut runner, &[W, W, L]);
+    let events = drive_to_rest(&mut runner);
+    assert_eq!(flips(&events), vec![(P0, W), (P0, W), (P0, L)]);
+    assert_eq!(hand_size(&runner, P0) - before, 2);
 }

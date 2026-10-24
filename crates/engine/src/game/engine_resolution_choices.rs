@@ -2225,13 +2225,23 @@ pub(super) fn handle_resolution_choice(
                 .ok_or_else(|| {
                     EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
                 })?;
+            let events_before_resume = events.len();
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
             // CR 608.2c: re-suspended for another interactive choice, else the
             // whole flip effect completed — drain back to Priority.
             let wf = match next {
-                Some(wf) => wf,
+                Some(wf) => {
+                    // CR 603.2 + CR 603.3b: preserve observers while the resumed
+                    // coin branch waits for another choice, until priority returns.
+                    crate::game::triggers::park_observer_triggers_if_paused(
+                        state,
+                        events,
+                        events_before_resume,
+                    );
+                    wf
+                }
                 None => finish_with_continuation(state, player, events),
             };
             ResolutionChoiceOutcome::WaitingFor(wf)
