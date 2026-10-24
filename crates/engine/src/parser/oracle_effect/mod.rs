@@ -23491,6 +23491,118 @@ fn try_parse_multi_target_damage_chain_with_damage_context(
     Some(clause)
 }
 
+/// Conservatively keep quantity-owned target declarations out of the population permission.
+fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
+    match amount {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::Variable { name } => name == "X",
+            QuantityRef::HandSize { .. }
+            | QuantityRef::LifeTotal { .. }
+            | QuantityRef::GraveyardSize { .. }
+            | QuantityRef::LifeAboveStarting
+            | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::NameStickerLetterCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::PropertyAggregate(..)
+            | QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::PartySize { .. }
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::Speed { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::SacrificedThisTurn { .. }
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::LifeGainedThisTurn { .. }
+            | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::BattlefieldEntriesThisTurn { .. }
+            | QuantityRef::LandsPlayedThisTurn { .. }
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::NotedNumber
+            | QuantityRef::ChosenNumber
+            | QuantityRef::PlayerChosenNumber { .. }
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::CardsDiscardedThisTurn { .. }
+            | QuantityRef::TokensCreatedThisTurn { .. }
+            | QuantityRef::PlayerActionsThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ManaSpentToCast { .. }
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::VoteCount { .. } => false,
+        },
+        QuantityExpr::DivideRounded { .. }
+        | QuantityExpr::Offset { .. }
+        | QuantityExpr::ClampMin { .. }
+        | QuantityExpr::Multiply { .. }
+        | QuantityExpr::Sum { .. }
+        | QuantityExpr::UpTo { .. }
+        | QuantityExpr::Power { .. }
+        | QuantityExpr::Difference { .. }
+        | QuantityExpr::Max { .. } => false,
+    }
+}
+
 fn try_parse_multi_target_damage_chain_inner(
     text: &str,
     ctx: &mut ParseContext,
@@ -23554,12 +23666,12 @@ fn try_parse_multi_target_damage_chain_inner(
         })
         .is_none()
     });
-    // Keep amount references ("equal to target creature's power") out of this scan.
+    // Amounts are restricted to plain quantities, so the first "to " starts the recipient.
     let recipient_span = head_spans.and_then(|(_, span)| {
-        nom_primitives::scan_last_at_word_boundaries(span, |input| {
-            tag::<_, _, OracleError<'_>>("to ").parse(input)
+        nom_primitives::scan_at_word_boundaries(span, |input| {
+            let (recipient, _) = tag::<_, _, OracleError<'_>>("to ").parse(input)?;
+            Ok((recipient, recipient))
         })
-        .map(|(_, recipient)| recipient)
     });
     let recipient_has_target_keyword = recipient_span.is_some_and(|span| {
         nom_primitives::scan_at_word_boundaries(span, |input| {
@@ -23569,11 +23681,12 @@ fn try_parse_multi_target_damage_chain_inner(
     });
     let parent_object_target = match &primary_effect {
         Effect::DealDamage {
+            amount,
             target: target @ TargetFilter::Typed(_),
             damage_source: None,
             excess: None,
-            ..
         } if damage_context == DamageTargetContext::FreshClause
+            && parent_population_amount_is_plain(amount)
             && source_has_no_target
             && recipient_has_target_keyword
             && primary_damage_multi_target.is_none()
@@ -53702,11 +53815,12 @@ mod parent_controller_population_tests {
                 filter.controller,
                 Some(ControllerRef::ParentTargetController)
             );
-            assert!(filter.properties.iter().any(|property| matches!(
-                property,
-                FilterProp::DistinctFrom { reference }
-                    if reference.as_ref() == &TargetFilter::ParentTarget
-            )));
+            assert_eq!(
+                filter.properties,
+                vec![FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]
+            );
         }
     }
 
@@ -53805,9 +53919,30 @@ mod parent_controller_population_tests {
     }
 
     #[test]
-    fn source_power_amount_preserves_target_recipient_population() {
+    fn source_power_amount_withholds_target_recipient_population() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals damage equal to ~'s power to target creature",
+        );
+    }
+
+    #[test]
+    fn quantity_target_amount_withholds_target_recipient_population() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals damage equal to the number of cards in target player's hand to target creature",
+        );
+    }
+
+    #[test]
+    fn recipient_power_comparison_preserves_target_population() {
         assert_public_population_permission(
-            "~ deals damage equal to ~'s power to target creature and 1 damage to each other creature with the same controller.",
+            "~ deals 3 damage to target creature with power less than or equal to 3 and 1 damage to each other creature with the same controller.",
+        );
+    }
+
+    #[test]
+    fn recipient_power_upper_bound_preserves_target_population() {
+        assert_public_population_permission(
+            "~ deals 3 damage to target creature with power 3 or less and 1 damage to each other creature with the same controller.",
         );
     }
 }
