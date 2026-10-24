@@ -22,7 +22,8 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
-    EmbalmCost, EmergeCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword,
+    WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -1069,6 +1070,29 @@ fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> 
     }
 }
 
+/// CR 702.42a: Parse an Entwine em-dash cost ("entwine—sacrifice two lands" or
+/// "entwine {2}{G}"). Mirrors `parse_echo_cost`: reminder-strip, delegate to
+/// `parse_oracle_cost`, wrap a single `Mana` cost in `Mana`, anything
+/// composite/non-mana in `NonMana`, and reject `Unimplemented`.
+fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(EntwineCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other if ability_cost_is_fully_typed(&other) => Some(EntwineCost::NonMana(other)),
+        _ => None,
+    }
+}
+
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
@@ -1735,6 +1759,16 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
+    // CR 702.42a: Entwine with em-dash cost — non-mana costs like
+    // "entwine—sacrifice two lands" (Solar Tide). Pure-mana entwine
+    // ("Entwine {2}{G}") is handled by the direct `FromStr` path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("entwine\u{2014}").parse(text) {
+        if let Some(entwine_cost) = parse_entwine_cost(rest) {
+            let after_sentence = split_once_on(rest, ".").map_or("", |(_, (_, after))| after);
+            return Some((Keyword::Entwine(entwine_cost), after_sentence));
+        }
+    }
+
     // CR 702.128a + CR 602.1a: Embalm with em-dash cost — composite mana +
     // non-mana ("embalm—{2}{W}{W}, discard a card"). Pure-mana embalm
     // ("Embalm {3}{W}") arrives via MTGJSON's keywords array (FromStr path).
@@ -2179,9 +2213,11 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
 /// than declining, because the line then renders as supported.
 fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Unimplemented { .. } => false,
-        // The only nesting variant; a composite is typed iff every part is.
-        AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. } => false,
+        // Nesting variants (AND / OR composition); typed iff every part is.
+        AbilityCost::Composite { costs, .. } | AbilityCost::OneOf { costs } => {
+            costs.iter().all(ability_cost_is_fully_typed)
+        }
         _ => true,
     }
 }
@@ -3268,6 +3304,39 @@ mod tests {
             parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
                 .is_none(),
             "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    #[test]
+    fn parse_router_keyword_line_entwine_rejects_unconsumed_condition() {
+        let res = parse_router_keyword_line("Entwine—Pay 2 life if you control an artifact");
+        assert!(
+            res.is_none(),
+            "entwine with unconsumed conditional text must be rejected, got: {res:?}"
+        );
+        assert!(
+            parse_router_keyword_line("Entwine—Sacrifice two lands. If you control an artifact")
+                .is_none(),
+            "entwine with trailing conditional text after period must be rejected"
+        );
+    }
+
+    #[test]
+    fn ability_cost_is_fully_typed_recurses_into_one_of() {
+        assert!(!ability_cost_is_fully_typed(&AbilityCost::OneOf {
+            costs: vec![AbilityCost::Composite {
+                costs: vec![AbilityCost::Unimplemented {
+                    description: "frobnicate".to_string()
+                }]
+            }],
+        }));
+    }
+
+    #[test]
+    fn parse_entwine_cost_rejects_composite_with_unimplemented_leg() {
+        assert!(
+            parse_entwine_cost("Pay 2 life, frobnicate a permanent").is_none(),
+            "composite entwine cost with unimplemented leg must return None"
         );
     }
 

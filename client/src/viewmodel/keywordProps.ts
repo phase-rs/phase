@@ -341,7 +341,7 @@ const MANA_COST_KEYWORDS = new Set([
   "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
   "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
-  "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
+  "Spectacle", "Surge", "Encore", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
   "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
   "MoreThanMeetsTheEye", "Freerunning", "Specialize",
@@ -353,7 +353,7 @@ const MANA_COST_KEYWORDS = new Set([
  */
 const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
   "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
-  "Buyback", "Echo", "Blitz",
+  "Buyback", "Echo", "Blitz", "Entwine",
 ]);
 
 /** Keywords whose payload is an AbilityCost. */
@@ -372,15 +372,42 @@ type KeywordAbilityCost = Parameters<typeof formatKnownCost>[0];
  * drops out of the text or turns into `formatCost`'s "Activate" fallback.
  */
 function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
-  // A sacrifice cost also names what and how many permanents to sacrifice.
-  // formatKnownCost only returns the verb, so its detail would be misleading.
-  if (cost.type === "Sacrifice") return null;
+  // A sacrifice cost names what and how many permanents to sacrifice
+  // ("Sacrifice two lands"), so it can render as detail instead of dropping to
+  // null and hiding a mandatory cost.
+  if (cost.type === "Sacrifice") return formatSacrificeCost(cost);
   if (cost.type === "Composite" || cost.type === "OneOf") {
     const legs = (cost.costs ?? []).map(formatKeywordAbilityCost);
     if (legs.length === 0 || !legs.every((leg): leg is string => leg !== null)) return null;
     return legs.join(cost.type === "Composite" ? ", " : " or ");
   }
   return formatKnownCost(cost);
+}
+
+/** Render a Sacrifice cost's count and target as keyword detail ("Sacrifice two lands"). */
+function formatSacrificeCost(cost: { count?: unknown; target?: unknown }): string {
+  const count = typeof cost.count === "number" ? Math.max(cost.count, 1) : 1;
+  const noun = formatSacrificeTarget(cost.target);
+  return count === 1 ? `Sacrifice a ${noun}` : `Sacrifice ${count} ${pluralize(noun)}`;
+}
+
+/** Noun for what a Sacrifice cost targets ("land", "creature", "permanent"). */
+function formatSacrificeTarget(target: unknown): string {
+  if (typeof target === "object" && target !== null) {
+    const t = target as { type?: string; type_filters?: unknown[] };
+    if (t.type === "Typed") {
+      const filters = (t.type_filters ?? [])
+        .filter((f): f is string => typeof f === "string" && f !== "Card" && f !== "Any");
+      if (filters.length === 1) return filters[0].toLowerCase();
+      if (filters.length > 0) return filters.join(" ");
+    }
+    if (t.type === "Any") return "permanent";
+  }
+  return "permanent";
+}
+
+function pluralize(noun: string): string {
+  return `${noun}s`;
 }
 
 /** CR 702.168a: DisguiseCost is untagged — a bare ManaCost, or `{ cost, reduction }`. */

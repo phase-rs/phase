@@ -99,6 +99,46 @@ pub enum EchoCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
+/// Most Entwine cards use a pure mana cost (e.g., Voidslime "Entwine {2}{B}"),
+/// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
+/// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
+/// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", from = "EntwineCostWire")]
+pub enum EntwineCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// Deserialization shape for `EntwineCost`. Entwine was previously stored as a
+/// bare `ManaCost`; previously exported card data (and fixtures) still carry
+/// that form, so it is read as `EntwineCost::Mana`. Serialization always emits
+/// the tagged `Mana`/`NonMana` wrapper.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntwineCostWire {
+    Tagged(EntwineCostTagged),
+    LegacyMana(ManaCost),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum EntwineCostTagged {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<EntwineCostWire> for EntwineCost {
+    fn from(wire: EntwineCostWire) -> Self {
+        match wire {
+            EntwineCostWire::Tagged(EntwineCostTagged::Mana(cost))
+            | EntwineCostWire::LegacyMana(cost) => EntwineCost::Mana(cost),
+            EntwineCostWire::Tagged(EntwineCostTagged::NonMana(cost)) => EntwineCost::NonMana(cost),
+        }
+    }
+}
+
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
 /// card as an Aura. Classic Theros bestow uses a pure mana cost (e.g. Boon Satyr
 /// "Bestow {3}{G}{G}"). Murders at Karlov Manor reprints introduced compound
@@ -914,7 +954,7 @@ pub enum Keyword {
     /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
     Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
-    Entwine(ManaCost),
+    Entwine(EntwineCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
@@ -2819,7 +2859,11 @@ impl FromStr for Keyword {
                     )))
                 }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
-                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "entwine" => {
+                    return Ok(Keyword::Entwine(EntwineCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "affinity" => {
                     if let Some(tf) = parse_affinity_type(p) {
                         return Ok(Keyword::Affinity(tf));
@@ -3744,7 +3788,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
-        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        "Entwine" => {
+            // `EntwineCost`'s `from = "EntwineCostWire"` shim already accepts the
+            // legacy bare `ManaCost` payload (`EntwineCostWire::LegacyMana`), so
+            // this is the single authority for both the legacy and tagged shapes.
+            // A malformed payload surfaces the `EntwineCost` error instead of
+            // being silently re-read as a bare `ManaCost`.
+            serde_json::from_value::<EntwineCost>(data.clone())
+                .map(Keyword::Entwine)
+                .map_err(|e| format!("Entwine: {e}"))
+        }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
             if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
@@ -4082,6 +4135,21 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
+    /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
+    #[test]
+    fn entwine_cost_reads_legacy_bare_mana_cost() {
+        let tagged = EntwineCost::Mana(ManaCost::generic(2));
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["type"], "Mana");
+        let legacy = serde_json::to_value(ManaCost::generic(2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EntwineCost>(legacy).unwrap(),
+            tagged
+        );
+        assert_eq!(serde_json::from_value::<EntwineCost>(json).unwrap(), tagged);
+    }
     use crate::types::ability::Effect;
 
     // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
@@ -5883,7 +5951,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
             Keyword::Casualty(3),
             Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(mc("{2}{R}")),
+            Keyword::Entwine(EntwineCost::NonMana(pay_life_cost())),
             Keyword::Outlast(mc("{2}{R}")),
             Keyword::Scavenge(mc("{2}{R}")),
             Keyword::Reinforce {
@@ -6437,6 +6505,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
             Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
+            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),

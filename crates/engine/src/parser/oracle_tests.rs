@@ -5704,6 +5704,77 @@ fn journey_of_discovery_modal_up_to_two_additional_lands() {
     }
 }
 
+/// Test that Entwine with a non-mana cost (Solar Tide) is parsed correctly.
+/// Solar Tide: "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands."
+#[test]
+fn solar_tide_entwine_non_mana_cost() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands.",
+        "Solar Tide",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let modal = r.modal.expect("Solar Tide is a modal spell");
+    assert_eq!(modal.mode_count, 2, "Solar Tide must have exactly 2 modes");
+    // CR 702.42a: the em-dash cost is extracted as a non-mana Entwine keyword;
+    // `synthesize_entwine` later copies it onto the ModalChoice.
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Entwine(crate::types::keywords::EntwineCost::NonMana(
+                AbilityCost::Sacrifice { .. }
+            ))
+        )),
+        "expected non-mana Entwine keyword, got {:?}",
+        r.extracted_keywords
+    );
+
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "one ability per mode: {:?}",
+        r.abilities
+    );
+}
+
+#[test]
+fn entwine_composite_cost_with_unimplemented_leg_is_rejected() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life, frobnicate a permanent.",
+        "Test Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "composite Entwine cost with an unimplemented leg must not be accepted: {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn entwine_rejects_unconsumed_trailing_condition() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life if you control an artifact.",
+        "Test Conditional Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "Entwine line with unconsumed trailing condition must be rejected: {:?}",
+        r.extracted_keywords
+    );
+}
+
 #[test]
 fn non_spell_permanent_resolution_like_lines_do_not_merge() {
     let r = parse(
