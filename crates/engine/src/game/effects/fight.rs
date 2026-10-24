@@ -95,7 +95,7 @@ pub(crate) fn resolve_fight_fighters(
     // from the flattened chain root. Fire ONLY when the root genuinely declares
     // two distinct object slots; otherwise fall through untouched, protecting
     // incumbent single-fighter `Fight{ParentTarget}` cards (time to feed,
-    // ezuri's predation, joust, …) whose root has <2 object slots (slot 1 → None).
+    // joust, …) whose root has <2 object slots (slot 1 → None).
     //
     // The DECLARED slots decide the shape; the live slot authority decides
     // participation. CR 701.14b: "If one or both creatures are illegal targets

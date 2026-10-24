@@ -2643,6 +2643,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             ability,
             tracked_members,
             iterated_counter_kinds,
+            iterated_created_objects,
             next_iteration,
             total_iterations,
             copy_order_fixed,
@@ -2664,6 +2665,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ability: ability.clone(),
                         tracked_members: tracked_members.clone(),
                         iterated_counter_kinds: iterated_counter_kinds.clone(),
+                        iterated_created_objects: iterated_created_objects.clone(),
                         next_iteration: iteration,
                         total_iterations,
                         copy_order_fixed,
@@ -2679,10 +2681,16 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // (DistinctCounterKindsAmong loop) applies to this iteration.
             let member = tracked_members.get(iteration).copied();
             let kind = iterated_counter_kinds.get(iteration).cloned();
+            let created = iterated_created_objects.get(iteration).copied();
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
                     rebind_member_driven_parent_target(&mut iter_ability, member);
+                    // CR 608.2c: a created-object pairing loop binds this
+                    // iteration's created object beside its member.
+                    if let Some(created) = created {
+                        bind_iteration_created_companion(&mut iter_ability, created);
+                    }
                 }
                 if let Some(kind) = kind {
                     rebind_iterated_counter_kind(&mut iter_ability, kind);
@@ -2722,6 +2730,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             ability: ability.clone(),
                             tracked_members: tracked_members.clone(),
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
+                            iterated_created_objects: iterated_created_objects.clone(),
                             next_iteration: next,
                             total_iterations,
                             copy_order_fixed,
@@ -15422,6 +15431,40 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
     matches!(effect, Effect::SearchLibrary { filter, .. } if filter_refs_same_name_as_parent_target(filter))
 }
 
+/// The object slots of an effect that can name the objects the preceding
+/// instruction created: every slot `effect_target_filter` surfaces plus the
+/// fight subject, which `target_filter()` hides behind the fought creature.
+fn effect_created_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
+    let mut slots: Vec<&TargetFilter> = effect_target_filter(effect).into_iter().collect();
+    if let Effect::Fight { subject, .. } = effect {
+        slots.push(subject);
+    }
+    slots
+}
+
+/// CR 608.2c: True when a member-driven loop body pairs each iterated member
+/// with one of the objects the preceding instruction created — it iterates
+/// over its parent target AND one of its object slots names the created
+/// objects (`LastCreated`). Ezuri's Predation: "Each of those tokens fights a
+/// different one of those creatures." Slot-based, so any effect whose slot
+/// names the created objects joins the pairing without driver changes.
+fn effect_pairs_created_objects(effect: &Effect) -> bool {
+    effect_iterates_over_parent_target(effect)
+        && effect_created_ref_slots(effect)
+            .iter()
+            .any(|slot| matches!(slot, TargetFilter::LastCreated))
+}
+
+/// CR 608.2c: Bind this iteration's created object ahead of the member that
+/// `rebind_member_driven_parent_target` bound, so the iteration's object
+/// targets read `[created, member]` — the same two-object shape a
+/// "target creature you control fights target creature an opponent controls"
+/// fight declares. Like the member, the created object is this iteration's
+/// object rather than an announced target, so it is written unpinned.
+fn bind_iteration_created_companion(ability: &mut ResolvedAbility, created: ObjectId) {
+    ability.insert_target(0, TargetRef::Object(created), None);
+}
+
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
 pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
@@ -16468,6 +16511,7 @@ fn drive_repeat_for_outermost(
                         ability: Box::new(resume),
                         tracked_members: Vec::new(),
                         iterated_counter_kinds: Vec::new(),
+                        iterated_created_objects: Vec::new(),
                         next_iteration,
                         total_iterations: base_iterations,
                         copy_order_fixed: None,
@@ -22442,7 +22486,7 @@ fn resolve_chain_body(
             // Set by the "copy each of those spells" arm, which folds the copy
             // replacements into each member's own count.
             let mut per_member_copy_counts = false;
-            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = match &ability
+            let mut iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = match &ability
                 .repeat_for
             {
                 // CR 707.10 + CR 608.2c: a copy of "each of those spells"
@@ -22525,6 +22569,35 @@ fn resolve_chain_body(
                 }
                 _ => Vec::new(),
             };
+
+            // CR 608.2c + CR 701.7a: a member-driven loop whose body names the
+            // objects the preceding instruction created ("Each of those tokens
+            // fights a different one of those creatures" — Ezuri's Predation)
+            // pairs the k-th created object with the k-th member. The created
+            // objects are snapshotted here, beside the member snapshot, so count
+            // and both bindings come from one loop-entry read. The pairing runs
+            // over the shorter list: a created object with no member left to
+            // pair (a token doubler made extra tokens) does nothing, and a member
+            // with no created object left is not paired.
+            //
+            // CR 608.2d: which created object pairs with which member is a
+            // choice the controller makes at resolution. Tokens one instruction
+            // creates from one specification are interchangeable, so pairing
+            // them in snapshot order is equivalent to any assignment the
+            // controller could choose among them. Pairing is in snapshot (creation)
+            // order, so tokens a replacement adds to the same event beyond the
+            // specified batch are tolerated rather than modelled.
+            let iterated_created_objects: Vec<crate::types::identifiers::ObjectId> =
+                if member_driven && effect_pairs_created_objects(&effective.effect) {
+                    let pairs = state
+                        .last_created_token_ids
+                        .len()
+                        .min(iter_tracked_members.len());
+                    iter_tracked_members.truncate(pairs);
+                    state.last_created_token_ids[..pairs].to_vec()
+                } else {
+                    Vec::new()
+                };
 
             // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
             // loop iterates once per distinct counter kind on filter-matched
@@ -22648,6 +22721,7 @@ fn resolve_chain_body(
                             ability: Box::new(resume_ability),
                             tracked_members: iter_tracked_members.clone(),
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
+                            iterated_created_objects: iterated_created_objects.clone(),
                             next_iteration: iteration,
                             total_iterations: iterations,
                             copy_order_fixed,
@@ -22675,6 +22749,11 @@ fn resolve_chain_body(
                         iter_ability = effective.clone();
                         if let Some(member) = member {
                             rebind_member_driven_parent_target(&mut iter_ability, member);
+                            // CR 608.2c: bind this iteration's created object
+                            // beside its member (empty unless the loop pairs).
+                            if let Some(&created) = iterated_created_objects.get(iteration) {
+                                bind_iteration_created_companion(&mut iter_ability, created);
+                            }
                         }
                         // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
                         // ChooseOneOf branch to the current counter kind.
@@ -22841,6 +22920,10 @@ fn resolve_chain_body(
                                 // counter kinds so each resumed iteration rebinds
                                 // its dynamic branch (empty for non-kind loops).
                                 iterated_counter_kinds: iterated_counter_kinds.clone(),
+                                // CR 608.2c: carry the per-iteration created
+                                // objects so each resumed iteration re-pairs
+                                // (empty unless the loop pairs).
+                                iterated_created_objects: iterated_created_objects.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
                                 copy_order_fixed,
@@ -45321,6 +45404,7 @@ mod tests {
             ability: Box::new(iter_ability),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
+            iterated_created_objects: vec![],
             next_iteration: 1,
             total_iterations: 3,
             copy_order_fixed: None,
@@ -59853,6 +59937,7 @@ mod entry_observation_settlement_tests {
             ability: Box::new(node(effect)),
             tracked_members: Vec::new(),
             iterated_counter_kinds: Vec::new(),
+            iterated_created_objects: Vec::new(),
             next_iteration: 1,
             total_iterations: 2,
             copy_order_fixed: None,
@@ -61578,6 +61663,7 @@ mod resolution_progress_contract_tests {
             ability: Box::new(iteration),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
+            iterated_created_objects: vec![],
             next_iteration: 1,
             total_iterations: 3,
             copy_order_fixed: None,
@@ -62098,5 +62184,206 @@ mod x_announcement_merge_tests {
             "the rider receives the paid X"
         );
         assert_eq!(rider.x_announcement, None, "the mark is consumed");
+    }
+}
+
+/// CR 608.2c + CR 701.14a: the created-object pairing loop ("Each of those
+/// tokens fights a different one of those creatures" — Ezuri's Predation),
+/// driven through `resolve_ability_chain` and the repeat-for drain with the
+/// fight node the parser emits. Card-level coverage through the cast pipeline
+/// lives in `tests/integration/ezuri_predation_pairing.rs`; these rows cover the
+/// shapes no printed effect can stage (fewer created objects than members, a
+/// created object that left before its fight, a parked loop's resume).
+#[cfg(test)]
+mod created_object_pairing_tests {
+    use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::PendingRepeatIteration;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    fn creature(state: &mut GameState, owner: PlayerId, power: i32, toughness: i32) -> ObjectId {
+        let card = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card,
+            owner,
+            format!("Creature {power}/{toughness}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        id
+    }
+
+    /// The fight node the parser emits for the pairing sentence.
+    fn paired_fight(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::ParentTarget,
+                subject: TargetFilter::LastCreated,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn opponent_creature_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+            },
+        }
+    }
+
+    fn damage(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id].damage_marked
+    }
+
+    #[test]
+    fn effect_pairs_created_objects_only_for_a_created_ref_slot_beside_a_parent_target() {
+        assert!(effect_pairs_created_objects(&Effect::Fight {
+            target: TargetFilter::ParentTarget,
+            subject: TargetFilter::LastCreated,
+        }));
+        // Reach guard + negative: a member-driven fight whose subject is the
+        // source iterates its parent target but names no created object.
+        let self_fight = Effect::Fight {
+            target: TargetFilter::ParentTarget,
+            subject: TargetFilter::SelfRef,
+        };
+        assert!(effect_iterates_over_parent_target(&self_fight));
+        assert!(!effect_pairs_created_objects(&self_fight));
+        // A created-object fight with no per-member target is not a pairing.
+        assert!(!effect_pairs_created_objects(&Effect::Fight {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            subject: TargetFilter::LastCreated,
+        }));
+    }
+
+    /// CR 701.14a: each created object fights exactly the member it is paired
+    /// with — the member's damage is its paired object's power and vice versa.
+    #[test]
+    fn each_created_object_fights_the_member_it_is_paired_with() {
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state, PlayerId(0), 0, 1);
+        let first_member = creature(&mut state, PlayerId(1), 1, 20);
+        let second_member = creature(&mut state, PlayerId(1), 2, 20);
+        let first_token = creature(&mut state, PlayerId(0), 5, 20);
+        let second_token = creature(&mut state, PlayerId(0), 7, 20);
+        state.last_created_token_ids = vec![first_token, second_token];
+
+        let mut ability = paired_fight(source);
+        ability.repeat_for = Some(opponent_creature_count());
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Pairing follows snapshot order: member k with created object k.
+        assert_eq!(damage(&state, first_member), 5);
+        assert_eq!(damage(&state, first_token), 1);
+        assert_eq!(damage(&state, second_member), 7);
+        assert_eq!(damage(&state, second_token), 2);
+        assert_eq!(damage(&state, source), 0, "the source never fights");
+    }
+
+    /// CR 608.2c: the pairing runs over the shorter list — a member left with no
+    /// created object to pair is not fought.
+    #[test]
+    fn pairing_runs_over_the_shorter_list() {
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state, PlayerId(0), 0, 1);
+        let first_member = creature(&mut state, PlayerId(1), 1, 20);
+        let second_member = creature(&mut state, PlayerId(1), 2, 20);
+        let token = creature(&mut state, PlayerId(0), 4, 20);
+        state.last_created_token_ids = vec![token];
+
+        let mut ability = paired_fight(source);
+        ability.repeat_for = Some(opponent_creature_count());
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let fights = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::DamageDealt {
+                        source_id,
+                        ..
+                    } if *source_id == token
+                )
+            })
+            .count();
+        assert_eq!(fights, 1, "one created object, one fight");
+        assert_eq!(damage(&state, first_member), 4, "reach: the pair fought");
+        assert_eq!(damage(&state, token), 1);
+        assert_eq!(damage(&state, second_member), 0, "no object left to pair");
+    }
+
+    /// CR 701.14b: a created object that left the battlefield before its fight
+    /// neither deals nor is dealt damage; the other pairs still fight.
+    #[test]
+    fn created_object_that_left_does_not_fight_its_member() {
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state, PlayerId(0), 0, 1);
+        let first_member = creature(&mut state, PlayerId(1), 1, 20);
+        let second_member = creature(&mut state, PlayerId(1), 2, 20);
+        let departed_token = creature(&mut state, PlayerId(0), 4, 20);
+        let token = creature(&mut state, PlayerId(0), 6, 20);
+        state.last_created_token_ids = vec![departed_token, token];
+        let mut events = Vec::new();
+        move_to_zone(&mut state, departed_token, Zone::Graveyard, &mut events);
+
+        let mut ability = paired_fight(source);
+        ability.repeat_for = Some(opponent_creature_count());
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(damage(&state, first_member), 0, "its pair left");
+        assert_eq!(
+            damage(&state, second_member),
+            6,
+            "reach: the other pair fought"
+        );
+        assert_eq!(damage(&state, token), 2);
+    }
+
+    /// CR 608.2c: a parked pairing loop resumes from the created objects
+    /// carried on its frame, not from the live `last_created_token_ids`.
+    #[test]
+    fn drain_resumes_pairing_from_the_parked_created_objects() {
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state, PlayerId(0), 0, 1);
+        let first_member = creature(&mut state, PlayerId(1), 1, 20);
+        let second_member = creature(&mut state, PlayerId(1), 2, 20);
+        let first_token = creature(&mut state, PlayerId(0), 5, 20);
+        let second_token = creature(&mut state, PlayerId(0), 7, 20);
+        // A later creation must not re-pair the parked loop.
+        state.last_created_token_ids = vec![second_token, first_token];
+
+        state.push_repeat_for(PendingRepeatIteration {
+            ability: Box::new(paired_fight(source)),
+            tracked_members: vec![first_member, second_member],
+            iterated_counter_kinds: vec![],
+            iterated_created_objects: vec![first_token, second_token],
+            next_iteration: 0,
+            total_iterations: 2,
+            copy_order_fixed: None,
+        });
+        let mut events = Vec::new();
+        drain_active_repeat_for(&mut state, &mut events);
+
+        assert_eq!(damage(&state, first_member), 5);
+        assert_eq!(damage(&state, first_token), 1);
+        assert_eq!(damage(&state, second_member), 7);
+        assert_eq!(damage(&state, second_token), 2);
     }
 }

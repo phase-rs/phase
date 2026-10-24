@@ -34947,3 +34947,189 @@ fn ir_facade_demotes_a_refused_granter_name() {
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
 }
+
+/// Every node of a definition's `sub_ability` chain, head first.
+fn created_pairing_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |node| node.sub_ability.as_deref()).collect()
+}
+
+fn opponent_creature_count() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent),
+            ),
+        },
+    }
+}
+
+/// CR 701.7a + CR 701.14a + CR 608.2c (SHAPE): Ezuri's Predation creates its
+/// Beasts in one batched instruction, and the fight is the per-member loop
+/// pairing each created token (`LastCreated`) with one counted creature
+/// (`ParentTarget`). Runtime semantics are covered by
+/// `tests/integration/ezuri_predation_pairing.rs`.
+#[test]
+fn ezuri_predation_pairs_each_created_token_with_one_counted_creature() {
+    let oracle = "For each creature your opponents control, create a 4/4 green Phyrexian Beast creature token. Each of those tokens fights a different one of those creatures.";
+    let parsed = parse_oracle_text(oracle, "Ezuri's Predation", &[], &["Sorcery".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
+    let chain = created_pairing_chain(&parsed.abilities[0]);
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::Unimplemented { .. })),
+        "{chain:#?}"
+    );
+    assert_eq!(chain.len(), 2, "{chain:#?}");
+
+    let head = chain[0];
+    let Effect::Token { count, name, .. } = &*head.effect else {
+        panic!("expected the token head, got {:?}", head.effect);
+    };
+    assert_eq!(name, "Phyrexian Beast");
+    assert_eq!(
+        count,
+        &opponent_creature_count(),
+        "the creation is folded into one batched instruction"
+    );
+    assert_eq!(head.repeat_for, None, "the creation is not a loop");
+
+    let fight = chain[1];
+    assert_eq!(
+        *fight.effect,
+        Effect::Fight {
+            target: TargetFilter::ParentTarget,
+            subject: TargetFilter::LastCreated,
+        }
+    );
+    assert_eq!(fight.repeat_for, Some(opponent_creature_count()));
+    assert_eq!(fight.sub_link, SubAbilityLink::SequentialSibling);
+}
+
+/// Fail-closed: a pairing sentence whose head is not a per-member token
+/// creation has no members to pair with, so it stays unsupported.
+#[test]
+fn created_token_pairing_without_a_per_member_head_fails_closed() {
+    let oracle = "Create three 1/1 green Saproling creature tokens. Each of those tokens fights a different one of those creatures.";
+    let parsed = parse_oracle_text(oracle, "Pairing Probe", &[], &["Sorcery".into()], &[]);
+    let chain = created_pairing_chain(&parsed.abilities[0]);
+    assert!(
+        matches!(
+            &*chain[0].effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ),
+        "reach: the head parsed as a token creation: {chain:#?}"
+    );
+    assert!(
+        chain.iter().any(|node| matches!(
+            &*node.effect,
+            Effect::Unimplemented { name, .. } if name == "created_token_pairing_unbindable"
+        )),
+        "{chain:#?}"
+    );
+    assert!(
+        !chain
+            .iter()
+            .any(|node| matches!(&*node.effect, Effect::Fight { .. })),
+        "{chain:#?}"
+    );
+}
+
+/// Sibling negative: a for-each token creation followed by an unrelated
+/// sentence keeps its per-iteration loop — only the pairing consumer folds it.
+#[test]
+fn for_each_token_creation_with_an_unrelated_sibling_keeps_its_loop() {
+    let oracle = "For each creature you control, create a 1/1 white Soldier creature token. Creatures you control gain indestructible until end of turn.";
+    let parsed = parse_oracle_text(oracle, "Loop Probe", &[], &["Sorcery".into()], &[]);
+    let chain = created_pairing_chain(&parsed.abilities[0]);
+    let head = chain[0];
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "{chain:#?}"
+    );
+    assert!(
+        matches!(
+            &head.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            })
+        ),
+        "the creation keeps its per-member loop: {chain:#?}"
+    );
+    assert!(
+        chain.len() >= 2,
+        "reach: the sibling sentence parsed: {chain:#?}"
+    );
+}
+
+/// CR 608.2c + CR 111.2 fail-closed: the paired loop re-counts "those
+/// creatures" after the tokens exist, so a counted population the created
+/// tokens can join (creatures YOU control) cannot be paired soundly and stays
+/// unsupported. The opponent-controlled Ezuri's Predation population, parsed in
+/// the same test, still binds — proving the recognizer is reached and only the
+/// population's controller decides.
+#[test]
+fn created_token_pairing_over_a_population_the_tokens_join_fails_closed() {
+    let oracle = "For each creature you control, create a 4/4 green Phyrexian Beast creature token. Each of those tokens fights a different one of those creatures.";
+    let parsed = parse_oracle_text(oracle, "Pairing Probe", &[], &["Sorcery".into()], &[]);
+    let chain = created_pairing_chain(&parsed.abilities[0]);
+    let head = chain[0];
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "reach: the head parsed as an unfolded token creation: {chain:#?}"
+    );
+    assert_eq!(
+        head.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        }),
+        "reach: the head keeps its per-member loop over creatures you control: {chain:#?}"
+    );
+    assert!(
+        chain.iter().any(|node| matches!(
+            &*node.effect,
+            Effect::Unimplemented { name, .. } if name == "created_token_pairing_unbindable"
+        )),
+        "{chain:#?}"
+    );
+    assert!(
+        !chain
+            .iter()
+            .any(|node| matches!(&*node.effect, Effect::Fight { .. })),
+        "{chain:#?}"
+    );
+
+    let ezuri = "For each creature your opponents control, create a 4/4 green Phyrexian Beast creature token. Each of those tokens fights a different one of those creatures.";
+    let parsed = parse_oracle_text(ezuri, "Ezuri's Predation", &[], &["Sorcery".into()], &[]);
+    let chain = created_pairing_chain(&parsed.abilities[0]);
+    assert_eq!(chain.len(), 2, "{chain:#?}");
+    assert!(
+        matches!(&*chain[0].effect, Effect::Token { count, .. } if *count == opponent_creature_count()),
+        "reach: the opponent-controlled population binds: {chain:#?}"
+    );
+    assert_eq!(
+        *chain[1].effect,
+        Effect::Fight {
+            target: TargetFilter::ParentTarget,
+            subject: TargetFilter::LastCreated,
+        }
+    );
+    assert_eq!(chain[1].repeat_for, Some(opponent_creature_count()));
+}

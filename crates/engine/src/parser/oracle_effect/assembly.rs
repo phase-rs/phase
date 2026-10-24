@@ -21,9 +21,11 @@ use crate::parser::oracle_ir::effect_chain::{
     AbsorbKind, ClauseDisposition, ClauseId, ClauseIr, ClausePlacement, EffectChainIr,
     OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::error::OracleError;
-use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
+use crate::parser::oracle_nom::target::{
+    chain_text_mentions_chosen_object, parse_paired_created_object_fight,
+};
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
@@ -1984,6 +1986,55 @@ fn declares_published_object_target(effect: &Effect) -> bool {
             .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
 }
 
+/// CR 608.2c + CR 701.7a: Bind a paired created-object consumer ("Each of
+/// those tokens fights a different one of those creatures") to the "For each
+/// <object>, create a token" head that precedes it.
+///
+/// The head must be a bare per-member token creation: one token per iteration,
+/// not attached to the iteration's object, no chained body, and repeated over
+/// an opponent-controlled `ObjectCount` population (the objects "those
+/// creatures" names). The
+/// head's repeat moves to the consumer — which becomes the per-member loop —
+/// and the head folds into one instruction creating that many tokens
+/// (`try_fold_token_repeat_into_count`), so the creation is a single event.
+///
+/// Returns `false`, leaving both definitions untouched, when the head is not
+/// that shape; the caller then fails the consumer closed.
+fn bind_created_token_pairing(
+    head: &mut AbilityDefinition,
+    consumer: &mut AbilityDefinition,
+) -> bool {
+    let Some(
+        qty @ QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+    ) = &head.repeat_for
+    else {
+        return false;
+    };
+    // CR 608.2c + CR 111.2: "those creatures" names the population the creation
+    // was repeated for, never the instruction's own tokens. The paired loop
+    // re-counts that population after the tokens exist, so it binds only when
+    // the population is opponent-controlled: the tokens enter under the
+    // creating player's control and can never be counted into it. A population
+    // the tokens could join ("For each creature you control, create …") fails
+    // closed.
+    let counts_only_opponent_objects = matches!(
+        filter,
+        TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::Opponent)
+    );
+    let qty = qty.clone();
+    if !counts_only_opponent_objects
+        || head.sub_ability.is_some()
+        || !try_fold_token_repeat_into_count(head.effect.as_mut(), &qty)
+    {
+        return false;
+    }
+    head.repeat_for = None;
+    consumer.repeat_for = Some(qty);
+    true
+}
+
 /// CR 207.2c + CR 608.2c: the "each other `<X>` that shares a color with it"
 /// population of a Radiance fan-out — a mass effect (Untap-all, `DamageAll`)
 /// whose filter is `SharesQuality { Color, ParentTarget }` and excludes "other"
@@ -3353,12 +3404,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // CR 111.1 + CR 616.1: bare "for each X, create a token" folded
                 // into one batched CreateToken event — no loop. Conservatively
                 // restricted to a single-clause ability: a trailing sibling may
-                // reference the created tokens (a tracked set or "those tokens"
-                // anaphor — e.g. Ezuri's Predation's fight pairing depends on the
-                // per-iteration creation), and we do not yet distinguish such
-                // token-referencing siblings from independent ones (e.g. Moogles'
-                // Valor's "creatures you control gain indestructible"), so we keep
-                // the loop for all multi-clause cases. The chained-body guard
+                // reference the created tokens (tracked-set or 'those tokens'
+                // anaphor); the paired-fight consumer folds the head
+                // retroactively (bind_created_token_pairing), every other
+                // multi-clause shape keeps the loop. The chained-body guard
                 // reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
                 // attaches it after this point via `clause_sub`, so
                 // `def.sub_ability` is not yet populated here).
@@ -3722,6 +3771,49 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
 
+        // CR 608.2c + CR 701.14a: "For each creature your opponents control,
+        // create a token. Each of those tokens fights a different one of those
+        // creatures." (Ezuri's Predation). The fight pairs each created token
+        // with one of the creatures the creation was repeated for, so the fight
+        // — not the creation — is the per-member loop: its subject names the
+        // created objects (`LastCreated`) and its target the iteration's member
+        // (`ParentTarget`). The creation itself folds into one batched
+        // instruction (CR 701.7a), retroactively, once this consumer is known.
+        // A head this consumer cannot bind fails closed.
+        let paired_created_fight = current_defs
+            .first()
+            .is_some_and(|def| matches!(&*def.effect, Effect::Fight { .. }))
+            && nom_parse_lower(
+                clause_ir
+                    .source
+                    .fragment()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                parse_paired_created_object_fight,
+            )
+            .is_some();
+        if paired_created_fight {
+            let consumer = &mut current_defs[0];
+            if let Effect::Fight { subject, target } = &mut *consumer.effect {
+                *subject = TargetFilter::LastCreated;
+                *target = TargetFilter::ParentTarget;
+            }
+            let bound = defs
+                .last_mut()
+                .is_some_and(|head| bind_created_token_pairing(head, consumer));
+            if !bound {
+                current_defs.truncate(1);
+                let consumer = &mut current_defs[0];
+                *consumer.effect = Effect::unimplemented(
+                    "created_token_pairing_unbindable",
+                    clause_ir.source.fragment().unwrap_or_default(),
+                );
+                consumer.sub_ability = None;
+            }
+        }
+
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
         // and bind direct follow-up ParentTarget references to the affected set.
         if !current_defs.is_empty() {
@@ -3810,7 +3902,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             )
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
-                        } else {
+                        } else if !matches!(
+                            &*current.effect,
+                            Effect::Fight {
+                                subject: TargetFilter::LastCreated,
+                                ..
+                            }
+                        ) {
+                            // CR 608.2c: a paired created-object fight (bound
+                            // above) keeps `ParentTarget` as the loop's
+                            // per-iteration member, not the chain's tracked set.
                             if plural_library_recall {
                                 rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
                             }
