@@ -24,6 +24,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -44,6 +45,12 @@ const VORACIOUS_BROOD: &str = "This creature enters with a +1/+1 counter on it f
 const ULTRON: &str = "Flying\nWhenever Ultron enters or attacks, create a 2/2 colorless Robot Villain artifact creature token.\nWhenever another artifact is put into your graveyard from the battlefield or an artifact card is put into your graveyard from anywhere other than the battlefield, each opponent loses 1 life.";
 const VOLRATH: &str = "Whenever a creature you control is put into your graveyard from the battlefield, you may put it on top of your library.";
 const PITILESS_PLUNDERER: &str = "Whenever another creature you control dies, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+const PATRON: &str = "Rat offering (You may cast this spell any time you could cast an instant by sacrificing a Rat and paying the difference in mana costs between this and the sacrificed Rat. Mana cost includes color.)\nWhenever a permanent is put into an opponent's graveyard, that player loses 1 life.";
+const BLOODCHIEF: &str = "At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)\nWhenever a card is put into an opponent's graveyard from anywhere, if this enchantment has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.";
+const DUSKMANTLE: &str = "{1}{U}{B}: Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.\n{2}{U}{B}: Target player mills two cards.";
+const LIABILITY: &str = "Whenever a nontoken permanent is put into a player's graveyard from the battlefield, that player loses 1 life.";
+const MASSACRE_WURM: &str = "When this creature enters, creatures your opponents control get -2/-2 until end of turn.\nWhenever a creature an opponent controls dies, that player loses 2 life.";
+const THREATEN: &str = "Untap target creature and gain control of it until end of turn. That creature gains haste until end of turn. (It can attack and {T} this turn.)";
 
 // --- Harness ----------------------------------------------------------------------------------
 
@@ -796,4 +803,526 @@ fn k1_creature_you_control_dies_still_fires_for_a_stolen_creature() {
     assert_eq!(trigger_instances(runner.state()), 1);
     drain(&mut runner);
     assert_eq!(treasures(&runner), 1, "P0 got a Treasure token");
+}
+
+// --- "that player" on an owner-scoped graveyard head names the card's OWNER ----------------------
+//
+// Loop card #41, U2. "Whenever a permanent is put into an opponent's graveyard, that
+// player loses 1 life" (Patron of the Nezumi, Bloodchief Ascension, Duskmantle Guildmage,
+// Liability, The Dark Barony): CR 400.3 makes the player whose graveyard it is the moving
+// card's OWNER, and by the rules of English (CR 608.2c) "that player" is that same player,
+// never the controller the card had when it died (a thief, or a controller-by-effect).
+// The controller reading stays correct where the head names no graveyard player: Massacre
+// Wurm's "a creature an opponent controls dies, that player ..." (CR 603.10a look-back);
+// R8 pins it. Every row asserts BOTH players' life deltas and ends on an empty stack.
+
+fn lives(runner: &GameRunner) -> (i32, i32) {
+    (life(runner, P0), life(runner, P1))
+}
+
+/// The life totals moved by exactly `delta` = (P0, P1) since `before`.
+fn assert_life_delta(runner: &GameRunner, before: (i32, i32), delta: (i32, i32), what: &str) {
+    let now = lives(runner);
+    assert_eq!(
+        (now.0 - before.0, now.1 - before.1),
+        delta,
+        "{what}: life delta (P0, P1) from {before:?} to {now:?}"
+    );
+}
+
+/// Nothing left to resolve: empty stack, no queued triggers, and a priority window.
+fn assert_settled(runner: &GameRunner) {
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+    assert_eq!(trigger_instances(runner.state()), 0, "no queued triggers");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "must be waiting for priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn assert_optional_prompt_for(runner: &GameRunner, expected: PlayerId) {
+    let WaitingFor::OptionalEffectChoice { player, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the optional \"you may\" prompt must be pending, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, expected, "who is asked \"you may have ...\"");
+}
+
+fn mana(color: ManaType) -> ManaUnit {
+    ManaUnit::new(color, ObjectId(0), false, vec![])
+}
+
+/// Murder `victim` through the production pipeline and return after the spell resolved,
+/// with the triggers it caused left waiting.
+fn murder(runner: &mut GameRunner, spell: ObjectId, victim: ObjectId, owner: PlayerId) {
+    cast_until_resolved(runner, spell, &[victim]);
+    let name = runner
+        .state()
+        .objects
+        .get(&victim)
+        .map(|obj| obj.name.clone());
+    if let Some(name) = name {
+        assert_in_graveyard_of(runner, &name, owner);
+    }
+}
+
+/// R1 (+R1b guard): Patron of the Nezumi. An opponent's card that died under YOUR control
+/// went to the opponent's graveyard (CR 400.3), so the OWNER loses the life.
+#[test]
+fn r1_patron_stolen_opponent_card_makes_its_owner_lose_life() {
+    let mut s = scenario();
+    s.add_creature_from_oracle(P0, "Patron of the Nezumi", 6, 6, PATRON);
+    let own = s.add_creature(P1, "Bear Own", 2, 2).id();
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_own = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    // R1b reach guard: a card P1 owns and controls dies -> P1 loses 1 (green either way).
+    let before = lives(&runner);
+    assert_controller(&runner, own, P1);
+    murder(&mut runner, murder_own, own, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Patron triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R1b P1/P1 card");
+
+    // R1: P1's card under P0's control dies -> it went to P1's graveyard, P1 loses 1.
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Patron triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R1 stolen card: the OWNER loses");
+}
+
+/// R2 (preservation): a card YOU own that an opponent controls dies -> it went to YOUR
+/// graveyard, so Patron does not trigger at all (CR 400.3).
+#[test]
+fn r2_patron_own_card_under_opponent_control_does_not_trigger() {
+    let mut s = scenario();
+    s.add_creature_from_oracle(P0, "Patron of the Nezumi", 6, 6, PATRON);
+    let taken = s
+        .add_creature(P0, "Bear Taken", 2, 2)
+        .controlled_by(P1)
+        .id();
+    let theirs = s.add_creature(P1, "Bear Theirs", 2, 2).id();
+    let murder_taken = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_theirs = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    assert_controller(&runner, taken, P1);
+    let before = lives(&runner);
+    murder(&mut runner, murder_taken, taken, P0);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        0,
+        "it went to P0's own graveyard, not an opponent's"
+    );
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(
+        &runner,
+        before,
+        (0, 0),
+        "R2 own card under opponent control",
+    );
+
+    // Reach guard: Patron is live and fires for a card P1 owns and controls.
+    let before = lives(&runner);
+    murder(&mut runner, murder_theirs, theirs, P1);
+    assert_eq!(trigger_instances(runner.state()), 1);
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R2 reach guard");
+}
+
+/// R3: a stolen opponent TOKEN. Patron counts tokens ("a permanent", CR 110.1); a token
+/// ceases to exist as an SBA after it triggers (CR 111.7, CR 704.5d), so by the time the
+/// trigger resolves there is no live object to read -- the owner (the token's creator,
+/// CR 111.2) must come from the zone-change record.
+#[test]
+fn r3_patron_stolen_opponent_token_makes_its_owner_lose_life() {
+    let mut s = scenario();
+    s.add_creature_from_oracle(P0, "Patron of the Nezumi", 6, 6, PATRON);
+    let token = s.add_creature(P1, "Rat Token", 1, 1).id();
+    let own = s.add_creature(P1, "Bear Own", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_token = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_own = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+    // Fixture: this creature is a token.
+    runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+
+    // R1b-style reach guard: the trigger is live for a card P1 owns and controls.
+    let before = lives(&runner);
+    murder(&mut runner, murder_own, own, P1);
+    assert_eq!(trigger_instances(runner.state()), 1);
+    drain(&mut runner);
+    assert_life_delta(&runner, before, (0, -1), "R3 reach guard");
+
+    steal(&mut runner, threaten, token, P0);
+    let before = lives(&runner);
+    cast_until_resolved(&mut runner, murder_token, &[token]);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        1,
+        "the token's death triggers Patron (CR 111.7)"
+    );
+    assert!(
+        !runner.state().objects.contains_key(&token),
+        "the token has ceased to exist (CR 704.5d): the trigger cannot read a live object"
+    );
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R3 stolen token: its owner loses");
+}
+
+/// R4: simultaneous deaths with mixed ownership (CR 603.2c, CR 603.10a). Four artifacts
+/// die to one Shatterstorm: A (P1 owns, P1 controls), B (P1 owns, stolen by P0),
+/// C (P0 owns, P1 controls), D (P0 owns, P0 controls). A and B went to P1's graveyard.
+#[test]
+fn r4_patron_simultaneous_mixed_ownership_deaths() {
+    let mut s = scenario();
+    s.add_creature_from_oracle(P0, "Patron of the Nezumi", 6, 6, PATRON);
+    let a = s.add_artifact_from_oracle(P1, "Relic A", "").id();
+    let b = s.add_artifact_from_oracle(P1, "Relic B", "").id();
+    let c = s
+        .add_artifact_from_oracle(P0, "Relic C", "")
+        .controlled_by(P1)
+        .id();
+    let d = s.add_artifact_from_oracle(P0, "Relic D", "").id();
+    let mastery = s
+        .add_spell_to_hand_from_oracle(P0, "Metallic Mastery", false, METALLIC_MASTERY)
+        .id();
+    let wipe = s
+        .add_spell_to_hand_from_oracle(P0, "Shatterstorm", false, SHATTERSTORM)
+        .id();
+    let mut runner = s.build();
+
+    steal(&mut runner, mastery, b, P0);
+    assert_controller(&runner, a, P1);
+    assert_controller(&runner, c, P1);
+    assert_controller(&runner, d, P0);
+    let before = lives(&runner);
+
+    cast_until_resolved(&mut runner, wipe, &[]);
+    assert_in_graveyard_of(&runner, "Relic A", P1);
+    assert_in_graveyard_of(&runner, "Relic B", P1);
+    assert_in_graveyard_of(&runner, "Relic C", P0);
+    assert_in_graveyard_of(&runner, "Relic D", P0);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        2,
+        "one Patron trigger per artifact that went to P1's graveyard"
+    );
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -2), "R4 mixed simultaneous deaths");
+}
+
+fn bloodchief_board() -> (GameScenario, ObjectId) {
+    let mut s = scenario();
+    let ascension = s
+        .add_enchantment_from_oracle(P0, "Bloodchief Ascension", BLOODCHIEF)
+        .id();
+    s.with_counter(ascension, CounterType::Generic("quest".into()), 3);
+    (s, ascension)
+}
+
+/// R5 (+R5b guard): Bloodchief Ascension with three quest counters. "You may have that
+/// player lose 2 life. If you do, you gain 2 life": P0 is asked (CR 608.2d); the player
+/// who loses is the OWNER of the card that went to the opponent's graveyard.
+#[test]
+fn r5_bloodchief_stolen_opponent_card_makes_its_owner_lose_life() {
+    let (mut s, _ascension) = bloodchief_board();
+    let own = s.add_creature(P1, "Bear Own", 2, 2).id();
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_own = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    // R5b reach guard: P1 owns and controls the card.
+    let before = lives(&runner);
+    murder(&mut runner, murder_own, own, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Bloodchief triggers");
+    drain(&mut runner);
+    assert_optional_prompt_for(&runner, P0);
+    accept_optional(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (2, -2), "R5b P1/P1 card");
+
+    // R5: P1's card under P0's control.
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Bloodchief triggers");
+    drain(&mut runner);
+    assert_optional_prompt_for(&runner, P0);
+    accept_optional(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (2, -2), "R5 stolen card: the OWNER loses");
+}
+
+fn duskmantle_board() -> (GameScenario, ObjectId) {
+    let mut s = scenario();
+    let guildmage = s
+        .add_creature_from_oracle(P0, "Duskmantle Guildmage", 2, 2, DUSKMANTLE)
+        .id();
+    // {1}{U}{B}, paid from the pool (auto-tap is not modelled by the activation driver).
+    s.with_mana_pool(
+        P0,
+        vec![
+            mana(ManaType::Blue),
+            mana(ManaType::Black),
+            mana(ManaType::Red),
+        ],
+    );
+    (s, guildmage)
+}
+
+/// The index of Duskmantle Guildmage's delayed-trigger ability ({1}{U}{B}), found by its
+/// effect, never by position.
+fn duskmantle_delayed_ability(runner: &GameRunner, guildmage: ObjectId) -> usize {
+    runner.state().objects[&guildmage]
+        .abilities
+        .iter()
+        .position(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("{1}{U}{B} creates a delayed trigger")
+}
+
+/// R6b: Duskmantle Guildmage's delayed trigger is live and reads the event. Two cards
+/// discarded into P1's graveyard (hand -> graveyard, P1 owns them) -> two triggers; P1
+/// loses 2 and P0, who activated the ability, loses nothing (the delayed trigger's
+/// creation must not capture a referent: CR 603.7, CR 603.7e).
+#[test]
+fn r6b_duskmantle_delayed_trigger_reads_the_discarded_cards_owner() {
+    let (mut s, guildmage) = duskmantle_board();
+    let held_a = s.add_card_to_hand(P1, "Hand A");
+    let held_b = s.add_card_to_hand(P1, "Hand B");
+    let mind_rot = s
+        .add_spell_to_hand_from_oracle(P0, "Mind Rot", false, MIND_ROT)
+        .id();
+    let mut runner = s.build();
+    let delayed = duskmantle_delayed_ability(&runner, guildmage);
+
+    let before = lives(&runner);
+    runner.activate(guildmage, delayed).resolve();
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the {{1}}{{U}}{{B}} activation created one delayed trigger"
+    );
+    assert_life_delta(
+        &runner,
+        before,
+        (0, 0),
+        "R6b creation of the delayed trigger",
+    );
+
+    runner
+        .cast(mind_rot)
+        .target_player(P1)
+        .discard(&[held_a, held_b])
+        .resolve();
+    drain(&mut runner);
+    assert_in_graveyard_of(&runner, "Hand A", P1);
+    assert_in_graveyard_of(&runner, "Hand B", P1);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -2), "R6b two discarded cards");
+}
+
+/// R6: ...and a card P1 owns that died under P0's control went to P1's graveyard, so P1
+/// (the owner), not the thief, loses the life.
+#[test]
+fn r6_duskmantle_delayed_trigger_stolen_opponent_card_makes_its_owner_lose_life() {
+    let (mut s, guildmage) = duskmantle_board();
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+    let delayed = duskmantle_delayed_ability(&runner, guildmage);
+
+    runner.activate(guildmage, delayed).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        1,
+        "the delayed trigger fires for the card put into P1's graveyard"
+    );
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R6 stolen card: the OWNER loses");
+}
+
+/// R7a: Liability ("a player's graveyard"): a card P0 owns and controls -> P0 loses 1.
+#[test]
+fn r7a_liability_own_card_makes_its_owner_lose_life() {
+    let mut s = scenario();
+    s.add_enchantment_from_oracle(P0, "Liability", LIABILITY);
+    let own = s.add_creature(P0, "Bear Own", 2, 2).id();
+    let murder_own = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    let before = lives(&runner);
+    murder(&mut runner, murder_own, own, P0);
+    assert_eq!(trigger_instances(runner.state()), 1, "Liability triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (-1, 0), "R7a P0/P0 card");
+}
+
+/// R7b: a card P1 owns that P0 controls (stolen) went to P1's graveyard -> P1 loses 1.
+#[test]
+fn r7b_liability_stolen_card_makes_its_owner_lose_life() {
+    let mut s = scenario();
+    s.add_enchantment_from_oracle(P0, "Liability", LIABILITY);
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Liability triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -1), "R7b stolen card: the OWNER loses");
+}
+
+/// R7c: a card P0 owns that P1 controls went to P0's graveyard -> P0 loses 1.
+#[test]
+fn r7c_liability_own_card_under_opponent_control_makes_its_owner_lose_life() {
+    let mut s = scenario();
+    s.add_enchantment_from_oracle(P0, "Liability", LIABILITY);
+    let taken = s
+        .add_creature(P0, "Bear Taken", 2, 2)
+        .controlled_by(P1)
+        .id();
+    let murder_taken = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    assert_controller(&runner, taken, P1);
+    let before = lives(&runner);
+    murder(&mut runner, murder_taken, taken, P0);
+    assert_eq!(trigger_instances(runner.state()), 1, "Liability triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(
+        &runner,
+        before,
+        (-1, 0),
+        "R7c own card under opponent control",
+    );
+}
+
+/// R8 (preservation): Massacre Wurm's "a creature an opponent controls dies, that player
+/// loses 2 life" keeps the CONTROLLER reading (CR 603.10a look-back; the antecedent of
+/// "that player" is the controlling opponent, CR 608.2c). The head names no graveyard
+/// player, so the owner reading must not leak into it.
+#[test]
+fn r8_massacre_wurm_keeps_the_controller_reading() {
+    let mut s = scenario();
+    // Placed on the battlefield: its enters trigger does not run.
+    s.add_creature_from_oracle(P0, "Massacre Wurm", 6, 5, MASSACRE_WURM);
+    let own = s.add_creature(P1, "Bear Own", 2, 2).id();
+    let taken = s
+        .add_creature(P0, "Bear Taken", 2, 2)
+        .controlled_by(P1)
+        .id();
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_own = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_taken = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    // (a) a creature P1 owns and controls dies -> P1 loses 2.
+    let before = lives(&runner);
+    murder(&mut runner, murder_own, own, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Wurm triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, -2), "R8a P1/P1 creature");
+
+    // (b) a creature P0 owns that P1 controls dies: it went to P0's graveyard, but P1 was
+    // the controlling opponent, so the CONTROLLER pays.
+    assert_controller(&runner, taken, P1);
+    let before = lives(&runner);
+    murder(&mut runner, murder_taken, taken, P0);
+    assert_eq!(trigger_instances(runner.state()), 1, "Wurm triggers");
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(
+        &runner,
+        before,
+        (0, -2),
+        "R8b own card under opponent control",
+    );
+
+    // (c) a creature P1 owns that P0 controls dies: P0 controlled it, so Wurm does not
+    // trigger.
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        0,
+        "Wurm's controller controlled the creature: no trigger"
+    );
+    drain(&mut runner);
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, 0), "R8c stolen creature");
 }

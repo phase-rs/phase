@@ -24213,20 +24213,186 @@ fn trigger_subject_you_control_put_into_your_graveyard_keeps_both_axes() {
     }));
 }
 
-/// Pins a KNOWN GAP, not the desired end state: a self-referential subject is not
-/// owner-scoped (wrapping `SelfRef` would hide the identity the self-trigger
-/// consumers key on), so a stolen Zodiac Dragon still fires. Positive twin of the
-/// tests above, which do scope their non-self subjects.
+/// The root effect of a trigger body, as a `LoseLife` target.
+fn lose_life_target(def: &TriggerDefinition) -> Option<TargetFilter> {
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(!has_unimplemented(execute), "{execute:?}");
+    let Effect::LoseLife { target, .. } = &*execute.effect else {
+        panic!("expected a LoseLife root effect, got {:?}", execute.effect);
+    };
+    target.clone()
+}
+
+/// CR 400.3 + CR 608.2c (loop card #41): "that player" after a head that names a
+/// third-person graveyard possessive ("put into an opponent's / a player's graveyard")
+/// is the graveyard's owner, i.e. the moving card's OWNER -- never the controller the
+/// card had when it moved. Patron of the Nezumi, Bloodchief Ascension, Liability and
+/// The Dark Barony.
 #[test]
-fn trigger_self_put_into_your_graveyard_stays_self_ref() {
+fn trigger_that_player_after_owner_scoped_graveyard_head_is_the_card_owner() {
+    for (text, name) in [
+        (
+            "Whenever a permanent is put into an opponent's graveyard, that player loses 1 life.",
+            "Patron of the Nezumi",
+        ),
+        (
+            "Whenever a nontoken permanent is put into a player's graveyard from the battlefield, that player loses 1 life.",
+            "Liability",
+        ),
+        (
+            "Whenever a nonblack card is put into a player's graveyard from anywhere, that player loses 1 life.",
+            "The Dark Barony",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::ChangesZone, "{name}");
+        assert_eq!(
+            lose_life_target(&def),
+            Some(TargetFilter::ParentTargetOwner),
+            "{name}: \"that player\" is the card's owner"
+        );
+    }
+}
+
+/// Bloodchief Ascension keeps its optional "you may have that player lose 2 life" and
+/// the "If you do, you gain 2 life" rider; only the antecedent of "that player" moves.
+#[test]
+fn trigger_bloodchief_that_player_is_the_card_owner() {
     let def = parse_trigger_line(
-        "When this creature is put into your graveyard from the battlefield, you may return it to your hand.",
-        "Zodiac Dragon",
+        "Whenever a card is put into an opponent's graveyard from anywhere, if ~ has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.",
+        "Bloodchief Ascension",
     );
     assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.origin, Some(Zone::Battlefield));
-    assert_eq!(def.destination, Some(Zone::Graveyard));
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
+    assert_eq!(
+        lose_life_target(&def),
+        Some(TargetFilter::ParentTargetOwner)
+    );
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(execute.optional, "\"you may have that player lose 2 life\"");
+    assert_eq!(execute.optional_player, None);
+    let rider = execute.sub_ability.as_deref().expect("gain-life rider");
+    assert!(
+        matches!(&*rider.effect, Effect::GainLife { .. }),
+        "{:?}",
+        rider.effect
+    );
+}
+
+/// Duskmantle Guildmage: the delayed "whenever ... this turn" split shares the scope
+/// authority, so its inner "that player" is the owner too.
+#[test]
+fn trigger_duskmantle_delayed_that_player_is_the_card_owner() {
+    let parsed = parse_oracle_text(
+        "{1}{U}{B}: Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.\n{2}{U}{B}: Target player mills two cards.",
+        "Duskmantle Guildmage",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("a delayed trigger ability");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected WheneverEvent, got {:?}", ability.effect);
+    };
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_owner_scoped(&trigger.valid_card, ControllerRef::Opponent);
+    assert!(!has_unimplemented(effect), "{effect:?}");
+    let Effect::LoseLife { target, .. } = &*effect.effect else {
+        panic!("expected LoseLife, got {:?}", effect.effect);
+    };
+    assert_eq!(target, &Some(TargetFilter::ParentTargetOwner));
+}
+
+/// Controls: a head that names no graveyard player ("a creature an opponent controls
+/// dies", "an artifact an opponent controls is put into a graveyard") keeps "that
+/// player" on the controller read from the zone-change record (CR 603.10a look-back).
+#[test]
+fn trigger_that_player_controller_heads_stay_triggering_player() {
+    for (text, name) in [
+        (
+            "Whenever a creature an opponent controls dies, that player loses 2 life.",
+            "Massacre Wurm",
+        ),
+        (
+            "Whenever a creature an opponent controls dies, that player loses 2 life.",
+            "Assault Intercessor",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(
+            lose_life_target(&def),
+            Some(TargetFilter::TriggeringPlayer),
+            "{name}"
+        );
+    }
+    for (text, name) in [
+        (
+            "Whenever a creature an opponent controls dies, ~ deals 1 damage to that player.",
+            "Shriek, Treblemaker",
+        ),
+        (
+            "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, ~ deals 1 damage to that player.",
+            "Pain Distributor",
+        ),
+        (
+            "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, ~ deals 1 damage to that player.",
+            "Sardian Avenger",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        let execute = def.execute.as_deref().expect("trigger has a body");
+        let Effect::DealDamage { target, .. } = &*execute.effect else {
+            panic!("{name}: expected DealDamage, got {:?}", execute.effect);
+        };
+        assert_eq!(target, &TargetFilter::TriggeringPlayer, "{name}");
+    }
+}
+
+/// Building block: `relative_player_scope_for_condition` binds "that player" to the
+/// card's owner exactly for a head naming a third-person graveyard possessive
+/// ("an opponent's", "a player's", "their"), for the trigger and the delayed ("this
+/// turn", no keyword) forms alike; "your graveyard" and "a graveyard" name no
+/// third-person player and keep no scope.
+#[test]
+fn relative_player_scope_binds_owner_scoped_graveyard_head_to_the_card_owner() {
+    for cond in [
+        "whenever a permanent is put into an opponent's graveyard",
+        // The delayed form: keyword and "this turn" window removed.
+        "a card is put into an opponent's graveyard from anywhere",
+        "whenever a nontoken permanent is put into a player's graveyard from the battlefield",
+        "whenever a creature card is put into an opponent's graveyard from their library",
+        // "their graveyard" is the opponent named earlier in the clause.
+        "whenever a creature card is put into their graveyard from the battlefield",
+        // Batched form (no printed witness).
+        "whenever one or more cards are put into an opponent's graveyard",
+    ] {
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::ParentTargetOwner),
+            "\"that player\" in {cond:?} is the graveyard's owner"
+        );
+    }
+    for cond in [
+        "whenever an artifact is put into your graveyard from the battlefield",
+        "whenever an artifact an opponent controls is put into a graveyard from the battlefield",
+        "whenever a creature an opponent controls dies",
+        "when ~ is put into your graveyard from the battlefield",
+    ] {
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            None,
+            "{cond:?} names no third-person graveyard player"
+        );
+    }
 }
 
 #[test]
