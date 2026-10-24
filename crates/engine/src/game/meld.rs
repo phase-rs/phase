@@ -559,6 +559,7 @@ fn finalize_meld_entry_snapshot(
     let combat_status = crate::types::game_state::ZoneChangeCombatStatus {
         attacking: defending_player.is_some(),
         defending_player,
+        attack_target,
         ..Default::default()
     };
     refresh_meld_entry_records(state, source_id, combat_status, events);

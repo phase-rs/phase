@@ -760,6 +760,23 @@ fn triggering_spell_resolved_ability(
     Some(resolved)
 }
 
+/// CR 506.3 + CR 508.1b: "the player or planeswalker it's attacking" as a
+/// `TargetRef`. The attack-target binding is owned by
+/// `combat::attack_target_cr506_3`; a creature attacking a battle has no
+/// referent.
+pub(crate) fn source_attack_target_ref(
+    state: &GameState,
+    asker_id: ObjectId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+) -> Option<TargetRef> {
+    use crate::game::combat::AttackTarget;
+    match crate::game::combat::attack_target_cr506_3(state, asker_id, trigger_source)? {
+        AttackTarget::Player(player) => Some(TargetRef::Player(player)),
+        AttackTarget::Planeswalker(pw_id) => Some(TargetRef::Object(pw_id)),
+        AttackTarget::Battle(_) => None,
+    }
+}
+
 /// Resolve event-context TargetFilter variants using the current trigger event.
 /// These variants auto-resolve at effect resolution time from `state.current_trigger_event`
 /// without requiring player selection (CR 603.2).
@@ -2348,21 +2365,10 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })
                 .map(TargetRef::Player)
         }
-        // CR 506.3 + CR 508.1b: "the player or planeswalker it's attacking" names a
-        // player or a planeswalker; a creature attacking a battle has no referent.
-        TargetFilter::SourceAttackTarget => {
-            crate::game::combat::attack_target_for_attacker(state, source_id).and_then(|target| {
-                match target {
-                    crate::game::combat::AttackTarget::Player(player) => {
-                        Some(TargetRef::Player(player))
-                    }
-                    crate::game::combat::AttackTarget::Planeswalker(pw_id) => {
-                        Some(TargetRef::Object(pw_id))
-                    }
-                    crate::game::combat::AttackTarget::Battle(_) => None,
-                }
-            })
-        }
+        // Outside a triggered ability's scope no attack event is bound, so only
+        // the source's own live attack can answer; `DealDamage` resolves the
+        // trigger-scoped form through `source_attack_target_ref` directly.
+        TargetFilter::SourceAttackTarget => source_attack_target_ref(state, source_id, None),
         TargetFilter::AttachedTo => {
             let host = resolve_source_attached_to(state, source_id)?;
             match host {

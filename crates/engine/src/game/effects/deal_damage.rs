@@ -130,10 +130,10 @@ fn bound_player_context_target(
     // planeswalker/battle, so it resolves to a full `TargetRef` from combat state
     // rather than through the player-only context resolver below.
     if matches!(target_filter, TargetFilter::SourceAttackTarget) {
-        return crate::game::targeting::resolve_event_context_target(
+        return crate::game::targeting::source_attack_target_ref(
             state,
-            target_filter,
             ability.source_id,
+            ability.trigger_source.as_ref(),
         );
     }
 

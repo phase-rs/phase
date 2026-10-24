@@ -141,7 +141,6 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::attacked_defenders_this_combat", map_key_types: &["PlayerId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::creature_attacked_defenders_this_combat", map_key_types: &["ObjectId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::damage_assignments", map_key_types: &["ObjectId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
-    NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::departed_attacker_targets", map_key_types: &["ObjectId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareAttackers::valid_attack_targets_by_attacker", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareAttackers, numeric_deserializer: Some(OPTION_NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareAttackers::attacker_constraints", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareAttackers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::valid_block_targets", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
@@ -787,14 +786,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "src/game/combat.rs",
             "CombatState",
             None,
-            "departed_attacker_targets",
-            "HashMap",
-            Classification::Canonical(HASH_MAP),
-        ),
-        (
-            "src/game/combat.rs",
-            "CombatState",
-            None,
             "first_strike_participants",
             "Option<HashSet>",
             Classification::Canonical(OPTION_HASH_SET),
@@ -1265,7 +1256,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        58,
+        57,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2069,10 +2060,6 @@ fn every_numeric_key_combat_map_round_trips_populated() {
                 }],
             ),
         ]),
-        departed_attacker_targets: HashMap::from([
-            (ObjectId(1), AttackTarget::Player(PlayerId(1))),
-            (ObjectId(2), AttackTarget::Player(PlayerId(0))),
-        ]),
         ..Default::default()
     };
     state.combat = Some(combat);
@@ -2088,7 +2075,6 @@ fn every_numeric_key_combat_map_round_trips_populated() {
         "attacked_defenders_this_combat",
         "creature_attacked_defenders_this_combat",
         "damage_assignments",
-        "departed_attacker_targets",
     ] {
         assert_eq!(
             before["combat"][field]

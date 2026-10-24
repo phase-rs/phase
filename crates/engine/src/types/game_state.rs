@@ -1952,6 +1952,12 @@ pub struct ZoneChangeCombatStatus {
     pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
+    /// CR 506.3 + CR 608.2h: What the object was attacking. Latched with the
+    /// rest of the combat status so "the player or planeswalker it's attacking"
+    /// resolves from the departing incarnation's last-known information even
+    /// after the object left (or was replaced at) its `ObjectId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_target: Option<crate::game::combat::AttackTarget>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was
