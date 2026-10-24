@@ -9209,7 +9209,8 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
 
 /// CR 608.2c: only a proven fresh damage head can authorize its population.
 /// `InheritedTargets` also represents unknown provenance: recursive defaults
-/// fail closed rather than forgetting targets from an enclosing instruction.
+/// withhold parent-target binding. Refusal leaves the pre-existing broad,
+/// unbound population fallback available; it is not a strict parse failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DamageTargetContext {
     FreshClause,
@@ -23537,15 +23538,27 @@ fn try_parse_multi_target_damage_chain_inner(
     // CR 608.2c + CR 608.2h: only an unambiguous, mandatory object head can
     // supply the immediate population's referent. A target-subject source is
     // already an additional declaration, even before its wrapper is lowered.
-    let source_span = nom_primitives::scan_at_word_boundaries(lower, |input| {
+    // CR 115.1a + CR 115.1c: a typed attachment-host reference is not a declared target.
+    // Inspect only the consumed head, never a later continuation's target words.
+    let consumed_head = &lower[..lower.len() - remainder.len()];
+    let head_spans = nom_primitives::scan_at_word_boundaries(consumed_head, |input| {
         let (rest, _) = alt((tag::<_, _, OracleError<'_>>("deals "), tag("deal "))).parse(input)?;
-        Ok((rest, &lower[..lower.len() - input.len()]))
+        Ok((
+            rest,
+            (&consumed_head[..consumed_head.len() - input.len()], rest),
+        ))
     });
-    let source_has_no_target = source_span.is_some_and(|span| {
+    let source_has_no_target = head_spans.is_some_and(|(span, _)| {
         nom_primitives::scan_at_word_boundaries(span, |input| {
             super::oracle_target::parse_word_bounded(input, "target")
         })
         .is_none()
+    });
+    let recipient_has_target_keyword = head_spans.is_some_and(|(_, span)| {
+        nom_primitives::scan_at_word_boundaries(span, |input| {
+            super::oracle_target::parse_word_bounded(input, "target")
+        })
+        .is_some()
     });
     let parent_object_target = match &primary_effect {
         Effect::DealDamage {
@@ -23555,6 +23568,7 @@ fn try_parse_multi_target_damage_chain_inner(
             ..
         } if damage_context == DamageTargetContext::FreshClause
             && source_has_no_target
+            && recipient_has_target_keyword
             && primary_damage_multi_target.is_none()
             && lower::target_filter_is_single_object_target(target)
             && super::oracle_target::resolve_pronoun_target(ctx, "it")
@@ -41370,6 +41384,8 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 /// CR 608.2c: context-less nested parsing cannot authorize a recipient-relative
 /// population. Ability-root producers use `parse_ability_ir_with_context`;
 /// callers that retain clause provenance use the explicit-context sibling.
+/// Withheld permission leaves the pre-existing unbound population fallback;
+/// this entry does not turn that fallback into a strict failure.
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
@@ -42679,8 +42695,10 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
     )
 }
 
-/// `None` is reserved for an ability root. Nested builders receive `Some` and
-/// cannot exceed that inherited permission, even at their first chunk.
+/// `None` is reserved for an explicit ability-root entry. Nested builders receive
+/// `Some` and retain that permission limit, even at their first chunk. Trigger,
+/// replacement and granted-ability bodies currently use the withheld default:
+/// their legacy unbound population fallback remains, not a strict parse failure.
 fn parse_effect_chain_ir_with_damage_context(
     text: &str,
     kind: AbilityKind,
@@ -53279,6 +53297,8 @@ mod parent_controller_population_tests {
         ));
     }
 
+    /// Check the reachable, pre-existing unbound population fallback after a
+    /// target-subject permission refusal, not a strict-failure AST.
     fn assert_unbound_target_subject_population(definition: &AbilityDefinition) {
         let Effect::TargetOnly {
             target: TargetFilter::Typed(source),
@@ -53374,6 +53394,8 @@ mod parent_controller_population_tests {
             })
     }
 
+    /// Both entries must reach the population and retain the pre-existing
+    /// unbound fallback when permission is withheld; neither must fail strictly.
     fn assert_population_boundary_through_both_parsers(head: &str) {
         let ordinary = format!("{head} and 1 damage to each creature.");
         let qualified =
@@ -53709,6 +53731,8 @@ mod parent_controller_population_tests {
         assert!(has_parent_population_binding(filter));
     }
 
+    /// Recursive defaults withhold parent-target binding while retaining the
+    /// reachable, pre-existing unbound population shape.
     #[test]
     fn contextless_recursive_entries_refuse_population_permission() {
         let text = "~ deals 2 damage to target creature and 1 damage to each other creature with the same controller";
@@ -53726,6 +53750,34 @@ mod parent_controller_population_tests {
         let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
         assert!(!has_parent_population_binding(population_filter(
             &lower_effect_chain_ir(&ir)
+        )));
+    }
+
+    #[test]
+    fn enchanted_recipient_population_keeps_preexisting_unbound_shape() {
+        assert_population_boundary_through_both_parsers("~ deals 2 damage to enchanted creature");
+        let parsed = parse_oracle_text(
+            "{R}: ~ deals 2 damage to enchanted creature and 1 damage to each other creature with the same controller.",
+            "Aura Population Probe", &[], &["Enchantment".into()], &["Aura".into()],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_eq!(parsed.abilities[0].kind, AbilityKind::Activated);
+        assert!(!has_parent_population_binding(population_filter(
+            &parsed.abilities[0]
+        )));
+    }
+
+    #[test]
+    fn equipped_recipient_population_keeps_preexisting_unbound_shape() {
+        assert_population_boundary_through_both_parsers("~ deals 2 damage to equipped creature");
+        let parsed = parse_oracle_text(
+            "{R}: ~ deals 2 damage to equipped creature and 1 damage to each other creature with the same controller.",
+            "Equipment Population Probe", &[], &["Artifact".into()], &["Equipment".into()],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_eq!(parsed.abilities[0].kind, AbilityKind::Activated);
+        assert!(!has_parent_population_binding(population_filter(
+            &parsed.abilities[0]
         )));
     }
 }
