@@ -40097,3 +40097,233 @@ fn prepared_gate_rejects_nonsource_grammar_matrix() {
         );
     }
 }
+
+// --- #9179 (A): the "during <window>" qualifier of an event-trigger head ---
+
+fn combat_window() -> TriggerCondition {
+    TriggerCondition::CurrentPhaseIs {
+        phases: PhaseGroup::Combat.steps().to_vec(),
+    }
+}
+
+fn event_time(condition: TriggerCondition) -> TriggerCondition {
+    TriggerCondition::EventTime {
+        condition: Box::new(condition),
+    }
+}
+
+/// CR 603.2 + CR 500.1 + CR 506.1 + CR 102.1: each arm of the shared
+/// `parse_event_window` building block — turn windows, the whole combat
+/// phase, and a named step.
+#[test]
+fn parse_event_window_types_turn_combat_and_step_windows() {
+    let controller_turn = TriggerCondition::DuringPlayersTurn {
+        player: PlayerFilter::Controller,
+    };
+    let opponent_turn = TriggerCondition::DuringPlayersTurn {
+        player: PlayerFilter::Opponent,
+    };
+    for (input, expected) in [
+        ("during your turn", controller_turn.clone()),
+        ("during each of your turns", controller_turn),
+        ("during an opponent's turn", opponent_turn.clone()),
+        ("during each opponent's turn", opponent_turn),
+        ("during combat", combat_window()),
+        (
+            "during the declare attackers step",
+            TriggerCondition::CurrentPhaseIs {
+                phases: vec![Phase::DeclareAttackers],
+            },
+        ),
+        (
+            "during the beginning of combat step",
+            TriggerCondition::CurrentPhaseIs {
+                phases: vec![Phase::BeginCombat],
+            },
+        ),
+    ] {
+        let parsed = all_consuming(parse_event_window).parse(input);
+        assert_eq!(
+            parsed.map(|(_, window)| window).ok(),
+            Some(expected),
+            "{input:?}"
+        );
+    }
+    // "during combat" is the whole combat phase (CR 506.1), not one step.
+    assert_eq!(
+        combat_window(),
+        TriggerCondition::CurrentPhaseIs {
+            phases: vec![
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ],
+        }
+    );
+}
+
+/// CR 603.2: windows the building block does not type are rejected, and
+/// "combat" matches only as a whole word.
+#[test]
+fn parse_event_window_rejects_untyped_windows() {
+    for input in [
+        "during their turn",
+        "during your upkeep",
+        "during combatants",
+        "during combat on your turn",
+    ] {
+        assert!(
+            all_consuming(parse_event_window).parse(input).is_err(),
+            "{input:?} must not type as an event window"
+        );
+    }
+}
+
+/// CR 603.2: the trailing peel splits the window off an event tail and
+/// leaves every other qualifier in the residual.
+#[test]
+fn peel_trailing_event_window_splits_only_a_trailing_window() {
+    assert_eq!(
+        peel_trailing_event_window("s during combat"),
+        ("s", Some(combat_window()))
+    );
+    assert_eq!(peel_trailing_event_window("s"), ("s", None));
+    assert_eq!(
+        peel_trailing_event_window("s from your graveyard during your turn"),
+        (
+            "s from your graveyard",
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        )
+    );
+}
+
+/// CR 603.2 + CR 603.4 (#9179 A): verbatim dies/enters heads carry the window
+/// as an event-time gate on `condition`; the constraint slot stays free and
+/// the zone-change shape is unchanged.
+#[test]
+fn event_trigger_heads_carry_the_window_as_an_event_time_gate() {
+    let pack = parse_trigger_line(
+        "When this creature dies during combat, create four 1/1 green Dog creature tokens.",
+        "Mongrel Pack",
+    );
+    assert_eq!(pack.mode, TriggerMode::ChangesZone);
+    assert_eq!(pack.origin, Some(Zone::Battlefield));
+    assert_eq!(pack.destination, Some(Zone::Graveyard));
+    assert_eq!(pack.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(pack.condition, Some(event_time(combat_window())));
+    assert_eq!(pack.constraint, None);
+    let body = pack.execute.as_ref().expect("Mongrel Pack body");
+    assert!(
+        !has_unimplemented(body),
+        "Mongrel Pack body must parse: {body:?}"
+    );
+
+    let noctis = parse_trigger_line(
+        "Whenever a creature you control enters during combat, you may attach target Equipment you control to target creature you control.",
+        "Noctis, Heir Apparent",
+    );
+    assert_eq!(noctis.mode, TriggerMode::ChangesZone);
+    assert_eq!(noctis.destination, Some(Zone::Battlefield));
+    assert_eq!(noctis.condition, Some(event_time(combat_window())));
+    assert_eq!(noctis.constraint, None);
+
+    let foe_liage = parse_trigger_line(
+        "Whenever a land enters during your turn, put a +1/+1 counter on this creature.",
+        "Foe-liage",
+    );
+    assert_eq!(foe_liage.mode, TriggerMode::ChangesZone);
+    assert_eq!(foe_liage.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        foe_liage.condition,
+        Some(event_time(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        }))
+    );
+    assert_eq!(foe_liage.constraint, None);
+
+    let portal_mage = parse_trigger_line(
+        "When this creature enters during the declare attackers step, you may reselect which player or permanent target attacking creature is attacking. (It can't attack its controller or their permanents.)",
+        "Portal Mage",
+    );
+    assert_eq!(portal_mage.mode, TriggerMode::ChangesZone);
+    assert_eq!(portal_mage.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        portal_mage.condition,
+        Some(event_time(TriggerCondition::CurrentPhaseIs {
+            phases: vec![Phase::DeclareAttackers],
+        }))
+    );
+    assert_eq!(portal_mage.constraint, None);
+}
+
+/// CR 603.2 + CR 603.4: the event window composes with a genuine intervening
+/// "if" — the window is wrapped in `EventTime` (never rechecked), the "if"
+/// beside it is not.
+#[test]
+fn event_window_composes_with_an_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever another creature dies during your turn, if you control an artifact, draw a card.",
+        "Synthetic Window And If",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    let Some(TriggerCondition::And { conditions }) = &def.condition else {
+        panic!(
+            "expected And of window + intervening if, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(conditions.len(), 2, "{conditions:?}");
+    assert!(
+        conditions.contains(&event_time(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        })),
+        "window must be an EventTime leaf: {conditions:?}"
+    );
+    assert!(
+        conditions
+            .iter()
+            .any(|c| !matches!(c, TriggerCondition::EventTime { .. })),
+        "the intervening if must stay outside EventTime: {conditions:?}"
+    );
+}
+
+/// CR 603.2: the window lives on `condition`, so a frequency constraint on
+/// the same trigger keeps the single constraint slot.
+#[test]
+fn event_window_composes_with_once_per_turn() {
+    let def = parse_trigger_line(
+        "Whenever a creature dies during combat, draw a card. This ability triggers only once each turn.",
+        "Synthetic Window Once Per Turn",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(def.condition, Some(event_time(combat_window())));
+}
+
+/// CR 603.2: a "during" window the combinator cannot type declines the head,
+/// so the line stays an unsupported `Unknown` trigger instead of an ungated
+/// zone-change trigger.
+#[test]
+fn untyped_event_window_declines_the_head() {
+    let def = parse_trigger_line(
+        "When this creature dies during your upkeep, draw a card.",
+        "Synthetic Untyped Window",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "untyped window must stay Unknown, got {:?}",
+        def.mode
+    );
+    // Reach guard: the same head without the window is a supported dies
+    // trigger, so the Unknown above comes from the window guard.
+    let plain = parse_trigger_line(
+        "When this creature dies, draw a card.",
+        "Synthetic Untyped Window",
+    );
+    assert_eq!(plain.mode, TriggerMode::ChangesZone);
+    assert_eq!(plain.condition, None);
+}

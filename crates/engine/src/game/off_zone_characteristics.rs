@@ -618,9 +618,9 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
             // collector.
             | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::RemoveAllAbilities
-            // CR 608.2d + CR 613.1f: `RemoveChosenKeyword` strips by
-            // discriminant the keyword stored in the source's
-            // `chosen_attributes` (Urborg / Walking Sponge). Same off-zone
+            // CR 608.2d + CR 613.1f: `RemoveChosenKeyword` strips the exact
+            // keyword stored in the source's `chosen_attributes`
+            // (Urborg / Walking Sponge). Same off-zone
             // applicability as `RemoveKeyword` — the granted/printed keyword
             // it targets may live on an object outside the battlefield.
             | ContinuousModification::RemoveChosenKeyword
@@ -705,9 +705,9 @@ fn modification_can_add_keyword_kind(
             .objects
             .get(&effect.source_id)
             .is_some_and(|src| src.chosen_keywords().iter().any(|kw| kw.kind() == kind)),
-        // Removal-only arms: `retain` by discriminant, `retain` by the source's
-        // chosen keyword, and `keywords.clear()` respectively. None can create a
-        // keyword — see the exactness argument on this function's doc.
+        // Removal-only arms: `retain` by the shared removal relation, `retain`
+        // by the source's exact chosen keyword, and `keywords.clear()`. None can
+        // create a keyword — see the exactness argument on this function's doc.
         ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::RemoveAllAbilities => false,
@@ -846,9 +846,9 @@ fn apply_keyword_modification(
             }
         }
         ContinuousModification::RemoveKeyword { keyword } => {
-            keywords.retain(|entry| {
-                std::mem::discriminant(&entry.keyword) != std::mem::discriminant(keyword)
-            });
+            // CR 113.10b + CR 702.11e: use the same family removal as layer 6.
+            keywords
+                .retain(|entry| !super::keywords::keyword_matches_removal(&entry.keyword, keyword));
         }
         ContinuousModification::AddDynamicKeyword { kind, value } => {
             let dynamic_value = resolve_quantity(state, value, effect.controller, effect.source_id);
@@ -954,6 +954,50 @@ mod tests {
             obj.timestamp = timestamp;
         }
         object_id
+    }
+
+    #[test]
+    fn lose_hexproof_off_zone_removes_family_only_from_recipient() {
+        use crate::types::keywords::HexproofFilter;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_card(&mut state, PlayerId(0), "Removal Source", Zone::Battlefield);
+        let recipient = create_card(&mut state, PlayerId(1), "Recipient", Zone::Graveyard);
+        let neighbor = create_card(&mut state, PlayerId(1), "Neighbor", Zone::Graveyard);
+        let qualified = Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black));
+        for id in [recipient, neighbor] {
+            state.objects.get_mut(&id).unwrap().base_keywords =
+                vec![qualified.clone(), Keyword::Flying];
+            assert_eq!(
+                effective_off_zone_keyword(&state, id, KeywordKind::Hexproof),
+                Some(qualified.clone()),
+            );
+        }
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Hexproof,
+            }],
+            None,
+        );
+        assert_eq!(
+            effective_off_zone_keyword(&state, recipient, KeywordKind::Flying),
+            Some(Keyword::Flying),
+        );
+        assert_eq!(
+            effective_off_zone_keyword(&state, neighbor, KeywordKind::Hexproof),
+            Some(qualified),
+        );
+        // CR 702.11e: the shared removal rule applies to objects off the battlefield too.
+        assert_eq!(
+            effective_off_zone_keyword(&state, recipient, KeywordKind::Hexproof),
+            None,
+            "lose hexproof must remove off-zone HexproofFrom",
+        );
     }
 
     /// CR 702.164b (issue #955): `upsert_keyword` must PUSH summing keywords

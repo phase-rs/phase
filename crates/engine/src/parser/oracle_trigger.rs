@@ -3,13 +3,16 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
-    all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, consumed, eof, fail, map, map_opt, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
+use super::oracle_effect::conditions::{
+    parse_phase_name_set, source_saddled_filter, split_leading_conditional,
+};
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
@@ -88,7 +91,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
     AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
 };
@@ -15114,6 +15117,15 @@ fn try_parse_event(
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
     if let Ok((after_enter, ())) = value((), tag::<_, _, OracleError<'_>>("enter")).parse(rest) {
+        // CR 603.2: a trailing "during <window>" qualifier ("enters during
+        // combat", "enters during your turn", "enters during the declare
+        // attackers step") is part of the trigger event. Peel it first so the
+        // origin / control / tapped / this-way riders below scan only the
+        // remaining tail; an unrecognized window stays coverage-red.
+        let (after_enter, window) = peel_trailing_event_window(after_enter);
+        if has_untyped_event_window(after_enter) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -15232,6 +15244,7 @@ fn try_parse_event(
             ));
         }
 
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -15244,12 +15257,20 @@ fn try_parse_event(
         ))
         .parse(input)
     }
-    if parse_dies_verb.parse(rest).is_ok() {
+    if let Ok((dies_tail, ())) = parse_dies_verb.parse(rest) {
+        // CR 603.2: "dies during combat" / "dies during your turn" — the
+        // window is part of the trigger event. An unrecognized window stays
+        // coverage-red rather than firing ungated.
+        let (dies_tail, window) = peel_trailing_event_window(dies_tail);
+        if has_untyped_event_window(dies_tail) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.origin = Some(Zone::Battlefield);
         def.destination = Some(Zone::Graveyard);
         def.valid_card = Some(subject.clone());
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -15724,19 +15745,7 @@ fn try_parse_event(
         // Courageous Rescuer ("another permanent you control leaves the
         // battlefield during your turn").
         let (tail, turn_constraint) = peel_trailing_turn_constraint(tail);
-        let turn_condition = match turn_constraint {
-            Some(TriggerConstraint::OnlyDuringYourTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Controller,
-                })
-            }
-            Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Opponent,
-                })
-            }
-            _ => None,
-        };
+        let turn_condition = turn_constraint.and_then(turn_window_condition);
         let without_dying = all_consuming(tag::<_, _, OracleError<'_>>("without dying"))
             .parse(tail)
             .is_ok();
@@ -23600,6 +23609,88 @@ fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint
             return (input, None);
         };
         remaining = remaining[idx + 1..].trim_start();
+    }
+}
+
+/// CR 102.1 + CR 603.2: the turn owner a [`parse_during_turn_spec`] token
+/// names, as a trigger-condition leaf ("your turn" → the trigger's
+/// controller is the active player; "an opponent's turn" → an opponent of the
+/// controller is). Only the two turn tokens `parse_during_turn_spec` emits map
+/// to a player; every other constraint is not a turn window.
+fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerCondition> {
+    let player = match constraint {
+        TriggerConstraint::OnlyDuringYourTurn => PlayerFilter::Controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => PlayerFilter::Opponent,
+        TriggerConstraint::OncePerTurn
+        | TriggerConstraint::OncePerGame
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OnlyDuringYourMainPhase
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::EventSourceControlledBy { .. } => return None,
+    };
+    Some(TriggerCondition::DuringPlayersTurn { player })
+}
+
+/// CR 603.2 + CR 500.1 + CR 506.1: the "during <window>" qualifier of an
+/// event-trigger head — "during your turn" / "during an opponent's turn"
+/// (turn windows, via [`parse_during_turn_spec`]), "during combat" (the whole
+/// combat phase, CR 506.1), or "during the <step/phase>" (via
+/// `parse_phase_name_set`). The arms are leaf alternatives after the shared
+/// "during " prefix. NON-`all_consuming`: callers own any trailing text.
+pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerCondition> {
+    preceded(
+        tag("during "),
+        alt((
+            map_opt(parse_during_turn_spec, turn_window_condition),
+            map(parse_event_word("combat"), |()| {
+                TriggerCondition::CurrentPhaseIs {
+                    phases: PhaseGroup::Combat.steps().to_vec(),
+                }
+            }),
+            map(preceded(tag("the "), parse_phase_name_set), |phases| {
+                TriggerCondition::CurrentPhaseIs { phases }
+            }),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 603.2: peel a "during <window>" qualifier that ends an event-trigger
+/// head's tail ("s during combat" → ("s", Some(window))). Found at a word
+/// boundary; the window must consume the rest of the tail.
+fn peel_trailing_event_window(input: &str) -> (&str, Option<TriggerCondition>) {
+    match scan_preceded(input, |i| all_consuming(parse_event_window).parse(i)) {
+        Some((before, window, _)) => (before.trim_end(), Some(window)),
+        None => (input, None),
+    }
+}
+
+/// CR 603.2: true when an event-trigger tail still carries a word-bounded
+/// "during " after [`peel_trailing_event_window`] — a window the combinator
+/// cannot type ("dies during your upkeep"). Callers decline the head so the
+/// line stays coverage-red instead of firing ungated.
+fn has_untyped_event_window(residual: &str) -> bool {
+    scan_preceded(residual, |i| {
+        tag::<_, _, OracleError<'_>>("during ").parse(i)
+    })
+    .is_some()
+}
+
+/// CR 603.2 + CR 603.4: AND the event window onto the trigger's condition as
+/// `EventTime` — read when the trigger event occurs and never rechecked on
+/// resolution, since the window is part of the trigger event rather than an
+/// intervening "if" (`stack_condition_for_trigger` drops `EventTime`).
+fn attach_event_window(def: &mut TriggerDefinition, window: Option<TriggerCondition>) {
+    if let Some(window) = window {
+        def.condition = Some(append_trigger_condition(
+            def.condition.take(),
+            TriggerCondition::EventTime {
+                condition: Box::new(window),
+            },
+        ));
     }
 }
 

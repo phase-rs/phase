@@ -3029,6 +3029,7 @@ fn prepared_designation_subject_unclassified_subject_stays_single() {
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     };
     let yours = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
 
@@ -89296,6 +89297,7 @@ mod carried_player_reference_tests {
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         }
     }
 
@@ -89456,6 +89458,7 @@ mod carried_player_reference_tests {
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         };
         let mut gain = gain_life_controller();
         inject_subject_target(
@@ -91326,6 +91329,7 @@ mod controller_anaphor_antecedent_writer_tests {
             multi_target,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         }
     }
 
@@ -93085,4 +93089,75 @@ fn an_unmodelled_player_relative_clause_is_an_unbound_subject() {
         "{:?}",
         each_of.effect
     );
+}
+
+#[test]
+fn search_reveal_continuation_keeps_the_searched_player_as_that_player() {
+    for text in [
+        "Search target opponent's library for a card and reveal it. That player loses 2 life.",
+        "Search target opponent's library for a card. That player loses 2 life.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let group = def
+            .declares_chosen_group
+            .expect("search declares its player");
+        let lose = chain_defs(&def)
+            .into_iter()
+            .find_map(|d| match &*d.effect {
+                Effect::LoseLife { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no LoseLife in {text}: {def:?}"));
+        assert_eq!(lose, Some(TargetFilter::DeclaredPlayer { group }), "{text}");
+    }
+}
+
+#[test]
+fn that_player_chooser_without_a_declared_player_is_not_bound_to_one() {
+    let def = parse_effect_chain(
+        "Choose two target creatures controlled by the same opponent. That player chooses one of those creatures. Trial of Agony deals 5 damage to that creature, and the other can't block this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "{def:?}");
+    let chooser = chain_defs(&def)
+        .into_iter()
+        .find_map(|d| match &*d.effect {
+            Effect::ChooseFromZone { chooser, .. } => Some(*chooser),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no ChooseFromZone: {def:?}"));
+    assert!(
+        !matches!(chooser, ZoneChoiceChooser::DeclaredPlayer { .. }),
+        "{chooser:?}"
+    );
+}
+
+#[test]
+fn only_that_player_binds_the_declared_player_as_zone_chooser() {
+    let chooser_of = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let chooser = chain_defs(&def).into_iter().find_map(|d| match &*d.effect {
+            Effect::ChooseFromZone { chooser, .. } => Some(*chooser),
+            _ => None,
+        });
+        (chooser, chain_has_unimplemented(&def), def)
+    };
+    let (chooser, unimplemented, def) = chooser_of(
+        "Search target opponent's library for four cards with different names and reveal them. That player chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand. Then that player shuffles their library.",
+    );
+    assert!(
+        matches!(chooser, Some(ZoneChoiceChooser::DeclaredPlayer { .. })) && !unimplemented,
+        "{def:?}"
+    );
+    for text in [
+        "Search target opponent's library for four cards with different names and reveal them. Its controller chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand.",
+        "Search target opponent's library for four cards with different names and reveal them. Tap target creature. Its controller chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand.",
+    ] {
+        let (chooser, unimplemented, def) = chooser_of(text);
+        assert!(
+            !matches!(chooser, Some(ZoneChoiceChooser::DeclaredPlayer { .. })),
+            "{text}: {def:?}"
+        );
+        assert!(unimplemented, "{text}: {def:?}");
+    }
 }

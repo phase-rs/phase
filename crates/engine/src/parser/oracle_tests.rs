@@ -16287,16 +16287,19 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
     let choose = chain
         .sub_ability
         .as_ref()
-        .and_then(|search_move| search_move.sub_ability.as_ref())
-        .expect("search move should chain to ChooseFromZone");
-    assert!(matches!(
-        &*choose.effect,
-        Effect::ChooseFromZone {
-            count: 2,
-            chooser: ZoneChoiceChooser::Opponent,
-            ..
-        }
-    ));
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "{:?}",
+        choose.effect
+    );
     let chosen_move = choose
         .sub_ability
         .as_ref()
@@ -16321,6 +16324,62 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
             ..
         }
     ));
+}
+
+#[test]
+fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+            "Search your library for up to four creature cards with different powers and reveal them. An opponent chooses two of those cards. Shuffle the chosen cards into your library and put the rest into your hand.",
+            AbilityKind::Spell,
+        );
+    let choose = chain
+        .sub_ability
+        .as_ref()
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(&*choose.effect, Effect::ChooseFromZone { .. }),
+        "{:?}",
+        choose.effect
+    );
+    let chosen_move = choose
+        .sub_ability
+        .as_ref()
+        .expect("choice should route chosen cards first");
+    assert!(matches!(
+        &*chosen_move.effect,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn search_without_choice_partition_keeps_its_put_step() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+        "Search your library for a card, put that card into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+    let put = chain.sub_ability.as_ref().expect("search put step");
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "{:?}",
+        put.effect
+    );
 }
 
 #[test]

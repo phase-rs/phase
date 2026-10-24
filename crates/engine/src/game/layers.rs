@@ -10899,8 +10899,8 @@ fn grant_keyword_instance(
         // most recently applied instance (this one, since modifications are
         // applied in ascending timestamp order, see `order_by_timestamp`)
         // replaces any earlier same-discriminant instance (printed or a prior
-        // grant) rather than coexisting with it. Mirrors `RemoveKeyword`'s
-        // discriminant technique, but replaces instead of strips.
+        // grant) rather than coexisting with it. Grant replacement remains
+        // variant-scoped; generic removal uses its own family-aware relation.
         obj.keywords
             .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword));
         obj.keywords.push(resolved_keyword.clone());
@@ -11974,16 +11974,12 @@ fn apply_continuous_effect_filtered(
                 }
                 other => grant_keyword_instance(obj, other.clone(), effect, 0),
             },
-            // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
-            // shares the same discriminant (e.g. "lose all flying"). The
-            // current Oracle parser only emits unparameterized variants here,
-            // so discriminant matching gives the intended "lose this kind of
-            // ability" scope. If a future card requires "lose protection from
-            // white but keep protection from blue," this arm needs to switch
-            // to PartialEq alongside a new typed parser shape.
+            // CR 113.10b + CR 613.1f: remove all instances in the ability layer.
+            // Generic removal keeps same-variant scope, extended to the full
+            // hexproof family by CR 702.11e. Chosen-keyword loss below stays exact.
             ContinuousModification::RemoveKeyword { keyword } => {
                 obj.keywords
-                    .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(keyword));
+                    .retain(|k| !super::keywords::keyword_matches_removal(k, keyword));
                 obj.trigger_definitions.retain(|entry| {
                     !KeywordTriggerInstaller::trigger_matches_keyword_kind(
                         entry.definition(),
@@ -11993,8 +11989,8 @@ fn apply_continuous_effect_filtered(
             }
             // CR 608.2d + CR 613.1f + CR 702.14: Strip the *exact* keyword
             // chosen at resolution time (read off the source's
-            // `chosen_attributes` above). Unlike the unparameterized
-            // `RemoveKeyword` arm, the chosen-keyword surface is concrete —
+            // `chosen_attributes` above). Unlike the generic `RemoveKeyword`
+            // arm, the chosen-keyword surface is concrete —
             // `ChosenAttribute::Keyword(Landwalk("Swamp"))` is exactly
             // swampwalk, not "any landwalk." CR 702.14 treats each landwalk
             // subtype as a distinct keyword, so removing swampwalk must

@@ -16675,20 +16675,13 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // player subject ("that player flips a coin") is stamped onto `flipper`
         // afterward by `inject_subject_target`.
         ImperativeFamilyAst::FlipCoins { flips } => {
-            // CR 705.2: `UntilLoss` carries a stub `win_effect` — subsequent "For each
-            // flip you won, ..." clauses are consolidated into it by
-            // `consolidate_die_and_coin_defs`. `Exactly` branches are attached the same
-            // way, from a following sentence ("for each heads …").
-            let win_effect = match flips {
-                CoinFlipRun::UntilLoss => Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::unimplemented("flip_coin_until_lose_stub", "pending consolidation"),
-                ))),
-                CoinFlipRun::Exactly { .. } => None,
-            };
+            // CR 705.2 + CR 608.2c: `consolidate_die_and_coin_defs` makes whatever clause
+            // follows the run its per-win reward ("for each flip you won, …"); a run with no
+            // following clause is complete as written. `Exactly` branches are attached the
+            // same way, from a following sentence ("for each heads …").
             Effect::FlipCoins {
                 flips,
-                win_effect,
+                win_effect: None,
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             }

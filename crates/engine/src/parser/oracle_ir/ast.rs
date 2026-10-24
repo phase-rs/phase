@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
+use crate::parser::oracle_nom::target::PlayerAnaphor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
@@ -85,6 +86,11 @@ pub(crate) struct SubjectApplication {
     /// `AbilityDefinition.optional` so the resolver treats the sub-ability
     /// as a player choice.
     pub(crate) is_optional: bool,
+    /// CR 608.2c: the player anaphor the subject phrase printed, which names its
+    /// antecedent where `affected` alone cannot ("that player" and "its controller"
+    /// both lower to `ParentTargetController`).
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -259,6 +265,9 @@ pub(crate) struct SubjectPhraseAst {
     pub(crate) inherits_parent: bool,
     /// CR 608.2c: Propagated from `SubjectApplication.is_optional`.
     pub(crate) is_optional: bool,
+    /// Propagated from `SubjectApplication.player_anaphor`.
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

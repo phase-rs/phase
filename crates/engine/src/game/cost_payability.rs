@@ -1653,6 +1653,10 @@ impl AbilityCost {
             AbilityCost::Reveal { count, filter } => match filter {
                 None => true,
                 Some(f) => {
+                    // CR 107.3a: X = 0 is a legal announcement, so before X is
+                    // announced a symbolic count reads 0 (mirrors Discard).
+                    let count = super::quantity::resolve_quantity(state, count, player, source)
+                        .max(0) as usize;
                     super::casting::find_eligible_reveal_targets(
                         state,
                         player,
@@ -1661,7 +1665,7 @@ impl AbilityCost {
                         f,
                     )
                     .len()
-                        >= *count as usize
+                        >= count
                 }
             },
             AbilityCost::Behold {

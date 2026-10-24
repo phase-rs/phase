@@ -12996,9 +12996,9 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::ManaDynamic { quantity: amount } => {
             bind_where_x_quantity(amount, where_x_expression, unbound);
         }
-        // CR 701.9: "discard X cards, where X is …" — the discard count is a
-        // `QuantityExpr` and must track the same where-X binding.
-        AbilityCost::Discard { count, .. } => {
+        // CR 701.9 / CR 701.20a: discard/reveal counts are QuantityExpr and
+        // track the same where-X binding ("discard X cards, where X is …").
+        AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, unbound);
         }
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -13047,7 +13047,6 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
@@ -16471,6 +16470,37 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    /// CR 701.20a + CR 107.3i: a reveal count is a `QuantityExpr` slot, so a
+    /// trailing "where X is …" binds it exactly as it binds a discard count.
+    #[test]
+    fn where_x_binds_reveal_cost_count() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::mana::ManaColor;
+        let expression = "the number of cards in your hand";
+        let expected = parse_where_x_quantity_expression(expression)
+            .expect("the where-X expression is representable");
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let mut cost = AbilityCost::Reveal {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+            filter: Some(filter.clone()),
+        };
+        let mut unbound = None;
+        super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
+        assert_eq!(unbound, None);
+        assert_eq!(
+            cost,
+            AbilityCost::Reveal {
+                count: expected,
+                filter: Some(filter),
+            }
         );
     }
 
