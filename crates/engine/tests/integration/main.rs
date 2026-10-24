@@ -2092,6 +2092,7 @@ mod commanders_plate_protection;
 mod display_identity_serde;
 mod event_window_trigger_gate;
 mod put_target_count_entry_counters;
+mod risky_move_gain_control_trigger;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;

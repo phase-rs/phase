@@ -162,7 +162,7 @@ use crate::types::statics::CastFreeOrigin;
 use crate::types::statics::{
     ActivationExemption, CastFrequency, GraveyardPermissionPool, StaticMode,
 };
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::Zone;
 
 use self::conditions::*;
@@ -2715,11 +2715,13 @@ fn try_parse_lose_control_delayed_trigger(
         },
     );
 
-    // CR 603.7 + CR 603.2: a one-shot ThisTurn ChangesController delayed trigger,
-    // `valid_card` bound to the Equipment slot so it fires on the loss of that
-    // specific Equipment.
+    // CR 603.7 + CR 603.2 + CR 603.10d: a one-shot ThisTurn ChangesController
+    // delayed trigger, `valid_card` bound to the Equipment slot so it fires on the
+    // loss of that specific Equipment.
     Some(build_when_next_delayed_trigger(
-        TriggerMode::ChangesController,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        },
         valid_card,
         inner,
         None,

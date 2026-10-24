@@ -64672,7 +64672,9 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
     );
     assert_eq!(
         trigger.mode,
-        TriggerMode::ChangesController,
+        TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses
+        },
         "trigger fires on the control change"
     );
     // Claim 2: valid_card binds the Equipment slot, not the collision ParentTarget.

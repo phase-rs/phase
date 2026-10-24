@@ -5975,7 +5975,9 @@ mod tests {
 
         // The `stolen uniform` shape — the slot anaphor is recognized in step 1
         // and `ChangesController` is not allowlisted in step 2.
-        let mut stolen = TriggerDefinition::new(TriggerMode::ChangesController);
+        let mut stolen = TriggerDefinition::new(TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses,
+        });
         stolen.valid_card = Some(TargetFilter::ParentTargetSlot { index: 1 });
         assert!(trigger_names_referent_zone_change(&stolen));
 

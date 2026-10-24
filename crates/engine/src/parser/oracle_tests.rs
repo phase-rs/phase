@@ -34947,3 +34947,48 @@ fn ir_facade_demotes_a_refused_granter_name() {
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
 }
+
+/// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move, verbatim, is a fully
+/// supported card. The second ability ("When you gain control of this
+/// enchantment from another player, ...") is the gain-side
+/// `ChangesController`; `card_face_gaps` runs `trigger_mode_is_supported`, so a
+/// dropped registry insert for `{ side: Gains }` makes this fail. The first
+/// ability is the upkeep `GiveControl` of the enchantment to the scoped
+/// (active) player.
+#[test]
+fn risky_move_full_card_supported_with_gain_side_control_trigger() {
+    use crate::types::triggers::{ControlChangeSide, TriggerMode};
+    let face = oracle_face_for(
+        "Risky Move",
+        "At the beginning of each player's upkeep, that player gains control of this enchantment.\nWhen you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        &["Enchantment"],
+        &[],
+    );
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert!(
+        gaps.is_empty(),
+        "Risky Move must be fully supported, gaps: {gaps:?}"
+    );
+    assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
+    let upkeep = &face.triggers[0];
+    assert_eq!(upkeep.mode, TriggerMode::Phase);
+    assert_eq!(upkeep.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep
+            .execute
+            .as_ref()
+            .expect("upkeep body")
+            .effect
+            .as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(
+        face.triggers[1].mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+}

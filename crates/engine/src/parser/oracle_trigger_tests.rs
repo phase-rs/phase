@@ -11165,20 +11165,98 @@ fn trigger_murktide_leaves_your_graveyard() {
     );
 }
 
-/// CR 603.2 + CR 613.3 + #1522: "When you lose control of ~" — Sigil of
-/// Corruption ability on Khârn the Betrayer. Maps to ChangesController with
-/// valid_card = SelfRef so the trigger fires only when this specific permanent
-/// changes controller. Execute draws 2 for the previous controller (the trigger
-/// fires before layer re-evaluation, so the previous controller still holds Khârn
-/// at trigger-scan time).
+/// CR 603.2 + CR 603.10d + #1522: "When you lose control of ~" — Sigil of
+/// Corruption ability on Khârn the Betrayer. Maps to ChangesController
+/// `{ side: Loses }` with valid_card = SelfRef so the trigger fires only when
+/// this specific permanent changes controller. Execute draws 2 for the previous
+/// controller (CR 603.10d: the ability looks back in time to the pre-change
+/// controller, who controls the trigger).
 #[test]
 fn trigger_when_you_lose_control_maps_to_changes_controller() {
     let def = parse_trigger_line(
         "When you lose control of ~, draw two cards.",
         "Khârn the Betrayer",
     );
-    assert_eq!(def.mode, TriggerMode::ChangesController);
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move's second ability, verbatim.
+/// "When you gain control of ~ from another player" maps to ChangesController
+/// `{ side: Gains }` with valid_card = SelfRef; "from another player" adds no
+/// constraint (CR 110.2: a control change always comes from the prior
+/// controller) so `valid_target` stays empty. The body is the shared
+/// choose-creature-and-opponent coin-flip chain and must not leak
+/// `Unimplemented` (the reach guard for
+/// `trigger_gain_control_hostile_shapes_stay_unknown`).
+#[test]
+fn trigger_when_you_gain_control_from_another_player_maps_to_gains() {
+    let def = parse_trigger_line(
+        "When you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        "Risky Move",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(def.valid_target, None);
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert!(
+        !has_unimplemented(execute),
+        "Risky Move's body leaked Unimplemented: {execute:?}"
+    );
+}
+
+/// CR 603.2 + CR 603.10: the bare "Whenever you gain control of ~" class — no
+/// "from another player" suffix — is rules-identical and maps to `Gains`.
+#[test]
+fn trigger_whenever_you_gain_control_bare_maps_to_gains() {
+    let def = parse_trigger_line("Whenever you gain control of ~, draw a card.", "Example");
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// Hostile shapes stay `Unknown` (honest coverage gaps): a counterparty other
+/// than "another player" and a lose-side line with a "from" suffix are not the
+/// recognised grammar. Paired with a positive in the same test so the negatives
+/// are not vacuous.
+#[test]
+fn trigger_gain_control_hostile_shapes_stay_unknown() {
+    let positive = parse_trigger_line(
+        "When you gain control of ~ from another player, draw a card.",
+        "Example",
+    );
+    assert_eq!(
+        positive.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        },
+        "reach guard: the recognised grammar parses"
+    );
+    for text in [
+        "When you gain control of ~ from an opponent, draw a card.",
+        "When you lose control of ~ from another player, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Example");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text:?} must stay Unknown, got {:?}",
+            def.mode
+        );
+    }
 }
 
 /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
