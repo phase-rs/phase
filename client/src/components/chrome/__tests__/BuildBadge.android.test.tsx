@@ -111,3 +111,14 @@ it("retains desktop app-version and updater reachability", async () => {
   expect(mocks.tauriUpdate).toHaveBeenCalledOnce();
   expect(mocks.serviceWorker).toHaveBeenCalledOnce();
 });
+
+it.each([
+  { preview: true, shown: true },
+  { preview: false, shown: false },
+])("shows the build hash only on preview builds (preview=$preview)", ({ preview, shown }) => {
+  vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
+  render(<BuildBadge inline />);
+  if (shown) expect(screen.getByText(__BUILD_HASH__)).toBeInTheDocument();
+  else expect(screen.queryByText(__BUILD_HASH__)).not.toBeInTheDocument();
+  vi.unstubAllGlobals();
+});

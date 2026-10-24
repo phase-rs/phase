@@ -15,6 +15,7 @@ import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
+import { displayedBuildHash } from "../../services/buildInfo.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
@@ -100,6 +101,7 @@ export function GameMenu({
   const ownedMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const resolvedMenuTriggerRef = menuTriggerRef ?? ownedMenuTriggerRef;
   const cardDataMeta = useCardDataMeta();
+  const buildHash = displayedBuildHash();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
   const isDraftPodMatch = searchParams.get("mode") === "draft-match";
   const boardLayoutToggleLabel = multiplayerBoardLayout === "split"
@@ -369,7 +371,7 @@ export function GameMenu({
               rel="noopener noreferrer"
               className="transition-colors hover:text-white"
             >
-              v{__APP_VERSION__} {__BUILD_HASH__}
+              v{__APP_VERSION__}{buildHash && ` ${buildHash}`}
             </a>
             {cardDataMeta && (
               <>

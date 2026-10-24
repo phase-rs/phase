@@ -11,6 +11,7 @@ import {
   useUpdateError,
   getUpdateDebugReport,
 } from "../../pwa/updateStatus";
+import { displayedBuildHash } from "../../services/buildInfo";
 import { isBundledTauriOrigin, isDesktopTauri, isTauri } from "../../services/platform";
 
 const UPDATED_LABEL_MS = 4500;
@@ -79,6 +80,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     window.alert(report);
   };
 
+  const buildHash = displayedBuildHash();
   const commitUrl = `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`;
   const cardDataAge = cardDataMeta ? formatRelativeDate(cardDataMeta.generated_at) : null;
   const cardDataCommitUrl = cardDataMeta
@@ -90,7 +92,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   // in its hover tooltip (the same meta the wide mobile pill shows inline).
   if (compact) {
     const tooltip = [
-      `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
+      buildHash ? `v${__APP_VERSION__} · ${buildHash}` : `v${__APP_VERSION__}`,
       shellVersion && t("buildBadge.desktopAppVersion", { version: shellVersion }),
       cardDataMeta &&
         t("buildBadge.cardDataTitle", {
@@ -153,7 +155,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           className="flex items-center gap-1 transition-colors hover:text-white"
         >
           <span>v{__APP_VERSION__}</span>
-          <span className="text-slate-600">{__BUILD_HASH__}</span>
+          {buildHash && <span className="text-slate-600">{buildHash}</span>}
         </a>
 
         {shellVersion && (

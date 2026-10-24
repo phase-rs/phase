@@ -805,6 +805,8 @@ jobs:
           CARD_DATA_URL: "https://data.phase-rs.dev/staging/${{ needs.preview-inputs.outputs.card_data_filename }}"
           ENGINE_WASM_URL: "https://data.phase-rs.dev/staging/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           ENGINE_FINGERPRINT: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
+          # Surfaces the commit hash beside the version (see __IS_PREVIEW_BUILD__).
+          PREVIEW_BUILD: "true"
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
           # access control), so it's baked into the bundle. Empty (secret unset) →
