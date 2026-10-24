@@ -2,19 +2,20 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
+#[cfg(test)]
+use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
-    StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    EffectScope, FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint,
+    PlayerFilter, PlayerScope, PreventionAmount, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
+    TriggerCondition, TriggerConditionAnchor, TriggerConstraint, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
+    TypeFilter, TypedFilter,
 };
-#[cfg(test)]
-use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -17678,10 +17679,32 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
     // is the same "any target" player-chosen slot as `DealDamage` — surface it so
     // the cast/trigger-time target slot is built.
+    // CR 115.1a/c/d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
+    // recipient, `TargetFilter::Any`, and no `damage_source_filter` ("prevent the
+    // next 2 damage that would be dealt to any target this turn", Aven Redeemer,
+    // Healing Salve) is a player-chosen target slot over creatures, planeswalkers,
+    // and players. When `damage_source_filter` is present (Awe Strike, Maze of Ith),
+    // the target slot is carried by the source filter and `Any` is an untargeted
+    // broadcast recipient that must not mint a slot. When `amount` is `All`
+    // (Fog, Sewers of Estark), it is an untargeted mass prevention effect that must
+    // not mint a slot.
     if effect.target_filter() == Some(&TargetFilter::Any)
         && !matches!(
             effect,
-            Effect::DealDamage { .. } | Effect::EachSourceDealsDamage { .. }
+            Effect::DealDamage { .. }
+                | Effect::EachSourceDealsDamage { .. }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount: PreventionAmount::Next(_),
+                    ..
+                }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount_dynamic: Some(_),
+                    ..
+                }
         )
     {
         return None;
@@ -35165,6 +35188,65 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "GenericEffect with a typed target must still generate a target slot"
+        );
+    }
+
+    /// CR 115.1c + CR 115.4 + CR 615.7: `PreventDamage { recipient_scope: Single, target: Any }`
+    /// ("prevent the next 2 damage that would be dealt to any target this turn", Aven Redeemer)
+    /// is a declared target over creatures, players, and planeswalkers — must generate a slot.
+    #[test]
+    fn extract_target_keeps_prevent_damage_with_any_target_and_single_recipient_scope() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::Next(2),
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
+            scope: crate::types::ability::PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "PreventDamage with Single recipient_scope and Any target must generate a target slot"
+        );
+    }
+
+    /// CR 115.10a + CR 615.1: `PreventDamage { recipient_scope: All, target: Any }`
+    /// ("prevent all combat damage that would be dealt this turn", Fog) is an untargeted
+    /// mass effect — must NOT generate a slot.
+    #[test]
+    fn extract_target_skips_prevent_damage_with_all_recipient_scope() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::All,
+            scope: crate::types::ability::PreventionScope::CombatDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "PreventDamage with All recipient_scope must not generate a target slot"
+        );
+    }
+
+    /// CR 115.10a + CR 615.1: `PreventDamage { recipient_scope: Single, target: Any, amount: All }`
+    /// (unconstrained mass prevention like Fog or Sewers of Estark) is untargeted — must NOT generate a slot.
+    #[test]
+    fn extract_target_skips_prevent_damage_with_all_amount() {
+        let effect = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
+            scope: crate::types::ability::PreventionScope::CombatDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "PreventDamage with All amount must not generate a target slot even with Single recipient_scope"
         );
     }
 

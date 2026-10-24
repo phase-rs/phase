@@ -67169,8 +67169,7 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
 /// the single authority the stack-time slot builder consults.
 #[test]
 fn prevent_recipient_scope_classification() {
-    // (oracle clause, scope, mints a declared slot, expected announced count)
-    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 9] = [
         (
             "Prevent all damage that would be dealt to target creature this turn.",
             EffectScope::Single,
@@ -67191,6 +67190,12 @@ fn prevent_recipient_scope_classification() {
         ),
         (
             "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 2 damage that would be dealt to any target this turn.",
             EffectScope::Single,
             true,
             None,

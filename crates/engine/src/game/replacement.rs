@@ -7745,6 +7745,23 @@ fn object_replacement_candidate_applies(
             }
         }
     }
+    // CR 400.7 + CR 615.1: an object-hosted prevention shield protects only its
+    // host's current incarnation. A blinked host keeps its id but bumps its
+    // incarnation, becoming a new object with no memory of the departed one's
+    // shield — refuse to apply this shield to a later incarnation. Registry
+    // (population) shields leave this field None and match the live population
+    // at each damage event, so they are unaffected.
+    if let Some(recorded) = repl_def.target_recipient_incarnation {
+        if let ProposedEvent::Damage { target, .. } = event {
+            let current = match target {
+                TargetRef::Object(oid) => state.objects.get(oid).map(|o| o.incarnation),
+                TargetRef::Player(_) => None,
+            };
+            if current != Some(recorded) {
+                return false;
+            }
+        }
+    }
     if repl_def.mana_replacement_scope == crate::types::ability::ManaReplacementScope::TappedForMana
     {
         // CR 106.12b + CR 614.1a: tapped-for-mana scopes only match mana from

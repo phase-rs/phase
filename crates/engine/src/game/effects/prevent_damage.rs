@@ -235,6 +235,13 @@ fn untargeted_damage_filter(
         // the generic `is_context_ref()` catch-all (same ordering contract as
         // the `TrackedSet` carve-out above).
         TargetFilter::SelfRef => None,
+        // CR 608.2k + CR 120.1: an event-context recipient (e.g. `EventTarget`
+        // from a passive damage trigger) is an OBJECT referent, not a player.
+        // The generic `is_context_ref()` classification below would misroute it
+        // through `resolve_player_for_context_ref` to the object's controller;
+        // this arm must precede `is_context_ref()` (same ordering contract as
+        // `TrackedSet` and `SelfRef` above).
+        TargetFilter::EventTarget => None,
         filter if filter.is_context_ref() => {
             super::resolve_player_for_context_ref(state, ability, filter).map(player_damage_filter)
         }
@@ -584,22 +591,34 @@ pub fn resolve(
         shield = shield.combat_scope(CombatDamageScope::CombatOnly);
     }
 
-    // CR 608.2c: When the shield is bound to a parent's chosen object target
-    // (Gatta and Luzzu's `ParentTarget` referencing the chosen creature), we
-    // host on the object itself and scope via `valid_card: SelfRef` — the
-    // player-scoped `untargeted_damage_filter` below resolves `ParentTarget`
-    // to the controller, which would mis-scope an object-shield as a
-    // player-shield. Skip the player-filter inference in that case.
-    let host_on_parent_target_object = matches!(target, TargetFilter::ParentTarget)
+    // CR 608.2c + CR 608.2k + CR 120.1: When the shield is bound to a parent's
+    // chosen object target (Gatta and Luzzu's `ParentTarget` referencing the chosen
+    // creature) or an event-context recipient (`EventTarget` referencing the damaged
+    // creature in a passive damage trigger), resolve the concrete target now while
+    // the event context is live, host on the object itself, and scope via
+    // `valid_card: SelfRef` — the player-scoped `untargeted_damage_filter` below
+    // resolves context refs to their controller, which would mis-scope an
+    // object-shield as a player-shield. Skip the player-filter inference in those cases.
+    let event_context_target = if matches!(target, TargetFilter::EventTarget) {
+        crate::game::targeting::resolve_event_context_target(state, &target, ability.source_id)
+    } else {
+        None
+    };
+    let host_on_context_target_object = (matches!(target, TargetFilter::ParentTarget)
         && ability
             .targets
             .iter()
-            .any(|t| matches!(t, TargetRef::Object(_)));
+            .any(|t| matches!(t, TargetRef::Object(_))))
+        || (matches!(target, TargetFilter::EventTarget)
+            && matches!(event_context_target, Some(TargetRef::Object(_))));
 
     // CR 115.1: a declared recipient is scoped by where the shield is installed
     // (the chosen object's host, or the chosen player's filter below), never by
     // the recipient's type filter, which would shield every matching object.
-    if !host_on_parent_target_object && !declared_recipient {
+    if !host_on_context_target_object
+        && !declared_recipient
+        && !matches!(target, TargetFilter::EventTarget)
+    {
         if let Some(filter) = untargeted_damage_filter(state, ability, &target) {
             shield = shield.damage_target_filter(filter);
         } else if let Some(recipient_filter) = typed_recipient_valid_card_filter(&target) {
@@ -689,12 +708,26 @@ pub fn resolve(
     //
     // CR 115.10a: a mass (`All`) shield never hosts on inherited targets — its
     // population is matched as each damage event happens, not chosen.
+    // CR 608.2k + CR 120.1: concrete recipient targets to host on — declared targets,
+    // inherited parent targets, or the active event's referent.
+    let targets_to_host: Vec<TargetRef> = if !ability.targets.is_empty() {
+        ability.targets.clone()
+    } else if matches!(target, TargetFilter::EventTarget) {
+        event_context_target.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+
     let host_on_targets = !source_scoped_prevent
-        && !ability.targets.is_empty()
-        && (!target.is_context_ref() || matches!(target, TargetFilter::ParentTarget))
+        && !targets_to_host.is_empty()
+        && (!target.is_context_ref()
+            || matches!(
+                target,
+                TargetFilter::ParentTarget | TargetFilter::EventTarget
+            ))
         && recipient_scope == EffectScope::Single;
     if host_on_targets {
-        for selected_target in &ability.targets {
+        for selected_target in &targets_to_host {
             match selected_target {
                 TargetRef::Object(obj_id) => {
                     // CR 614.1a: When the shield is hosted on a specific object,
@@ -708,6 +741,14 @@ pub fn resolve(
                         object_shield.valid_card = Some(TargetFilter::SelfRef);
                     }
                     if let Some(obj) = state.objects.get_mut(obj_id) {
+                        // CR 400.7 + CR 615.1: the object keeps its id across a
+                        // zone change but bumps its incarnation, so a blinked
+                        // creature is a new object with no memory of the
+                        // departed one's shield. Stamp the host's incarnation on
+                        // the shield at install time so the match-time gate in
+                        // `game::replacement::object_replacement_candidate_applies`
+                        // refuses to apply this shield to a later incarnation.
+                        object_shield.target_recipient_incarnation = Some(obj.incarnation);
                         // CR 611.2c + CR 613.1: install through the one
                         // resolution-install authority so the CR 613.1 layer reseed
                         // CARRIES this shield instead of wiping it. A prevention
@@ -733,8 +774,9 @@ pub fn resolve(
                 }
             }
         }
-    } else if declared_recipient {
-        // CR 115.6: "up to" a number of targets with zero chosen leaves nothing to
+    } else if declared_recipient || matches!(target, TargetFilter::EventTarget) {
+        // CR 115.6 + CR 608.2b: "up to" a number of targets with zero chosen or
+        // an event-context recipient with no legal referent leaves nothing to
         // affect, so no shield is installed (an untargeted shield here would
         // prevent damage to every matching object).
     } else if ability.self_ref_binding(state).is_none()
@@ -853,12 +895,17 @@ mod tests {
         scope: PreventionScope,
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
+        let recipient_scope = if targets.is_empty() {
+            EffectScope::All
+        } else {
+            EffectScope::Single
+        };
         ResolvedAbility::new(
             Effect::PreventDamage {
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
-                recipient_scope: EffectScope::Single,
+                recipient_scope,
                 scope,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -1006,7 +1053,7 @@ mod tests {
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
                 target: TargetFilter::Any,
-                recipient_scope: EffectScope::Single,
+                recipient_scope: EffectScope::All,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -4178,7 +4225,7 @@ mod tests {
             source,
             PlayerId(0),
             TargetFilter::Any,
-            EffectScope::Single,
+            EffectScope::All,
             None,
             PreventionAmount::Next(1),
         );
@@ -4335,7 +4382,7 @@ mod tests {
                 shield_source,
                 PlayerId(0),
                 TargetFilter::Any,
-                EffectScope::Single,
+                EffectScope::All,
                 None,
                 PreventionAmount::Next(1),
             );

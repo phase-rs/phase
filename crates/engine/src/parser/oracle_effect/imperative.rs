@@ -6902,6 +6902,9 @@ pub(super) fn parse_utility_imperative_ast(
                 // to. This is the one construction site where `ParseContext` is
                 // live; downstream lowering has only the captured flag.
                 parent_target_available: ctx.parent_target_available,
+                // CR 608.2k + CR 120.1: preserve a condition-derived object
+                // referent for bare `it` in passive damage triggers.
+                object_pronoun_ref: ctx.object_pronoun_ref.clone(),
             }),
             "regenerate" => Some(UtilityImperativeAst::Regenerate {
                 text: text.to_string(),
@@ -7856,7 +7859,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Prevent {
             text,
             parent_target_available,
-        } => parse_prevent_effect(&text, parent_target_available),
+            object_pronoun_ref,
+        } => parse_prevent_effect_with_context(&text, parent_target_available, object_pronoun_ref),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
             let rest = tag::<_, _, OracleError<'_>>("regenerate ")
@@ -7944,29 +7948,27 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 /// 0. A source-anaphoric gendered pronoun ("him"/"her"/"himself"/"herself") →
 ///    `SelfRef`, UNGATED (CR 201.5 + CR 109.5). Magic templating uses a
 ///    gendered pronoun only as the printed-name self-reference, so unlike the
-///    neuter "it" it needs no `parent_target_available` gate. This tier must
-///    run FIRST: with the gate closed, tier 1 declines and tier 2's
-///    `is_broadcast_population_filter` check rejects `SelfRef`, so without it
-///    "prevent all damage that would be dealt to him this turn" (Gideon Jura,
-///    Gideon of the Trials) fell through to the `Any` default — a shield with
-///    NO recipient constraint, i.e. a turn-long Fog over every damage event in
-///    the game rather than a shield on the Gideon.
+///    neuter "it" it needs no `parent_target_available` gate.
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
-/// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
-///    mass typed recipients ("creatures"/"players"/"creatures you control" —
-///    Blinding Fog, Defend the Hearth) AND "those permanents"/"those
-///    creatures", which `parse_target` already maps to a `TrackedSet`
-///    sentinel. The sentinel is resolved to a concrete, FROZEN set id at
-///    shield-creation time by `prevent_damage::resolve` — never left as a
-///    live filter — because the antecedent population must be locked in at
-///    resolution regardless of whether it came from a chosen-target clause
-///    (Energy Arc's untapped creatures) or a Continuous-mode static grant
-///    (Mutational Advantage's countered permanents: the resolution-time
-///    population is enumerated once by the widened `GenericEffect` arm in
+/// 2. If no parent or condition-derived reference is available, a bare "it"
+///    is interpreted contextually as the ability source (CR 608.2c; Balduvian Hydra).
+/// 3. Any other recipient phrase `parse_target` recognizes as a real filter —
+///    including self-references ("this creature", "~", "itself" → `SelfRef`,
+///    `EffectScope::Single` per CR 608.2c), mass typed recipients
+///    ("creatures"/"players"/"creatures you control" — Blinding Fog, Defend the
+///    Hearth) AND "those permanents"/"those creatures", which `parse_target`
+///    already maps to a `TrackedSet` sentinel. The sentinel is resolved to a
+///    concrete, FROZEN set id at shield-creation time by
+///    `prevent_damage::resolve` — never left as a live filter — because the
+///    antecedent population must be locked in at resolution regardless of
+///    whether it came from a chosen-target clause (Energy Arc's untapped
+///    creatures) or a Continuous-mode static grant (Mutational Advantage's
+///    countered permanents: the resolution-time population is enumerated once by
+///    the widened `GenericEffect` arm in
 ///    `game::effects::affected_objects_from_events`). Mutational Advantage's
-///    official ruling: "The set of permanents affected by Mutational
-///    Advantage is determined at the time Mutational Advantage resolves."
+///    official ruling: "The set of permanents affected by Mutational Advantage
+///    is determined at the time Mutational Advantage resolves."
 ///
 /// Returns `None` only when neither tier recognizes the phrase — the caller
 /// then falls back to the pre-existing `Any` default.
@@ -7982,6 +7984,14 @@ pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
 ) -> Option<(TargetFilter, EffectScope)> {
+    resolve_prevent_recipient_with_context(recipient, parent_target_available, None)
+}
+
+fn resolve_prevent_recipient_with_context(
+    recipient: TextPair<'_>,
+    parent_target_available: bool,
+    object_pronoun_ref: Option<TargetFilter>,
+) -> Option<(TargetFilter, EffectScope)> {
     // CR 201.5 + CR 109.5: tier 0 — the ungated printed-name self-reference.
     if let Some((filter, _)) =
         crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
@@ -7993,15 +8003,31 @@ pub(super) fn resolve_prevent_recipient(
     {
         return Some((filter, EffectScope::Single));
     }
-    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
+    // CR 608.2k + CR 120.1: a bare `it` can refer to the object named by the
+    // trigger condition (the damage recipient). Use that antecedent after a
+    // nearer parent target, and before the source-self shorthand.
+    if parse_word_bounded(recipient.lower, "it").is_ok() {
+        if let Some(object_pronoun_ref) = object_pronoun_ref {
+            return Some((object_pronoun_ref, EffectScope::Single));
+        }
+        if !parent_target_available {
+            return Some((TargetFilter::SelfRef, EffectScope::Single));
+        }
+    }
+    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`
     // are inherited-reference filters naming a specific already-established
     // object — exclusively tier 1's gated domain (`parent_target_available`).
     // `parse_target` resolves these unconditionally, with no such gate, so
     // this tier must reject them explicitly — otherwise a standalone recipient
     // anaphor with `parent_target_available == false` would leak through here
     // as an ungated `ParentTarget` binding to a nonexistent chosen target.
+    // CR 608.2c: Self-references ("this creature", "~", "itself") name only the
+    // source object and are valid self-only recipients (`EffectScope::Single`).
     let (filter, _, syntax) =
         parse_target_with_syntax(recipient.original, &mut ParseContext::default());
+    if matches!(filter, TargetFilter::SelfRef) {
+        return Some((TargetFilter::SelfRef, EffectScope::Single));
+    }
     if matches!(filter, TargetFilter::Any) || !super::is_broadcast_population_filter(&filter) {
         return None;
     }
@@ -8053,7 +8079,16 @@ fn prevent_recipient_phrase(lower: &str) -> Option<(&str, &str)> {
 /// the same effect chain selected a target that a trailing anaphor ("that
 /// creature" / "the creature" / "it") can bind to via `ParentTarget`. When
 /// false the anaphor recognizer is a no-op and the target falls back to `Any`.
+#[cfg(test)]
 fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
+    parse_prevent_effect_with_context(text, parent_target_available, None)
+}
+
+fn parse_prevent_effect_with_context(
+    text: &str,
+    parent_target_available: bool,
+    object_pronoun_ref: Option<TargetFilter>,
+) -> Effect {
     let lower = text.to_lowercase();
     let rest = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(&*lower)
@@ -8174,6 +8209,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     // CR 115.1a + CR 115.10a: only a declared recipient is Single here;
     // untargeted descriptors are classified by resolve_prevent_recipient.
     let mut recipient_scope = EffectScope::Single;
+    let mut undeclared_recipient = false;
     let target = if let Some((filter, _)) = declared_recipient {
         filter
     } else if let Some(conjunct) = parse_compound_you_and_permanents(text, &lower) {
@@ -8198,7 +8234,13 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         TargetFilter::Controller
     } else if let Some(filter) = TextPair::new(text, &lower)
         .strip_after("dealt to ")
-        .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
+        .and_then(|tp| {
+            resolve_prevent_recipient_with_context(
+                tp,
+                parent_target_available,
+                object_pronoun_ref.clone(),
+            )
+        })
     {
         let (filter, scope) = filter;
         recipient_scope = scope;
@@ -8208,13 +8250,37 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         // prior `Any` fallback: a recipient phrase that no tier recognizes
         // still falls through to `Any` below.
         filter
+    } else if parent_target_available
+        && matches!(amount, PreventionAmount::Next(_))
+        && !nom_primitives::scan_contains(rest, "would")
+    {
+        // CR 608.2c + CR 115.10a: a bare "prevent the next N damage" shorthand
+        // ("If it's a green creature, prevent the next 2 damage instead" — Elvish
+        // Healer) names no recipient of its own; it continues the antecedent
+        // clause's declared recipient rather than declaring a new one.
+        TargetFilter::ParentTarget
     } else {
-        // Default: "that would be dealt" with no specific target → Any
+        // CR 115.10a: no recipient phrase names a target, so the recipient is
+        // not declared; `Any` is a broadcast fallback, never an "any target" slot.
+        undeclared_recipient = true;
         TargetFilter::Any
     };
 
     let damage_source_filter = parse_prevent_damage_source_filter(text, &lower)
         .or_else(|| parse_prevent_that_would_deal_source_filter(text, &lower));
+
+    // CR 115.10a: a counted shield ("prevent the next N damage") whose recipient
+    // phrase declares nothing and that has no source scope or inherited parent
+    // target is a broadcast, not an "any target" slot. Source-scoped shields
+    // (Barbed Wire) and prevent-all shields (Sewers of Estark) keep `Single` so
+    // inherited chain targets can still host them.
+    if undeclared_recipient
+        && matches!(amount, PreventionAmount::Next(_))
+        && damage_source_filter.is_none()
+        && !parent_target_available
+    {
+        recipient_scope = EffectScope::All;
+    }
 
     // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
     // <quantity>" override) is populated at chunk level by
@@ -8349,6 +8415,10 @@ fn parse_compound_you_and_permanents(
 fn parse_prevent_damage_source_filter(_text: &str, lower: &str) -> Option<TargetFilter> {
     let (_, (_, after_by)) = nom_primitives::split_once_on(lower, " by ").ok()?;
     let subject = after_by.trim().trim_end_matches('.').trim();
+    // CR 615.3: a trailing duration window ("by this artifact this turn" —
+    // Barbed Wire) bounds the shield, not the source phrase.
+    let subject = nom_primitives::split_once_on(subject, " this turn")
+        .map_or(subject, |(_, (source, _))| source.trim());
     crate::parser::oracle_replacement::parse_damage_source_subject_filter(subject)
 }
 
@@ -16124,6 +16194,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             UtilityImperativeAst::Prevent {
                 ref text,
                 parent_target_available,
+                ref object_pronoun_ref,
             },
         )) => {
             // CR 615 + CR 608.2c (issue #1094): a bidirectional "dealt to and
@@ -16145,6 +16216,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             let effect = lower_utility_imperative_ast(UtilityImperativeAst::Prevent {
                 text: text.clone(),
                 parent_target_available,
+                object_pronoun_ref: object_pronoun_ref.clone(),
             });
             // CR 601.2c + CR 115.6: only a declared recipient carries an announced
             // count ("up to two target creatures" — Redeem).
@@ -27856,6 +27928,40 @@ mod tests {
             "\"those creatures\" must bind via parse_target's tracked-set dispatch"
         );
 
+        // CR 201.5: printed-name and reflexive self references resolve to the source
+        // with Single scope.
+        for self_phrase in [
+            "this creature this turn.",
+            "~ this turn.",
+            "itself this turn.",
+        ] {
+            let lower = self_phrase.to_lowercase();
+            let tp = TextPair::new(self_phrase, &lower);
+            assert_eq!(
+                resolve_prevent_recipient(tp, false),
+                Some((TargetFilter::SelfRef, EffectScope::Single)),
+                "\"{self_phrase}\" must resolve to SelfRef"
+            );
+        }
+
+        // CR 608.2c: In this utility context with no earlier target or event
+        // object, bare "it" defaults to the source (SelfRef).
+        let text = "it this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            Some((TargetFilter::SelfRef, EffectScope::Single)),
+            "bare \"it\" without parent target must resolve to SelfRef (CR 608.2c)"
+        );
+
+        // CR 608.2c: With a parent target, bare "it" is an anaphor to the chosen target.
+        assert_eq!(
+            resolve_prevent_recipient(tp, true),
+            Some((TargetFilter::ParentTarget, EffectScope::Single)),
+            "bare \"it\" with parent target must resolve to ParentTarget (CR 608.2c)"
+        );
+
         // Neither tier recognizes a genuinely unclassified recipient phrase —
         // `resolve_prevent_recipient` returns `None`, not `Any`.
         let text = "xyzzy this turn.";
@@ -27865,6 +27971,30 @@ mod tests {
             resolve_prevent_recipient(tp, false),
             None,
             "an unclassified recipient phrase must fall through, not silently guess"
+        );
+    }
+
+    #[test]
+    fn prevent_bare_it_uses_condition_object_after_parent_target() {
+        let recipient = TextPair::new("it", "it");
+        assert_eq!(
+            resolve_prevent_recipient_with_context(
+                recipient,
+                false,
+                Some(TargetFilter::EventTarget),
+            ),
+            Some((TargetFilter::EventTarget, EffectScope::Single)),
+            "CR 608.2k + CR 120.1: a passive damage trigger's bare it is its damaged recipient"
+        );
+
+        assert_eq!(
+            resolve_prevent_recipient_with_context(
+                recipient,
+                true,
+                Some(TargetFilter::EventTarget),
+            ),
+            Some((TargetFilter::ParentTarget, EffectScope::Single)),
+            "CR 608.2c: a nearer chosen parent target takes precedence"
         );
     }
 

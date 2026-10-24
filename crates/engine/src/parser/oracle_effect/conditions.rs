@@ -2160,6 +2160,11 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     if let Some((condition, remainder)) = parse_if_exiled_card_type_conditional(text) {
         return (Some(condition), remainder);
     }
+    if let Some((condition_text, remainder)) = split_leading_conditional(text) {
+        if let Some(condition) = parse_target_color_condition_text(&condition_text) {
+            return (Some(condition), remainder);
+        }
+    }
     let lower = text.to_lowercase();
     let rest = alt((
         tag::<_, _, OracleError<'_>>("if it's a "),
@@ -2253,16 +2258,24 @@ fn parse_target_color_condition(
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_anaphoric_subject(input)?;
     let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, _) = opt(tag("a ")).parse(rest)?;
     let (rest, first_color) = nom_primitives::parse_color(rest)?;
     // CR 105.2: Disjunctive color condition — "white or blue" etc.
     let (rest, second_color) =
         opt(preceded(tag(" or "), nom_primitives::parse_color)).parse(rest)?;
+    // CR 105.2 + CR 205.2a: "a green creature" combines a color predicate
+    // with the creature card type on the same anaphoric object.
+    let (rest, creature_only) =
+        map(opt(tag(" creature")), |suffix| suffix.is_some()).parse(rest)?;
     let mut filters: Vec<_> = std::iter::once(first_color)
         .chain(second_color)
         .map(|color| {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
-            )
+            let mut typed = TypedFilter::default();
+            if creature_only {
+                typed.type_filters.push(TypeFilter::Creature);
+            }
+            typed.properties.push(FilterProp::HasColor { color });
+            TargetFilter::Typed(typed)
         })
         .collect();
     let filter = if filters.len() > 1 {
@@ -2698,7 +2711,7 @@ fn parse_target_anaphoric_tense_polarity(
 
 fn parse_target_color_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let parsed = all_consuming(parse_target_color_condition)
+    let parsed = all_consuming(preceded(opt(tag("if ")), parse_target_color_condition))
         .parse(lower.as_str())
         .ok()
         .map(|(_, condition)| condition);
@@ -4528,6 +4541,10 @@ pub(super) fn strip_routed_suffix_conditional(
         effect_prefix.to_string()
     };
 
+    if let Some(cond) = parse_target_color_condition_text(condition_core) {
+        return (general(cond), effect_text);
+    }
+
     if let Some(cond) = parse_its_a_type_condition(condition_core, ctx) {
         return (general(cond), effect_text);
     }
@@ -5617,7 +5634,8 @@ pub(crate) fn lower_instead_condition(
     cond_text: &str,
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
-    try_nom_condition_as_ability_condition(cond_text, ctx)
+    parse_target_color_condition_text(cond_text)
+        .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
 }
@@ -11133,6 +11151,24 @@ mod tests {
             "expected Red color filter, got {:?}",
             filter.properties
         );
+    }
+
+    #[test]
+    fn green_creature_instead_gate_checks_parent_target_type_and_color() {
+        let (condition, body) = strip_card_type_conditional(
+            "If it's a green creature, prevent the next 2 damage instead.",
+        );
+        assert_eq!(body, "prevent the next 2 damage instead.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, .. }) = condition else {
+            panic!("expected target-relative color and type condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed target filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.contains(&FilterProp::HasColor {
+            color: ManaColor::Green
+        }));
     }
 
     #[test]

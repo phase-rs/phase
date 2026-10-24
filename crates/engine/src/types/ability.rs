@@ -35041,6 +35041,17 @@ pub struct ReplacementDefinition {
     /// None = any target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_target_filter: Option<DamageTargetFilter>,
+    /// CR 400.7 + CR 615.1: the incarnation of the object this object-hosted
+    /// prevention shield was installed on, recorded at install time. A shield
+    /// meant to protect one specific creature ("prevent the next damage to
+    /// target creature") must not protect that creature's replacement after a
+    /// blink: the object keeps its id but bumps its incarnation on every zone
+    /// change, so a new incarnation is a new object with no memory of the
+    /// departed one's shields. `None` for registry-hosted (population) shields
+    /// and for player recipients, which intentionally match whatever object is
+    /// damaged at event time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_recipient_incarnation: Option<u64>,
     /// CR 614.1a: Restricts to combat-only or noncombat-only damage.
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35392,6 +35403,7 @@ impl ReplacementDefinition {
             damage_modification: None,
             damage_source_filter: None,
             damage_target_filter: None,
+            target_recipient_incarnation: None,
             combat_scope: None,
             shield_kind: ShieldKind::None,
             quantity_modification: None,
