@@ -4253,16 +4253,42 @@ pub(crate) fn node_has_stack_target_declaration_matching(
     {
         return false;
     }
-    if let Some(roles) = damage_replacement_target_roles(&ability.effect) {
+    effect_stack_target_declaration_matching(
+        &ability.effect,
+        || ability_needs_companion_target_player_slot(ability),
+        || is_per_opponent_target_fanout(ability),
+        predicate,
+    )
+}
+
+/// CR 115.1a + CR 601.2c: the effect's announced roles, without resolved-node
+/// metadata. Shares the role matcher used by `node_has_stack_target_declaration`;
+/// callers inspect descendants and clause-level unless-payers separately.
+pub(crate) fn effect_has_stack_target_declaration(effect: &Effect) -> bool {
+    effect_stack_target_declaration_matching(
+        effect,
+        || effect_references_target_player(effect),
+        || false,
+        &|_| true,
+    )
+}
+
+fn effect_stack_target_declaration_matching(
+    effect: &Effect,
+    companion_player: impl FnOnce() -> bool,
+    fanout_player: impl FnOnce() -> bool,
+    predicate: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    if let Some(roles) = damage_replacement_target_roles(effect) {
         return roles.into_iter().any(|role| predicate(role.filter()));
     }
-    if let Some(filter) = damage_replacement_source_slot_filter(&ability.effect) {
+    if let Some(filter) = damage_replacement_source_slot_filter(effect) {
         return predicate(filter);
     }
-    if paired_subject_filters(&ability.effect).is_some() {
-        return paired_subject_slot_filters(&ability.effect).any(predicate);
+    if paired_subject_filters(effect).is_some() {
+        return paired_subject_slot_filters(effect).any(predicate);
     }
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Effect::Fight { subject, target } = effect {
         return fight_declared_slot_filters(subject, target).any(predicate);
     }
     if let Effect::MoveCounters {
@@ -4270,46 +4296,45 @@ pub(crate) fn node_has_stack_target_declaration_matching(
         target,
         selection,
         ..
-    } = &ability.effect
+    } = effect
     {
         return move_counter_stack_target_filters(source, target, *selection)
             .into_iter()
             .filter(|filter| !filter.is_context_ref())
             .any(predicate);
     }
-    if let Some(role) = mana_multi_role(&ability.effect) {
+    if let Some(role) = mana_multi_role(effect) {
         return role.surfaced_filters().any(|(_, filter)| predicate(filter));
     }
     if let Effect::Attach {
         attachment,
         target,
         selection,
-    } = &ability.effect
+    } = effect
     {
         return (attach_attachment_claims_announcement_slot(attachment, selection)
             && predicate(attachment))
             || (attach_host_filter_needs_target_slot(target) && predicate(target));
     }
-    if matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
-        return each_power_damage_recipient_slot_filter(ability).is_some_and(predicate);
+    if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
+        return predicate(recipient);
     }
-    if is_per_opponent_target_fanout(ability) {
-        return predicate(&TargetFilter::Player)
-            || ability.effect.target_filter().is_some_and(predicate);
+    if fanout_player() {
+        return predicate(&TargetFilter::Player) || effect.target_filter().is_some_and(predicate);
     }
-    (ability_needs_companion_target_player_slot(ability) && predicate(&TargetFilter::Player))
-        || (effect_needs_target_creature_quantity_slot(&ability.effect)
-            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
+    (companion_player() && predicate(&TargetFilter::Player))
+        || (effect_needs_target_creature_quantity_slot(effect)
+            && !one_sided_fight_source_supplies_quantity_creature(effect)
             && predicate(
-                &effect_target_slot_filter(&ability.effect)
+                &effect_target_slot_filter(effect)
                     .expect("slot filter present when gate true")
                     .filter,
             ))
-        || (effect_needs_parent_target_combat_relation_slot(&ability.effect)
+        || (effect_needs_parent_target_combat_relation_slot(effect)
             && predicate(&parent_target_combat_relation_slot_filter()))
-        || become_copy_recipient_slot_filter(&ability.effect).is_some_and(predicate)
-        || (!effect_target_filter_references_chosen_player(&ability.effect)
-            && triggers::extract_target_filter_from_effect(&ability.effect).is_some_and(predicate))
+        || become_copy_recipient_slot_filter(effect).is_some_and(predicate)
+        || (!effect_target_filter_references_chosen_player(effect)
+            && triggers::extract_target_filter_from_effect(effect).is_some_and(predicate))
 }
 
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be

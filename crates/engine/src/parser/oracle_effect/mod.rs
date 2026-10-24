@@ -6786,13 +6786,14 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 fn try_parse_unless_player_have_deal_damage(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     let (before_unless, _, after_unless) =
         nom_primitives::scan_preceded(tp.lower, |i| tag("unless a player has ").parse(i))?;
     let cost = parse_unless_player_have_deal_damage_cost(after_unless)?;
     let cleaned = tp.original[..before_unless.trim_end().len()].trim();
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let mut clause = parse_effect_clause(cleaned, ctx);
+    let mut clause = parse_effect_clause_with_damage_context(cleaned, ctx, damage_context);
     if matches!(clause.effect, Effect::Unimplemented { .. }) {
         ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
@@ -8044,6 +8045,7 @@ fn retarget_put_counter_to_parent(effect: &mut Effect) {
 fn try_parse_choose_one_of_inline(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     let mut chooser = PlayerFilter::Controller;
     let mut scoped_choice_player = false;
@@ -8245,13 +8247,32 @@ fn try_parse_choose_one_of_inline(
         // is copied back, never `*ctx = branch_ctx`.
         let mut branch_ctx = ctx.clone_throwaway();
         branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
-        left_def = parse_effect_chain_with_context(left_orig, AbilityKind::Spell, &mut branch_ctx);
-        right_def =
-            parse_effect_chain_with_context(right_orig, AbilityKind::Spell, &mut branch_ctx);
+        left_def = parse_nested_effect_chain_with_damage_context(
+            left_orig,
+            AbilityKind::Spell,
+            &mut branch_ctx,
+            damage_context,
+        );
+        right_def = parse_nested_effect_chain_with_damage_context(
+            right_orig,
+            AbilityKind::Spell,
+            &mut branch_ctx,
+            damage_context,
+        );
         ctx.diagnostics = branch_ctx.diagnostics;
     } else {
-        left_def = parse_effect_chain_with_context(left_orig, AbilityKind::Spell, ctx);
-        right_def = parse_effect_chain_with_context(right_orig, AbilityKind::Spell, ctx);
+        left_def = parse_nested_effect_chain_with_damage_context(
+            left_orig,
+            AbilityKind::Spell,
+            ctx,
+            damage_context,
+        );
+        right_def = parse_nested_effect_chain_with_damage_context(
+            right_orig,
+            AbilityKind::Spell,
+            ctx,
+            damage_context,
+        );
     }
 
     // Reject unless BOTH branches produce a non-Unimplemented HEAD effect. This
@@ -8488,6 +8509,7 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
 fn try_parse_have_causative(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
     //
@@ -8598,7 +8620,7 @@ fn try_parse_have_causative(
     if let Some((_, rest_orig)) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("have you ")).parse(i)
     }) {
-        let clause = parse_effect_clause(rest_orig, ctx);
+        let clause = parse_effect_clause_with_damage_context(rest_orig, ctx, damage_context);
         return Some(rebind_controller_to_original(clause));
     }
 
@@ -9185,8 +9207,9 @@ pub(crate) fn is_for_each_opponent_choose_controlled(lower: &str) -> bool {
     imperative::is_for_each_opponent_choose_controlled(lower)
 }
 
-/// CR 608.2c: a reparsed damage tail retains earlier target declarations; it
-/// cannot authorize a population as though its head were the first instruction.
+/// CR 608.2c: only a proven fresh damage head can authorize its population.
+/// `InheritedTargets` also represents unknown provenance: recursive defaults
+/// fail closed rather than forgetting targets from an enclosing instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DamageTargetContext {
     FreshClause,
@@ -9194,7 +9217,7 @@ enum DamageTargetContext {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
-    parse_effect_clause_with_damage_context(text, ctx, DamageTargetContext::FreshClause)
+    parse_effect_clause_with_damage_context(text, ctx, DamageTargetContext::InheritedTargets)
 }
 
 fn parse_effect_clause_with_damage_context(
@@ -10382,6 +10405,7 @@ pub(super) fn parse_player_choice_noun(i: &str) -> OracleResult<'_, ChoiceType> 
 fn try_parse_choose_player_to_verb(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     // Strip the optional sequence connector before parsing the shared noun.
     let after_then = opt(tag::<_, _, OracleError<'_>>("then "))
@@ -10497,7 +10521,8 @@ fn try_parse_choose_player_to_verb(
         // Map the lowercase verb tail back to the original-case slice so the
         // recursive parse sees unmodified text.
         let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
-        let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+        let mut verb_clause =
+            parse_effect_clause_with_damage_context(verb_orig, ctx, damage_context);
         if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
             // The verb tail didn't parse — fall back to the bare Choose so the
             // chosen player is still recorded (no dependent effect).
@@ -10523,6 +10548,7 @@ fn try_parse_choose_player_to_verb(
 fn try_parse_an_opponent_to_verb(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
 ) -> Option<ParsedEffectClause> {
     let after_then = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(tp.lower)
@@ -10546,7 +10572,7 @@ fn try_parse_an_opponent_to_verb(
         return None;
     }
     let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
-    let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+    let mut verb_clause = parse_effect_clause_with_damage_context(verb_orig, ctx, damage_context);
     if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
         return None;
     }
@@ -11126,7 +11152,7 @@ mod swap_chosen_labels_parser_tests {
 }
 
 fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
-    parse_effect_clause_inner_with_damage_context(text, ctx, DamageTargetContext::FreshClause)
+    parse_effect_clause_inner_with_damage_context(text, ctx, DamageTargetContext::InheritedTargets)
 }
 
 fn parse_effect_clause_inner_with_damage_context(
@@ -11508,19 +11534,19 @@ fn parse_effect_clause_inner_with_damage_context(
     // chosen player via `ctx.relative_player_scope`. Checked before the
     // generic imperative `choose` dispatch (which would consume the prefix
     // and drop the trailing verb).
-    if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx) {
+    if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx, damage_context) {
         return clause;
     }
 
     // CR 608.2d (issue #1504): "an opponent <verb>" before generic subject
     // dispatch, which would bind `ControllerRef::Opponent` as a cast-time player
     // target on Draw/Mill/etc.
-    if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx) {
+    if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx, damage_context) {
         return clause;
     }
 
     // CR 608.2d + CR 118.12a: "[DEFAULT] unless a player has ~ deal N to them".
-    if let Some(clause) = try_parse_unless_player_have_deal_damage(tp, ctx) {
+    if let Some(clause) = try_parse_unless_player_have_deal_damage(tp, ctx, damage_context) {
         return clause;
     }
 
@@ -11568,7 +11594,7 @@ fn parse_effect_clause_inner_with_damage_context(
     // clause top level, (b) both halves independently parse as a supported
     // imperative — prevents false positives on intra-imperative "or" like
     // "target creature or player".
-    if let Some(clause) = try_parse_choose_one_of_inline(tp, ctx) {
+    if let Some(clause) = try_parse_choose_one_of_inline(tp, ctx, damage_context) {
         return clause;
     }
 
@@ -11580,7 +11606,7 @@ fn parse_effect_clause_inner_with_damage_context(
 
     // CR 608.2d: "have it [verb]" / "have you [verb]" — causative construction
     // from "any opponent may" effects (e.g., "have it deal 4 damage to them").
-    if let Some(clause) = try_parse_have_causative(tp, ctx) {
+    if let Some(clause) = try_parse_have_causative(tp, ctx, damage_context) {
         return clause;
     }
 
@@ -11656,7 +11682,7 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
-    if let Some(clause) = try_parse_gain_energy(tp, ctx) {
+    if let Some(clause) = try_parse_gain_energy(tp, ctx, damage_context) {
         return clause;
     }
 
@@ -11982,11 +12008,12 @@ fn parse_effect_clause_inner_with_damage_context(
         let branch_def = {
             // CR 608.2c: a branch-local player choice indexes after the choices
             // already made earlier in this resolution (same seam as the chunk fold).
-            let ir = parse_effect_chain_ir_after_player_choices(
+            let ir = parse_effect_chain_ir_with_damage_context(
                 effect_text,
                 AbilityKind::Spell,
                 ctx,
                 ctx.chosen_player_count,
+                Some(damage_context),
             );
             lower_effect_chain_ir(&ir)
         };
@@ -19825,7 +19852,11 @@ fn search_library_target_player_is_for_each_antecedent(target: &TargetFilter) ->
         && typed.controller == Some(ControllerRef::TargetPlayer)
 }
 
-fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_gain_energy(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> Option<ParsedEffectClause> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("you get "), tag("get ")))
         .parse(tp.lower)
         .ok()?;
@@ -19862,7 +19893,13 @@ fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<Par
     }
     if let Some(continuation) = parse_energy_gain_continuation(rest) {
         clause.sub_ability = Some(Box::new({
-            let ir = parse_effect_chain_ir(continuation, AbilityKind::Spell, ctx);
+            let ir = parse_effect_chain_ir_with_damage_context(
+                continuation,
+                AbilityKind::Spell,
+                ctx,
+                0,
+                Some(damage_context),
+            );
             lower_effect_chain_ir(&ir)
         }));
         return Some(clause);
@@ -20611,7 +20648,7 @@ fn lower_clause_ast(
         ast,
         ctx,
         original_clause,
-        DamageTargetContext::FreshClause,
+        DamageTargetContext::InheritedTargets,
     )
 }
 
@@ -24349,12 +24386,15 @@ fn try_split_damage_compound_with_damage_context(
 
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
-    // CR 608.2c: normalization does not make this inherited tail a fresh head.
-    let mut sub_clause = parse_effect_clause_with_damage_context(
-        sub_parse_text,
-        ctx,
-        DamageTargetContext::InheritedTargets,
-    );
+    // CR 608.2c: a preceding announced target prevents treating the tail as a fresh head.
+    let continuation_context =
+        if crate::game::ability_utils::effect_has_stack_target_declaration(&primary_effect) {
+            DamageTargetContext::InheritedTargets
+        } else {
+            damage_context
+        };
+    let mut sub_clause =
+        parse_effect_clause_with_damage_context(sub_parse_text, ctx, continuation_context);
     let sub_target_chooser = ctx.target_chooser.clone();
     ctx.target_chooser = primary_target_chooser;
     // CR 601.2c: drop whatever the continuation recorded. The primary head's own
@@ -41121,6 +41161,16 @@ pub(crate) fn parse_ability_ir(
     mode: ChainLoweringMode,
     ctx: &mut ParseContext,
 ) -> AbilityIr {
+    parse_ability_ir_with_damage_context(text, kind, mode, ctx, None)
+}
+
+fn parse_ability_ir_with_damage_context(
+    text: &str,
+    kind: AbilityKind,
+    mode: ChainLoweringMode,
+    ctx: &mut ParseContext,
+    damage_context: Option<DamageTargetContext>,
+) -> AbilityIr {
     // CR 608.2c + CR 109.4: a leading "During target opponent's next turn, …"
     // window DECLARES a player target, and that player is in scope for the whole
     // ability body — so a "that player" anaphor anywhere in it refers to the
@@ -41245,7 +41295,7 @@ pub(crate) fn parse_ability_ir(
     }
     AbilityIr {
         source_text: text.to_string(),
-        body: parse_effect_chain_ir(text, kind, ctx),
+        body: parse_effect_chain_ir_with_damage_context(text, kind, ctx, 0, damage_context),
         shell: AbilityShellIr::default(),
         die_results: vec![],
         root_transforms: vec![],
@@ -41300,11 +41350,12 @@ pub(super) fn parse_child_ability_with_parent_target(
         parent_target_available,
         ..ParseContext::default()
     };
-    lower_ability_ir(&parse_ability_ir(
+    lower_ability_ir(&parse_ability_ir_with_damage_context(
         text,
         kind,
         ChainLoweringMode::Standalone,
         &mut child_ctx,
+        Some(DamageTargetContext::InheritedTargets),
     ))
 }
 
@@ -41314,23 +41365,37 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
 
-/// Parse a compound effect chain with subject context for pronoun resolution.
-/// CR 608.2k: Used by the trigger parser to thread the trigger subject so that
-/// bare pronouns ("it") resolve to TriggeringSource instead of SelfRef.
+/// Parse a nested compound body with subject context for pronoun resolution.
 ///
-/// The `WithContext` half of the same identity:
-/// `parse_effect_chain_with_context(t, k, cx)` **is**
-/// `lower_ability_ir(&parse_ability_ir_with_context(t, k, cx))`. A T8 producer
-/// conversion replaces this single call with the two halves and inserts its root
-/// stamps into the `AbilityShellIr` between them, which is why the conversion is
-/// byte-identical for the whole *class* of text the recognizer handles rather
-/// than merely for today's corpus.
+/// CR 608.2c: context-less nested parsing cannot authorize a recipient-relative
+/// population. Ability-root producers use `parse_ability_ir_with_context`;
+/// callers that retain clause provenance use the explicit-context sibling.
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir_with_context(text, kind, ctx))
+    parse_nested_effect_chain_with_damage_context(
+        text,
+        kind,
+        ctx,
+        DamageTargetContext::InheritedTargets,
+    )
+}
+
+fn parse_nested_effect_chain_with_damage_context(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> AbilityDefinition {
+    lower_ability_ir(&parse_ability_ir_with_damage_context(
+        text,
+        kind,
+        ChainLoweringMode::WithContext,
+        ctx,
+        Some(damage_context),
+    ))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
@@ -42605,7 +42670,25 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
     ctx: &mut ParseContext,
     already_chosen: u8,
 ) -> EffectChainIr {
-    let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen);
+    parse_effect_chain_ir_with_damage_context(
+        text,
+        kind,
+        ctx,
+        already_chosen,
+        Some(DamageTargetContext::InheritedTargets),
+    )
+}
+
+/// `None` is reserved for an ability root. Nested builders receive `Some` and
+/// cannot exceed that inherited permission, even at their first chunk.
+fn parse_effect_chain_ir_with_damage_context(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+    already_chosen: u8,
+    damage_context: Option<DamageTargetContext>,
+) -> EffectChainIr {
+    let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen, damage_context);
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -42636,6 +42719,7 @@ fn parse_effect_chain_ir_body(
     kind: AbilityKind,
     ctx: &mut ParseContext,
     already_chosen_players: u8,
+    enclosing_damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
@@ -42917,6 +43001,38 @@ fn parse_effect_chain_ir_body(
         // a stale antecedent for the next chunk.
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
+        // CR 608.2c: only a root chunk with no earlier same-sentence target
+        // declaration can open permission. Nested builders retain their ceiling.
+        let damage_context = if builder
+            .clauses()
+            .iter()
+            .rev()
+            .take_while(|clause| clause.boundary != Some(ClauseBoundary::Sentence))
+            .any(|clause| {
+                std::iter::once((
+                    &clause.parsed.effect,
+                    clause
+                        .unless_pay
+                        .as_ref()
+                        .or(clause.parsed.unless_pay.as_ref()),
+                ))
+                .chain(
+                    std::iter::successors(clause.parsed.sub_ability.as_deref(), |ability| {
+                        ability.sub_ability.as_deref()
+                    })
+                    .map(|ability| (ability.effect.as_ref(), ability.unless_pay.as_ref())),
+                )
+                .any(|(effect, unless_pay)| {
+                    crate::game::ability_utils::effect_has_stack_target_declaration(effect)
+                        || unless_pay.is_some_and(|modifier| {
+                            crate::game::ability_utils::payer_is_declared_target(&modifier.payer)
+                        })
+                })
+            }) {
+            DamageTargetContext::InheritedTargets
+        } else {
+            enclosing_damage_context.unwrap_or(DamageTargetContext::FreshClause)
+        };
         let prospective_rejected_guard = pending_rejected_search_guard.take();
         // TOP of the iteration: check the PREVIOUS iteration's stamp, then re-arm.
         debug_assert!(
@@ -43329,7 +43445,13 @@ fn parse_effect_chain_ir_body(
         {
             if let Some(else_text) = strip_inverse_control_otherwise_connector(normalized_text) {
                 let else_def = {
-                    let ir = parse_effect_chain_ir(&else_text, kind, ctx);
+                    let ir = parse_effect_chain_ir_with_damage_context(
+                        &else_text,
+                        kind,
+                        ctx,
+                        0,
+                        Some(damage_context),
+                    );
                     lower_effect_chain_ir(&ir)
                 };
                 // Bound by construction: this arm is reached only inside
@@ -43394,7 +43516,13 @@ fn parse_effect_chain_ir_body(
             let saved_parent_target_available = ctx.parent_target_available;
             ctx.parent_target_available = saved_parent_target_available || else_inherits_parent;
             let mut else_def = {
-                let ir = parse_effect_chain_ir(else_text, kind, ctx);
+                let ir = parse_effect_chain_ir_with_damage_context(
+                    else_text,
+                    kind,
+                    ctx,
+                    0,
+                    Some(damage_context),
+                );
                 lower_effect_chain_ir(&ir)
             };
             ctx.parent_target_available = saved_parent_target_available;
@@ -44044,18 +44172,20 @@ fn parse_effect_chain_ir_body(
                 // its `ChosenPlayer` index must start after them.
                 let ir = match chain_chosen_player_scope.as_ref() {
                     Some(scope) => ctx.with_player_scope(scope.clone(), |ctx| {
-                        parse_effect_chain_ir_after_player_choices(
+                        parse_effect_chain_ir_with_damage_context(
                             effect_text,
                             kind,
                             ctx,
                             chain_chosen_player_count,
+                            Some(damage_context),
                         )
                     }),
-                    None => parse_effect_chain_ir_after_player_choices(
+                    None => parse_effect_chain_ir_with_damage_context(
                         effect_text,
                         kind,
                         ctx,
                         chain_chosen_player_count,
+                        Some(damage_context),
                     ),
                 };
                 lower_effect_chain_ir(&ir)
@@ -44701,7 +44831,13 @@ fn parse_effect_chain_ir_body(
                     );
                 }
                 ctx.next_declared_player_group = chain_declared_groups;
-                let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
+                let mut body_ir = parse_effect_chain_ir_with_damage_context(
+                    &text,
+                    kind,
+                    ctx,
+                    0,
+                    Some(damage_context),
+                );
                 chain_declared_groups = ctx.next_declared_player_group;
                 if let Some(last) = body_ir.clauses.last_mut() {
                     if last.boundary.is_none() {
@@ -45766,11 +45902,14 @@ fn parse_effect_chain_ir_body(
                         // demonstrated consequence — the corpus double bake bounds it
                         // to zero.
                         let mut probe_ctx = ctx.clone_throwaway();
-                        let probe = lower_effect_chain_ir(&parse_effect_chain_ir(
-                            body,
-                            kind,
-                            &mut probe_ctx,
-                        ));
+                        let probe =
+                            lower_effect_chain_ir(&parse_effect_chain_ir_with_damage_context(
+                                body,
+                                kind,
+                                &mut probe_ctx,
+                                0,
+                                Some(damage_context),
+                            ));
                         if consequent_is_a_property_of_the_granted_cast(&probe) {
                             (text_after_prefix, None)
                         } else {
@@ -45798,7 +45937,13 @@ fn parse_effect_chain_ir_body(
                 } else {
                     strip_any_number_quantifier(text_after_prefix)
                 };
-            let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
+            let inner_ir = parse_effect_chain_ir_with_damage_context(
+                &inner_text,
+                kind,
+                ctx,
+                0,
+                Some(damage_context),
+            );
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
@@ -46035,27 +46180,6 @@ fn parse_effect_chain_ir_body(
         let entry_rider = {
             let prior = builder.clauses().last().map(|c| &c.parsed.effect);
             entry_counter_rider_clause(&text_no_qty, condition.as_ref(), prior)
-        };
-        // CR 608.2c: coordinated chunks of one sentence retain earlier target
-        // declarations, just like a recursively parsed damage continuation.
-        let damage_context = if builder
-            .clauses()
-            .iter()
-            .rev()
-            .take_while(|clause| clause.boundary != Some(ClauseBoundary::Sentence))
-            .any(|clause| {
-                std::iter::once(&clause.parsed.effect)
-                    .chain(
-                        std::iter::successors(clause.parsed.sub_ability.as_deref(), |ability| {
-                            ability.sub_ability.as_deref()
-                        })
-                        .map(|ability| ability.effect.as_ref()),
-                    )
-                    .any(|effect| triggers::extract_target_filter_from_effect(effect).is_some())
-            }) {
-            DamageTargetContext::InheritedTargets
-        } else {
-            DamageTargetContext::FreshClause
         };
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());
@@ -53447,5 +53571,161 @@ mod parent_controller_population_tests {
                     if reference.as_ref() == &TargetFilter::ParentTarget
             )));
         }
+    }
+
+    fn assert_clause_population_permission(
+        clause: &ParsedEffectClause,
+        damage_context: DamageTargetContext,
+    ) {
+        assert!(!matches!(clause.effect, Effect::Unimplemented { .. }));
+        let filter = population_filter(
+            clause
+                .sub_ability
+                .as_deref()
+                .expect("reachable population continuation"),
+        );
+        match damage_context {
+            DamageTargetContext::FreshClause => {
+                assert_eq!(
+                    filter.controller,
+                    Some(ControllerRef::ParentTargetController)
+                );
+                assert!(filter.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::DistinctFrom { reference }
+                        if reference.as_ref() == &TargetFilter::ParentTarget
+                )));
+            }
+            DamageTargetContext::InheritedTargets => {
+                assert!(!has_parent_population_binding(filter));
+            }
+        }
+    }
+
+    #[test]
+    fn choose_player_body_preserves_population_context() {
+        let text = "choose an opponent to have ~ deal 2 damage to target creature and 1 damage to each other creature with the same controller";
+        for context in [
+            DamageTargetContext::FreshClause,
+            DamageTargetContext::InheritedTargets,
+        ] {
+            let clause = parse_effect_clause_with_damage_context(
+                text,
+                &mut ParseContext::default(),
+                context,
+            );
+            assert!(matches!(clause.effect, Effect::Choose { .. }));
+            assert_clause_population_permission(&clause, context);
+        }
+    }
+
+    #[test]
+    fn choose_player_compound_tail_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals 3 damage to target creature, then choose an opponent to have ~ deal 2 damage to target creature",
+        );
+    }
+
+    #[test]
+    fn exchange_control_head_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "Exchange control of two target creatures, then have ~ deal 2 damage to target creature",
+        );
+    }
+
+    #[test]
+    fn unless_player_body_preserves_population_context() {
+        let text = "~ deals 2 damage to target creature and 1 damage to each other creature with the same controller unless a player has ~ deal 1 damage to them";
+        let lower = text.to_lowercase();
+        for context in [
+            DamageTargetContext::FreshClause,
+            DamageTargetContext::InheritedTargets,
+        ] {
+            let clause = try_parse_unless_player_have_deal_damage(
+                TextPair::new(text, &lower),
+                &mut ParseContext::default(),
+                context,
+            )
+            .expect("unless-player body reaches its damage continuation");
+            assert!(clause.unless_pay.is_some());
+            assert_clause_population_permission(&clause, context);
+        }
+    }
+
+    #[test]
+    fn nested_conditional_body_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "Tap target creature, then if you control a creature, draw a card, then have ~ deal 2 damage to target creature",
+        );
+    }
+
+    fn assert_public_population_permission(text: &str) {
+        let parsed = parse_oracle_text(text, "Boundary Probe", &[], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        for definition in [
+            &parse_effect_chain(text, AbilityKind::Spell),
+            &parsed.abilities[0],
+        ] {
+            let filter = population_filter(definition);
+            assert_eq!(
+                filter.controller,
+                Some(ControllerRef::ParentTargetController)
+            );
+            assert!(filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::DistinctFrom { reference }
+                    if reference.as_ref() == &TargetFilter::ParentTarget
+            )));
+        }
+    }
+
+    #[test]
+    fn sentence_boundary_restores_population_permission() {
+        assert_public_population_permission(
+            "Tap target creature. ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.",
+        );
+    }
+
+    #[test]
+    fn untargeted_damage_head_keeps_permission_fresh() {
+        assert_public_population_permission(
+            "~ deals 2 damage to you and 3 damage to target creature and 1 damage to each other creature with the same controller.",
+        );
+    }
+
+    #[test]
+    fn activated_ability_fresh_population_binds() {
+        let parsed = parse_oracle_text(
+            "{R}: ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.",
+            "Boundary Probe", &[], &["Creature".into()], &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+        assert_eq!(parsed.abilities[0].kind, AbilityKind::Activated);
+        let filter = population_filter(&parsed.abilities[0]);
+        assert_eq!(
+            filter.controller,
+            Some(ControllerRef::ParentTargetController)
+        );
+        assert!(has_parent_population_binding(filter));
+    }
+
+    #[test]
+    fn contextless_recursive_entries_refuse_population_permission() {
+        let text = "~ deals 2 damage to target creature and 1 damage to each other creature with the same controller";
+        for clause in [
+            parse_effect_clause(text, &mut ParseContext::default()),
+            parse_effect_clause_inner(text, &mut ParseContext::default()),
+            lower_clause_ast(
+                parse_clause_ast(text, &mut ParseContext::default()),
+                &mut ParseContext::default(),
+                text,
+            ),
+        ] {
+            assert_clause_population_permission(&clause, DamageTargetContext::InheritedTargets);
+        }
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(!has_parent_population_binding(population_filter(
+            &lower_effect_chain_ir(&ir)
+        )));
     }
 }
