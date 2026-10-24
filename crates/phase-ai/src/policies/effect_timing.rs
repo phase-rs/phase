@@ -805,6 +805,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -886,6 +887,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1051,6 +1053,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1416,6 +1419,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1535,6 +1539,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1594,6 +1599,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1685,6 +1691,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -1699,6 +1706,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1770,6 +1778,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
 
@@ -1885,6 +1894,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -2129,7 +2139,7 @@ mod tests {
 
     fn counter_effect() -> Effect {
         Effect::Counter {
-            target: TargetFilter::Any,
+            target: TargetFilter::StackSpell,
             source_rider: None,
             countered_spell_zone: None,
         }
@@ -2161,8 +2171,7 @@ mod tests {
             obj.toughness = Some(toughness);
         }
         let ability = ResolvedAbility::new(effect, targets, source_id, controller);
-        let id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
+        let id = source_id;
         state.stack.push_back(StackEntry {
             id,
             source_id,

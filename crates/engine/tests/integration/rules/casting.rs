@@ -1625,32 +1625,32 @@ fn required_blight_with_no_creatures_rejects_cast() {
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell_id].card_id;
 
-    let first = runner.act(GameAction::CastSpell {
-        object_id: spell_id,
-        card_id,
-        targets: vec![],
-
-        payment_mode: CastPaymentMode::Auto,
-    });
-
-    // CastSpell may enter TargetSelection first. The gate fires once the
-    // required cost is about to be paid — either at CastSpell time if no
-    // targets are required, or at SelectTargets time.
-    let final_result = match first {
-        Err(_) => first,
-        Ok(res) if matches!(res.waiting_for, WaitingFor::TargetSelection { .. }) => {
-            runner.act(GameAction::SelectTargets {
-                targets: vec![TargetRef::Player(P1)],
-            })
-        }
-        other => other,
-    };
-
-    assert!(
-        final_result.is_err(),
-        "cast must fail when required additional cost is unpayable, got {:?}",
-        final_result
-    );
+    let first = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the spell reaches target declaration before checking the required cost");
+    assert!(matches!(
+        first.waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    let result = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("the unpayable required cost settles the entire casting procedure");
+    assert!(runner.state().cancelled_casts.contains(&spell_id));
+    assert_eq!(runner.state().objects[&spell_id].zone, Zone::Hand);
+    assert!(runner.state().pending_cast.is_none());
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|entry| entry.id != spell_id));
+    assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 /// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable

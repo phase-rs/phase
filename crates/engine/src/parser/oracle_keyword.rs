@@ -8,7 +8,7 @@ use nom::combinator::{all_consuming, eof, not, opt, peek, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_discard_cost_body, parse_oracle_cost};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
@@ -17,8 +17,8 @@ use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
     AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
-    CostReduction, Effect, EffectScope, FilterProp, QuantityExpr, SacrificeRequirement,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    CostReduction, DiscardSelfScope, Effect, EffectScope, FilterProp, QuantityExpr,
+    SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
@@ -34,9 +34,10 @@ use crate::types::zones::Zone;
 /// per WUBRG color so the runtime gets typed `Color(ManaColor)` variants
 /// instead of an opaque string. Bare "each color"/"all colors" only — phrases
 /// like "each color that's not in your commander's color identity" (Commander's
-/// Plate) or "each color with the most votes" (Council Guardian) carry
-/// additional qualifiers and pass through unchanged for a future dynamic
-/// handler.
+/// Plate, typed by `parse_protection_target` as `ProtectionTarget::EachColor` and
+/// expanded at grant time by `game::keywords::resolve_granted_protection`) or
+/// "each color with the most votes" (Council Guardian) carry additional
+/// qualifiers and pass through unexpanded.
 ///
 /// CR 702.16i: also expands a bare comma-list continuation — after a
 /// "protection from A" prefix, subsequent list members that are neither
@@ -676,19 +677,31 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
     let lower = cost_text.trim().trim_end_matches('.').to_lowercase();
 
+    // CR 702.21a + CR 205.2a: a discard cost's noun phrase can itself be a
+    // comma-separated card-type list ("an enchantment, instant, or sorcery
+    // card"), so a discard-led ward cost is read whole by the discard grammar
+    // before the compound splitter sees its commas. A discard-led cost the
+    // grammar does not fully consume fails closed (never the mana fallback).
+    if let Ok((_, cost)) = parse_discard_ward_cost(&lower) {
+        return cost.map(Keyword::Ward);
+    }
+
     // CR 702.21a: Detect compound costs — comma-separated sub-costs.
     // Only split on ", " that is NOT inside mana braces {}.
     // Example: "{2}, Pay 2 life" → ["{2}", "Pay 2 life"]
     if lower.contains(", ") {
         let parts = split_outside_braces(&lower);
         if parts.len() > 1 {
-            let sub_costs: Vec<WardCost> = parts
+            // CR 702.21a + CR 118.3: a ward cost is paid in full or not at all,
+            // so every comma-separated leg is part of the one cost; a leg the
+            // grammar declines leaves the cost unmodeled — decline rather than
+            // re-read the whole text as one leg (the mana fallback would make
+            // that a partial cost).
+            return parts
                 .iter()
-                .filter_map(|part| parse_ward_cost_single(part.trim()))
-                .collect();
-            if sub_costs.len() == parts.len() {
-                return Some(Keyword::Ward(WardCost::Compound(sub_costs)));
-            }
+                .map(|part| parse_ward_cost_single(part.trim()))
+                .collect::<Option<Vec<WardCost>>>()
+                .map(|legs| Keyword::Ward(WardCost::Compound(legs)));
         }
     }
 
@@ -725,6 +738,59 @@ fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost
     .parse(input)
 }
 
+/// CR 702.21a + CR 701.9a + CR 701.9b: a discard ward cost ("discard a card",
+/// "discard a card at random", "discard an enchantment, instant, or sorcery
+/// card"), read whole by the shared hand-discard cost grammar.
+///
+/// Three outcomes:
+/// - `Err`: the text does not start with the discard verb, so it is not a
+///   discard leg.
+/// - `Ok((_, None))`: discard-led but unmodeled (bare verb, inflected verb,
+///   unreadable or unsupported body). The caller declines the whole cost; it
+///   must never reach the mana fallback, which reads brace-free text as a free
+///   Ward {0}.
+/// - `Ok((_, Some(cost)))`: modeled.
+///
+/// The verb is recognized independently of its body and carries no trailing
+/// word boundary: "discards a card" and "discarded" are claimed here (and
+/// declined) rather than leaving the discard grammar. Only whitespace followed
+/// by a fully consumed body can model a cost.
+fn parse_discard_ward_cost(lower: &str) -> OracleResult<'_, Option<WardCost>> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("discard").parse(lower)?;
+    let (rest, body) = opt(preceded(
+        space1::<_, OracleError<'_>>,
+        nom::combinator::rest,
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        body.and_then(|body| ward_discard_from_ability_cost(parse_discard_cost_body(lower, body))),
+    ))
+}
+
+/// CR 702.21a: project a parsed hand-discard `AbilityCost` onto the ward cost
+/// shape. Ward discards are always paid from the payer's hand with a printed,
+/// fixed, positive count; anything else (an unmodeled typed random discard, the
+/// "discard this card" self-scope, a dynamic count such as "your hand") is
+/// unmodeled and yields `None`.
+fn ward_discard_from_ability_cost(cost: Option<AbilityCost>) -> Option<WardCost> {
+    let Some(AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value },
+        filter,
+        selection,
+        self_scope: DiscardSelfScope::FromHand,
+    }) = cost
+    else {
+        return None;
+    };
+    let count = u32::try_from(value).ok().filter(|n| *n > 0)?;
+    Some(WardCost::Discard {
+        count,
+        filter,
+        selection,
+    })
+}
+
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
@@ -749,9 +815,10 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
         }
     }
 
-    // "discard a card" / "discard two cards" etc.
-    if tag::<_, _, OracleError<'_>>("discard").parse(lower).is_ok() {
-        return Some(WardCost::DiscardCard);
+    // "discard a card" / "discard two cards" etc. A discard leg the grammar does
+    // not fully consume declines (`None`) instead of reaching the mana fallback.
+    if let Ok((_, cost)) = parse_discard_ward_cost(lower) {
+        return cost;
     }
 
     // "sacrifice [N] permanent(s)/creature(s)/etc." — extract count and filter
@@ -3323,6 +3390,151 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    fn ward_discard(
+        count: u32,
+        filter: Option<TargetFilter>,
+        selection: crate::types::ability::CardSelectionMode,
+    ) -> Option<Keyword> {
+        Some(Keyword::Ward(WardCost::Discard {
+            count,
+            filter,
+            selection,
+        }))
+    }
+
+    fn typed_card(card_type: TypeFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(card_type))
+    }
+
+    /// CR 701.9b + CR 702.21a: the random-selection axis of a discard ward cost
+    /// (Alpharael, Stonechosen: "Ward—Discard a card at random.") is kept, as
+    /// is a counted random discard.
+    #[test]
+    fn ward_discard_at_random_keeps_selection_and_count() {
+        use crate::types::ability::CardSelectionMode::{Chosen, Random};
+        assert_eq!(
+            parse_ward_cost("Discard a card at random."),
+            ward_discard(1, None, Random)
+        );
+        assert_eq!(
+            parse_ward_cost("Discard two cards at random."),
+            ward_discard(2, None, Random)
+        );
+        // Reach guard for the negatives below: the chosen form is still chosen.
+        assert_eq!(
+            parse_ward_cost("Discard a card."),
+            ward_discard(1, None, Chosen)
+        );
+    }
+
+    /// CR 702.21a + CR 205.2a: a card-type list is one discard cost, not a
+    /// comma-split compound (Saruman of Many Colors).
+    #[test]
+    fn ward_discard_typed_list_is_one_filtered_discard() {
+        use crate::types::ability::CardSelectionMode::Chosen;
+        assert_eq!(
+            parse_ward_cost("Discard an enchantment, instant, or sorcery card."),
+            ward_discard(
+                1,
+                Some(TargetFilter::Or {
+                    filters: vec![
+                        typed_card(TypeFilter::Enchantment),
+                        typed_card(TypeFilter::Instant),
+                        typed_card(TypeFilter::Sorcery),
+                    ],
+                }),
+                Chosen
+            )
+        );
+        assert_eq!(
+            parse_ward_cost("Discard a creature card."),
+            ward_discard(1, Some(typed_card(TypeFilter::Creature)), Chosen)
+        );
+    }
+
+    /// CR 702.21a + CR 701.9a: the count axis is kept.
+    #[test]
+    fn ward_discard_keeps_count() {
+        use crate::types::ability::CardSelectionMode::Chosen;
+        assert_eq!(
+            parse_ward_cost("Discard two cards."),
+            ward_discard(2, None, Chosen)
+        );
+        assert_eq!(
+            parse_ward_cost("Discard a card."),
+            ward_discard(1, None, Chosen)
+        );
+    }
+
+    /// CR 702.21a: a discard cost the grammar does not model fails closed — no
+    /// Ward keyword at all — instead of being read as a plain one-card discard.
+    #[test]
+    fn ward_discard_unmodeled_bodies_fail_closed() {
+        use crate::types::ability::CardSelectionMode::Random;
+        assert_eq!(
+            parse_ward_cost("Discard a card at random."),
+            ward_discard(1, None, Random),
+            "reach guard: the modeled random form parses"
+        );
+        for unmodeled in [
+            "Discard a creature card at random.",
+            "Discard a card or pay {2}.",
+            "Discard frobnitz.",
+            "Discard your hand.",
+            "Discard this card.",
+        ] {
+            assert_eq!(parse_ward_cost(unmodeled), None, "{unmodeled}");
+        }
+    }
+
+    /// CR 702.21a: a bare or inflected discard verb is discard-led and fails
+    /// closed; it must never reach the mana fallback, which would read it as a
+    /// free Ward {0}.
+    #[test]
+    fn ward_discard_bare_and_inflected_verbs_fail_closed() {
+        use crate::types::ability::CardSelectionMode::Chosen;
+        assert_eq!(
+            parse_ward_cost("Discard a card."),
+            ward_discard(1, None, Chosen),
+            "reach guard: the modeled form parses"
+        );
+        for unmodeled in ["Discard.", "Discard", "Discards a card.", "Discarded."] {
+            assert_eq!(parse_ward_cost(unmodeled), None, "{unmodeled}");
+        }
+    }
+
+    /// CR 702.21a + CR 118.3: a discard leg inside a compound cost is part of
+    /// the one cost; a leg the grammar declines declines the whole cost rather
+    /// than leaving a partial cost.
+    #[test]
+    fn ward_compound_with_discard_leg() {
+        use crate::types::ability::CardSelectionMode::Chosen;
+        assert_eq!(
+            parse_ward_cost("{2}, Discard a card."),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::Discard {
+                    count: 1,
+                    filter: None,
+                    selection: Chosen,
+                },
+            ])))
+        );
+        assert_eq!(parse_ward_cost("{2}, Discard frobnitz."), None);
+        assert_eq!(parse_ward_cost("{2}, Discard."), None);
+    }
+
+    /// The strict router must not accept a discard ward line with a trailing
+    /// clause the keyword grammar never read.
+    #[test]
+    fn ward_discard_router_rejects_trailing_clause() {
+        assert!(parse_router_keyword_line("Ward\u{2014}Discard a card.").is_some());
+        assert!(parse_router_keyword_line(
+            "Ward\u{2014}Discard a card if you control an artifact."
+        )
+        .is_none());
+    }
+
     #[test]
     fn parse_granted_keyword_fragment_cascade() {
         // CR 702.85a: Cascade is a no-parameter keyword.
@@ -4566,8 +4778,10 @@ mod tests {
         // your commander's color identity") and Council Guardian ("protection
         // from each color with the most votes") are dynamic, conditional
         // qualifiers — the "each color" prefix here is NOT the bare 5-WUBRG
-        // shorthand. Expansion must leave them untouched so a future dynamic
-        // handler can interpret them.
+        // shorthand. Expansion must leave them untouched: Plate's phrase is typed
+        // as `ProtectionTarget::EachColor` and expanded at runtime; Council
+        // Guardian's phrase would stay an untyped `CardType` on this path (the
+        // card itself is typed per color by the vote parser).
         let keywords = extract_granted_keyword_list(
             "protection from each color that's not in your commander's color identity",
             &["protection".to_string()],
@@ -4582,10 +4796,17 @@ mod tests {
             1,
             "qualified 'each color' phrase must not expand, got {prots:?}"
         );
-        // Should remain as CardType (or future dynamic variant) — not 5 Color entries.
+        // Stays one typed EachColor entry (expanded at runtime), not 5 Color entries.
         assert!(
             !matches!(prots[0], Keyword::Protection(ProtectionTarget::Color(_))),
             "qualified 'each color' was wrongly expanded to a Color variant: {prots:?}"
+        );
+        assert_eq!(
+            *prots[0],
+            Keyword::Protection(ProtectionTarget::EachColor(
+                crate::types::keywords::ProtectionColorSet::OutsideCommanderColorIdentity
+            )),
+            "Plate's phrase must reach the keyword list as the typed set quality"
         );
     }
 

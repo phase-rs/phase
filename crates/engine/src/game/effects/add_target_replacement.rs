@@ -1,13 +1,20 @@
+use crate::game::quantity::{
+    quantity_ref_object_scope, quantity_ref_recipient_read, resolve_quantity_with_targets,
+    RecipientRead,
+};
+use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
 use crate::types::ability::{
-    AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
-    EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+    AbilityDefinition, CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Duration,
+    Effect, EffectError, EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
     SourceExclusion, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::zones::Zone;
 
 /// Whether a duration supplies a replacement expiry at the installation seam.
 ///
@@ -477,6 +484,247 @@ fn freeze_damage_modification_x(
     }
 }
 
+/// CR 614.1c: preserve reference leaves that read the entering permanent.
+/// Entry extraction supplies `entering`, not a layer `recipient`: only object
+/// scopes and quantities that retain the enclosing context can use that fallback.
+/// CR 608.2h: event-scoped reads must be fixed before trigger context is cleared.
+fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
+    match qty {
+        // Payment facts belong to the entering spell. Preserved limitations:
+        // CostXPaid still reads source/trigger context, not ctx.entering;
+        // SharedCardTypes needs ctx.spell, which entry extraction lacks.
+        QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::SharedCardTypes { .. } => true,
+        QuantityRef::ManaSpentToCast { scope, .. } => match scope {
+            CastManaObjectScope::SelfObject => true,
+            CastManaObjectScope::TriggeringSpell | CastManaObjectScope::AbilityTarget => false,
+        },
+        QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::NameStickerLetterCount { .. } => match quantity_ref_recipient_read(qty) {
+            RecipientRead::Characteristics => true,
+            RecipientRead::Unread | RecipientRead::PopulationIdentity => false,
+        },
+        QuantityRef::PlayerCount { filter } => match filter {
+            // The threshold preserves ctx.entering, unlike object filter thresholds.
+            // Keep the census live when its threshold needs the entrant. The
+            // freezer still snapshots non-Recipient ObjectScope leaves within
+            // that threshold; they are independent of its candidate binding.
+            // All other threshold leaves stay live conservatively, including
+            // ScopedPlayer reads and filters with ScopedPlayer controllers.
+            // Resolution-only reads without an ObjectScope remain unsupported
+            // inside a deferred threshold.
+            PlayerFilter::PlayerAttribute { value, .. } => {
+                value.any_ref(&mut entry_counter_reference_is_deferred)
+            }
+            PlayerFilter::Controller
+            | PlayerFilter::Opponent
+            | PlayerFilter::DefendingPlayer
+            | PlayerFilter::OpponentLostLife
+            | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::HasLostTheGame
+            | PlayerFilter::OpponentAttacked { .. }
+            | PlayerFilter::OpponentAttackingEnchantedPlayer
+            | PlayerFilter::All
+            | PlayerFilter::AllExcept { .. }
+            | PlayerFilter::HighestSpeed
+            | PlayerFilter::ZoneChangedThisWay
+            | PlayerFilter::PerformedActionThisWay { .. }
+            | PlayerFilter::OwnersOfCardsExiledBySource
+            | PlayerFilter::TriggeringPlayer
+            | PlayerFilter::OpponentOtherThanTriggering
+            | PlayerFilter::OpponentOfTriggeringPlayer
+            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+            | PlayerFilter::VotedFor { .. }
+            | PlayerFilter::ParentObjectTargetController
+            | PlayerFilter::ChosenPlayer { .. }
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::TargetPlayer
+            | PlayerFilter::GrantingObjectCaster
+            | PlayerFilter::OpponentDealtDamage { .. }
+            | PlayerFilter::ControlsCount { .. }
+            | PlayerFilter::TrackedSetPossessor { .. }
+            | PlayerFilter::AnyOf { .. } => false,
+        },
+        // CR 611.2d + CR 608.2h: these player/population reads are fixed now.
+        // FilterContext receives only ctx.recipient (absent at install AND entry);
+        // its nested thresholds start fresh contexts without ctx.entering.
+        // Even Characteristics-graded filter/player reads do not gain an entering
+        // binding; PopulationIdentity ("other", "attached to it") is source-relative.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::PropertyAggregate(..)
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
+        | QuantityRef::DistinctColorsAmong { .. } => false,
+        // CR 608.2h: remaining resolution-owned source/controller/event reads
+        // are fixed now, as are non-recipient object reads classified above.
+        QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// CR 611.2d + CR 608.2h: snapshot each resolution-owned reference while its
+/// ability/source/event context is available; keep entry-time leaves live.
+/// Arithmetic remains the shared quantity resolver's responsibility.
+fn freeze_entry_counter_expression(
+    expr: &mut QuantityExpr,
+    state: &GameState,
+    ability: &ResolvedAbility,
+    freeze_reference: fn(&QuantityRef) -> bool,
+) {
+    match expr {
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => {
+            if freeze_reference(qty) {
+                *expr = QuantityExpr::Fixed {
+                    value: resolve_quantity_with_targets(state, expr, ability),
+                };
+            } else if let QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute { value, .. },
+            } = qty
+            {
+                // CR 608.2h + CR 614.1c: preserve entry/candidate bindings while
+                // fixing ability-bound object reads before trigger context clears.
+                freeze_entry_counter_expression(value, state, ability, |reference| {
+                    quantity_ref_object_scope(reference)
+                        .is_some_and(|scope| scope != ObjectScope::Recipient)
+                });
+            }
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            freeze_entry_counter_expression(inner, state, ability, freeze_reference);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for expr in exprs {
+                freeze_entry_counter_expression(expr, state, ability, freeze_reference);
+            }
+        }
+        QuantityExpr::UpTo { max } => {
+            freeze_entry_counter_expression(max, state, ability, freeze_reference);
+        }
+        QuantityExpr::Power { exponent, .. } => {
+            freeze_entry_counter_expression(exponent, state, ability, freeze_reference);
+        }
+        QuantityExpr::Difference { left, right } => {
+            freeze_entry_counter_expression(left, state, ability, freeze_reference);
+            freeze_entry_counter_expression(right, state, ability, freeze_reference);
+        }
+    }
+}
+
+/// CR 611.2d + CR 608.2h: a resolving ability determines the variable in its
+/// continuous effect once, on resolution, rather than when the creature enters.
+/// CR 109.5 + CR 113.7a: use the resolving ability's controller and source context,
+/// including its carried source information if the source has left.
+fn freeze_entry_counter_quantities(
+    replacement: &mut ReplacementDefinition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) {
+    if replacement.event != ReplacementEvent::ChangeZone
+        || replacement.destination_zone != Some(Zone::Battlefield)
+    {
+        return;
+    }
+    let mut current = replacement.execute.as_deref_mut();
+    while let Some(execute) = current {
+        // CR 614.1c: only the event-modifier prefix changes how the object enters.
+        // Choice branches and post-entry instructions retain their own timing.
+        if !EventModifiers::is_event_modifier_effect(&execute.effect) {
+            break;
+        }
+        if let Effect::PutCounter { count, .. } = execute.effect.as_mut() {
+            freeze_entry_counter_expression(count, state, ability, |qty| {
+                !entry_counter_reference_is_deferred(qty)
+            });
+        }
+        current = execute.sub_ability.as_deref_mut();
+    }
+}
+
 fn replacement_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -565,15 +813,33 @@ pub fn resolve(
     // CR 614.1a: `TargetFilter::None` is the "no per-target binding" signal —
     // the carried replacement is self-contained (its own source/target filters
     // already constrain when it fires) and is pushed directly to the global
-    // pending_damage_replacements. Used by triggered creation of turn-bound
-    // damage-modification replacements (Rankle and Torbran's "If a source
-    // would deal damage to a player or battle this turn..."; I Call for
-    // Slaughter's "If a source you control would deal damage this turn,
-    // it deals that much damage plus 1 instead.").
+    // pending_damage_replacements through `install_floating_damage_replacement`,
+    // the install authority for floating replacements. Used by triggered
+    // creation of turn-bound damage-modification replacements (Rankle and
+    // Torbran's "If a source would deal damage to a player or battle this
+    // turn..."; I Call for Slaughter's "If a source you control would deal
+    // damage this turn, it deals that much damage plus 1 instead.") and of
+    // floating entry-modifier riders (Communal Brewing's "that creature enters
+    // with X additional +1/+1 counters on it").
     if matches!(target, TargetFilter::None) {
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
-        state.pending_damage_replacements.push(replacement);
+        freeze_entry_counter_quantities(&mut replacement, state, ability);
+        // CR 113.7a + CR 608.2h: a floating rider may still refer to its source
+        // ("this enchantment"); a battlefield source anchors host-relative gates
+        // and deferred quantities (via `replacement_source_host`).
+        // Resolution-owned counts, including source reads, were frozen above
+        // with the resolving ability's source/LKI context (CR 611.2d). Deferred
+        // entering-object reads stay live. A source not on the battlefield at
+        // resolution still leaves the host as the sentinel for gates and any
+        // deferred source read.
+        super::install_floating_damage_replacement(
+            state,
+            replacement,
+            ability.controller,
+            ability.source_id,
+            &[Zone::Battlefield],
+        );
         attached += 1;
     } else {
         for resolved_target in replacement_targets(state, ability, target) {
@@ -1881,6 +2147,249 @@ mod tests {
             owner,
             PlayerId(0),
             "our own token creation must not be redirected by our own Crafty Cutpurse"
+        );
+    }
+
+    /// Fixture for the floating entry-counter rider tests (issue #9991): a source
+    /// `S` on the battlefield controlled by P1 that is neither a Dog nor a Wolf,
+    /// P1's Dog / Dog Wolf / Wolf, P0's Wolf, and P1's creature spell `E` on the
+    /// stack. Returns `(state, S, E)`.
+    fn floating_entry_counter_fixture() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::card_type::CoreType;
+
+        fn creature(
+            state: &mut GameState,
+            card: u64,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            subtypes: &[&str],
+        ) -> ObjectId {
+            let id = create_object(state, CardId(card), owner, name.to_string(), zone);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types
+                .subtypes
+                .extend(subtypes.iter().map(|s| s.to_string()));
+            id
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Rider Source".to_string(),
+            Zone::Battlefield,
+        );
+        creature(
+            &mut state,
+            2,
+            PlayerId(1),
+            "P1 Dog",
+            Zone::Battlefield,
+            &["Dog"],
+        );
+        creature(
+            &mut state,
+            3,
+            PlayerId(1),
+            "P1 Dog Wolf",
+            Zone::Battlefield,
+            &["Dog", "Wolf"],
+        );
+        creature(
+            &mut state,
+            4,
+            PlayerId(1),
+            "P1 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        creature(
+            &mut state,
+            5,
+            PlayerId(0),
+            "P0 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        let entering = creature(
+            &mut state,
+            6,
+            PlayerId(1),
+            "Entering Human",
+            Zone::Stack,
+            &["Human"],
+        );
+        (state, source, entering)
+    }
+
+    /// Resolve a floating cast-enters-with rider shaped like Torgal, A Fine
+    /// Hound's payload ("that creature enters with an additional +1/+1 counter on
+    /// it for each Dog and/or Wolf you control"; the first-Human-each-turn trigger
+    /// gate is omitted) the way a resolving trigger installs it:
+    /// `AddTargetReplacement` with `TargetFilter::None`, a `PutCounter` whose count
+    /// reads the installing controller's board, and a `valid_card` bound to the
+    /// triggering spell.
+    fn install_dog_wolf_entry_rider(state: &mut GameState, source: ObjectId, entering: ObjectId) {
+        use crate::types::ability::{
+            AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+
+        let subtype_you = |subtype: &str| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype(subtype.to_string())
+                    .controller(ControllerRef::You),
+            )
+        };
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Or {
+                                filters: vec![subtype_you("Dog"), subtype_you("Wolf")],
+                            },
+                        },
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    TargetFilter::SpecificObject {
+                        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+                    },
+                ],
+            })
+            .destination_zone(Zone::Battlefield);
+        replacement.consume_on_apply = true;
+
+        // The SpellCast event that triggered the installing ability names the
+        // entering spell (`extract_source_from_event`).
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(6),
+            controller: PlayerId(1),
+            object_id: entering,
+            cast_mana_value: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+    }
+
+    /// Drive the entering spell's stack-to-battlefield event through the
+    /// replacement pipeline and return the counters it will enter with.
+    fn entry_counters(
+        state: &mut GameState,
+        entering: ObjectId,
+    ) -> Vec<(crate::types::counter::CounterType, u32)> {
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(entering, Zone::Stack, Zone::Battlefield, None);
+        let result = replace_event(state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected the entering ZoneChange to execute, got {result:?}");
+        };
+        enter_with_counters
+    }
+
+    /// CR 611.2d: the rider fixes its count at install from the trigger controller's
+    /// board: P1's Dog, Dog Wolf (counted once), and Wolf give 3, not P0's 1.
+    /// The provenance assertions separately check the source anchor and controller
+    /// latch. Entry-time controller threading matters only for deferred leaves
+    /// that need that controller; no current corpus cast rider has such a leaf.
+    #[test]
+    fn floating_entry_counter_rider_counts_installing_controllers_board() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+
+        // Reach guard: exactly one rider, anchored to its installer.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let rider = &state.pending_damage_replacements[0];
+        assert_eq!(rider.source_object, Some(source));
+        assert_eq!(rider.source_controller, Some(PlayerId(1)));
+        assert!(!rider.is_consumed);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)],
+            "'you' is the installing controller (P1: Dog, Dog Wolf, Wolf), not PlayerId(0)"
+        );
+        assert!(
+            state.pending_damage_replacements[0].is_consumed,
+            "the one-shot rider must be consumed once it applies"
+        );
+    }
+
+    /// CR 611.2d: a source control change after install cannot change the count
+    /// already fixed from the trigger controller's board (P1's 3, not P0's 1).
+    /// This guards install-time freezing, not the entry-time controller latch;
+    /// only deferred leaves can exercise that latch, and no current corpus cast
+    /// rider has a controller-dependent deferred leaf.
+    #[test]
+    fn floating_entry_counter_rider_you_is_latched_when_source_changes_control() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider is anchored, so the source is the live object below"
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
+        );
+    }
+
+    /// CR 611.2d: source departure after install cannot change the count already
+    /// fixed from the trigger controller's board. P0 owns the source, but the
+    /// trigger controller P1 supplied the frozen count of 3, not P0's 1.
+    /// This does not discriminate entry-time controller threading, which matters
+    /// only for deferred leaves; no current corpus cast rider has a deferred
+    /// leaf that needs that controller.
+    #[test]
+    fn floating_entry_counter_rider_survives_source_leaving_battlefield() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        state.objects.get_mut(&source).unwrap().owner = PlayerId(0);
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider was anchored before its source left"
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
         );
     }
 }

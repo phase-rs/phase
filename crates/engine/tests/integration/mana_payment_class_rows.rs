@@ -258,7 +258,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             !done[k]
                 && (lands[k].is_some()
                     || flat.iter().any(|x| {
-                        matches!(x, GameAction::ActivateAbility { source_id, ability_index }
+                        matches!(x, GameAction::ActivateAbility { source_id, ability_index, .. }
                             if *source_id == source && *ability_index == index)
                     }))
         });
@@ -267,6 +267,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             Some(lands[p].clone().unwrap_or(GameAction::ActivateAbility {
                 source_id: b.acts[p].0,
                 ability_index: b.acts[p].1,
+                payment_mode: CastPaymentMode::Auto,
             }))
         } else {
             let fodder_only = |a: &&GameAction| {
@@ -392,6 +393,7 @@ fn drive(row: &Row) -> (bool, String) {
         let action = land_row(c.r.state(), act, &c.hint).unwrap_or(GameAction::ActivateAbility {
             source_id: act.0,
             ability_index: act.1,
+            payment_mode: CastPaymentMode::Auto,
         });
         if step(&mut c.r, action) {
             answer(&mut c, &mut done);

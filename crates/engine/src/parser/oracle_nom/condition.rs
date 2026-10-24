@@ -6,7 +6,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace1, satisfy};
 use nom::combinator::{cut, eof, map, not, opt, peek, recognize, value, verify};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
@@ -2486,6 +2486,41 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((rest, condition))
 }
 
+/// CR 722.3a + CR 700.7 + CR 603.4: Parse "<explicit self> is[n't] prepared"
+/// → SourceMatchesFilter over the property-only prepared filter, wrapping the
+/// negated idiom in `Not { SourceMatchesFilter }`. The polarity is a single
+/// `alt()` axis over the affirmative ("is prepared") and the two negated
+/// spellings ("isn't prepared" / "is not prepared"), longest-match first so
+/// "is not" wins over "is " before the predicate — the `parse_source_is_saddled`
+/// template. Woodwork Prodigy's upkeep trigger ("if this creature isn't
+/// prepared, it becomes prepared"; same sentence on Stingerquill Voxmancer and
+/// Paradox Shaper) drives the negated branch.
+///
+/// Explicit-self subjects only (`parse_explicit_self_source_subject`: `~` /
+/// "this creature" / "this permanent" / ...). Attached prefixes ("equipped /
+/// enchanted creature ") and the bare recipient-anaphoric "it" are deliberately
+/// NOT accepted here: for those the real subject is the host/recipient, not
+/// the ability source, so a `Source*` check would bind the wrong object.
+/// Property-only filter shape (no creature-type gate): the prepared
+/// designation is a permanent property, and CR 700.7 keeps "this creature"
+/// bound even after type loss (One with the Stars).
+fn parse_source_is_prepared(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_explicit_self_source_subject(input)?;
+    let (rest, negated) = parse_copula_is_or_isnt(rest)?;
+    let (rest, _) = tag("prepared").parse(rest)?;
+    let condition = StaticCondition::SourceMatchesFilter {
+        filter: crate::parser::oracle_effect::conditions::prepared_source_filter(),
+    };
+    let condition = if negated {
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
+}
+
 /// CR 702.171b + CR 508.1m: Bare elided-subject participle state gate
 /// ("Whenever this creature attacks while saddled" — Alacrian Jaguar). The
 /// printed while-gate elides the subject; the participle is part of the trigger
@@ -2568,6 +2603,30 @@ fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, Sta
     .parse(rest)
 }
 
+/// CR 701.43b: Source exert history, with negation composed over the same leaf.
+fn parse_source_exerted_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_subject(input)?;
+    terminated(
+        alt((
+            value(
+                StaticCondition::SourceExertedThisTurn,
+                tag("has been exerted this turn"),
+            ),
+            value(
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceExertedThisTurn),
+                },
+                (parse_hasnt, tag(" been exerted this turn")),
+            ),
+        )),
+        peek(alt((
+            value((), eof),
+            value((), satisfy(|c: char| !c.is_alphanumeric())),
+        ))),
+    )
+    .parse(rest)
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -2589,6 +2648,9 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 702.171b: "~ is saddled" / "this creature isn't saddled" / etc.
         // (negation composes Not { SourceIsSaddled }).
         parse_source_is_saddled,
+        // CR 722.3a: "~ is prepared" / "this creature isn't prepared" / etc.
+        // (negation composes Not { SourceMatchesFilter { Typed([Prepared]) } }).
+        parse_source_is_prepared,
         // CR 301.5 + CR 303.4: "~ is attached to a creature" / "this equipment is attached to a creature".
         // Must precede `parse_source_is_type` so the specific "is attached to a creature"
         // predicate wins over generic "is <type>" dispatch.
@@ -2617,6 +2679,7 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Not(SourceHasDealtDamage). Specific full-phrase tag; placed before the
         // generic predicates so it is not shadowed.
         parse_source_hasnt_dealt_damage,
+        parse_source_exerted_this_turn,
         // CR 400.7: Entered this turn.
         // Accept both the long "entered the battlefield this turn" and the abbreviated
         // "entered this turn" forms — Oracle templates vary between them for the same
@@ -12217,6 +12280,29 @@ mod tests {
         "controlled by that player",
         "the chosen player controls",
     ];
+
+    #[test]
+    fn source_exert_history_grammar_preserves_polarity_and_boundaries() {
+        for subject in ["~", "this creature", "this permanent"] {
+            let text = format!("{subject} has been exerted this turn, draw a card");
+            let (rest, condition) = parse_inner_condition(&text).unwrap();
+            assert_eq!(rest, ", draw a card");
+            assert_eq!(condition, StaticCondition::SourceExertedThisTurn);
+            for tense in ["hasn't", "hasn’t"] {
+                let text = format!("{subject} {tense} been exerted this turn");
+                let (rest, condition) = parse_inner_condition(&text).unwrap();
+                assert!(rest.is_empty());
+                assert_eq!(
+                    condition,
+                    StaticCondition::Not {
+                        condition: Box::new(StaticCondition::SourceExertedThisTurn)
+                    }
+                );
+            }
+        }
+        assert!(parse_inner_condition("this creature has been exerted this turnip").is_err());
+        assert!(parse_inner_condition("this creature hasn't been exerted this turnip").is_err());
+    }
 
     #[test]
     fn they_control_count_ge_marker() {

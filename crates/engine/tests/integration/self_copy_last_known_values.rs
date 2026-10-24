@@ -20,6 +20,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{GameState, PayCostKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -171,6 +172,7 @@ fn activate_and_pay(runner: &mut GameRunner, source: ObjectId, discard: Option<O
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the copy ability is activatable");
     for _ in 0..16 {

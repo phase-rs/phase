@@ -270,6 +270,7 @@ fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a Ability
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => ctx
             .state
             .objects
@@ -1524,7 +1525,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     WardCost::PayLifeEqualToPower => {
                         (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                     }
-                    WardCost::DiscardCard => 1.5,
+                    WardCost::Discard { count, .. } => *count as f64 * 1.5,
                     WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                     WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                     // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
@@ -1573,7 +1574,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             WardCost::PayLifeEqualToPower => {
                                 (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                             }
-                            WardCost::DiscardCard => 1.5,
+                            WardCost::Discard { count, .. } => *count as f64 * 1.5,
                             WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                             WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                             WardCost::GetPlayerCounters {

@@ -85,6 +85,7 @@ fn sandman_returns_self_and_land_both_tapped_from_graveyard() {
         .act(GameAction::ActivateAbility {
             source_id: sandman,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Sandman's return ability must be activatable from the graveyard");
 

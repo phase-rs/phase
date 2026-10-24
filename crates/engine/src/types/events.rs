@@ -6,8 +6,9 @@ use super::counter::CounterType;
 use crate::types::ability::AttachmentReferent;
 
 use super::ability::{
-    AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
-    TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind,
+    FilterProp, TargetFilter, TargetRef, ThisWayCause, TriggerDefinitionRef, TypeFilter,
+    TypedFilter,
 };
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
@@ -204,6 +205,50 @@ impl ActivatedAbilityKind {
             Self::Loyalty => self == Self::Loyalty,
             Self::Mana => self == Self::Mana,
         }
+    }
+}
+
+/// CR 602.1a + CR 602.2b + CR 601.2h + CR 605.3: the activation cost (everything
+/// before the colon) of the definition an activation was bound to, captured
+/// before any of its cost was paid — for stack-using and mana-ability
+/// activations alike. Never re-read from the source afterwards: a cost may
+/// have moved it, resetting its abilities (CR 400.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BoundActivationCost {
+    /// No binding is known: an event or record decoded from a state that
+    /// predates this fact, or a mana activation resumed without its
+    /// pre-payment definition. Readers fail closed.
+    #[default]
+    Unknown,
+    /// The bound definition carries no cost (`AbilityDefinition::cost` is
+    /// `None`; engine-built definitions only — no printed activated ability
+    /// lacks one, CR 602.1). The activation paid nothing.
+    Costless,
+    /// CR 602.1a: the bound definition's activation cost. Boxed so the
+    /// payload does not grow every `GameEvent` (serde is transparent).
+    Cost(Box<AbilityCost>),
+}
+
+impl BoundActivationCost {
+    /// From the definition the activation is bound to (`None` = no binding).
+    pub fn of_definition(def: Option<&AbilityDefinition>) -> Self {
+        match def {
+            None => Self::Unknown,
+            Some(def) => def
+                .cost
+                .clone()
+                .map_or(Self::Costless, |cost| Self::Cost(Box::new(cost))),
+        }
+    }
+
+    /// CR 305.6: a basic land type's intrinsic "{T}: Add [mana symbol]", whose
+    /// activation cost is `{T}`.
+    pub fn basic_land_intrinsic() -> Self {
+        Self::Cost(Box::new(AbilityCost::Tap))
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
     }
 }
 
@@ -633,6 +678,10 @@ impl EventObjectSnapshot {
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
+            // CR 506.3: needs live combat state (the attacker's current attack target)
+            // and may be a planeswalker permanent; unlike `DefendingPlayer` it is not
+            // a player-axis selector the snapshot can answer `false` for.
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::OriginalSource
@@ -809,6 +858,16 @@ impl EventObjectSnapshot {
             // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
             // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
             FilterProp::Goaded
+            // CR 722.3a: prepared is a designation on the LIVE permanent
+            // (`GameObject::prepared`). The departure ledger carries it
+            // (`LKISnapshot` / `ZoneChangeRecord::was_prepared`, read by the
+            // runtime), but the event-subject projection (`EventObjectSnapshot`)
+            // this reach gate walks does not, so an event-subject prepared
+            // filter cannot be answered from a snapshot. Classify Unsupported so
+            // a future prepared event-subject filter fails the reach gate LOUDLY
+            // rather than silently reading an unprepared projection. Deferred
+            // follow-up (option a): snapshot prepared onto EventObjectSnapshot.
+            | FilterProp::Prepared
             | FilterProp::WasPlayed
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
@@ -880,6 +939,18 @@ impl PartialEq for LifeTotalReading {
 }
 
 impl Eq for LifeTotalReading {}
+
+/// CR 701.43: the way a permanent came to be exerted. CR 701.43d links an attack
+/// exert to its own "when you do" trigger (CR 607.2h), so that trigger must not
+/// see an exert paid as part of an activated ability's cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExertOrigin {
+    /// CR 701.43d: the optional cost of attacking ("exert this creature as it attacks").
+    #[default]
+    AttackCost,
+    /// CR 602.2b + CR 605.3b: an `{Exert}` cost of an activated ability.
+    AbilityCost,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -1020,6 +1091,13 @@ pub enum GameEvent {
         /// a state predating the field. Omitted on the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stack_entry: Option<ObjectId>,
+        /// CR 602.1a + CR 603.2 + CR 603.10: the activation's own cost, bound before
+        /// payment (`BoundActivationCost`). A trigger reads it from the event it is
+        /// matching — never from the source, the stack, or `pending_activations`.
+        /// Public: it is the activated ability's text (CR 602.2a, CR 605.3).
+        /// `Unknown` for an event predating the field; omitted on the wire then.
+        #[serde(default, skip_serializing_if = "BoundActivationCost::is_unknown")]
+        activation_cost: BoundActivationCost,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -1135,11 +1213,29 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         incarnation: Option<u64>,
     },
-    /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
-    /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
-    /// Glory-Bound Initiate, ...).
+    /// CR 701.43a: A permanent was exerted by `player`, either as an optional
+    /// attack cost (CR 701.43d) or as part of an activated ability's cost.
+    /// Fires the linked `TriggerMode::Exerted` "when you do" trigger (Combat
+    /// Celebrant, Glory-Bound Initiate, ...) and "whenever you exert a creature"
+    /// observers, which key on `player`.
     CreatureExerted {
         object_id: ObjectId,
+        /// The player who chose to exert it. `None` on a legacy event: the
+        /// historical shape (an attack exert) never recorded its actor, and no
+        /// actor is invented for it - an observer keyed on "you exert" does not
+        /// match an event whose actor was not saved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<PlayerId>,
+        /// Which exert this was. A legacy event defaults to
+        /// [`ExertOrigin::AttackCost`]: attack exert was the only emitter before
+        /// activated-ability exert costs were recorded, so that is the saved
+        /// fact, not a guess.
+        #[serde(default)]
+        origin: ExertOrigin,
+        /// CR 607.2h: Exact optional attack permission whose cost was paid.
+        /// Historical completed events retain their original unbound meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attack_permission: Option<TriggerDefinitionRef>,
     },
     /// CR 702.154c: A creature enlisted another creature as it attacked. Fires
     /// the linked `TriggerMode::Enlisted` "when you do" trigger and carries the
@@ -2118,6 +2214,7 @@ mod tests {
                 departed_source_lki,
                 trigger_state,
                 stack_entry,
+                activation_cost,
                 ..
             } => {
                 assert_eq!(kind, ActivatedAbilityKind::Normal);
@@ -2133,6 +2230,11 @@ mod tests {
                 assert_eq!(
                     stack_entry, None,
                     "a legacy event predating the field names no stack entry"
+                );
+                assert_eq!(
+                    activation_cost,
+                    BoundActivationCost::Unknown,
+                    "CR 602.1a: a legacy event predating the field carries no bound cost"
                 );
             }
             other => panic!("expected AbilityActivated, got {other:?}"),
@@ -2154,6 +2256,7 @@ mod tests {
                 departed_source_lki: None,
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
+                activation_cost: BoundActivationCost::Unknown,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -2175,6 +2278,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: ActivationTriggerState::Pending,
             stack_entry,
+            activation_cost: BoundActivationCost::Unknown,
         };
         let named = event(Some(ObjectId(42)));
         let json = serde_json::to_value(&named).unwrap();
@@ -2186,6 +2290,83 @@ mod tests {
         assert!(
             json["data"].get("stack_entry").is_none(),
             "an activation that used no stack omits the key"
+        );
+    }
+
+    #[test]
+    fn ability_activated_activation_cost_round_trips_and_is_omitted_when_unknown() {
+        // CR 602.1a + CR 605.3: the activation's bound cost survives
+        // serialization for a mana ability's `{X}, {T}, Sacrifice` cost and for a
+        // cost-less definition; an event with no binding omits the key.
+        let event = |activation_cost| GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Mana,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: None,
+            activation_cost,
+        };
+        let x_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![super::super::mana::ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice(super::super::ability::SacrificeCost::count(
+                    TargetFilter::SelfRef,
+                    1,
+                )),
+            ],
+        };
+        for cost in [
+            BoundActivationCost::Cost(Box::new(x_cost)),
+            BoundActivationCost::Costless,
+        ] {
+            let original = event(cost);
+            let json = serde_json::to_value(&original).unwrap();
+            assert!(
+                json["data"].get("activation_cost").is_some(),
+                "a bound cost is always serialized"
+            );
+            let back: GameEvent = serde_json::from_value(json).unwrap();
+            assert_eq!(back, original);
+        }
+
+        let json = serde_json::to_value(event(BoundActivationCost::Unknown)).unwrap();
+        assert!(
+            json["data"].get("activation_cost").is_none(),
+            "an event with no bound cost omits the key"
+        );
+    }
+
+    #[test]
+    fn bound_activation_cost_of_definition_distinguishes_unknown_costless_and_cost() {
+        // CR 602.1a: no binding is `Unknown`; a bound definition without a cost
+        // is `Costless`, never confused with `Unknown`; otherwise its cost.
+        use super::super::ability::{AbilityKind, Effect, QuantityExpr};
+        assert_eq!(
+            BoundActivationCost::of_definition(None),
+            BoundActivationCost::Unknown
+        );
+        let costless = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        assert_eq!(
+            BoundActivationCost::of_definition(Some(&costless)),
+            BoundActivationCost::Costless
+        );
+        let tapped = costless.clone().cost(AbilityCost::Tap);
+        assert_eq!(
+            BoundActivationCost::of_definition(Some(&tapped)),
+            BoundActivationCost::Cost(Box::new(AbilityCost::Tap))
         );
     }
 
@@ -2401,6 +2582,25 @@ mod tests {
         assert_eq!(classify(&goaded), Unsupported);
     }
 
+    /// CR 722.3a: prepared is a designation on the LIVE permanent. The
+    /// departure ledger now carries it (`LKISnapshot` / `ZoneChangeRecord::
+    /// was_prepared`, read by the runtime), but the event-subject projection
+    /// (`EventObjectSnapshot`) still does not. The reach-gate classifier must
+    /// AGREE: a prepared event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently
+    /// certifying unprepared.
+    /// Revert-probe: returning Prepared to the Supported group makes classify
+    /// yield Supported, flipping this assertion.
+    #[test]
+    fn prepared_subject_filter_is_unsupported() {
+        let prepared = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Prepared],
+        });
+        assert_eq!(classify(&prepared), Unsupported);
+    }
+
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole
     /// filter cannot be. Getting this backwards would let an unanswerable filter through
     /// the gate and be silently evaluated as `false` at runtime.
@@ -2488,5 +2688,24 @@ mod tests {
             ],
         };
         assert_eq!(classify(&nested), Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_snapshot_tests {
+    use super::*;
+
+    /// CR 506.3: needs live combat state and may be a planeswalker permanent, so the
+    /// Connive snapshot gate refuses it rather than answering false.
+    #[test]
+    fn attacked_referent_is_unsupported_for_a_snapshot_subject() {
+        assert!(matches!(
+            EventObjectSnapshot::classify_filter_shape(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            EventObjectFilterSupport::Unsupported
+        ));
+        assert!(matches!(
+            EventObjectSnapshot::classify_filter_shape(&TargetFilter::DefendingPlayer),
+            EventObjectFilterSupport::PermanentDomainFalse
+        ));
     }
 }

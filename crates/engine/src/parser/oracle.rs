@@ -40,7 +40,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
+use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
     parse_number as nom_parse_number, parse_object_recipient_pronoun, parse_period_sentences,
@@ -78,8 +78,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context, parse_windowed_replacement_install_ir,
-    rewrite_condition_keyword, target_filter_controller_ref,
+    parse_effect_chain, parse_effect_chain_with_context, parse_phase_name_set,
+    parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -229,6 +229,30 @@ fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
             .sub_ability
             .as_deref()
             .is_some_and(definition_grants_flashback)
+}
+
+pub(crate) fn parse_attack_exert_header(input: &str) -> OracleResult<'_, Option<StaticCondition>> {
+    let (input, condition) = opt(preceded(
+        tag("if "),
+        terminated(parse_inner_condition, tag(", ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("you may exert ").parse(input)?;
+    let (input, _) = take_until(" as ").parse(input)?;
+    let (input, _) = tag(" as ").parse(input)?;
+    let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
+    let (input, _) = tag(" attacks").parse(input)?;
+    Ok((input, condition))
+}
+
+pub(crate) fn parse_unknown_conditioned_attack_exert_header(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("if ").parse(input)?;
+    let (input, _) = take_until(", you may exert ").parse(input)?;
+    let (input, _) = tag(", you may exert ").parse(input)?;
+    let (input, _) = take_until(" as ").parse(input)?;
+    let (input, _) = tag(" as ").parse(input)?;
+    let (input, _) = alt((tag("it"), tag("he"), tag("she"), tag("they"))).parse(input)?;
+    value((), tag(" attacks")).parse(input)
 }
 
 fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
@@ -5675,8 +5699,10 @@ fn parse_normalized_oracle_ir(
             //    branches) — every one of them a CR 608.2 resolution-tree field.
             //    The shell stamps NONE of them: it writes cost, cost_reduction,
             //    activation restrictions and the other CR 602.1 envelope fields
-            //    only. So the pre-shell and post-shell lowerings still agree on
-            //    this predicate.
+            //    only. Once that envelope is complete, the linked-paid-cast
+            //    mana-composition fence can additionally refuse unsupported
+            //    inline work; the pre-shell trial has no activation cost and
+            //    deliberately does not classify that composition yet.
             //
             // Cost: one extra lowering per LEVEL-block activated line (two or
             // three rather than one or two). It is intrinsic, not laziness — the
@@ -6639,8 +6665,8 @@ fn parse_normalized_oracle_ir(
         {
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
-            // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing; Torgal
-            // and Boreal Outrider are NOT recognized here; the self-exile form, Dark
+            // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing, Torgal;
+            // Boreal Outrider is NOT recognized here; the self-exile form, Dark
             // Intimations, is recognized only to fail closed below) is a TRIGGERED
             // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
@@ -6806,98 +6832,58 @@ fn parse_normalized_oracle_ir(
             }
         }
 
-        // CR 701.43d: "You may exert [creature] as it attacks" — optional attack cost.
-        // Must intercept BEFORE Priority 7 (static patterns) because the "When you do"
-        // linked effect often contains "gets +N/+M" which is_static_pattern would match.
-        // Standalone: skip (separate "Whenever you exert" trigger line follows).
-        // Compound: produce an Exerted trigger with the linked effect.
-        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
-            value(
-                (),
-                alt((
-                    tag("you may exert this creature as it attacks"),
-                    tag("you may exert ~ as it attacks"),
-                    tag("you may exert it as it attacks"),
-                )),
-            )
-            .parse(i)
-        }) {
-            // Check for linked "When you do, [effect]" in same sentence
-            let rest_trimmed = rest_original.trim().trim_start_matches('.').trim_start();
-            let rest_lower = rest_trimmed.to_lowercase();
-            if let Some(((), effect_rest)) = nom_on_lower(rest_trimmed, &rest_lower, |i| {
-                value((), tag("when you do, ")).parse(i)
+        // CR 701.43d + CR 607.2h: Keep the optional attack cost and its
+        // linked payoff together, intercepting before static P/T dispatch.
+        // CR 603.4: A leading condition gates payment, not trigger resolution.
+        if let Some((attack_cost_condition, rest_original)) =
+            nom_on_lower(&line, &lower, parse_attack_exert_header)
+        {
+            let mut trigger = TriggerDefinition::new(TriggerMode::Exerted)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Battlefield])
+                .description(line.to_string());
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(((), effect_rest)) = nom_on_lower(rest_original, &rest_lower, |input| {
+                value((), tag(". when you do, ")).parse(input)
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
+                trigger = trigger.execute(parse_effect_chain_with_context(
                     effect_rest.trim(),
                     AbilityKind::Spell,
                     &mut ctx,
+                ));
+            } else if all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+                .parse(rest_lower.trim())
+                .is_err()
+            {
+                emitter.ability_at(
+                    item_line,
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::unimplemented("attack_exert_rider", &line),
+                    ),
                 );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                // `&line` is the whole printed sentence, which is also what the
-                // recognizer stamped as `description` — the body was parsed
-                // from the suffix after ". When you do, ", but the CR 701.43d
-                // optional attack cost and its CR 607.2h linked reflexive
-                // trigger are one printed paragraph.
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+                i += 1;
+                continue;
             }
+            if let Some(condition) = attack_cost_condition {
+                trigger = trigger.attack_cost_condition(condition);
+            }
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
             i += 1;
             continue;
         }
-        // CR 701.43d: Variant with card name — "You may exert {Name} as {he/she/it/they} attacks"
-        if nom_on_lower(&line, &lower, |i| value((), tag("you may exert ")).parse(i)).is_some()
-            && scan_contains(&lower, "as ")
-            && scan_contains(&lower, "attacks")
-        {
-            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                ctx.subject = None;
-                ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
-                    effect_text.trim(),
+        // A syntactically attack-exert paragraph with an unknown leading gate
+        // must remain unsupported rather than silently losing its restriction.
+        if nom_on_lower(&line, &lower, parse_unknown_conditioned_attack_exert_header).is_some() {
+            emitter.ability_at(
+                item_line,
+                AbilityDefinition::new(
                     AbilityKind::Spell,
-                    &mut ctx,
-                );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
-            }
-            i += 1;
-            continue;
-        }
-        // CR 701.43d: Conditional exert — "If [creature] hasn't been exerted this turn, you may exert it"
-        if nom_on_lower(&line, &lower, |i| value((), tag("if ")).parse(i)).is_some()
-            && scan_contains(&lower, "you may exert")
-            && scan_contains(&lower, "attacks")
-        {
-            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                ctx.subject = None;
-                ctx.actor = None;
-                let effect_def = parse_effect_chain_with_context(
-                    effect_text.trim(),
-                    AbilityKind::Spell,
-                    &mut ctx,
-                );
-                let trigger = TriggerDefinition::new(TriggerMode::Exerted)
-                    .valid_card(TargetFilter::SelfRef)
-                    .trigger_zones(vec![Zone::Battlefield])
-                    .execute(effect_def)
-                    .description(line.to_string());
-                // The leading if-gate this arm dispatches on is still DROPPED —
-                // no condition is stamped for "hasn't been exerted this turn".
-                // That gap is pre-existing and deliberately preserved here: the
-                // conversion is behavior-identical, and the fix belongs in a
-                // change that is allowed to move bytes.
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
-            }
+                    Effect::unimplemented("attack_exert_condition", &line),
+                ),
+            );
             i += 1;
             continue;
         }
@@ -9527,6 +9513,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -10609,6 +10596,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -11949,6 +11937,9 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// turn-role and turn-window axes are consumed by their own sub-combinators, so
 /// the four role×window gates come from four small tags instead of eight
 /// enumerated phrases (and a new spelling on either axis is a one-tag change).
+/// The unscoped determiner×step arm ("during the <step> step" / "during any
+/// <step> step") shares the same prefix and still lowers to the existing
+/// `RequiresCondition` variant.
 fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     alt((
         value(
@@ -12213,13 +12204,27 @@ fn parse_activation_turn_window(i: &str) -> OracleResult<'_, ActivationTurnWindo
     .parse(i)
 }
 
-/// CR 602.1b: the composed `during <role> <window>` activation gate — the
-/// shared prefix is consumed once, then each axis by its own sub-combinator.
+/// The unscoped step-determiner axis of a `during ...` activation gate:
+/// "the" / "any" name a step with no turn owner. Plumbing only — the rules
+/// reading lives in `named_step_activation_restriction`. The trailing space is
+/// load-bearing: "their" (a turn-role possessive) cannot match "the ".
+fn parse_unscoped_step_determiner(i: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag::<_, _, OracleError<'_>>("the "), tag("any ")))).parse(i)
+}
+
+/// CR 602.1b: the composed `during ...` activation gate — the shared prefix is
+/// consumed once, then either the unscoped determiner×step axes ("during the
+/// <step> step" / "during any <step> step", via the shared step-name grammar
+/// `parse_phase_name_set`) or the `<role> <window>` axes, each by its own
+/// sub-combinator. Every arm emits an EXISTING `ActivationRestriction` variant.
 fn parse_activation_during_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     preceded(
         tag::<_, _, OracleError<'_>>("during "),
         alt((
-            value(any_upkeep_activation_restriction(), tag("any upkeep step")),
+            map(
+                preceded(parse_unscoped_step_determiner, parse_phase_name_set),
+                named_step_activation_restriction,
+            ),
             map(
                 (parse_activation_turn_role, parse_activation_turn_window),
                 |(role, window)| activation_turn_gate(role, window),
@@ -12269,25 +12274,28 @@ fn opponents_turn_activation_condition() -> ParsedCondition {
 /// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
 /// gates activation to the upkeep step of an opponent's turn (Trade Caravan).
 /// Composed from the same team-aware opponent-turn leaf as
-/// `opponents_turn_activation_condition` plus the `IsDuringUpkeep` step
-/// predicate, so the opponent scope reuses the existing composition idiom
-/// instead of a dedicated `DuringOpponents*` restriction sibling per step.
+/// `opponents_turn_activation_condition` plus the step predicate
+/// `CurrentPhaseIs { phases: [Upkeep] }`, so the opponent scope reuses the
+/// existing composition idiom instead of a dedicated `DuringOpponents*`
+/// restriction sibling per step.
 fn opponents_upkeep_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(ParsedCondition::And {
             conditions: vec![
                 opponents_turn_activation_condition(),
-                ParsedCondition::IsDuringUpkeep,
+                ParsedCondition::CurrentPhaseIs {
+                    phases: vec![Phase::Upkeep],
+                },
             ],
         }),
     }
 }
 
-/// CR 602.1b + CR 503.1: activation instructions can restrict activation to
-/// the upkeep step. "Any upkeep" imposes no active-player restriction.
-fn any_upkeep_activation_restriction() -> ActivationRestriction {
+/// CR 602.1b + CR 500.1 + CR 506.1: "during the <step> step" / "during any <step>
+/// step" names one turn step with no turn owner.
+fn named_step_activation_restriction(phases: Vec<Phase>) -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
-        condition: Some(ParsedCondition::IsDuringUpkeep),
+        condition: Some(ParsedCondition::CurrentPhaseIs { phases }),
     }
 }
 

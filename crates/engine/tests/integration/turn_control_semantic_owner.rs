@@ -298,6 +298,7 @@ fn a_controlled_seats_mana_ability_books_its_land_to_the_seat() {
         GameAction::ActivateAbility {
             source_id: forest,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the controller activates the seat's land mana ability");
@@ -317,6 +318,7 @@ fn an_uncontrolled_seats_mana_ability_books_its_land_to_the_seat() {
         GameAction::ActivateAbility {
             source_id: forest,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the seat activates its own land mana ability");

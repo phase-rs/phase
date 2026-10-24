@@ -43,6 +43,7 @@ fn activate(runner: &mut GameRunner, bombardment: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: bombardment,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Goblin Bombardment activation must enter target selection");
 }

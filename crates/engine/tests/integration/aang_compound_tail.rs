@@ -589,6 +589,7 @@ fn counter_tail_failure_is_visible_in_full_activated_oracle_and_never_executes_a
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("the untargeted zero-cost activation commits");
         assert!(activation.disposition.is_applied());

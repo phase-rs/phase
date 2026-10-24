@@ -20,7 +20,7 @@ use crate::types::ability::{
     ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
     ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
@@ -23603,8 +23603,72 @@ fn gideon_the_oathless_full_oracle_shape() {
     }
     assert!(parsed.extracted_keywords.iter().any(|kw| matches!(
         kw,
-        Keyword::Ward(crate::types::keywords::WardCost::DiscardCard)
+        Keyword::Ward(crate::types::keywords::WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        })
     )));
+}
+
+// CR 702.21a: a ward cost is paid in full or not at all, so a ward discard
+// whose text the grammar cannot fully read must fail closed — no Ward keyword
+// and an honest Unimplemented marker — never a free Ward {0} or a plain
+// one-card discard. Full pipeline, with the MTGJSON "Ward" keyword that
+// production passes (Titania, Rugged Rumbler: "Ward—Discard a card or pay {2}.").
+#[test]
+fn unmodeled_ward_discard_line_fails_closed_through_parse_oracle_text() {
+    use crate::types::keywords::WardCost;
+
+    let ward_keywords = |parsed: &crate::parser::oracle::ParsedAbilities| {
+        parsed
+            .extracted_keywords
+            .iter()
+            .filter(|kw| matches!(kw, Keyword::Ward(_)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let creature = ["Creature".to_string()];
+    let mtgjson_keywords = ["Ward".to_string()];
+
+    // Positive reach guard: the same pipeline and MTGJSON keyword, with a
+    // modeled discard body, does yield the typed Ward.
+    let arna = parse_oracle_text(
+        "Ward—Discard a card.",
+        "Arna Kennerüd, Skycaptain",
+        &mtgjson_keywords,
+        &creature,
+        &["Human".to_string(), "Knight".to_string()],
+    );
+    assert_eq!(
+        ward_keywords(&arna),
+        vec![Keyword::Ward(WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+        })],
+        "the modeled discard ward is extracted: {arna:?}"
+    );
+    assert!(!arna.abilities.iter().any(has_unimplemented));
+
+    let titania = parse_oracle_text(
+        "Ward—Discard a card or pay {2}. (Whenever this creature becomes the target of a \
+         spell or ability an opponent controls, counter it unless that player discards a \
+         card or pays {2}.)",
+        "Titania, Rugged Rumbler",
+        &mtgjson_keywords,
+        &creature,
+        &["Human".to_string(), "Villain".to_string()],
+    );
+    assert_eq!(
+        ward_keywords(&titania),
+        Vec::<Keyword>::new(),
+        "an unmodeled ward discard yields no Ward keyword: {titania:?}"
+    );
+    assert!(
+        titania.abilities.iter().any(has_unimplemented),
+        "the unmodeled ward line stays an honest Unimplemented: {titania:?}"
+    );
 }
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
@@ -39382,6 +39446,654 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
         assert!(
             !json.contains("Unimplemented"),
             "{name}: stays supported: {json}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cast-or-activate split and the `{X}`-in-cost qualifier (Unbound Flourishing,
+// Bill Potts, Glava, Neerdiv, Vazi). Oracle text verbatim from MTGJSON.
+// ---------------------------------------------------------------------------
+
+const UNBOUND_FLOURISHING: &str = "Whenever you cast a permanent spell with a mana cost that contains {X}, double the value of X.\nWhenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+const BILL_POTTS: &str = "Whenever you cast an instant or sorcery spell that targets only Bill Potts or activate an ability that targets only Bill Potts, copy that spell or ability. You may choose new targets for the copy. This ability triggers only once each turn.\nDoctor's companion (You can have two commanders if the other is the Doctor.)";
+const GLAVA: &str = "Whenever you cast a permanent spell with {X} in its mana cost or activate an ability with {X} in its activation cost that isn't a mana ability, you may have the value of X become 5. Do this only once each turn.";
+const NEERDIV: &str = "Whenever Neerdiv becomes tapped, target player mills cards equal to its power.\nWhenever you cast a spell from your graveyard or activate an ability of a card in your graveyard, draw a card and put a +1/+1 counter on Neerdiv.";
+const VAZI: &str = "Haste\n{T}: Target opponent creates X Treasure tokens, where X is the number of Treasure tokens you created this turn.\nWhenever an opponent casts a spell or activates an ability, if mana from a Treasure was spent to cast it or activate it, put a +1/+1 counter on target creature, then draw a card.";
+
+fn cast_or_activate_triggers(text: &str, name: &str, card_type: &str) -> Vec<TriggerDefinition> {
+    parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]).triggers
+}
+
+fn x_in_mana_cost() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]))
+}
+
+fn x_in_activation_cost() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]))
+}
+
+fn instant_or_sorcery() -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+        ],
+    }
+}
+
+/// The copy half of Unbound Flourishing's second line, as each lowered half
+/// must carry it: "copy that spell or ability. You may choose new targets for
+/// the copy." (CR 707.10c).
+fn assert_copies_triggering_source(def: &TriggerDefinition, label: &str) {
+    let execute = def.execute.as_deref().expect("the copy body parses");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                ..
+            }
+        ),
+        "{label}: {:?}",
+        execute.effect
+    );
+    assert!(!has_unimplemented(execute), "{label}: {execute:?}");
+}
+
+/// CR 107.3a + CR 202.1 / CR 602.1a: one combinator recognizes both printed
+/// `{X}`-in-cost grammars for each cost slot, and a spell qualifier never
+/// accepts the activation slot (nor the reverse).
+#[test]
+fn x_in_cost_qualifier_accepts_both_grammars_for_each_slot() {
+    for spell_phrase in [
+        "with {x} in its mana cost",
+        "with an {x} in its mana cost",
+        "with a mana cost that contains {x}",
+    ] {
+        assert_eq!(
+            parse_post_spell_modifier(spell_phrase),
+            Some(x_in_mana_cost()),
+            "{spell_phrase}"
+        );
+        assert_eq!(
+            parse_post_activation_modifier(spell_phrase),
+            None,
+            "a mana-cost qualifier is not an activation qualifier: {spell_phrase}"
+        );
+    }
+    for activation_phrase in [
+        "with {x} in its activation cost",
+        "with an {x} in its activation cost",
+        "with an activation cost that contains {x}",
+    ] {
+        assert_eq!(
+            parse_post_activation_modifier(activation_phrase),
+            Some(x_in_activation_cost()),
+            "{activation_phrase}"
+        );
+        assert_eq!(
+            parse_post_spell_modifier(activation_phrase),
+            None,
+            "an activation-cost qualifier is not a spell qualifier: {activation_phrase}"
+        );
+    }
+    // Full consumption: a trailing word is not part of the qualifier.
+    assert_eq!(
+        parse_post_spell_modifier("with {x} in its mana cost this turn"),
+        None
+    );
+    assert_eq!(
+        parse_post_activation_modifier("with an activation cost that contains {x} twice"),
+        None
+    );
+}
+
+/// Unbound Flourishing line 1 keeps "with a mana cost that contains {X}": the
+/// trigger watches only permanent spells whose mana cost contains {X}. Its
+/// effect ("double the value of X") lowers to
+/// `Effect::ModifyAnnouncedX { modification: XModification::DOUBLE }`.
+#[test]
+fn unbound_line_one_requires_x_in_its_mana_cost() {
+    let triggers =
+        cast_or_activate_triggers(UNBOUND_FLOURISHING, "Unbound Flourishing", "Enchantment");
+    let line_one = &triggers[0];
+    assert_eq!(line_one.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        line_one.valid_card,
+        Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::permanent()),
+                x_in_mana_cost()
+            ],
+        })
+    );
+    let execute = line_one.execute.as_deref().expect("line 1 body");
+    assert_eq!(
+        *execute.effect,
+        Effect::ModifyAnnouncedX {
+            modification: XModification::DOUBLE
+        }
+    );
+    assert!(!has_unimplemented(execute), "{execute:?}");
+}
+
+/// The strict-failure gap "double the value of X" lowers to outside a
+/// spell-cast trigger body.
+fn is_double_value_of_x_gap(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Unimplemented { name, .. } if name == "double_value_of_x_without_triggering_spell"
+    )
+}
+
+/// CR 107.3e: "the value of X" names the X of the spell that caused a
+/// spell-cast trigger. In an ETB trigger body or bare spell text nothing names
+/// whose X it is, so the clause stays a strict failure. SYNTHETIC: no printed
+/// card exercises the gate's negative branch.
+#[test]
+fn double_the_value_of_x_needs_a_triggering_spell() {
+    let etb = parse_oracle_text(
+        "When this creature enters, double the value of X.",
+        "Synthetic Doubler",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let etb_body = etb.triggers[0].execute.as_deref().expect("ETB body");
+    assert!(
+        is_double_value_of_x_gap(&etb_body.effect),
+        "{:?}",
+        etb_body.effect
+    );
+
+    let spell = parse_oracle_text(
+        "Double the value of X.",
+        "Synthetic Doubling",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        is_double_value_of_x_gap(&spell.abilities[0].effect),
+        "{:?}",
+        spell.abilities[0].effect
+    );
+}
+
+/// CR 107.3e: an intervening-if that pins the body's anaphor to the card itself
+/// ("if this card is in your graveyard") leaves no triggering spell for "the
+/// value of X" to name, so the clause stays a strict failure. SYNTHETIC: no
+/// printed card exercises the gate's negative branch.
+#[test]
+fn double_the_value_of_x_under_a_self_pinning_if_is_strict() {
+    let parsed = parse_oracle_text(
+        "Whenever you cast a spell, if this card is in your graveyard, double the value of X.",
+        "Synthetic Doubler",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(
+        trigger.mode,
+        TriggerMode::SpellCast,
+        "reach: a spell-cast head"
+    );
+    let body = trigger.execute.as_deref().expect("trigger body");
+    assert!(is_double_value_of_x_gap(&body.effect), "{:?}", body.effect);
+}
+
+/// CR 603.2 + CR 603.4: Unbound Flourishing line 2 lowers to one spell-cast
+/// trigger and one activation trigger, each with its own share of the
+/// distributed intervening-if folded into its event filter.
+#[test]
+fn unbound_copy_line_splits_into_spell_and_activation_triggers() {
+    let triggers =
+        cast_or_activate_triggers(UNBOUND_FLOURISHING, "Unbound Flourishing", "Enchantment");
+    assert_eq!(triggers.len(), 3, "{triggers:#?}");
+
+    let spell_half = &triggers[1];
+    assert_eq!(spell_half.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        spell_half.valid_card,
+        Some(TargetFilter::And {
+            filters: vec![instant_or_sorcery(), x_in_mana_cost()],
+        })
+    );
+
+    let activation_half = &triggers[2];
+    assert_eq!(activation_half.mode, TriggerMode::AbilityActivated);
+    assert_eq!(activation_half.valid_card, Some(x_in_activation_cost()));
+
+    for (label, half) in [
+        ("spell half", spell_half),
+        ("activation half", activation_half),
+    ] {
+        assert_eq!(half.valid_target, Some(TargetFilter::Controller), "{label}");
+        assert_eq!(half.condition, None, "{label}: the if is in the filter");
+        assert_copies_triggering_source(half, label);
+    }
+}
+
+/// SYNTHETIC (no printed card writes a lone, crossed or reversed anaphor): the
+/// intervening-if is distributed only by anaphor. A lone anaphor and crossed
+/// cost slots decline the split (the line stays one strict-failure trigger);
+/// the reversed order still splits, each slot going to its own half.
+#[test]
+fn cast_or_activate_split_distributes_an_x_cost_condition_only_by_anaphor() {
+    let head = "Whenever you cast an instant or sorcery spell or activate an ability, ";
+    for condition in [
+        "if that spell's mana cost contains {X}, copy that spell or ability.",
+        "if that ability's mana cost or that spell's activation cost contains {X}, copy that spell or ability.",
+    ] {
+        let text = format!("{head}{condition}");
+        let triggers = cast_or_activate_triggers(&text, "Synthetic Copier", "Enchantment");
+        assert_eq!(triggers.len(), 1, "declines: {text}");
+        assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+        let execute = triggers[0].execute.as_deref().expect("body");
+        assert!(
+            matches!(&*execute.effect, Effect::Unimplemented { name, .. } if name == "unparsed_condition"),
+            "{text}: {:?}",
+            execute.effect
+        );
+    }
+
+    let reversed = format!(
+        "{head}if that ability's activation cost or that spell's mana cost contains {{X}}, copy that spell or ability."
+    );
+    let triggers = cast_or_activate_triggers(&reversed, "Synthetic Copier", "Enchantment");
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(
+        triggers[0].valid_card,
+        Some(TargetFilter::And {
+            filters: vec![instant_or_sorcery(), x_in_mana_cost()],
+        })
+    );
+    assert_eq!(triggers[1].mode, TriggerMode::AbilityActivated);
+    assert_eq!(triggers[1].valid_card, Some(x_in_activation_cost()));
+}
+
+/// Bill Potts: "This ability triggers only once each turn" must count across
+/// both events, so the activation half stays a strict failure and the spell
+/// half keeps the card's spell trigger unchanged.
+#[test]
+fn bill_potts_activation_half_stays_strict_until_one_counter_spans_both_halves() {
+    let triggers = cast_or_activate_triggers(BILL_POTTS, "Bill Potts", "Creature");
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+
+    let spell_half = &triggers[0];
+    assert_eq!(spell_half.mode, TriggerMode::SpellCast);
+    let targets_only_self = || FilterProp::TargetsOnly {
+        filter: Box::new(TargetFilter::SelfRef),
+    };
+    assert_eq!(
+        spell_half.valid_card,
+        Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant).properties(vec![targets_only_self()])
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Sorcery).properties(vec![targets_only_self()])
+                ),
+            ],
+        })
+    );
+    assert_eq!(spell_half.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(spell_half.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_copies_triggering_source(spell_half, "Bill Potts spell half");
+
+    assert!(
+        matches!(&triggers[1].mode, TriggerMode::Unknown(text)
+            if text == "Whenever you activate an ability that targets only ~"),
+        "{:?}",
+        triggers[1].mode
+    );
+}
+
+/// Glava: the spell half gains its "{X} in its mana cost" qualifier (it fired on
+/// every permanent spell before); "Do this only once each turn" (CR 603.2h)
+/// keeps the activation half strict.
+#[test]
+fn glava_spell_half_keeps_its_x_qualifier_and_activation_half_is_strict() {
+    let triggers = cast_or_activate_triggers(GLAVA, "Glava, Five-Advents Mage", "Creature");
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(
+        triggers[0].valid_card,
+        Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::permanent()),
+                x_in_mana_cost()
+            ],
+        })
+    );
+    assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert!(triggers[0].optional);
+    assert!(
+        matches!(triggers[1].mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        triggers[1].mode
+    );
+}
+
+/// Neerdiv: the "or activate an ability of a card in your graveyard" leg is no
+/// longer silently dropped; it surfaces as a strict-failure half while the spell
+/// half keeps the card's graveyard-cast trigger.
+#[test]
+fn neerdiv_activation_leg_is_no_longer_dropped() {
+    let triggers = cast_or_activate_triggers(NEERDIV, "Neerdiv, Devious Diver", "Creature");
+    assert_eq!(triggers.len(), 3, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::Taps);
+
+    let spell_half = &triggers[1];
+    assert_eq!(spell_half.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        spell_half.spell_cast_origin,
+        OriginConstraint::Equals(Zone::Graveyard)
+    );
+    assert_eq!(spell_half.valid_target, Some(TargetFilter::Controller));
+    let execute = spell_half.execute.as_deref().expect("draw body");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "{:?}",
+        execute.effect
+    );
+    let counter = execute.sub_ability.as_deref().expect("counter rider");
+    assert!(
+        matches!(
+            &*counter.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "{:?}",
+        counter.effect
+    );
+
+    assert!(
+        matches!(&triggers[2].mode, TriggerMode::Unknown(text)
+            if text == "Whenever you activate an ability of a card in your graveyard"),
+        "{:?}",
+        triggers[2].mode
+    );
+}
+
+/// Vazi: an intervening-if that is not the anaphoric `{X}`-in-cost restatement
+/// declines the split, so the line keeps its single trigger.
+#[test]
+fn vazi_cast_or_activate_line_is_not_split_without_a_distributable_if() {
+    let triggers = cast_or_activate_triggers(VAZI, "Vazi, Keen Negotiator", "Creature");
+    assert_eq!(triggers.len(), 1, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(
+        triggers[0].valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+/// SYNTHETIC (no printed third-person cast-or-activate line lowers without a
+/// non-distributable if): the actor, "cast(s)" and "activate(s)" must agree in
+/// person; a disagreeing line is not split.
+#[test]
+fn cast_or_activate_split_requires_subject_verb_agreement() {
+    let opponent = || {
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    };
+    let triggers = cast_or_activate_triggers(
+        "Whenever an opponent casts a spell or activates an ability, draw a card.",
+        "Synthetic Watcher",
+        "Enchantment",
+    );
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(triggers[1].mode, TriggerMode::AbilityActivated);
+    assert_eq!(triggers[0].valid_target, opponent());
+    assert_eq!(triggers[1].valid_target, opponent());
+
+    let disagreeing = cast_or_activate_triggers(
+        "Whenever an opponent casts a spell or activate an ability, draw a card.",
+        "Synthetic Watcher",
+        "Enchantment",
+    );
+    assert_eq!(disagreeing.len(), 1, "{disagreeing:#?}");
+    assert_eq!(disagreeing[0].mode, TriggerMode::SpellCast);
+}
+
+/// The detector shared by the printed splitter and the "when you next cast …
+/// or activate an ability …" delayed trigger splits at a word boundary.
+#[test]
+fn spell_or_activation_disjunction_splits_at_a_word_boundary() {
+    let magus = split_spell_or_activation_disjunction(
+        "spell with {x} in its mana cost or activate an ability with {x} in its activation cost",
+    )
+    .expect("Magus's disjunction");
+    assert_eq!(magus.spell, "spell with {x} in its mana cost");
+    assert_eq!(magus.person, SubjectPerson::Second);
+    assert_eq!(
+        magus.activation,
+        "activate an ability with {x} in its activation cost"
+    );
+    assert_eq!(
+        magus.activation_qualifier,
+        " with {x} in its activation cost"
+    );
+
+    let third = split_spell_or_activation_disjunction("a spell or activates an ability")
+        .expect("third-person disjunction");
+    assert_eq!(third.spell, "a spell");
+    assert_eq!(third.person, SubjectPerson::Third);
+    assert_eq!(third.activation_qualifier, "");
+
+    assert!(split_spell_or_activation_disjunction("a spell or activate an abilityx").is_none());
+}
+
+/// SYNTHETIC (no printed card reaches the marker discriminatingly: Bill Potts'
+/// and Glava's activation halves do not lower on their own): a counted
+/// constraint is never shipped on two lowered halves.
+#[test]
+fn cast_or_activate_split_never_ships_two_counted_halves() {
+    // Reach guard: the activation half alone lowers to a counted activation trigger.
+    let lone = cast_or_activate_triggers(
+        "Whenever you activate an ability, draw a card. This ability triggers only once each turn.",
+        "Synthetic Once",
+        "Enchantment",
+    );
+    assert_eq!(lone.len(), 1);
+    assert_eq!(lone[0].mode, TriggerMode::AbilityActivated);
+    assert_eq!(lone[0].constraint, Some(TriggerConstraint::OncePerTurn));
+
+    let triggers = cast_or_activate_triggers(
+        "Whenever you cast an instant spell or activate an ability, draw a card. This ability triggers only once each turn.",
+        "Synthetic Once",
+        "Enchantment",
+    );
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(
+        triggers[0].valid_card,
+        Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)))
+    );
+    assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert!(
+        matches!(&triggers[1].mode, TriggerMode::Unknown(text)
+            if text == "Whenever you activate an ability"),
+        "{:?}",
+        triggers[1].mode
+    );
+}
+
+// CR 603.4 + CR 722.3a: Woodwork Prodigy (FRA) front face, verbatim Oracle —
+// "At the beginning of your upkeep, if this creature isn't prepared, it
+// becomes prepared. (While it's prepared, you may cast a copy of its spell.
+// Doing so unprepares it.)" The source-designation gate hoists to a
+// trigger-level intervening-if (`Not(SourceMatchesFilter{property-only
+// Prepared})`) and the residual effect prepares the source itself ("it" →
+// SelfRef). Same sentence on Stingerquill Voxmancer and Paradox Shaper.
+#[test]
+fn woodwork_prodigy_unprepared_gate_hoists_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this creature isn't prepared, it becomes prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)",
+        "Woodwork Prodigy",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let expected = Some(TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Prepared]),
+            ),
+        }),
+    });
+    assert_eq!(def.condition, expected);
+    let execute = def.execute.as_deref().expect("residual effect parses");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+            }
+        ),
+        "residual 'it becomes prepared' must prepare the source, got {:?}",
+        execute.effect
+    );
+    let json = serde_json::to_string(&def).expect("serialize trigger");
+    assert!(
+        // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+        !json.contains("\"Unimplemented\""),
+        "Woodwork Prodigy trigger must contain no Effect::Unimplemented"
+    );
+}
+
+// Paired reach-guard for the affirmative polarity: "if this creature is
+// prepared" must produce the un-negated source-designation gate (proves the
+// negated test above exercises the polarity axis rather than a
+// always-negated shape).
+#[test]
+fn prepared_gate_affirmative_polarity_reach_guard() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this creature is prepared, draw a card.",
+        "Prepared Probe",
+    );
+    let expected = Some(TriggerCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Prepared])),
+    });
+    assert_eq!(def.condition, expected);
+    assert!(def.execute.is_some());
+}
+
+// Apostrophe/negation surface variants: curly "isn’t" (U+2019, some Oracle
+// printings) and the two-word "is not" must gate identically to ASCII
+// "isn't".
+#[test]
+fn prepared_gate_apostrophe_variants() {
+    let expected = Some(TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Prepared]),
+            ),
+        }),
+    });
+    for text in [
+        "At the beginning of your upkeep, if this creature isn’t prepared, it becomes prepared.",
+        "At the beginning of your upkeep, if this creature is not prepared, it becomes prepared.",
+    ] {
+        let def = parse_trigger_line(text, "Woodwork Prodigy");
+        assert_eq!(def.condition, expected, "gate must fire for {text:?}");
+        assert!(def.execute.is_some());
+    }
+}
+
+// Hostile non-match: a NON-source subject ("that creature") must NOT hoist
+// the source-designation gate, while the trigger itself still parses (proves
+// the negative is not vacuous — the input got past any upstream
+// short-circuit).
+#[test]
+fn prepared_gate_rejects_nonsource_subject() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if that creature isn't prepared, it becomes prepared.",
+        "Woodwork Prodigy",
+    );
+    let is_prepared_gate = matches!(
+        &def.condition,
+        Some(TriggerCondition::Not { condition }) if matches!(
+            condition.as_ref(),
+            TriggerCondition::SourceMatchesFilter { filter }
+                if matches!(
+                    filter,
+                    // allow-noncombinator: test guard scans a parsed property vec, not parsing dispatch
+                    TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::Prepared)
+                )
+        )
+    );
+    assert!(
+        !is_prepared_gate,
+        "non-source subject must not hoist the prepared source gate, got {:?}",
+        def.condition
+    );
+    assert!(
+        def.execute.is_some(),
+        "the trigger body must still parse for the hostile input"
+    );
+}
+
+// Hostile matrix: attached subjects, bare recipient-anaphoric "it", and
+// incomplete/post-effect/otherwise-bearing forms must NOT hoist the prepared
+// source gate, while the trigger body itself still parses (non-vacuous
+// negatives — each input got past any upstream short-circuit).
+#[test]
+fn prepared_gate_rejects_nonsource_grammar_matrix() {
+    for text in [
+        // Attached subjects bind the host/recipient, never the ability source.
+        "At the beginning of your upkeep, if equipped creature isn't prepared, it becomes prepared.",
+        "At the beginning of your upkeep, if enchanted creature isn't prepared, it becomes prepared.",
+        // Bare "it" is recipient-anaphoric outside explicit-self grammar.
+        "At the beginning of your upkeep, if it isn't prepared, it becomes prepared.",
+        // Post-effect placement is not an intervening-if (CR 603.4: the gate
+        // must sit immediately after the trigger condition).
+        "At the beginning of your upkeep, it becomes prepared if this creature isn't prepared.",
+        // Post-effect Otherwise conditionals are not intervening-if gates.
+        "At the beginning of your upkeep, it becomes prepared if this creature isn't prepared. Otherwise, draw a card.",
+        // Incomplete gate: no predicate to hoist.
+        "At the beginning of your upkeep, if this creature isn't, it becomes prepared.",
+    ] {
+        let def = parse_trigger_line(text, "Woodwork Prodigy");
+        let is_prepared_gate = matches!(
+            &def.condition,
+            Some(TriggerCondition::Not { condition }) if matches!(
+                condition.as_ref(),
+                TriggerCondition::SourceMatchesFilter { filter }
+                    if matches!(
+                        filter,
+                        // allow-noncombinator: test guard scans a parsed property vec, not parsing dispatch
+                        TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::Prepared)
+                    )
+            )
+        );
+        assert!(
+            !is_prepared_gate,
+            "nonsource grammar must not hoist the prepared source gate, got {:?} for {text:?}",
+            def.condition
+        );
+        assert!(
+            def.execute.is_some(),
+            "the trigger body must still parse for {text:?}"
         );
     }
 }

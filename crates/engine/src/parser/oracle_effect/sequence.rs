@@ -2359,6 +2359,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
+        // CR 608.2c: ", and <permanents> you control gain …" after a complete clause is a new
+        // instruction; a comma inside the head means a serial subject list ("Auras, Equipment,
+        // and … you control"). A mana-spent-gated head is owned by `starts_mana_spent_conjunct`.
+        if starts_you_control_subject_predicate(after_and)
+            && super::subject_has_no_clause_boundary(&current_lower)
+            && !nom_primitives::scan_contains(&current_lower, MANA_SPENT_TO_CAST)
+        {
+            return Some((ClauseBoundary::Comma, whitespace_len));
+        }
     }
 
     None
@@ -3436,6 +3445,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("transform ")),
     ))
     .or(value((), tag("cast ")))
+    // CR 608.2c: "<instruction> and repeat this process" — split only the
+    // terminal bare directive (anchored to the end of the segment) so
+    // "... and repeat this process for first strike" and the counted / "any
+    // number of times" shapes are not newly split.
+    .or(value(
+        (),
+        terminated(tag("repeat this process"), (opt(tag(".")), eof)),
+    ))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
     // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
@@ -5111,6 +5128,33 @@ fn effect_bears_retargetable_copy(effect: &Effect) -> bool {
     }
 }
 
+/// The intervening optional cost (e.g. Birthing Ritual's "you may sacrifice a
+/// creature") that sits between an anchor look `Dig` at top-level
+/// `anchor_index` and its "from among those cards" dependent — the host whose
+/// sub-ability carries the `DigSource::PriorLook` consumer Digs.
+///
+/// CR 608.2c: written order is real, so the intervening clause is found by
+/// walking emission order FORWARD from the anchor (U6-C3 `Between { anchor }`
+/// under the `DigLookbackTransparentCost` guard), never by assuming adjacency.
+/// The single authority shared by the `DigFromAmong` restructure that installs
+/// the consumers and the `PutRest` fan-out that later patches them, so both
+/// bind the same host. Returns the host's current index in `defs`, or `None`
+/// when no such clause intervenes.
+fn dig_intervening_cost_host(
+    env: &super::assembly::AssemblyEnv,
+    defs: &[AbilityDefinition],
+    anchor_index: usize,
+) -> Option<usize> {
+    env.node_id_at(anchor_index).and_then(|anchor| {
+        env.resolve(
+            defs,
+            super::assembly::AntecedentSelector::Between { anchor },
+            Some(super::assembly::BindGuard::DigLookbackTransparentCost),
+            super::assembly::OnMiss::Ignore,
+        )
+    })
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -5680,6 +5724,37 @@ pub(super) fn apply_clause_continuation(
                     reorder_all,
                     rest_order,
                 );
+                // CR 608.2c + CR 701.20e: when the anchor is the look-only Dig of
+                // the intervening-optional-cost restructure (DigFromAmong arm,
+                // Birthing Ritual), the looked-at set is disposed of by the
+                // PriorLook consumer Digs nested under that cost — not by the
+                // anchor, whose rest fields are never read (a keep-0 look returns
+                // early in `dig::resolve`). "Put the rest … in a random order"
+                // must reach them. The host is bound through
+                // `dig_intervening_cost_host`, the same helper the restructure
+                // calls, so producer and consumer cannot drift. `reorder_all` is
+                // never forwarded: the consumers' kept destination is owned by
+                // their own from-among clause.
+                if !reorder_all {
+                    if let Some(host) = dig_intervening_cost_host(env, defs, bound_index) {
+                        if let Some(consumer) = defs[host].sub_ability.as_deref_mut().filter(|c| {
+                            matches!(
+                                &*c.effect,
+                                Effect::Dig {
+                                    source: DigSource::PriorLook,
+                                    ..
+                                }
+                            )
+                        }) {
+                            patch_rest_destination_recursively(
+                                consumer,
+                                destination,
+                                false,
+                                rest_order,
+                            );
+                        }
+                    }
+                }
             }
         }
         ContinuationAst::DigFromAmong {
@@ -5731,14 +5806,7 @@ pub(super) fn apply_clause_continuation(
                     // CR 608.2c: written order is real, so the intervening clause must be
                     // found by walking emission order FORWARD from the anchor — not by
                     // assuming adjacency. Resolved over `order`, never the output tree.
-                    let sac_pos = env.node_id_at(dig_pos).and_then(|anchor| {
-                        env.resolve(
-                            defs,
-                            super::assembly::AntecedentSelector::Between { anchor },
-                            Some(super::assembly::BindGuard::DigLookbackTransparentCost),
-                            super::assembly::OnMiss::Ignore,
-                        )
-                    });
+                    let sac_pos = dig_intervening_cost_host(env, defs, dig_pos);
 
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
@@ -8245,6 +8313,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -10376,6 +10445,7 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 
 #[cfg(test)]
 mod tests {
+    use super::super::parse_effect_chain;
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
@@ -14719,6 +14789,7 @@ mod tests {
             up_to: choice_up_to,
             filter: choice_filter,
             rest_destination: choice_rest,
+            rest_order: choice_rest_order,
             source: choice_src,
             reveal: choice_reveal,
             ..
@@ -14746,6 +14817,14 @@ mod tests {
             *choice_rest,
             Some(Zone::Library),
             "\"put the rest on the bottom\" → rest_destination Library"
+        );
+        // CR 608.2c + CR 701.20e: "in a random order" reaches the PriorLook
+        // consumer that actually disposes of the looked-at set, not only the
+        // look-only anchor (whose rest fields are never read at runtime).
+        assert_eq!(
+            *choice_rest_order,
+            DigRestOrder::Random,
+            "\"in a random order\" must patch the PriorLook choice Dig"
         );
         // Creature + mana-value-relative-to-sacrificed-creature filter.
         let TargetFilter::Typed(TypedFilter {
@@ -14791,6 +14870,7 @@ mod tests {
         let Effect::Dig {
             keep_count: else_keep,
             rest_destination: else_rest,
+            rest_order: else_rest_order,
             source: else_src,
             ..
         } = else_ab.effect.as_ref()
@@ -14810,6 +14890,11 @@ mod tests {
             *else_rest,
             Some(Zone::Library),
             "else_ability Dig routes all to library bottom"
+        );
+        assert_eq!(
+            *else_rest_order,
+            DigRestOrder::Random,
+            "\"in a random order\" must patch the PriorLook decline Dig too"
         );
 
         // No stray `ChangeZone { target: ParentTarget }` from clause 3.
@@ -14831,6 +14916,76 @@ mod tests {
                 .any(|e| matches!(e, Effect::Unimplemented { .. })),
             "no clause should fall back to Unimplemented, got {effects:?}"
         );
+    }
+
+    /// Regression guard for the DigFromAmong intervening-cost restructure: with
+    /// no trailing "put the rest … in a random order" clause (Preferred
+    /// Selection's effect text), the PriorLook consumers keep the restructure's
+    /// default `DigRestOrder::Preserve`. This input never reaches the PutRest
+    /// arm, so it pins the restructure's default, not the PutRest fan-out.
+    #[test]
+    fn dig_from_among_after_optional_cost_without_rest_clause_keeps_preserve_order() {
+        fn collect_prior_look_digs<'a>(
+            def: &'a AbilityDefinition,
+            out: &mut Vec<&'a AbilityDefinition>,
+        ) {
+            if matches!(
+                def.effect.as_ref(),
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    ..
+                }
+            ) {
+                out.push(def);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect_prior_look_digs(sub, out);
+            }
+            if let Some(else_def) = def.else_ability.as_deref() {
+                collect_prior_look_digs(else_def, out);
+            }
+        }
+
+        let def = parse_effect_chain(
+            "look at the top two cards of your library. You may sacrifice this enchantment and \
+             pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put \
+             one of those cards on the bottom of your library.",
+            AbilityKind::Spell,
+        );
+
+        // Positive reach guard: the restructure fired — a PriorLook Dig hangs
+        // under the optional Sacrifice.
+        let mut node = Some(&def);
+        let mut sacrifice = None;
+        while let Some(d) = node {
+            if matches!(d.effect.as_ref(), Effect::Sacrifice { .. }) {
+                sacrifice = Some(d);
+                break;
+            }
+            node = d.sub_ability.as_deref();
+        }
+        let sacrifice = sacrifice.expect("chain must contain the optional Sacrifice");
+        let mut prior_look_digs = Vec::new();
+        if let Some(sub) = sacrifice.sub_ability.as_deref() {
+            collect_prior_look_digs(sub, &mut prior_look_digs);
+        }
+        assert!(
+            !prior_look_digs.is_empty(),
+            "the restructure must wire a PriorLook Dig under the Sacrifice, got {:?}",
+            sacrifice.sub_ability
+        );
+
+        for dig in prior_look_digs {
+            let Effect::Dig { rest_order, .. } = dig.effect.as_ref() else {
+                unreachable!("collected only Dig effects");
+            };
+            assert_eq!(
+                *rest_order,
+                DigRestOrder::Preserve,
+                "no rest-order clause → PriorLook consumer keeps Preserve, got {:?}",
+                dig.effect
+            );
+        }
     }
 
     #[test]

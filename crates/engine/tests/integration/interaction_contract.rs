@@ -1475,6 +1475,7 @@ fn exact_player_and_number_schema_siblings_are_self_describing() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real activation reaches its amount prompt");
     assert!(matches!(
@@ -1584,6 +1585,7 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real mana ability reaches its color prompt");
     assert!(matches!(
@@ -2710,6 +2712,7 @@ fn from_among_counter_cost_projects_and_submits_typed_amount_assignments() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activated ability reaches its from-among payment");
     assert!(matches!(
@@ -7684,6 +7687,7 @@ fn fellwar_stone_activation_uses_opponents_command_tower_colors() {
         .act(GameAction::ActivateAbility {
             source_id: stone,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate parsed Fellwar Stone mana ability");
     match &runner.state().waiting_for {
@@ -7764,6 +7768,7 @@ fn exotic_orchard_activation_uses_opponents_command_tower_colors() {
         .act(GameAction::ActivateAbility {
             source_id: orchard,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate parsed Exotic Orchard mana ability");
     match &runner.state().waiting_for {

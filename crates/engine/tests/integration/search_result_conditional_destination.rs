@@ -885,6 +885,7 @@ fn activate_chest_twenty(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap()
         .events;
@@ -1231,6 +1232,7 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap()
             .events;

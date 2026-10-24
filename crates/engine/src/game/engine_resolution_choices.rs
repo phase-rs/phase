@@ -7,15 +7,15 @@ use rand::seq::SliceRandom;
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
     ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TargetRef,
+    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, CopyChosenSelection,
-    GameState, OutsideGameChoiceSource, PayableResource, PendingContinuation,
-    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
-    ZoneOpponentChooserPurpose,
+    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
+    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
+    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
+    PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::resolved_commands::{
@@ -32,6 +32,23 @@ use super::{
     casting, casting_costs, engine_priority, mana_abilities, payment_transaction, public_state,
     zone_pipeline,
 };
+
+/// CR 608.2c: does the parked zone-choice continuation `chain` treat
+/// the objects NOT picked as "the rest" for its next instruction (a
+/// `ChooseFromZone` partition)?
+///
+/// It does not for counter-placement continuations (Bolster, Gluntch: their
+/// `sub_ability` is an independent trailing clause), nor for a parked
+/// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
+/// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
+fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
+    use crate::types::ability::{Effect, TargetChoiceTiming};
+    !matches!(
+        chain.effect,
+        Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
+    ) && !(matches!(chain.effect, Effect::TargetOnly { .. })
+        && chain.target_choice_timing == TargetChoiceTiming::Resolution)
+}
 
 /// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
 /// an instruction's announced targets. Result-dependent instructions bind the
@@ -3353,6 +3370,16 @@ pub(super) fn handle_resolution_choice(
                     mana_abilities::continue_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
+            // CR 614.12a: a pre-entry as-enters life payment answers the parked
+            // battlefield entry, not a resolving ability — no `last_effect_count`
+            // stamp, no continuation. Mirrors the `PendingEntry` branch of the
+            // `NamedChoice` arm; range validation is inherited from the shared
+            // guard above, so an over-cap submission fails closed there.
+            if super::replacement::pending_entry_payment_is_live(state) {
+                let waiting_for =
+                    super::engine_replacement::handle_entry_payment(state, amount, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
             match resource {
                 PayableResource::LoopCollapse { .. } => {
                     // CR 732.2a: an accepted unbounded loop shortcut deferred its finite
@@ -3428,11 +3455,11 @@ pub(super) fn handle_resolution_choice(
                                     count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
                                         values: growth.profile.clone(),
-                                        display_source:
-                                            crate::game::game_object::DisplaySource::Token,
-                                        printed_ref: None,
-                                        token_image_ref: None,
-                                        token_art: None,
+                                        display: crate::game::game_object::DisplayIdentity {
+                                            display_source:
+                                                crate::game::game_object::DisplaySource::Token,
+                                            ..Default::default()
+                                        },
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,
@@ -3440,6 +3467,8 @@ pub(super) fn handle_resolution_choice(
                                         sacrifice_at: None,
                                         source_id: ObjectId(0),
                                         controller: player,
+                                        // Source-less growth mint from a fodder profile; empty mods are stamp-proof.
+                                        donor: None,
                                     }),
                                 };
                                 crate::game::effects::token_copy::drive_copy_token_batches(
@@ -3752,6 +3781,8 @@ pub(super) fn handle_resolution_choice(
                                     player,
                                     total: accumulated.saturating_add(amount),
                                     resume_at_resolution_depth,
+                                    // Resolution-time prompt: no parked entry.
+                                    pending_entry: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -5527,6 +5558,26 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
+            // CR 115.10a + CR 608.2d: this answer selects only a sticker
+            // recipient. It is neither a partition nor a completed placement.
+            let sticker_recipient = state
+                .active_ability_continuation()
+                .filter(|cont| {
+                    matches!(cont.chain.effect, Effect::PutSticker { .. })
+                        && effects::awaits_resolution_object_choice(&cont.chain)
+                })
+                .and_then(|_| chosen.first())
+                .and_then(|id| {
+                    state.objects.get(id).map(|object| {
+                        (
+                            *id,
+                            crate::types::identifiers::ObjectIncarnationRef::of(
+                                *id,
+                                object.incarnation,
+                            ),
+                        )
+                    })
+                });
             // CR 608.2c: When the parked continuation consumes the chain's
             // tracked set (a `GrantCastingPermission { target: TrackedSet }` /
             // any `TrackedSet`-referencing downstream effect — e.g. End-Blaze
@@ -5547,6 +5598,7 @@ pub(super) fn handle_resolution_choice(
                 state.active_ability_continuation().is_some_and(|cont| {
                     effects::chain_references_tracked_set(&cont.chain)
                         && !effects::resolution_choice_head_publishes_on_resume(&cont.chain)
+                        && sticker_recipient.is_none()
                 });
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
@@ -5591,7 +5643,9 @@ pub(super) fn handle_resolution_choice(
                 .then(|| Box::new(ForwardedResultContext::from_object_ids(state, &unchosen)));
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
-                if let Some(snapshot) = counter_kind_choice {
+                if let Some((id, pin)) = sticker_recipient {
+                    effects::stickers::bind_recipient(&mut cont.chain, id, pin);
+                } else if let Some(snapshot) = counter_kind_choice {
                     if let crate::types::ability::Effect::ChooseCounterKind { target, .. } =
                         &mut cont.chain.effect
                     {
@@ -5636,12 +5690,14 @@ pub(super) fn handle_resolution_choice(
                 // control") is NOT a partition — its `sub_ability` is an
                 // independent trailing clause (e.g. the next `Choose`) and
                 // must not have the non-picked objects forced into its target
-                // list. Gate the forward on the continuation's own effect.
-                let is_partition = !matches!(
-                    cont.chain.effect,
-                    crate::types::ability::Effect::PutCounter { .. }
-                        | crate::types::ability::Effect::ChooseCounterKind { .. }
-                );
+                // list. Neither is a parked untargeted `TargetOnly` chooser
+                // ("choose a creature you control", CR 115.10a): the pick is
+                // the whole choice, and the unchosen candidates are not "the
+                // rest". A sticker-recipient answer selects only that
+                // recipient, so it forwards nothing either. Gate the forward
+                // on the continuation's own effect.
+                let is_partition = continuation_forwards_unchosen_complement(&cont.chain)
+                    && sticker_recipient.is_none();
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
                         // CR 707.12a: A `CastCopyOfCard` continuation casts the
@@ -9509,6 +9565,79 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
+/// CR 107.3f + CR 118.12: the X announcement a just-paused resolution-time payment makes for
+/// the instructions that follow it, keyed by the prompt the payment opened:
+/// * a "tap X untapped ..." payment (`TapCreaturesSelectionMode::VariableX`) announces the
+///   count tapped; a fixed count or a power threshold (Crew/Saddle shape) announces nothing;
+/// * a "pay any amount of energy / life" or unannounced-X mana payment (CR 107.14, CR 119.4)
+///   announces the amount paid. A mana ability's own amount prompt (`pending_mana_ability`)
+///   and a loop-collapse count are not resolution-time payments of an effect.
+pub(crate) fn paused_payment_x_announcement(
+    paying: &ResolvedAbility,
+    waiting_for: &WaitingFor,
+) -> Option<ContinuationXAnnouncement> {
+    if !matches!(paying.effect, Effect::PayCost { .. }) {
+        return None;
+    }
+    match waiting_for {
+        WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { mode },
+            resume: CostResume::Resolution,
+            ..
+        } => match mode {
+            TapCreaturesSelectionMode::VariableX => Some(ContinuationXAnnouncement::TappedCount),
+            TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::Aggregate(_) => None,
+        },
+        WaitingFor::PayAmountChoice {
+            resource,
+            pending_mana_ability: None,
+            ..
+        } => match resource {
+            PayableResource::Energy
+            | PayableResource::Life
+            | PayableResource::ManaGeneric { .. } => Some(ContinuationXAnnouncement::PaidAmount),
+            PayableResource::Counters
+            | PayableResource::Speed
+            | PayableResource::LoopCollapse { .. } => None,
+        },
+        _ => None,
+    }
+}
+
+/// CR 107.3f + CR 107.3i + CR 608.2c: X announced by a resolution-time payment (a count of
+/// permanents tapped, an amount paid) is X for the instructions after that payment, and for no
+/// other chain. Finds the rider the paused payment parked (the frame marked with
+/// `announcement`, see `PendingContinuation::x_announcement`, located by
+/// `ResolutionStack::x_announcement_rider_mut` even when an unmarked chain was parked above
+/// it), consumes the mark, and stamps `value` on that rider's chain and every sub/else branch.
+/// No other frame is touched: a payment with no rider parked nothing, so an enclosing
+/// continuation keeps its own X, and a chain parked above the rider keeps its own X.
+///
+/// A paid amount is not stamped onto a rider that opens with its own unannounced-X payment
+/// prompt: that prompt asks for its X itself (the next `PayAmountChoice` accumulates).
+pub(crate) fn stamp_paused_payment_rider_x(
+    state: &mut GameState,
+    announcement: ContinuationXAnnouncement,
+    value: u32,
+) {
+    let Some(frame) = state
+        .resolution_stack
+        .x_announcement_rider_mut(announcement)
+    else {
+        return;
+    };
+    frame.pending.x_announcement = None;
+    let asks_for_its_own_x = match announcement {
+        ContinuationXAnnouncement::PaidAmount => {
+            starts_with_pay_amount_prompt(&frame.pending.chain)
+        }
+        ContinuationXAnnouncement::TappedCount => false,
+    };
+    if !asks_for_its_own_x {
+        frame.pending.chain.set_chosen_x_recursive(value);
+    }
+}
+
 /// CR 118.12 + CR 119.4 + CR 616.1: Complete the outer pay-amount action only
 /// after any interactive post-replacement child of the life payment has
 /// settled. Shared by the direct submit path and the deferred-life resumer.
@@ -9519,22 +9648,20 @@ pub(crate) fn finish_pay_amount_choice(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     state.last_effect_count = Some(total as i32);
-    let pending_starts_with_pay_amount = state
-        .active_ability_continuation()
-        .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
-    if !pending_starts_with_pay_amount {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
-            frame.pending.chain.set_chosen_x_recursive(total);
-        }
-    }
+    stamp_paused_payment_rider_x(state, ContinuationXAnnouncement::PaidAmount, total);
     let mut waiting_for = finish_with_continuation(state, player, events);
     if let WaitingFor::PayAmountChoice {
         accumulated: next_accumulated,
         ..
     } = &mut waiting_for
     {
-        *next_accumulated = total;
-        state.waiting_for = waiting_for.clone();
+        // CR 614.12a: a nested pre-entry payment is a FRESH, independent
+        // payment (Phyrexian Processor put onto the battlefield mid-chain) —
+        // the outer total must not leak into its accumulator.
+        if !super::replacement::pending_entry_payment_is_live(state) {
+            *next_accumulated = total;
+            state.waiting_for = waiting_for.clone();
+        }
     }
     waiting_for
 }
@@ -14781,5 +14908,55 @@ mod tests {
             vec![pile[1], pile[3], p1c, pile[5], pile[9]],
             "separate libraries place the card third from the top of its owner's"
         );
+    }
+
+    /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)
+    /// `TargetOnly` chooser, and the counter-placement continuations, decline the
+    /// unchosen-complement forward; a Stack-timed `TargetOnly` wrapper after a
+    /// `ChooseFromZone` and an ordinary partition head keep it.
+    #[test]
+    fn only_untargeted_choosers_and_counter_placements_skip_the_complement_forward() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetChoiceTiming, TargetFilter};
+        let chain = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut chain = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            chain.target_choice_timing = timing;
+            chain
+        };
+        let target_only = || Effect::TargetOnly {
+            target: TargetFilter::Any,
+        };
+
+        assert!(
+            !continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Resolution
+            )),
+            "the Resolution-timed chooser's pick is the whole choice"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Stack
+            )),
+            "reach: the same effect Stack-timed still forwards the complement"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                TargetChoiceTiming::Resolution
+            )),
+            "an ordinary head keeps the forward"
+        );
+        assert!(!continuation_forwards_unchosen_complement(&chain(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            TargetChoiceTiming::Resolution
+        )));
     }
 }

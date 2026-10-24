@@ -620,12 +620,14 @@ fn refused_search_pair_expires_at_the_next_source_chunk() {
         assert!(gaps[0].id < alternative.id);
         match intervening {
             "Repeat this process." => {
+                // The bare directive is the structural `Bare` outcome; as a
+                // standalone sentence it still emits no clause here.
                 assert!(matches!(
                     try_parse_repeat_process_directive(
                         "Repeat this process.",
                         &mut ParseContext::default()
                     ),
-                    Some(RepeatProcessOutcome::ConsumeOnly)
+                    Some(RepeatProcessOutcome::Bare)
                 ));
                 assert_eq!(
                     alternative.id.0,

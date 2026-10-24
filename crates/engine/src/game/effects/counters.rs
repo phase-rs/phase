@@ -886,6 +886,17 @@ fn apply_pending_counter_post_action(
                 state, object_id, *tail, events,
             )
         }
+        PendingCounterPostAction::ContinueNonLiminalCopyTokenAfterEntryPayment {
+            object_id,
+            tail,
+        } => {
+            // CR 614.12a + CR 707.2: the copied entry payment is answered and
+            // latched; journal the birth with the answer, run the rest of this
+            // token's entry, plus the rest of the batch.
+            super::token_copy::continue_copy_token_after_entry_payment(
+                state, object_id, *tail, events,
+            )
+        }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
             name,
@@ -893,6 +904,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
             object_id,
@@ -901,6 +913,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
             events,
         ),
         action @ PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry { .. } => {
@@ -3151,22 +3164,30 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
-    // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
-    // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
-    // present, route to the interactive per-type selection. We MUST NOT numerically
-    // resolve the inner `Fixed{-1}` — the board-derived per-type `available` counts
-    // ARE the legal domain (each type 0..=available; total 0..=Σ, incl. zero,
-    // CR 107.1c). Resolving the scalar would collapse into the non-interactive
-    // "remove all" branch below and skip the player's choice.
+    // CR 107.1c + CR 608.2d: "remove any number of counters" and "remove up to N
+    // counters" are resolution-time interactive choices; the parser encodes them
+    // as `UpTo { Fixed{-1} }` and `UpTo { N }`. Discriminate on the peel FLAG
+    // (never on the scalar): if the count wrapper is present, route to the
+    // interactive per-type selection. The board-derived per-type `available`
+    // counts ARE the legal domain (each type 0..=available; total 0..=Σ, incl.
+    // zero, CR 107.1c), further capped at N for "up to N" — see
+    // `remove_counter_choice_cap`. Resolving the scalar here would collapse into
+    // the non-interactive branch below and skip the player's choice.
     if let Effect::RemoveCounter {
         count,
         counter_type,
         ..
     } = &ability.effect
     {
-        if count.is_up_to() {
-            return resolve_remove_interactive(state, ability, counter_type.clone(), events);
+        if let (max, true) = count.peel_up_to() {
+            let max_total = remove_counter_choice_cap(state, max, ability);
+            return resolve_remove_interactive(
+                state,
+                ability,
+                counter_type.clone(),
+                max_total,
+                events,
+            );
         }
     }
 
@@ -3260,14 +3281,47 @@ pub fn resolve_remove(
     Ok(())
 }
 
+/// CR 608.2d + CR 608.2h: the total cap of an interactive counter removal, read
+/// from the inner maximum of its `UpTo` count. The legacy "remove all" sentinel
+/// (`Fixed { value: -1 }`, wrapped for "any number of counters") is uncapped
+/// (`None`, CR 107.1c); any other maximum — a printed N or the announced X of
+/// "remove up to X counters" (CR 107.3a) — is determined once, as the effect is
+/// applied, and floors at zero.
+fn remove_counter_choice_cap(
+    state: &GameState,
+    max: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> Option<u32> {
+    match max {
+        QuantityExpr::Fixed { value } if *value < 0 => None,
+        _ => Some(
+            crate::game::quantity::resolve_quantity_with_targets(state, max, ability).max(0) as u32,
+        ),
+    }
+}
+
+/// CR 608.2c + CR 608.2h: publish how many counters an interactive removal
+/// removed, for both "this way" channels a later instruction can read: the
+/// `EventContextAmount` count ("create that many", Tetravus) and the
+/// `PreviousEffectAmount` amount ("for each counter removed this way", Hex
+/// Parasite). A removal that paused for the controller's choice finishes after
+/// the chain walker's own amount stamp has already run, so the removal itself
+/// is the authority for its result.
+fn publish_counter_removal_total(state: &mut GameState, total: u32) {
+    let total = crate::game::arithmetic::u32_to_i32_saturating(total);
+    state.last_effect_count = Some(total);
+    state.last_effect_amount = Some(total);
+}
+
 /// CR 107.1c + CR 608.2d: Resolve "remove any number of counters from [source]"
-/// as a resolution-time interactive choice. Derives the public per-type counter
-/// budget from the single removal source (the ability's target for Rhys, the
-/// Evermore; `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice`
-/// so the controller picks any per-type subset (0..=available, incl. the empty
-/// set). When no counters are available the only legal selection is empty, so we
-/// resolve immediately with `last_effect_count = Some(0)` (CR 608.2h) and no
-/// prompt.
+/// and "remove up to N counters from [source]" as a resolution-time interactive
+/// choice. Derives the public per-type counter budget from the single removal
+/// source (the ability's target for Rhys, the Evermore and Hex Parasite;
+/// `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice` so the
+/// controller picks any per-type subset (0..=available, incl. the empty set)
+/// totalling at most `max_total` when the removal is capped. When no counters
+/// are available, or the cap is zero, the only legal selection is empty, so we
+/// resolve immediately with a published total of 0 (CR 608.2h) and no prompt.
 ///
 /// ponytail: single-source only — multi-source "from among" removals (Galloping
 /// Lizrog, Eventide's Shadow) are out of scope and keep hitting the parser's
@@ -3276,6 +3330,7 @@ fn resolve_remove_interactive(
     state: &mut GameState,
     ability: &ResolvedAbility,
     counter_type: Option<CounterType>,
+    max_total: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let Some(source_id) = resolve_defined_or_targets(state, ability)
@@ -3308,11 +3363,21 @@ fn resolve_remove_interactive(
         })
         .unwrap_or_default();
 
-    // CR 107.1c: "any number" includes zero — an empty board means the only legal
-    // choice is the empty set. Resolve without a prompt and stamp 0 so a
-    // downstream "create that many" rider (Tetravus) reads 0, not a stale count.
-    if available.is_empty() {
-        state.last_effect_count = Some(0);
+    // CR 608.2d: "up to N" bounds the total across every kind; the per-kind
+    // bounds stay the counters actually there. Publishing the cap already
+    // bounded by what is available keeps every consumer on one number.
+    let available_total = available
+        .iter()
+        .fold(0u32, |total, (_, count)| total.saturating_add(*count));
+    let max_total = max_total.map(|cap| cap.min(available_total));
+
+    // CR 107.1c: "any number" includes zero — an empty board (or an "up to 0"
+    // cap, Hex Parasite with X = 0) means the only legal choice is the empty
+    // set. Resolve without a prompt and publish 0 so a downstream "create that
+    // many" / "for each counter removed this way" rider reads 0, not a stale
+    // count.
+    if available.is_empty() || max_total == Some(0) {
+        publish_counter_removal_total(state, 0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -3326,6 +3391,7 @@ fn resolve_remove_interactive(
         source_id,
         counter_type,
         available,
+        max_total,
         pending_effect: Box::new(ability.clone()),
     };
     Ok(())
@@ -3373,9 +3439,11 @@ pub(crate) fn validate_counter_selection(
     Ok(total)
 }
 
-/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and park the
-/// per-type removals in the typed `CounterRemovals` frame for
-/// `drain_pending_counter_removals` to apply. Mirrors
+/// CR 107.1c + CR 608.2d: Validate a submitted `RemoveCountersChoice` answer
+/// and park the per-type removals in the typed `CounterRemovals` frame for
+/// `drain_pending_counter_removals` to apply. Beyond the shared per-kind
+/// constraints, a capped "remove up to N counters" prompt refuses a selection
+/// totalling more than its `max_total`. Mirrors
 /// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
 /// a thin dispatcher.
 pub(crate) fn validate_and_queue_counter_removal(
@@ -3383,9 +3451,15 @@ pub(crate) fn validate_and_queue_counter_removal(
     selections: &[CounterRemoveChoice],
     source_id: ObjectId,
     available: &[(CounterType, u32)],
+    max_total: Option<u32>,
     pending_effect: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     let total = validate_counter_selection(available, selections)?;
+    if max_total.is_some_and(|cap| total > cap) {
+        return Err(EffectError::InvalidParam(
+            "counter removal request exceeds the most counters the effect may remove".to_string(),
+        ));
+    }
     let remaining: Vec<PendingCounterRemoval> = selections
         .iter()
         .map(|s| PendingCounterRemoval {
@@ -3440,9 +3514,11 @@ pub(crate) fn settled_in_flight_counter_removal(
 /// single-authority remove pipeline so prevention/modification replacements
 /// apply. Mirrors `drain_pending_counter_moves`: re-parks the queue (returning
 /// early) when a per-removal replacement surfaces a `ReplacementChoice`, and when
-/// the queue empties stamps `last_effect_count = applied_total` BEFORE emitting
-/// `EffectResolved` so a downstream "create that many" / "add that much" rider
-/// reading `QuantityRef::EventContextAmount` picks up the removed count.
+/// the queue empties publishes `applied_total` (`publish_counter_removal_total`)
+/// BEFORE emitting `EffectResolved` so a downstream "create that many" / "add
+/// that much" rider reading `QuantityRef::EventContextAmount`, or a "for each
+/// counter removed this way" rider reading `QuantityRef::PreviousEffectAmount`,
+/// picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(mut queue) = state.active_counter_removals().cloned() {
         if let Some(in_flight) = queue.in_flight.take() {
@@ -3462,7 +3538,7 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
         else {
             // CR 608.2h: ordering invariant — stamp the actual removed total before the
             // terminating EffectResolved (and thus before the continuation drains).
-            state.last_effect_count = Some(queue.applied_total as i32);
+            publish_counter_removal_total(state, queue.applied_total);
             state
                 .take_active_counter_removals()
                 .expect("settled counter-removals queue must own the active frame")
@@ -6334,6 +6410,7 @@ mod tests {
                 counters: lki_counters,
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -6667,6 +6744,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -6783,6 +6861,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -6887,6 +6966,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -8647,6 +8727,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
                 Route::LiminalEntryEmit => {
@@ -8912,6 +8993,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
             };

@@ -124,6 +124,7 @@ fn soul_tether_creates_a_heartwood_token_with_a_two_color_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: token_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Heartwood's tap ability must be accepted");
 

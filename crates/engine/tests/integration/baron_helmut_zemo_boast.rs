@@ -241,6 +241,7 @@ fn zemo_boast_payable_at_fifteen_symbols() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Boast is payable with 15 black symbols");
     match &runner.state().waiting_for {
@@ -265,6 +266,7 @@ fn zemo_boast_unpayable_at_fourteen_symbols() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: zemo,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),
@@ -290,6 +292,7 @@ fn zemo_boast_rejects_subset_below_threshold() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable: 17 symbols available");
     // Choose four {B}{B}{B} (12) + the {B}{B} (2) = 14 symbols — one short.
@@ -318,6 +321,7 @@ fn zemo_boast_caps_cast_choice_at_three() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     // Pay the cost by exiling all five graveyard cards.
@@ -368,6 +372,7 @@ fn zemo_boast_casts_three_copies_for_free() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     runner
@@ -419,6 +424,7 @@ fn zemo_boast_binds_cost_exiled_set_across_intervening_set() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     runner
@@ -487,6 +493,7 @@ fn zemo_boast_tracks_only_cards_delivered_to_exile_after_replacement_choices() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Boast is payable");
     let result = runner

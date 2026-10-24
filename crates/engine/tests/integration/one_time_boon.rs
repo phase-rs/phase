@@ -3598,6 +3598,7 @@ fn sourced_ability_still_respects_protection_from_red() {
         .act(GameAction::ActivateAbility {
             source_id: pyro,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce the Pyromancer activation");
     match &runner.state().waiting_for {

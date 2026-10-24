@@ -1792,6 +1792,15 @@ pub(crate) enum ChooseImperativeAst {
         min: u32,
         max: Option<u32>,
     },
+    /// CR 115.10a + CR 608.2d: "choose an object and a player" makes two
+    /// untargeted choices during resolution, in the printed order.
+    ObjectAndPlayer {
+        object: TargetFilter,
+        player: crate::types::ability::ChoiceType,
+        /// The printed object-and-player clause, kept so the bare-effect
+        /// fail-closed marker carries Oracle text like its siblings.
+        clause: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3214,6 +3223,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }

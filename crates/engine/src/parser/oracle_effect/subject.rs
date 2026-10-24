@@ -257,6 +257,21 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
+    // Runs before the continuous arm, which would otherwise take "your life total"
+    // as a subject and harvest a later conjunct's keywords onto it.
+    if let Some(clause) = try_parse_life_lock_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
+    }
+
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -2275,31 +2290,6 @@ fn try_parse_subject_restriction_clause(
         });
     }
 
-    // CR 119.7 + CR 119.8: "[possessor] life total can't change" — bidirectional
-    // life-lock for the named player (Teferi's Protection: "your life total can't
-    // change"). Distinct from the generic " can't " split below because the
-    // subject is a possessive noun phrase ("your") rather than a player subject.
-    if let Some((before, _)) = tp.split_around(" life total can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life total cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-
     // CR 510.1a: "[subject] assigns no combat damage [this turn/this combat]"
     // Transient rule modification that prevents combat damage assignment.
     if let Some((before, after)) = tp.split_around(" assigns no combat damage") {
@@ -2995,13 +2985,20 @@ fn parse_subject_application_for(
     // "each" with an interposed "of" that parse_target doesn't handle directly.
     // Must check before "each " to avoid the generic "each" path swallowing "each of".
     if let Ok((remainder, _)) = tag::<_, _, OracleError<'_>>("each of ").parse(lower.as_str()) {
-        if alt((
+        if let Ok((after_opponents, _)) = alt((
             tag::<_, _, OracleError<'_>>("your opponents"),
             tag("your opponent"),
         ))
         .parse(remainder)
-        .is_ok()
         {
+            // CR 608.2c: an unmodelled "who …" restriction stays unbound, as
+            // in the "each <player> who" arm below.
+            if tag::<_, _, OracleError<'_>>(" who ")
+                .parse(after_opponents)
+                .is_ok()
+            {
+                return None;
+            }
             return subject_filter_application(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 false,
@@ -3053,6 +3050,28 @@ fn parse_subject_application_for(
     if let Ok((rest_lower, _)) =
         alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(lower.as_str())
     {
+        // CR 608.2c: a player population restricted by a relative clause no
+        // arm here models ("each opponent who lost life this turn" — Papalymo
+        // Totolymo) is not that population: the type-phrase reader below
+        // would drop the clause, leaving a subject-less effect its controller
+        // performs. Leave it unbound so the clause fails closed
+        // (`UNBOUND_SUBJECT_GAP`).
+        if (
+            alt((
+                tag::<_, _, OracleError<'_>>("other players"),
+                tag("other player"),
+                tag("players"),
+                tag("player"),
+                tag("opponents"),
+                tag("opponent"),
+            )),
+            tag(" who "),
+        )
+            .parse(rest_lower)
+            .is_ok()
+        {
+            return None;
+        }
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
         let (filter, rest) = ctx
@@ -6662,6 +6681,22 @@ fn try_parse_become_choice(
     )
 }
 
+/// CR 119.7 + CR 119.8: "[possessor] life total(s) can't change" — bidirectional
+/// life-lock for the named player (Teferi's Protection: "your life total can't
+/// change"). The subject is a possessive noun phrase rather than a player subject.
+fn try_parse_life_lock_clause(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, (possessor, _, _)) = (
+        take_until::<_, _, OracleError<'_>>(" life total"),
+        alt((tag(" life totals"), tag(" life total"))),
+        alt((tag(" can't change"), tag(" cannot change"))),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    let scope_filter = life_lock_scope_from_possessor(possessor.trim());
+    Some(build_life_lock_clause(scope_filter))
+}
+
 /// CR 119.7 + CR 119.8: Map the possessive subject of a "life total can't change"
 /// clause to the player-scope filter for the resulting CantGainLife/CantLoseLife
 /// statics. Recognizes opponent possessives ("an opponent's", "your opponents'",
@@ -6945,6 +6980,7 @@ fn build_restriction_clause(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }

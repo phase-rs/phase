@@ -2,16 +2,17 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect,
-    PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
+    Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, GameState, PendingCostMoveResume, PendingCounterPostAction,
-    TokenEntryEventEmission, UnrepresentablePolicy, WaitingFor,
+    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
+    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission,
+    UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -35,6 +36,7 @@ use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
+use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 
 /// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
@@ -994,11 +996,21 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
-                // are always Mandatory and applied inline by
-                // `flip_coin::flip_through_replacement`; they never reach the
-                // optional replacement-choice resume path. Unreachable in
-                // practice — present only for match exhaustiveness.
+                // CR 616.1 + CR 705.1: every coin-flip replacement parsed today
+                // (Krark's Thumb) is a count multiplier that
+                // `candidate_materiality` classifies as a commuting `Count`
+                // writer, and its mode is Mandatory — so competing coin-flip
+                // replacements auto-apply and a CoinFlip NEVER parks for an
+                // ordering or an optional choice. An optional coin-flip
+                // replacement (Pokey, the Scallywagg, currently unparsed) would
+                // reach this arm even alone, through the optional-choice path.
+                //
+                // A non-commuting coin-flip replacement would need its flip
+                // context parked OUTSIDE the resolution stack (the
+                // `pending_die_roll_instruction` precedent) plus a delivery
+                // here; `flip_through_replacement`'s `NeedsChoice` arm cannot
+                // serve it, because it parks a keep-choice frame whose gate does
+                // not match `ReplacementChoice`.
                 ProposedEvent::CoinFlip { .. } => {
                     debug_assert!(
                         false,
@@ -2016,6 +2028,172 @@ pub(super) fn handle_entry_named_choice(
     handle_replacement_choice(state, 0, events)
 }
 
+/// CR 614.12a + CR 118.11 + CR 119.4: Answer path for an as-enters life
+/// payment (Phyrexian Processor class). Pays via the shared life-cost
+/// authority, latches the SUBMITTED amount as `ChosenAttribute::Number`
+/// (modifiers change what is lost, never what X remembers — CR 118.11), and
+/// completes the parked entry. Deliberately stamps NO `last_effect_count`
+/// and touches NO continuation: the prompt answers an entry, not a resolving
+/// ability (CR 614.1). The liveness gate lives at the `SubmitPayAmount`
+/// answer site (`pending_entry_payment_is_live`).
+pub(super) fn handle_entry_payment(
+    state: &mut GameState,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !super::replacement::pending_entry_payment_is_live(state) {
+        return Err(EngineError::InvalidAction(
+            "as-enters payment has no pending battlefield entry".to_string(),
+        ));
+    }
+    let (player, accumulated) = match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            player,
+            accumulated,
+            ..
+        } => (*player, *accumulated),
+        _ => unreachable!("a live pre-entry payment owns a PayAmountChoice prompt"),
+    };
+    // Take the outer record FIRST so the inner life-loss ordering (which owns
+    // `pending_replacement` while IT resolves) cannot collide with it; pin the
+    // taken local's delivery boundary BEFORE the payment can change the
+    // proposal (the G1 pin-first order).
+    let mut pending = state
+        .pending_replacement
+        .take()
+        .expect("a live pre-entry payment owns the pending replacement");
+    pending.pin_delivery_boundary();
+    let resume_at_resolution_depth = state.resolution_stack.len();
+    match pay_life_as_cost(state, player, amount, events) {
+        PayLifeCostResult::Paid { .. } => {
+            if let Some(slot) =
+                super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
+            {
+                slot.get_or_insert_with(Default::default)
+                    .0
+                    .push(ChosenAttribute::Number(amount));
+            }
+            state.pending_replacement = Some(pending);
+            resume_parked_entry_payment(state, events)
+        }
+        PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+        | PayLifeCostResult::DeferredReplacementChoice { .. } => {
+            // The inner prompt owns `pending_replacement` now; the latched
+            // outer rides the resume marker until the drain completes it.
+            if let Some(slot) =
+                super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
+            {
+                slot.get_or_insert_with(Default::default)
+                    .0
+                    .push(ChosenAttribute::Number(amount));
+            }
+            state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+                player,
+                total: accumulated.saturating_add(amount),
+                resume_at_resolution_depth,
+                pending_entry: Some(Box::new(pending)),
+            });
+            Ok(state.waiting_for.clone())
+        }
+        PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+            // The payment changed nothing (life costs fail atomically); restore
+            // the pinned outer and reject the answer.
+            state.pending_replacement = Some(pending);
+            Err(EngineError::InvalidAction(format!(
+                "Player {player:?} cannot pay {amount} life"
+            )))
+        }
+    }
+}
+
+/// CR 614.12a + CR 616.1f: shared completion tail for a parked entry payment:
+/// install the pinned record, mark the answered payment applied, and re-enter
+/// the ordinary handler (which re-loops the pipeline over the still-applicable
+/// effects). Called by the answer (Paid path) and by the deferred drain.
+pub(crate) fn resume_parked_entry_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 614.12a + CR 707.2: a copy-surfaced payment parks a synthetic
+    // battlefield-to-battlefield proposal — there is no delivery to resume.
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(super::replacement::parked_entry_payment_is_copy_surface)
+    {
+        return complete_copy_surfaced_payment(state, events);
+    }
+    let pending = state
+        .pending_replacement
+        .as_mut()
+        .expect("an answered entry payment installs its pending replacement");
+    // Idempotent no-op safety net (`pin_delivery_boundary` only sets `None`):
+    // both callers install a pre-pinned record.
+    pending.pin_delivery_boundary();
+    let rid = pending.candidates[0];
+    // Mark before re-entering the ordinary handler so the payment is not
+    // raised again while that handler applies this same replacement.
+    pending.proposed.mark_applied(rid);
+    handle_replacement_choice(state, 0, events)
+}
+
+/// CR 614.12a + CR 707.2: complete a copy-surfaced entry payment (Clone
+/// entering as Minion of the Wastes). The parked proposal is synthetic — the
+/// object already entered — so the latch folds straight onto the live object
+/// and the synthetic dies here (no mark: nothing re-scans it). Latch-before-
+/// replay, mirroring the post-copy `NamedChoice` answer
+/// (`engine_resolution_choices.rs`, "As it enters, choose …" block), so ETB
+/// observers fire against the realized post-payment object.
+fn complete_copy_surfaced_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let pending = state
+        .pending_replacement
+        .take()
+        .expect("an answered copy-surfaced payment parks its synthetic proposal");
+    let ProposedEvent::ZoneChange {
+        object_id,
+        enter_with_choices,
+        ..
+    } = &pending.proposed
+    else {
+        unreachable!("copy-surface parks are ZoneChange proposals");
+    };
+    if let Some(choices) = enter_with_choices {
+        if let Some(obj) = state.objects.get_mut(object_id) {
+            obj.chosen_attributes.extend(choices.0.iter().cloned());
+            // CR 613.1: the CDA reads the latch at layer evaluation, which
+            // already ran for the copy — re-run so the realized P/T lands
+            // before the SBA pass (mirrors `effects::choose.rs`).
+            crate::game::layers::mark_layers_full(state);
+        }
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    if !state.deferred_entry_events.is_empty() {
+        if let Some(waiting_for) = replay_deferred_entry_events(state, *object_id, events)? {
+            return Ok(waiting_for);
+        }
+    }
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 614.12a: complete a pre-entry payment whose inner life loss deferred
+/// (ordering or substitute): install the preserved record and run the shared
+/// completion tail. The latch was recorded at answer time; no stamp, no
+/// continuation — the drain resumes an ENTRY, not a resolution chain.
+pub(crate) fn complete_entry_payment(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    state.pending_replacement = Some(pending);
+    resume_parked_entry_payment(state, events)
+}
+
 /// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
 /// "As this Aura enters, choose a creature." Latches the chosen creature's
 /// copiable values (fixed here, per CR 707.2c, as the copy effect first starts
@@ -2039,26 +2217,17 @@ fn handle_persist_chosen_attribute_choice(
     )?;
     // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
     // source), captured alongside the values — NOT a copiable value itself.
-    let (display_source, printed_ref, token_image_ref, token_art) = state
+    let display = state
         .objects
         .get(&donor_id)
-        .map(|o| {
-            (
-                o.display_source,
-                o.printed_ref.clone(),
-                o.token_image_ref.clone(),
-                o.token_art.clone(),
-            )
-        })
+        .map(|o| o.display_identity())
         .unwrap_or_default();
 
     // CR 400.7: persist the frozen snapshot on the Aura so it is cleared
     // automatically when the Aura changes zones (exactly the copy's lifetime).
     let snapshot = crate::types::ability::LatchedCopiableSnapshot {
         values: values.clone(),
-        display_source,
-        printed_ref: printed_ref.clone(),
-        token_image_ref: token_image_ref.clone(),
+        display: display.clone(),
     };
     if let Some(aura) = state.objects.get_mut(&source_id) {
         aura.chosen_attributes
@@ -2166,10 +2335,7 @@ fn handle_persist_chosen_attribute_choice(
         duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         additional_modifications: Vec::new(),
         effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
     };
@@ -2814,6 +2980,32 @@ fn finish_copy_target_choice_entry(
         ) {
             return Ok(Some(waiting_for));
         }
+    }
+    // CR 614.12a + CR 707.2: surface a copied as-enters life payment (Clone
+    // entering as Minion of the Wastes) before replaying the entry — the
+    // payment sibling of the choice surface above. No card carries both a
+    // copied choice and a copied payment, so ordering between the two surfaces
+    // is unobservable; the named surface keeps its existing first slot.
+    if let Some(waiting_for) =
+        super::replacement::surface_copied_entry_payment(state, source_id, events)
+    {
+        // CR 616.1 carrier for the payment pause — verbatim mirror of the aura-site
+        // stash below: `counter_pause_post_actions` holds the liminal copy-token
+        // caller's committed-entry emit and its remaining-batch continuation, and
+        // returning the prompt without parking them would drop both (the drain
+        // side is `complete_copy_surfaced_payment`, which resumes through
+        // `resume_pending_continuation_if_priority` when the payment is answered).
+        // Empty-guarded so the single-token path (which passes nothing) acquires
+        // no spurious pending-counter frame.
+        if !counter_pause_post_actions.is_empty() {
+            super::effects::counters::stash_pending_counter_post_actions(
+                state,
+                crate::types::ability::EffectKind::CopyTokenOf,
+                source_id,
+                counter_pause_post_actions,
+            );
+        }
+        return Ok(Some(waiting_for));
     }
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
     // choice is answered — the first instant the token IS the thing that entered. Placed before
@@ -8263,10 +8455,10 @@ mod tests {
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {
                 values: Box::new(values),
-                display_source: crate::game::game_object::DisplaySource::Token,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: crate::game::game_object::DisplayIdentity {
+                    display_source: crate::game::game_object::DisplaySource::Token,
+                    ..Default::default()
+                },
                 extra_keywords: Vec::new(),
                 additional_modifications: Vec::new(),
                 tapped: false,
@@ -8274,6 +8466,8 @@ mod tests {
                 sacrifice_at: None,
                 source_id: entering_aura,
                 controller: PlayerId(0),
+                // Test-only Treasure tail stages no donor; empty mods are stamp-proof.
+                donor: None,
             }),
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),

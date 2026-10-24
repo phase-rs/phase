@@ -860,6 +860,32 @@ pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, Target
     value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
 }
 
+/// CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" and its
+/// "that creature is attacking" form: the player or planeswalker the referred-to
+/// attacking creature is attacking, read at resolution (never a declared target).
+///
+/// One `alt` per axis of variation: the copula ("it's" / "it is" / "that creature
+/// is"), then the fixed "attacking". The trailing `not(alphanumeric)` keeps
+/// "attacking" a whole word. Only the printed kind is accepted: an attack-target
+/// SETTER ("also attacks the player or planeswalker ...") never reaches this
+/// combinator, and "target player or planeswalker" keeps its "target" slot.
+pub fn parse_attacked_player_or_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::AttackedPlayerOrPlaneswalker,
+        terminated(
+            preceded(
+                tag("the player or planeswalker "),
+                terminated(
+                    alt((tag("it's"), tag("it is"), tag("that creature is"))),
+                    tag(" attacking"),
+                ),
+            ),
+            not(satisfy(char::is_alphanumeric)),
+        ),
+    )
+    .parse(input)
+}
+
 /// Matches "that spell", "that player", "that creature", "defending player",
 /// "the defending player", "that card", "that permanent".
 /// Returns a `TargetFilter` for the referenced entity.
@@ -1426,6 +1452,43 @@ pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<O
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attacked_player_or_planeswalker_family() {
+        use super::parse_attacked_player_or_planeswalker as parse;
+        for text in [
+            "the player or planeswalker it's attacking",
+            "the player or planeswalker it is attacking",
+            "the player or planeswalker that creature is attacking",
+        ] {
+            assert_eq!(
+                parse(text).unwrap(),
+                ("", TargetFilter::AttackedPlayerOrPlaneswalker),
+                "{text}"
+            );
+        }
+        // The remainder is left to the caller.
+        assert_eq!(
+            parse("the player or planeswalker it's attacking equal to the number of artifacts")
+                .unwrap(),
+            (
+                " equal to the number of artifacts",
+                TargetFilter::AttackedPlayerOrPlaneswalker
+            )
+        );
+        assert!(TargetFilter::AttackedPlayerOrPlaneswalker.is_context_ref());
+        // Siblings: the combinator is not an anaphor, a slot, a setter or a defender.
+        for text in [
+            "the player",
+            "the player or planeswalker",
+            "the player or planeswalker it's attackingly",
+            "target player or planeswalker it's attacking",
+            "defending player",
+            "the player or planeswalker that creature is attacked by",
+        ] {
+            assert!(parse(text).is_err(), "{text}");
+        }
+    }
+
     use super::*;
 
     /// Each constant is the grammar's reading of its phrase, and the

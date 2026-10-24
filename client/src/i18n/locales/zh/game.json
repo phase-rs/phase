@@ -448,6 +448,7 @@
   "cardChoice": {
     "badges": {
       "attach": "贴附",
+      "cast": "施放",
       "battlefield": "战场",
       "bottom": "牌库底",
       "choose": "选择",
@@ -610,6 +611,7 @@
     },
     "effectZone": {
       "labelAttach": "贴附（{{selected}}/{{count}}）",
+      "labelCast": "施放（{{selected}}/{{count}}）",
       "labelConfirm": "确认（{{selected}}/{{count}}）",
       "labelDecline": "拒绝",
       "labelExile": "放逐（{{selected}}/{{count}}）",
@@ -628,6 +630,12 @@
       "subtitleAttachExact_other": "选择{{count}}件要贴附的武具",
       "subtitleAttachRange_one": "选择{{min}}-{{count}}件要贴附的武具",
       "subtitleAttachRange_other": "选择{{min}}-{{count}}件要贴附的武具",
+      "subtitleCastExact_one": "选择{{count}}张要施放的牌",
+      "subtitleCastExact_other": "选择{{count}}张要施放的牌",
+      "subtitleCastUpTo_one": "至多选择{{count}}张要施放的牌",
+      "subtitleCastUpTo_other": "至多选择{{count}}张要施放的牌",
+      "subtitleCastRange_one": "选择{{min}}-{{count}}张要施放的牌",
+      "subtitleCastRange_other": "选择{{min}}-{{count}}张要施放的牌",
       "subtitleAttachUpTo_one": "至多选择{{count}}件要贴附的武具",
       "subtitleAttachUpTo_other": "至多选择{{count}}件要贴附的武具",
       "subtitleBattlefieldExact_one": "选择{{count}}张要放进战场的牌",
@@ -673,6 +681,7 @@
       "subtitleUntapUpTo_one": "至多选择{{count}}个要竖置的永久物",
       "subtitleUntapUpTo_other": "至多选择{{count}}个要竖置的永久物",
       "titleAttach": "贴附",
+      "titleCast": "施放",
       "titleBattlefield": "放进战场",
       "titleExile": "放逐",
       "titleHand": "移回",
@@ -1684,7 +1693,15 @@
     "manaCostReduced": "其法术力费用减少{{reduction}}",
     "selfManaCost": "其法术力费用",
     "selfManaValue": "其总法术力费用",
-    "spliceOnto": "通联于{{subtype}}{{cost}}"
+    "spliceOnto": "通联于{{subtype}}{{cost}}",
+    "wardDiscardAtRandom_few": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_many": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_one": "随机弃一张牌",
+    "wardDiscardAtRandom_other": "随机弃{{count}}张牌",
+    "wardDiscard_few": "弃{{count}}张牌",
+    "wardDiscard_many": "弃{{count}}张牌",
+    "wardDiscard_one": "弃一张牌",
+    "wardDiscard_other": "弃{{count}}张牌"
   },
   "kickDialog": {
     "body": "他们将放弃此盘游戏，且无法重新加入。",

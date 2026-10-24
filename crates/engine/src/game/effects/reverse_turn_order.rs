@@ -52,6 +52,7 @@ mod tests {
             source_id: ObjectId(1),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
             delayed_origin: None,

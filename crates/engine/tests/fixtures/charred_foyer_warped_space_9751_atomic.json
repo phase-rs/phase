@@ -1,0 +1,266 @@
+{
+  "meta": {
+    "date": "2026-10-12",
+    "version": "5.3.0+20261012"
+  },
+  "data": {
+    "Charred Foyer // Warped Space": [
+      {
+        "colorIdentity": [
+          "R"
+        ],
+        "colors": [
+          "R"
+        ],
+        "convertedManaCost": 10.0,
+        "edhrecRank": 2812,
+        "edhrecSaltiness": 0.24,
+        "faceConvertedManaCost": 4.0,
+        "faceManaValue": 4.0,
+        "faceName": "Charred Foyer",
+        "foreignData": [
+          {
+            "faceName": "Foyer calciné",
+            "language": "French",
+            "name": "Foyer calciné // Espace déformé",
+            "skuIds": {
+              "foil": "c24874e2-89d7-54b4-b636-d3fda6fa422e",
+              "nonfoil": "9defd61c-ab88-5196-bc68-0a18d4e183c9"
+            },
+            "text": "Au début de votre entretien, exilez la carte du dessus de votre bibliothèque. Vous pouvez la jouer ce tour-ci.\n(Vous pouvez lancer la moitié de votre choix. Cet accès se déverrouille sur le champ de bataille. Au moment où vous pourriez lancer un rituel, vous pouvez payer le coût de mana d'un accès verrouillé pour le déverrouiller.)",
+            "type": "Enchantement — pièce"
+          },
+          {
+            "faceName": "Verkohltes Foyer",
+            "language": "German",
+            "name": "Verkohltes Foyer // Gekrümmter Raum",
+            "skuIds": {
+              "foil": "ecde8fc4-3224-517f-89e6-50ae0c07dba0",
+              "nonfoil": "5dfd9313-e5cd-5f0f-8544-509c7ef894ca"
+            },
+            "text": "Zu Beginn deines Versorgungssegments schickst du die oberste Karte deiner Bibliothek ins Exil. Du kannst sie in diesem Zug spielen.\n(Du kannst eine beliebige Hälfte wirken und jene Tür wird im Spiel entsperrt. Du kannst die Manakosten der noch versperrten Tür wie eine Hexerei bezahlen, um sie zu entsperren.)",
+            "type": "Verzauberung — Raum"
+          },
+          {
+            "faceName": "Ingresso Bruciato",
+            "language": "Italian",
+            "name": "Ingresso Bruciato // Spazio Distorto",
+            "skuIds": {
+              "foil": "c5ac7fbb-dd27-563e-a2fc-9506951d6cae",
+              "nonfoil": "52838834-28d2-5574-8d66-62d99bd55027"
+            },
+            "text": "All'inizio del tuo mantenimento, esilia la prima carta del tuo grimorio. Puoi giocarla in questo turno.\n(Puoi lanciare una qualsiasi delle due metà. Quella porta si sblocca sul campo di battaglia. Come una stregoneria, puoi pagare il costo di mana di una porta bloccata per sbloccarla.)",
+            "type": "Incantesimo — Stanza"
+          },
+          {
+            "faceName": "黒焦げのホワイエ",
+            "language": "Japanese",
+            "name": "黒焦げのホワイエ // 歪んだ空間",
+            "skuIds": {
+              "foil": "cbfdce47-26eb-50a6-8063-3552f0ef4d12",
+              "nonfoil": "26e4d303-8787-5764-9f62-466ab2df0fa4"
+            },
+            "text": "あなたのアップキープの開始時に、あなたのライブラリーの一番上にあるカード１枚を追放する。このターン、それをプレイしてもよい。\n（どちらの半分でも唱えることができる。そのドアは戦場で開放される。閉鎖されているドアのマナ・コストを支払って、それを開放してもよい。これはソーサリーとして行う。）",
+            "type": "エンチャント — 部屋"
+          },
+          {
+            "faceName": "Recibidor carbonizado",
+            "language": "Spanish",
+            "name": "Recibidor carbonizado // Espacio deformado",
+            "skuIds": {
+              "foil": "69d02a6f-9d7a-5ee4-9201-10bf7fe4c819",
+              "nonfoil": "451d95bf-945a-531b-a3c9-a9e0d5e6c5e9"
+            },
+            "text": "Al comienzo de tu mantenimiento, exilia la primera carta de tu biblioteca. Puedes jugarla este turno.\n(Puedes lanzar cualquier mitad. Esa puerta se abre en el campo de batalla. Puedes pagar el coste de maná de una puerta cerrada como un conjuro para abrirla.)",
+            "type": "Encantamiento — Sala"
+          }
+        ],
+        "identifiers": {
+          "scryfallOracleId": "9f50ec9f-78e6-403f-8f41-84d603fee0eb"
+        },
+        "layout": "split",
+        "legalities": {
+          "alchemy": "Legal",
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "future": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "standard": "Legal",
+          "standardbrawl": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{3}{R}",
+        "manaValue": 10.0,
+        "name": "Charred Foyer // Warped Space",
+        "printings": [
+          "DSK",
+          "PDSK"
+        ],
+        "purchaseUrls": {
+          "cardKingdom": "https://mtgjson.com/links/e5e2487f0898ad1b",
+          "cardKingdomFoil": "https://mtgjson.com/links/6f679a10ce8f0b91",
+          "cardmarket": "https://mtgjson.com/links/bece1b6cb813c863",
+          "cardmarketFoil": "https://mtgjson.com/links/779bd1343bce2a0b",
+          "tcgplayer": "https://mtgjson.com/links/d4956aaa4d904e07"
+        },
+        "rulings": [
+          {
+            "date": "2024-09-20",
+            "text": "If you cast a spell for an alternative cost of {0}, you can't pay any other alternative costs. You can, however, pay additional costs, such as kicker. If the card has any mandatory additional costs, you must pay those."
+          },
+          {
+            "date": "2024-09-20",
+            "text": "You pay all costs and follow all timing rules for cards played with the permission granted by Charred Foyer's ability. For example, if the exiled card is a land card, you may play it only during your main phase while the stack is empty."
+          }
+        ],
+        "side": "a",
+        "subtypes": [
+          "Room"
+        ],
+        "supertypes": [],
+        "text": "At the beginning of your upkeep, exile the top card of your library. You may play it this turn.\n(You may cast either half. That door unlocks on the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)",
+        "type": "Enchantment — Room",
+        "types": [
+          "Enchantment"
+        ]
+      },
+      {
+        "colorIdentity": [
+          "R"
+        ],
+        "colors": [
+          "R"
+        ],
+        "convertedManaCost": 10.0,
+        "edhrecRank": 2812,
+        "edhrecSaltiness": 0.24,
+        "faceConvertedManaCost": 6.0,
+        "faceManaValue": 6.0,
+        "faceName": "Warped Space",
+        "foreignData": [
+          {
+            "faceName": "Espace déformé",
+            "language": "French",
+            "name": "Foyer calciné // Espace déformé",
+            "skuIds": {
+              "foil": "726c5e4e-1913-5420-8b3c-c098e748042c",
+              "nonfoil": "f81a3b53-3d77-5169-9757-66216a943620"
+            },
+            "text": "Espace déformé\no4oRoR\nUne fois par tour, vous pouvez payer {0} à la place du coût de mana d'un sort que vous lancez depuis l'exil.",
+            "type": "Enchantement — pièce"
+          },
+          {
+            "faceName": "Gekrümmter Raum",
+            "language": "German",
+            "name": "Verkohltes Foyer // Gekrümmter Raum",
+            "skuIds": {
+              "foil": "0be690b3-dd8e-5cef-90fd-eb6699062913",
+              "nonfoil": "e7f1668b-14a3-5420-a49d-4b501015a217"
+            },
+            "text": "Gekrümmter Raum\no4oRoR\nEinmal pro Zug kannst du {0} bezahlen, statt die Manakosten für einen Zauberspruch, den du aus dem Exil wirkst, zu bezahlen.",
+            "type": "Verzauberung — Raum"
+          },
+          {
+            "faceName": "Spazio Distorto",
+            "language": "Italian",
+            "name": "Ingresso Bruciato // Spazio Distorto",
+            "skuIds": {
+              "foil": "1229107f-bdd9-52b7-a4c4-b7c3c7041826",
+              "nonfoil": "e48c8ee1-e4e0-5abc-9225-2dbf1913c773"
+            },
+            "text": "Spazio Distorto\no4oRoR\nUna volta per turno, puoi pagare {0} invece di pagare il costo di mana per una magia che lanci dall'esilio.",
+            "type": "Incantesimo — Stanza"
+          },
+          {
+            "faceName": "歪んだ空間",
+            "language": "Japanese",
+            "name": "黒焦げのホワイエ // 歪んだ空間",
+            "skuIds": {
+              "foil": "9cbc847e-29ab-5fbe-8597-3e070459d420",
+              "nonfoil": "835354ea-86cf-513f-be91-8b26f6cf6ff7"
+            },
+            "text": "歪（ゆが）んだ空（くう）間（かん）\no4oRoR\n各ターン、あなたは追放領域から唱える呪文１つのマナ・コストを支払うのではなく{0}を支払ってもよい。",
+            "type": "エンチャント — 部屋"
+          },
+          {
+            "faceName": "Espacio deformado",
+            "language": "Spanish",
+            "name": "Recibidor carbonizado // Espacio deformado",
+            "skuIds": {
+              "foil": "591df36b-44b0-536a-a823-65c846a70062",
+              "nonfoil": "308f5945-da74-5c15-9b02-27c54f367da0"
+            },
+            "text": "Espacio deformado\no4oRoR\nUna vez por turno, puedes pagar {0} en vez de pagar el coste de maná de un hechizo que lanzas desde el exilio.",
+            "type": "Encantamiento — Sala"
+          }
+        ],
+        "identifiers": {
+          "scryfallOracleId": "9f50ec9f-78e6-403f-8f41-84d603fee0eb"
+        },
+        "layout": "split",
+        "legalities": {
+          "alchemy": "Legal",
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "future": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "standard": "Legal",
+          "standardbrawl": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{4}{R}{R}",
+        "manaValue": 10.0,
+        "name": "Charred Foyer // Warped Space",
+        "printings": [
+          "DSK",
+          "PDSK"
+        ],
+        "purchaseUrls": {
+          "cardKingdom": "https://mtgjson.com/links/c295c474d5ede743",
+          "cardKingdomFoil": "https://mtgjson.com/links/97fdb59d1074f0e7",
+          "cardmarket": "https://mtgjson.com/links/882808b214e22981",
+          "cardmarketFoil": "https://mtgjson.com/links/a3b2ff4666263d76",
+          "tcgplayer": "https://mtgjson.com/links/5061ae7784502480"
+        },
+        "rulings": [
+          {
+            "date": "2024-09-20",
+            "text": "If you cast a spell for an alternative cost of {0}, you can't pay any other alternative costs. You can, however, pay additional costs, such as kicker. If the card has any mandatory additional costs, you must pay those."
+          },
+          {
+            "date": "2024-09-20",
+            "text": "You pay all costs and follow all timing rules for cards played with the permission granted by Charred Foyer's ability. For example, if the exiled card is a land card, you may play it only during your main phase while the stack is empty."
+          }
+        ],
+        "side": "b",
+        "subtypes": [
+          "Room"
+        ],
+        "supertypes": [],
+        "text": "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast from exile.\n(You may cast either half. That door unlocks on the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)",
+        "type": "Enchantment — Room",
+        "types": [
+          "Enchantment"
+        ]
+      }
+    ]
+  }
+}
