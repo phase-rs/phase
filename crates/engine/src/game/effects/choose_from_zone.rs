@@ -3453,6 +3453,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             source,

@@ -6181,6 +6181,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::ExiledBySource,
                     count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
                     position: crate::types::ability::LibraryPosition::Bottom,
+                    arranger: None,
                 },
             );
             // Walk into the sub_ability chain to find the right attachment point.
@@ -6292,6 +6293,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 0 },
                     position,
+                    arranger: None,
                 },
             );
             append_definition_to_sub_chain(previous, put_def);

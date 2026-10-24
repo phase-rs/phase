@@ -15,7 +15,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
+    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
+    PendingZoneChangeDelivery, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1924,7 +1925,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
 
 /// CR 401.4: Group object ids by owner in APNAP order for per-owner library
 /// arrangement prompts.
-fn group_object_ids_by_owner_apnap(
+pub(crate) fn group_object_ids_by_owner_apnap(
     state: &GameState,
     object_ids: &[ObjectId],
 ) -> Vec<(PlayerId, Vec<ObjectId>)> {
@@ -1940,6 +1941,9 @@ fn group_object_ids_by_owner_apnap(
         .collect()
 }
 
+/// The only builder of an owner-arrangement prompt: the first prompt, each
+/// next batch's prompt, and every departure republish come through here, so
+/// the prompt actor is always the batch's `chooser()`.
 fn mass_library_order_effect_zone_choice(
     batch: MassLibraryOrderBatch,
     source_id: ObjectId,
@@ -1954,7 +1958,8 @@ fn mass_library_order_effect_zone_choice(
         .map(|member| member.identity.object_id)
         .collect();
     WaitingFor::EffectZoneChoice {
-        player: batch.owner,
+        // CR 401.4 + CR 101.1: the arranger the instruction names, else the owner.
+        player: batch.chooser(),
         cards,
         count: choice_count,
         min_count: choice_count,
@@ -1989,10 +1994,12 @@ fn mass_library_order_effect_zone_choice(
 fn snapshot_mass_library_order_batch(
     state: &GameState,
     owner: PlayerId,
+    arranger: Option<PlayerId>,
     cards: Vec<ObjectId>,
 ) -> MassLibraryOrderBatch {
     MassLibraryOrderBatch {
         owner,
+        arranger,
         members: cards
             .into_iter()
             .map(|object_id| {
@@ -2006,40 +2013,415 @@ fn snapshot_mass_library_order_batch(
     }
 }
 
-/// CR 401.4: After one owner batch of a mass library-order prompt completes,
-/// surface the next owner's `EffectZoneChoice` if any remain.
-pub(crate) fn resume_next_mass_library_order_choice(state: &mut GameState) -> Option<PlayerId> {
-    let mut pending = state.pending_mass_library_order_choice.take()?;
+/// CR 400.7 + CR 401.4: whether a frozen arrangement member is still the object
+/// the instruction found: the same incarnation, still in the zone it occupied
+/// when its owner's batch was frozen, and still owned by that batch's owner.
+pub(crate) fn mass_library_order_member_is_current(
+    state: &GameState,
+    owner: PlayerId,
+    member: &MassLibraryOrderMember,
+) -> bool {
+    state
+        .objects
+        .get(&member.identity.object_id)
+        .is_some_and(|object| {
+            object.incarnation == member.identity.incarnation
+                && object.zone == member.origin
+                && object.owner == owner
+        })
+}
+
+/// The members of `batch` that are still current, in their frozen order.
+fn live_mass_library_order_batch(
+    state: &GameState,
+    batch: &MassLibraryOrderBatch,
+) -> MassLibraryOrderBatch {
+    MassLibraryOrderBatch {
+        owner: batch.owner,
+        arranger: batch.arranger,
+        members: batch
+            .members
+            .iter()
+            .filter(|member| mass_library_order_member_is_current(state, batch.owner, member))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// The instruction an owner-arrangement prompt answers. These fields bind a
+/// collected carrier to the arrangement that created it.
+pub(crate) struct OwnerArrangementInstruction<'a> {
+    pub source_id: ObjectId,
+    pub library_position: &'a LibraryPosition,
+    pub track_exiled_by_source: bool,
+    pub duration: Option<&'a Duration>,
+}
+
+/// CR 608.2c + CR 401.4: whether `pending` belongs to the arrangement whose
+/// prompt names `instruction`.
+pub(crate) fn owner_arrangement_carrier_binds(
+    state: &GameState,
+    pending: &PendingMassLibraryOrderChoice,
+    instruction: &OwnerArrangementInstruction,
+) -> bool {
+    pending.source_id == instruction.source_id
+        && pending.library_position == *instruction.library_position
+        && pending.track_exiled_by_source == instruction.track_exiled_by_source
+        && pending.duration.as_ref() == instruction.duration
+        && pending.resolving_entry.is_none_or(|entry| {
+            state
+                .resolving_stack_entry
+                .as_ref()
+                .is_some_and(|resolving| resolving.id == entry)
+        })
+}
+
+/// The result of recording one owner's library order.
+pub(crate) enum OwnerLibraryOrderProgress {
+    /// The next owner's batch in APNAP order is prompted; nothing has moved.
+    /// Carries the player that prompt names: the batch's `chooser()`.
+    NextOwner(PlayerId),
+    /// Every owner has chosen: the complete arrangement, as APNAP owner
+    /// segments each in that owner's order, to be moved as one batch.
+    Complete(Vec<ObjectId>),
+}
+
+/// CR 101.4 + CR 401.4: record one owner's arrangement. Owners choose in APNAP
+/// order and nothing moves until the last owner has chosen ("Then the actions
+/// happen simultaneously"), so the complete arrangement is returned for one
+/// zone-change batch. `owner` and `arranger` identify the answered batch: whose
+/// cards were arranged, and the player the instruction named to arrange them
+/// (`None` = that owner, CR 401.4).
+pub(crate) fn submit_owner_library_order(
+    state: &mut GameState,
+    owner: PlayerId,
+    arranger: Option<PlayerId>,
+    instruction: &OwnerArrangementInstruction,
+    chosen: &[ObjectId],
+) -> OwnerLibraryOrderProgress {
+    let carrier = state.pending_mass_library_order_choice.take();
+    // CR 608.2c: a carrier of another instruction or resolution is discarded, never merged.
+    let Some(mut pending) =
+        carrier.filter(|pending| owner_arrangement_carrier_binds(state, pending, instruction))
+    else {
+        return OwnerLibraryOrderProgress::Complete(chosen.to_vec());
+    };
+    if pending.remaining_batches.is_empty() {
+        // CR 400.7: a collected member that changed zones is a new object the instruction no longer finds.
+        let mut arranged: Vec<ObjectId> = pending
+            .arranged_batches
+            .iter()
+            .flat_map(|batch| live_mass_library_order_batch(state, batch).members)
+            .map(|member| member.identity.object_id)
+            .collect();
+        arranged.extend_from_slice(chosen);
+        return OwnerLibraryOrderProgress::Complete(arranged);
+    }
+    pending
+        .arranged_batches
+        .push(snapshot_mass_library_order_batch(
+            state,
+            owner,
+            arranger,
+            chosen.to_vec(),
+        ));
+    OwnerLibraryOrderProgress::NextOwner(open_next_owner_library_order(state, pending))
+}
+
+/// CR 401.4 + CR 101.4: open the owners' arrangement of cards an effect puts
+/// into one library position at the same time — one EffectZoneChoice per owner
+/// in APNAP order; each owner orders only their own cards. Nothing moves until
+/// every owner has chosen (CR 101.4). The slot is always written, so a carrier
+/// from another instruction cannot survive into this one.
+///
+/// CR 101.1: an instruction that orders the cards itself names the arranger.
+/// `arranger` is that player, resolved at resolution (CR 608.2d) and written
+/// onto every batch here (later batches copy it); after that, only a departure
+/// rewrites it (`hand_on_departed_arranger`, CR 800.4g + CR 800.4h). `None`
+/// leaves each library's owner arranging (CR 401.4).
+pub(crate) fn open_owner_library_arrangement(
+    state: &mut GameState,
+    owner_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+    arranger: Option<PlayerId>,
+    source_id: ObjectId,
+    library_position: LibraryPosition,
+    track_exiled_by_source: bool,
+    duration: Option<Duration>,
+) {
+    let (first_owner, first_cards) = owner_batches
+        .first()
+        .expect("an owner library arrangement requires at least one owner batch")
+        .clone();
+    let remaining_batches: Vec<_> = owner_batches
+        .into_iter()
+        .skip(1)
+        .map(|(owner, cards)| snapshot_mass_library_order_batch(state, owner, arranger, cards))
+        .collect();
+    let resolving_entry = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    state.pending_mass_library_order_choice = (!remaining_batches.is_empty()).then(|| {
+        Box::new(PendingMassLibraryOrderChoice {
+            source_id,
+            library_position: library_position.clone(),
+            track_exiled_by_source,
+            duration: duration.clone(),
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(remaining_batches),
+            arranged_batches: Vec::new(),
+            resolving_entry,
+        })
+    });
+    state.waiting_for = mass_library_order_effect_zone_choice(
+        snapshot_mass_library_order_batch(state, first_owner, arranger, first_cards),
+        source_id,
+        library_position,
+        track_exiled_by_source,
+        duration,
+    );
+}
+
+/// CR 401.4 + CR 101.4: surface the next queued owner's `EffectZoneChoice`.
+/// The carrier is always stored back, even once its queue is empty, because it
+/// still holds the orders already collected for the one simultaneous move.
+/// Returns the player the published prompt names: the batch's `chooser()`.
+fn open_next_owner_library_order(
+    state: &mut GameState,
+    mut pending: Box<PendingMassLibraryOrderChoice>,
+) -> PlayerId {
     let batch = match &mut pending.remaining_batches {
-        crate::types::game_state::PendingMassLibraryOrderBatches::Typed(batches) => {
-            if batches.is_empty() {
-                return None;
-            }
-            batches.remove(0)
-        }
-        crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches) => {
-            let (owner, cards) = batches.first()?.clone();
-            batches.remove(0);
+        PendingMassLibraryOrderBatches::Typed(batches) => (!batches.is_empty())
+            .then(|| batches.remove(0))
+            .expect("a next owner library order requires a queued owner batch"),
+        PendingMassLibraryOrderBatches::Legacy(batches) => {
+            let (owner, cards) = (!batches.is_empty())
+                .then(|| batches.remove(0))
+                .expect("a next owner library order requires a queued owner batch");
             // Legacy tuple queues did not record identity/origin. The strict legacy
             // admission gate accepted the CURRENT prompt only after proving every
             // member still occupies its old battlefield origin; snapshot the next
             // batch before publishing it so every later interaction is typed.
-            snapshot_mass_library_order_batch(state, owner, cards)
+            // Legacy queues predate the arranger: each was owner-arranged.
+            snapshot_mass_library_order_batch(state, owner, None, cards)
         }
     };
-    if pending.remaining_batches.is_empty() {
-        state.pending_mass_library_order_choice = None;
-    } else {
-        state.pending_mass_library_order_choice = Some(pending.clone());
-    }
+    let chooser = batch.chooser();
     state.waiting_for = mass_library_order_effect_zone_choice(
-        batch.clone(),
+        batch,
         pending.source_id,
-        pending.library_position,
+        pending.library_position.clone(),
         pending.track_exiled_by_source,
-        pending.duration,
+        pending.duration.clone(),
     );
-    Some(batch.owner)
+    state.pending_mass_library_order_choice = Some(pending);
+    chooser
+}
+
+/// Keep only the still-current members of `batches`, dropping emptied batches.
+fn retain_live_mass_library_order_batches(
+    state: &GameState,
+    batches: &mut Vec<MassLibraryOrderBatch>,
+) {
+    *batches = batches
+        .iter()
+        .map(|batch| live_mass_library_order_batch(state, batch))
+        .filter(|batch| !batch.members.is_empty())
+        .collect();
+}
+
+/// CR 800.4g + CR 800.4h: the arrangement a departed named arranger still owed
+/// passes on. The arranger is the instruction's controller (CR 101.1 +
+/// CR 608.2c); a controller who has left the game would choose another player
+/// to make the choice (CR 800.4g), and that choice is itself required of a
+/// player who has left, so the next player in turn order after them makes it
+/// (CR 800.4h). Writes that player onto `batch` as its arranger and returns
+/// them; `None` when the batch names no arranger or its arranger is still in
+/// the game.
+///
+/// Known limitation: the elector arranges the cards themself; the CR 800.4g
+/// option to name another player is not modelled.
+///
+/// An owner-arranged batch (`arranger: None`) never needs this: a departed
+/// owner's cards leave the game with them (CR 800.4a), so nothing of that batch
+/// is left to arrange.
+fn hand_on_departed_arranger(
+    state: &GameState,
+    batch: &mut MassLibraryOrderBatch,
+) -> Option<PlayerId> {
+    let departed = batch
+        .arranger
+        .filter(|arranger| !crate::game::players::is_alive(state, *arranger))?;
+    let substitute = crate::game::players::next_player_in_turn_order(state, departed);
+    batch.arranger = Some(substitute);
+    Some(substitute)
+}
+
+fn prune_owner_arrangement_carrier(state: &GameState, pending: &mut PendingMassLibraryOrderChoice) {
+    // CR 800.4a + CR 400.7: a departed owner's cards left the game with them, and an object exiled with its departed controller is a new object; neither remains in the arrangement.
+    match &mut pending.remaining_batches {
+        PendingMassLibraryOrderBatches::Typed(batches) => {
+            retain_live_mass_library_order_batches(state, batches);
+            // CR 800.4g + CR 800.4h: a queued batch whose named arranger left passes to the next player in turn order.
+            for batch in batches.iter_mut() {
+                hand_on_departed_arranger(state, batch);
+            }
+        }
+        PendingMassLibraryOrderBatches::Legacy(batches) => {
+            batches.retain(|(owner, _)| crate::game::players::is_alive(state, *owner))
+        }
+    }
+    retain_live_mass_library_order_batches(state, &mut pending.arranged_batches);
+}
+
+/// How an open owner library arrangement continues after a player leaves.
+pub(crate) enum OwnerLibraryArrangementReconciliation {
+    /// The open prompt still names exactly its live members.
+    Unchanged,
+    /// `waiting_for` now holds this chooser's prompt.
+    Prompted(PlayerId),
+    /// `waiting_for` holds `chooser`'s prompt over `cards`; submitting `cards`
+    /// completes the arrangement as one simultaneous move. `chooser` may have
+    /// left the game; an empty `cards` completes the instruction with nothing
+    /// moved.
+    Settle {
+        chooser: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// The open prompt is not a current-shape prompt of this arrangement and its
+    /// actor has left, so nothing can continue the collected orders; the carrier
+    /// is dropped without completion. A current-shape prompt never reaches this:
+    /// its instruction completes through `Settle` even when its last chooser has
+    /// left. A finished game clears the carrier in elimination's GameOver branch.
+    Retired,
+}
+
+/// CR 800.4a + CR 101.4 + CR 401.4: reconcile an open owner library arrangement
+/// with the players and objects still in the game after a departure. The only
+/// departure authority for the carrier and its open prompt. An instruction whose
+/// current-shape prompt is open always completes, even when its last chooser has
+/// left.
+///
+/// CR 800.4g + CR 800.4h: when the arranger the instruction named has left while
+/// the open batch, or a queued one, still has cards to arrange, the next player
+/// in turn order after them arranges those cards. Known limitation: the elector
+/// arranges the cards themself; the CR 800.4g option to name another player is
+/// not modelled.
+pub(crate) fn reconcile_owner_library_arrangement(
+    state: &mut GameState,
+) -> OwnerLibraryArrangementReconciliation {
+    let WaitingFor::EffectZoneChoice {
+        player: chooser,
+        source_id,
+        track_exiled_by_source,
+        library_position: Some(library_position),
+        mass_library_order: Some(current),
+        duration,
+        ..
+    } = &state.waiting_for
+    else {
+        // Every state that is not an owner-arrangement prompt, a legacy-shaped
+        // prompt included, carries no member provenance to reconcile.
+        let Some(mut pending) = state.pending_mass_library_order_choice.take() else {
+            return OwnerLibraryArrangementReconciliation::Unchanged;
+        };
+        prune_owner_arrangement_carrier(state, &mut pending);
+        if state
+            .waiting_for
+            .acting_player()
+            .is_some_and(|player| !crate::game::players::is_alive(state, player))
+        {
+            return OwnerLibraryArrangementReconciliation::Retired;
+        }
+        state.pending_mass_library_order_choice = Some(pending);
+        return OwnerLibraryArrangementReconciliation::Unchanged;
+    };
+    let chooser = *chooser;
+    let source_id = *source_id;
+    let track_exiled_by_source = *track_exiled_by_source;
+    let library_position = library_position.clone();
+    let duration = duration.clone();
+    let current = current.clone();
+
+    let instruction = OwnerArrangementInstruction {
+        source_id,
+        library_position: &library_position,
+        track_exiled_by_source,
+        duration: duration.as_ref(),
+    };
+    let carrier = state.pending_mass_library_order_choice.take();
+    let mut pending =
+        carrier.filter(|pending| owner_arrangement_carrier_binds(state, pending, &instruction));
+    if let Some(pending) = pending.as_mut() {
+        prune_owner_arrangement_carrier(state, pending);
+    }
+    let mut live = live_mass_library_order_batch(state, &current);
+    if !live.members.is_empty() {
+        state.pending_mass_library_order_choice = pending;
+        // CR 800.4a + CR 800.4g + CR 800.4h + CR 608.2m: the named arranger left
+        // while cards remain to arrange; the resolution continues, and the
+        // arrangement passes to the next player in turn order after them.
+        if let Some(substitute) = hand_on_departed_arranger(state, &mut live) {
+            state.waiting_for = mass_library_order_effect_zone_choice(
+                live,
+                source_id,
+                library_position,
+                track_exiled_by_source,
+                duration,
+            );
+            return OwnerLibraryArrangementReconciliation::Prompted(substitute);
+        }
+        if live == current {
+            return OwnerLibraryArrangementReconciliation::Unchanged;
+        }
+        state.waiting_for = mass_library_order_effect_zone_choice(
+            live,
+            source_id,
+            library_position,
+            track_exiled_by_source,
+            duration,
+        );
+        return OwnerLibraryArrangementReconciliation::Prompted(chooser);
+    }
+
+    // CR 800.4a: the current owner has nothing left to arrange; CR 101.4: the next owner chooses, or the collected arrangement happens.
+    if let Some(mut pending) = pending {
+        if !pending.remaining_batches.is_empty() {
+            return OwnerLibraryArrangementReconciliation::Prompted(open_next_owner_library_order(
+                state, pending,
+            ));
+        }
+        if let Some(last) = pending.arranged_batches.pop() {
+            let chooser = last.chooser();
+            let cards = last
+                .members
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect();
+            state.pending_mass_library_order_choice = Some(pending);
+            state.waiting_for = mass_library_order_effect_zone_choice(
+                last,
+                source_id,
+                library_position,
+                track_exiled_by_source,
+                duration,
+            );
+            return OwnerLibraryArrangementReconciliation::Settle { chooser, cards };
+        }
+    }
+    // CR 608.2c + CR 608.2m + CR 800.4a: nothing is left for anyone to arrange. The
+    // departure took the leaver's owned cards out of the arrangement, but the
+    // resolution under way continues (CR 608.2m), so the instruction completes with
+    // nothing moved — whether or not its last chooser is still in the game — and
+    // the resolution goes on to its remaining instructions before any player
+    // receives priority (CR 117.2e).
+    state.waiting_for = mass_library_order_effect_zone_choice(
+        live,
+        source_id,
+        library_position,
+        track_exiled_by_source,
+        duration,
+    );
+    OwnerLibraryArrangementReconciliation::Settle {
+        chooser,
+        cards: Vec::new(),
+    }
 }
 
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
@@ -2354,34 +2736,13 @@ pub fn resolve_all(
         && !random_order
         && matching.len() > 1
     {
+        // `matching.len() > 1` guarantees at least one owner batch.
         let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
-        let (first_owner, first_cards) = owner_batches
-            .first()
-            .expect("matching.len() > 1 guarantees at least one owner batch")
-            .clone();
-        let remaining_batches: Vec<_> = owner_batches
-            .into_iter()
-            .skip(1)
-            .map(|(owner, cards)| snapshot_mass_library_order_batch(state, owner, cards))
-            .collect();
-        if !remaining_batches.is_empty() {
-            state.pending_mass_library_order_choice = Some(Box::new(
-                crate::types::game_state::PendingMassLibraryOrderChoice {
-                    source_id: ability.source_id,
-                    library_position: effect_library_position
-                        .clone()
-                        .expect("library-order branch requires an explicit library position"),
-                    track_exiled_by_source,
-                    duration: ability.duration.clone(),
-                    remaining_batches:
-                        crate::types::game_state::PendingMassLibraryOrderBatches::Typed(
-                            remaining_batches,
-                        ),
-                },
-            ));
-        }
-        state.waiting_for = mass_library_order_effect_zone_choice(
-            snapshot_mass_library_order_batch(state, first_owner, first_cards),
+        // CR 401.4: a mass move names no arranger; each owner orders their own.
+        open_owner_library_arrangement(
+            state,
+            owner_batches,
+            None,
             ability.source_id,
             effect_library_position
                 .clone()
@@ -8209,10 +8570,58 @@ mod tests {
         }
     }
 
-    /// CR 401.4: When one mass move covers multiple owners' cards, each owner
-    /// receives an independent library-order prompt in APNAP order.
-    #[test]
-    fn change_zone_all_library_bottom_order_prompts_each_owner_sequentially() {
+    /// A `ChangeZoneAll` Library → Library bottom placement of the last
+    /// revealed cards, with no ordering randomization (CR 401.4).
+    fn library_bottom_change_zone_all(source_id: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+    }
+
+    fn library_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+        state.players[player.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    fn put_at_library_position_resolutions(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// Two owners' revealed library cards are put on the bottom at once:
+    /// P0 owns `p0_card`; P1 owns `p1_a`, `p1_b` above an unrevealed `deep`.
+    /// P1 is active, so P1 chooses first (CR 101.4). The resolution has opened
+    /// P1's prompt. Returns `(state, p0_card, p1_a, p1_b, deep)`.
+    fn two_owner_library_bottom_arrangement() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectId)
+    {
         let mut state = GameState::new_two_player(42);
         let p0_card = create_object(
             &mut state,
@@ -8235,32 +8644,25 @@ mod tests {
             "Opponent Revealed B".to_string(),
             Zone::Library,
         );
+        let deep = create_object(
+            &mut state,
+            CardId(714),
+            PlayerId(1),
+            "Opponent Unrevealed".to_string(),
+            Zone::Library,
+        );
         state.players[0].library = im::vector![p0_card];
-        state.players[1].library = im::vector![p1_a, p1_b];
+        state.players[1].library = im::vector![p1_a, p1_b, deep];
         state.last_revealed_ids = vec![p0_card, p1_a, p1_b];
         state.active_player = PlayerId(1);
 
-        let ability = ResolvedAbility::new(
-            Effect::ChangeZoneAll {
-                origin: Some(Zone::Library),
-                destination: Zone::Library,
-                target: TargetFilter::LastRevealed,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                enter_with_counters: vec![],
-                face_down_profile: None,
-                library_position: Some(LibraryPosition::Bottom),
-                library_shuffle: Default::default(),
-                random_order: false,
-            },
-            vec![],
-            ObjectId(901),
-            PlayerId(0),
-        );
-
         let mut events = Vec::new();
-        resolve_all(&mut state, &ability, &mut events).unwrap();
+        resolve_all(
+            &mut state,
+            &library_bottom_change_zone_all(ObjectId(901)),
+            &mut events,
+        )
+        .unwrap();
 
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
@@ -8299,15 +8701,10 @@ mod tests {
                 }),
             "non-active owner batch must remain queued"
         );
+        (state, p0_card, p1_a, p1_b, deep)
+    }
 
-        apply_as_current(
-            &mut state,
-            GameAction::SelectCards {
-                cards: vec![p1_a, p1_b],
-            },
-        )
-        .unwrap();
-
+    fn assert_owner_prompt(state: &GameState, owner: PlayerId, expected: &[ObjectId]) {
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,
@@ -8315,15 +8712,468 @@ mod tests {
                 mass_library_order,
                 ..
             } => {
-                assert_eq!(*player, PlayerId(0), "second owner receives their batch");
-                assert_eq!(cards, &vec![p0_card]);
+                assert_eq!(*player, owner, "the next owner receives their batch");
+                assert_eq!(cards, expected);
                 assert_eq!(
                     mass_library_order.as_ref().map(|batch| batch.owner),
-                    Some(PlayerId(0))
+                    Some(owner)
                 );
             }
-            other => panic!("expected second-owner EffectZoneChoice, got {other:?}"),
+            other => panic!("expected {owner:?}'s EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 101.4 + CR 401.4: when one mass move covers several owners' cards,
+    /// each owner chooses in APNAP order and every card moves together after
+    /// the last choice. The first owner's submission moves nothing; the last
+    /// one moves all three cards in one completion over the whole set.
+    ///
+    /// REVERT-FAILING: with per-owner delivery restored, P1's cards are already
+    /// at the bottom when P0 is prompted, and the count covers only P0's card.
+    #[test]
+    fn change_zone_all_library_order_collects_each_owner_before_one_move() {
+        let (mut state, p0_card, p1_a, p1_b, deep) = two_owner_library_bottom_arrangement();
+
+        let first = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            library_ids(&state, PlayerId(1)),
+            vec![p1_a, p1_b, deep],
+            "CR 101.4: nothing moves before the last owner chooses"
+        );
+        let pending = state
+            .pending_mass_library_order_choice
+            .as_ref()
+            .expect("the collected order is carried to the last owner");
+        assert!(pending.remaining_batches.is_empty());
+        assert_eq!(pending.resolving_entry, None);
+        assert_eq!(pending.arranged_batches.len(), 1);
+        assert_eq!(pending.arranged_batches[0].owner, PlayerId(1));
+        assert_eq!(
+            pending.arranged_batches[0]
+                .members
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect::<Vec<_>>(),
+            vec![p1_b, p1_a],
+            "P1's submitted order is recorded"
+        );
+        assert_owner_prompt(&state, PlayerId(0), &[p0_card]);
+
+        let last = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p0_card],
+            },
+        )
+        .unwrap();
+        assert_eq!(library_ids(&state, PlayerId(1)), vec![deep, p1_b, p1_a]);
+        assert_eq!(library_ids(&state, PlayerId(0)), vec![p0_card]);
+        assert_eq!(state.last_effect_count, Some(3));
+        assert_eq!(
+            put_at_library_position_resolutions(&first.events)
+                + put_at_library_position_resolutions(&last.events),
+            1,
+            "one arrangement completes once"
+        );
+        assert!(state.pending_mass_library_order_choice.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 400.7: a collected member that changes zones before the last owner
+    /// chooses is a new object; the instruction no longer finds it, so it is
+    /// left where it is while the rest of the arrangement moves.
+    ///
+    /// Paired positive: `change_zone_all_library_order_collects_each_owner_before_one_move`
+    /// moves `p1_a` on the identical fixture.
+    #[test]
+    fn change_zone_all_library_order_skips_a_collected_member_that_changed_identity() {
+        let (mut state, p0_card, p1_a, p1_b, deep) = two_owner_library_bottom_arrangement();
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .unwrap();
+        state.objects.get_mut(&p1_a).unwrap().incarnation += 1;
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p0_card],
+            },
+        )
+        .expect("the last owner's choice still completes");
+        assert_eq!(library_ids(&state, PlayerId(1)), vec![p1_a, deep, p1_b]);
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.pending_mass_library_order_choice.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Which part of a foreign carrier fails to bind to the answered prompt.
+    enum ForeignCarrier {
+        /// A carrier written by another instruction's source.
+        OtherSource,
+        /// The same instruction fields, but bound to a resolution that is not
+        /// the one now resolving.
+        OtherResolution,
+        /// A carrier that binds (same fields, no entry provenance).
+        Binding,
+    }
+
+    fn submit_single_owner_order_beside(
+        carrier: ForeignCarrier,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let p0_card = create_object(
+            &mut state,
+            CardId(721),
+            PlayerId(0),
+            "Self Card".to_string(),
+            Zone::Library,
+        );
+        let p0_deep = create_object(
+            &mut state,
+            CardId(722),
+            PlayerId(0),
+            "Self Deep".to_string(),
+            Zone::Library,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(723),
+            PlayerId(1),
+            "Opponent Revealed A".to_string(),
+            Zone::Library,
+        );
+        let p1_b = create_object(
+            &mut state,
+            CardId(724),
+            PlayerId(1),
+            "Opponent Revealed B".to_string(),
+            Zone::Library,
+        );
+        let deep = create_object(
+            &mut state,
+            CardId(725),
+            PlayerId(1),
+            "Opponent Unrevealed".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = im::vector![p0_card, p0_deep];
+        state.players[1].library = im::vector![p1_a, p1_b, deep];
+        state.last_revealed_ids = vec![p1_a, p1_b];
+
+        resolve_all(
+            &mut state,
+            &library_bottom_change_zone_all(ObjectId(902)),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let (source_id, library_position, track_exiled_by_source, duration) =
+            match &state.waiting_for {
+                WaitingFor::EffectZoneChoice {
+                    player,
+                    source_id,
+                    library_position,
+                    track_exiled_by_source,
+                    duration,
+                    ..
+                } => {
+                    assert_eq!(*player, PlayerId(1));
+                    (
+                        *source_id,
+                        library_position
+                            .clone()
+                            .expect("owner prompt names a position"),
+                        *track_exiled_by_source,
+                        duration.clone(),
+                    )
+                }
+                other => panic!("expected P1's ordering prompt, got {other:?}"),
+            };
+        assert!(
+            state.pending_mass_library_order_choice.is_none(),
+            "a single-owner arrangement writes no carrier"
+        );
+
+        let (source_id, resolving_entry) = match carrier {
+            ForeignCarrier::OtherSource => (ObjectId(source_id.0 + 1000), None),
+            ForeignCarrier::OtherResolution => (source_id, Some(ObjectId(4242))),
+            ForeignCarrier::Binding => (source_id, None),
+        };
+        state.pending_mass_library_order_choice = Some(Box::new(
+            crate::types::game_state::PendingMassLibraryOrderChoice {
+                source_id,
+                library_position,
+                track_exiled_by_source,
+                duration,
+                remaining_batches: crate::types::game_state::PendingMassLibraryOrderBatches::Typed(
+                    Vec::new(),
+                ),
+                arranged_batches: vec![MassLibraryOrderBatch {
+                    owner: PlayerId(0),
+                    members: vec![MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::from_object(&state.objects[&p0_card]),
+                        origin: Zone::Library,
+                    }],
+                    arranger: None,
+                }],
+                resolving_entry,
+            },
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .expect("P1 submits their order");
+        assert_eq!(library_ids(&state, PlayerId(1)), vec![deep, p1_b, p1_a]);
+        assert!(state.pending_mass_library_order_choice.is_none());
+        (state, p0_card, p0_deep)
+    }
+
+    /// CR 608.2c + CR 401.4: a carrier that does not belong to the answered
+    /// arrangement — another instruction's source, or another resolution — is
+    /// discarded, never merged into this owner's move.
+    ///
+    /// Paired positive (reach guard): a binding carrier on the same fixture
+    /// does merge, so the discarded variants are not vacuous.
+    #[test]
+    fn owner_arrangement_discards_a_carrier_bound_to_another_instruction() {
+        for carrier in [ForeignCarrier::OtherSource, ForeignCarrier::OtherResolution] {
+            let (state, p0_card, p0_deep) = submit_single_owner_order_beside(carrier);
+            assert_eq!(
+                library_ids(&state, PlayerId(0)),
+                vec![p0_card, p0_deep],
+                "a foreign carrier's collected order never moves"
+            );
+            assert_eq!(state.last_effect_count, Some(2));
+        }
+
+        let (state, p0_card, p0_deep) = submit_single_owner_order_beside(ForeignCarrier::Binding);
+        assert_eq!(
+            library_ids(&state, PlayerId(0)),
+            vec![p0_deep, p0_card],
+            "reach guard: a binding carrier's collected order moves with this one"
+        );
+        assert_eq!(state.last_effect_count, Some(3));
+    }
+
+    /// CR 104.1: when a departure ends the game mid-arrangement, the collected
+    /// orders are retired with it.
+    #[test]
+    fn owner_arrangement_carrier_is_retired_at_game_over() {
+        let (mut state, p0_card, p1_a, p1_b, _deep) = two_owner_library_bottom_arrangement();
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .unwrap();
+        assert_owner_prompt(&state, PlayerId(0), &[p0_card]);
+        assert!(state.pending_mass_library_order_choice.is_some());
+
+        apply_as_current(
+            &mut state,
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1))
+            }
+        );
+        assert!(state.pending_mass_library_order_choice.is_none());
+    }
+
+    /// CR 800.4g + CR 800.4h: when the arranger an instruction named leaves
+    /// with a batch still queued, that queued batch passes to the next player
+    /// in turn order too, not only the open one. P0 arranges P1's and P2's
+    /// cards; P0 concedes at P1's batch, so P1 arranges both.
+    ///
+    /// No printed card in the controller-arranged class places more than one
+    /// owner's cards, so this queue is reached only from a constructed
+    /// arrangement.
+    ///
+    /// REVERT-FAILING: without the queued rewrite, P2's batch is published to
+    /// the departed P0 once P1 submits.
+    #[test]
+    fn departed_arranger_hand_on_rewrites_the_queued_batches() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut cards = Vec::new();
+        for (cid, owner) in [(731, 1), (732, 1), (733, 1), (734, 2), (735, 2), (736, 2)] {
+            cards.push(create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(owner),
+                format!("Library Card {cid}"),
+                Zone::Library,
+            ));
+        }
+        let (p1_a, p1_b, p1_deep) = (cards[0], cards[1], cards[2]);
+        let (p2_a, p2_b, p2_deep) = (cards[3], cards[4], cards[5]);
+        state.players[1].library = im::vector![p1_deep, p1_a, p1_b];
+        state.players[2].library = im::vector![p2_deep, p2_a, p2_b];
+        open_owner_library_arrangement(
+            &mut state,
+            vec![
+                (PlayerId(1), vec![p1_a, p1_b]),
+                (PlayerId(2), vec![p2_a, p2_b]),
+            ],
+            Some(PlayerId(0)),
+            ObjectId(903),
+            LibraryPosition::Top,
+            false,
+            None,
+        );
+        let arranger_of = |state: &GameState| match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                mass_library_order: Some(batch),
+                ..
+            } => (*player, batch.owner, batch.arranger),
+            other => panic!("expected an arrangement prompt, got {other:?}"),
+        };
+        // Reach guard: P0 arranges P1's batch, and P2's batch is queued for P0.
+        assert_eq!(
+            arranger_of(&state),
+            (PlayerId(0), PlayerId(1), Some(PlayerId(0)))
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        )
+        .expect("P0 concedes");
+        assert_eq!(
+            arranger_of(&state),
+            (PlayerId(1), PlayerId(1), Some(PlayerId(1))),
+            "the open batch passes to the next player in turn order"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .expect("P1 arranges P1's batch");
+        assert_eq!(
+            arranger_of(&state),
+            (PlayerId(1), PlayerId(2), Some(PlayerId(1))),
+            "the queued batch passed on too"
+        );
+
+        let completed = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p2_b, p2_a],
+            },
+        )
+        .expect("P1 arranges P2's batch");
+        assert_eq!(library_ids(&state, PlayerId(1)), vec![p1_b, p1_a, p1_deep]);
+        assert_eq!(library_ids(&state, PlayerId(2)), vec![p2_b, p2_a, p2_deep]);
+        assert_eq!(put_at_library_position_resolutions(&completed.events), 1);
+        assert!(state.pending_mass_library_order_choice.is_none());
+    }
+
+    /// CR 101.1 + CR 401.4 + CR 101.4: a named arranger who orders two owners'
+    /// cards answers each owner's batch in turn; each recorded order stays keyed
+    /// to the library's owner, so both libraries receive the arranger's order in
+    /// the one simultaneous move.
+    ///
+    /// No printed card in the controller-arranged class places more than one
+    /// owner's cards, so this queue is reached only from a constructed
+    /// arrangement.
+    ///
+    /// REVERT-FAILING: with the answered batch keyed to the answering player
+    /// instead of its owner, P1's recorded order is dropped at the final move.
+    #[test]
+    fn named_arranger_orders_every_owners_batch_into_its_owners_library() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut cards = Vec::new();
+        for (cid, owner) in [(741, 1), (742, 1), (743, 1), (744, 2), (745, 2), (746, 2)] {
+            cards.push(create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(owner),
+                format!("Library Card {cid}"),
+                Zone::Library,
+            ));
+        }
+        let (p1_a, p1_b, p1_deep) = (cards[0], cards[1], cards[2]);
+        let (p2_a, p2_b, p2_deep) = (cards[3], cards[4], cards[5]);
+        state.players[1].library = im::vector![p1_deep, p1_a, p1_b];
+        state.players[2].library = im::vector![p2_deep, p2_a, p2_b];
+        open_owner_library_arrangement(
+            &mut state,
+            vec![
+                (PlayerId(1), vec![p1_a, p1_b]),
+                (PlayerId(2), vec![p2_a, p2_b]),
+            ],
+            Some(PlayerId(0)),
+            ObjectId(904),
+            LibraryPosition::Top,
+            false,
+            None,
+        );
+        let arranger_of = |state: &GameState| match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                mass_library_order: Some(batch),
+                ..
+            } => (*player, batch.owner, batch.arranger),
+            other => panic!("expected an arrangement prompt, got {other:?}"),
+        };
+        assert_eq!(
+            arranger_of(&state),
+            (PlayerId(0), PlayerId(1), Some(PlayerId(0)))
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_b, p1_a],
+            },
+        )
+        .expect("P0 arranges P1's batch");
+        assert_eq!(
+            arranger_of(&state),
+            (PlayerId(0), PlayerId(2), Some(PlayerId(0))),
+            "P0 arranges the queued batch too"
+        );
+        assert_eq!(
+            library_ids(&state, PlayerId(1)),
+            vec![p1_deep, p1_a, p1_b],
+            "CR 101.4: nothing moves before the last batch is arranged"
+        );
+
+        let completed = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p2_b, p2_a],
+            },
+        )
+        .expect("P0 arranges P2's batch");
+        assert_eq!(library_ids(&state, PlayerId(1)), vec![p1_b, p1_a, p1_deep]);
+        assert_eq!(library_ids(&state, PlayerId(2)), vec![p2_b, p2_a, p2_deep]);
+        assert_eq!(put_at_library_position_resolutions(&completed.events), 1);
+        assert!(state.pending_mass_library_order_choice.is_none());
     }
 
     /// Build an Exhume-shaped ability: `Effect::ChangeZone` Graveyard →

@@ -7806,6 +7806,7 @@ fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
             ),
             count: QuantityExpr::Fixed { value: 2 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
     )));
     {

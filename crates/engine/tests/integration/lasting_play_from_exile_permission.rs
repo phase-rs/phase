@@ -571,6 +571,7 @@ fn the_rest_of_those_exiled_cards_survives_the_removed_optionality() {
             target,
             count,
             position,
+            arranger: _,
         } = &*cleanup.effect
         else {
             panic!("chapter {} — expected the bottom cleanup", chapter + 1);

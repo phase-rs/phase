@@ -5211,26 +5211,44 @@ pub struct PendingPerPlayerZoneChoice {
     pub nominee: Option<PlayerId>,
 }
 
-/// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
-/// `ChangeZoneAll` instruction that places multiple owners' cards at the same
-/// library position with `random_order: false`. The first owner's batch is
-/// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
-/// batches drain after each batch completes.
+/// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
+/// instruction that places several owners' cards at one library position. The
+/// first owner's batch is surfaced as `WaitingFor::EffectZoneChoice`; each
+/// submitted order is collected, the next owner is prompted in APNAP order, and
+/// every owner's cards move together after the last owner chooses. Each prompt
+/// is answered by its batch's `chooser()` — the owner, unless the instruction
+/// names the arranger itself (CR 101.1).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderMember {
     /// The exact object incarnation that was selected for this ordered move.
     pub identity: ObjectIncarnationRef,
-    /// The zone this member occupied when the mass move created the prompt.
+    /// The zone this member occupied when the library-order prompt was created.
     pub origin: Zone,
 }
 
 /// One owner's exact members of a mass library-order instruction.
 /// The identity and origin are frozen at prompt creation so a later object with
-/// the same id cannot satisfy an in-flight ordering choice.
+/// the same id cannot satisfy an in-flight ordering choice. `owner` is whose
+/// cards and library these are; the player who arranges them is `chooser()`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderBatch {
     pub owner: PlayerId,
+    /// CR 101.1 + CR 608.2c: the player the instruction directs to arrange this
+    /// owner's cards; `None` = CR 401.4 owner. Snapshotted at resolution
+    /// (CR 608.2d); if that player leaves, the next player in turn order
+    /// replaces them (CR 800.4g + CR 800.4h). Older saves decode as `None`: every earlier prompt was
+    /// owner-arranged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arranger: Option<PlayerId>,
     pub members: Vec<MassLibraryOrderMember>,
+}
+
+impl MassLibraryOrderBatch {
+    /// CR 401.4 + CR 101.1: the player who arranges this batch — the arranger
+    /// the instruction names, else the owner of the cards.
+    pub fn chooser(&self) -> PlayerId {
+        self.arranger.unwrap_or(self.owner)
+    }
 }
 
 /// Remaining batches of an in-flight mass library order.
@@ -5273,6 +5291,18 @@ pub struct PendingMassLibraryOrderChoice {
     /// Remaining owner batches in APNAP order after the current prompt.
     #[serde(default)]
     pub remaining_batches: PendingMassLibraryOrderBatches,
+    /// CR 101.4 + CR 401.4: owners who have already chosen, in APNAP order;
+    /// each batch lists that owner's cards in their submitted order with the
+    /// identity/origin frozen at submission. Nothing has moved yet: the whole
+    /// arrangement is delivered as one simultaneous action after the last owner
+    /// chooses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arranged_batches: Vec<MassLibraryOrderBatch>,
+    /// CR 608.2c: the stack entry whose resolution opened this arrangement. A
+    /// carrier is consumed only by a prompt of that same resolution; `None`
+    /// (older saves, or no resolving entry) binds on the instruction fields alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -7004,8 +7034,10 @@ pub enum BatchCompletion {
         player: PlayerId,
         /// Resolving effect source for the terminal `EffectResolved` event.
         source_id: ObjectId,
-        /// Full selected order. It determines the printed placement order and
-        /// remains the selected-object tracked set / effect count.
+        /// The complete arranged order: for an owner arrangement, every owner's
+        /// cards (APNAP owner segments, each in that owner's order). It
+        /// determines the printed placement order and remains the
+        /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
         /// Selection members that were already in a library at delivery time.
         /// They are repositions, not replaceable zone-change requests.
@@ -16707,9 +16739,12 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
-        /// Exact origin/identity snapshot for a fresh
-        /// mass `ChangeZoneAll` library-order prompt. Generic zone choices leave
-        /// this absent and therefore retain their ordinary strict zone check.
+        /// Exact origin/identity snapshot for a fresh CR 401.4 owner
+        /// library-order prompt: a `ChangeZoneAll` mass placement or an
+        /// announced target set placed by `PutAtLibraryPosition`. The prompt's
+        /// `player` is the batch's `chooser()`: its owner, or the arranger the
+        /// instruction names (CR 101.1). Generic zone choices leave this absent
+        /// and therefore retain their ordinary strict zone check.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mass_library_order: Option<MassLibraryOrderBatch>,
         /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
@@ -24001,8 +24036,9 @@ declare_game_state! {
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
-    /// CR 401.4: Remaining per-owner library-order batches for a mass
-    /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
+    /// CR 401.4 + CR 101.4: the remaining per-owner prompts and the orders
+    /// already chosen for one owner library arrangement paused on
+    /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Boxed to keep `GameState` inside its stack budget
     /// (`types/game_state_size.rs`): it is populated only between the batches of
@@ -48668,6 +48704,7 @@ mod tests {
                 identity: ObjectIncarnationRef::of(ObjectId(1), 7),
                 origin: Zone::Battlefield,
             }],
+            arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
@@ -48725,6 +48762,8 @@ mod tests {
             track_exiled_by_source: false,
             duration: None,
             remaining_batches: PendingMassLibraryOrderBatches::Typed(Vec::new()),
+            arranged_batches: Vec::new(),
+            resolving_entry: None,
         };
         let mut wire = serde_json::to_value(pending).unwrap();
         wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
@@ -48735,6 +48774,14 @@ mod tests {
             PendingMassLibraryOrderBatches::Legacy(ref batches)
                 if batches == &vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
         ));
+        assert!(
+            decoded.arranged_batches.is_empty(),
+            "an older save without collected orders decodes with none"
+        );
+        assert_eq!(
+            decoded.resolving_entry, None,
+            "an older save without entry provenance binds on the instruction fields alone"
+        );
 
         let reserialized = serde_json::to_value(decoded).unwrap();
         assert_eq!(
@@ -48742,6 +48789,84 @@ mod tests {
             serde_json::json!([[1, [2, 3]]]),
             "a legacy mass-order queue must retain its migration authority across a save"
         );
+    }
+
+    /// CR 101.4 + CR 401.4 + CR 608.2c: the orders owners have already chosen
+    /// and the resolution that opened the arrangement survive a save, so a
+    /// reloaded arrangement still delivers every owner's cards together.
+    #[test]
+    fn pending_mass_library_order_choice_round_trips_arranged_batches_and_entry() {
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::NthFromTop { n: 3 },
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
+                owner: PlayerId(2),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::of(ObjectId(5), 1),
+                    origin: Zone::Battlefield,
+                }],
+                arranger: None,
+            }]),
+            arranged_batches: vec![MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                members: vec![
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(3), 2),
+                        origin: Zone::Battlefield,
+                    },
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(4), 0),
+                        origin: Zone::Graveyard,
+                    },
+                ],
+                arranger: None,
+            }],
+            resolving_entry: Some(ObjectId(7)),
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+    }
+
+    /// CR 101.1 + CR 401.4: an instruction-named arranger survives serde on both
+    /// the queued and the arranged batch, so a reload still prompts the arranger
+    /// rather than falling back to the owner; a wire without the key decodes as
+    /// the owner default.
+    #[test]
+    fn mass_library_order_batch_round_trips_an_explicit_arranger() {
+        let batch = |owner: u8, object: u64| MassLibraryOrderBatch {
+            owner: PlayerId(owner),
+            members: vec![MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::of(ObjectId(object), 0),
+                origin: Zone::Graveyard,
+            }],
+            arranger: Some(PlayerId(0)),
+        };
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::Top,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![batch(2, 5)]),
+            arranged_batches: vec![batch(1, 3)],
+            resolving_entry: None,
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            wire["arranged_batches"][0]["arranger"],
+            serde_json::json!(0)
+        );
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+        assert_eq!(decoded.arranged_batches[0].chooser(), PlayerId(0));
+
+        let mut legacy = serde_json::to_value(batch(1, 3)).unwrap();
+        legacy.as_object_mut().unwrap().remove("arranger");
+        let legacy: MassLibraryOrderBatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.arranger, None);
+        assert_eq!(legacy.chooser(), PlayerId(1));
     }
 
     /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip

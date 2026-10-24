@@ -2206,11 +2206,13 @@ pub(super) fn finish_deferred_spell_resolution(
 /// It keeps resolving fully (CR 608.2m), so it owes the stack-exit bookkeeping
 /// of how it was cast, as on the inline path; only the move is skipped, because
 /// it is already where it was put (issue #323). Reported resolved exactly once
-/// (CR 608.2m) — whether its own instruction moved it, its owner left, or its
-/// controller left while another player still had its instruction to answer.
-/// A carrier the elimination retires as `Eliminated` (the departed player's
-/// question was its last live work) never reaches here and is not reported
-/// resolved. A carrier whose final part was not deferred owes nothing here.
+/// (CR 608.2m) — whether its own instruction moved it, its owner left, its
+/// controller left while another player still had its instruction to answer,
+/// or the departure itself settled its departed controller's owner arrangement
+/// (CR 401.4) and its remaining instructions. A carrier the elimination retires
+/// as `Eliminated` (the departed player's unanswered question was its last live
+/// work) never reaches here and is not reported resolved. A carrier whose final
+/// part was not deferred owes nothing here.
 fn finish_deferred_resolution_of_departed_spell(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

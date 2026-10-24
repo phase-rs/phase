@@ -1455,9 +1455,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
-    // identities and origins for later private choices. The public current
-    // `EffectZoneChoice` is projected below; its execution-only successor
-    // carrier must never be shipped to any viewer, including a future owner.
+    // identities and origins for later private choices, and the orders owners
+    // have already chosen (CR 401.4: the order isn't revealed). The public
+    // current `EffectZoneChoice` is projected below; its execution-only
+    // successor carrier must never be shipped to any viewer, including a
+    // future owner.
     filtered.pending_mass_library_order_choice = None;
     // CR 400.2 + CR 616.1: the replacement-suspended exile iterator retains
     // the exact remaining library order and current-resolution incarnation

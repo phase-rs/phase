@@ -14086,6 +14086,7 @@ fn spell_graveyard_replacement_def(
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position,
+                arranger: None,
             },
             "CR 614.1a: if this spell would be put into its owner's graveyard, put it on its \
              owner's library instead.",

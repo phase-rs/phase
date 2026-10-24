@@ -21283,6 +21283,16 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         position: LibraryPosition,
+        /// CR 401.4 + CR 101.1 + CR 608.2c: who arranges two or more cards this effect
+        /// puts into one library position. `None`: the CR 401.4 default — each library's
+        /// owner arranges the cards put into it (Plow Under, Rebuking Ceremony, Riptide
+        /// Gearhulk). `Some(player)`: the instruction itself orders them ("… in any order"
+        /// in the controller's instruction — Misinformation, Lodestone Bauble), and that
+        /// player arranges (CR 101.1). Resolved at resolution (CR 608.2d) through
+        /// `resolve_player_for_context_ref`. Consulted only for an announced target set:
+        /// a resolution-time selection is already placed in its selector's order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arranger: Option<TargetFilter>,
     },
     /// Choose cards in hand that were drawn this turn. Chosen cards are put on
     /// top of their owner's library; each unchosen required card is kept by
@@ -41244,6 +41254,7 @@ mod tests {
             target: TargetFilter::ParentTarget,
             count: fixed(71),
             position: LibraryPosition::BeneathTop { depth: fixed(72) },
+            arranger: None,
         };
         let mut nested = ResolvedAbility::new(
             Effect::Draw {
