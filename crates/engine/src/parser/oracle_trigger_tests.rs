@@ -24317,17 +24317,15 @@ fn trigger_duskmantle_delayed_that_player_is_the_card_owner() {
 /// player" on the controller read from the zone-change record (CR 603.10a look-back).
 #[test]
 fn trigger_that_player_controller_heads_stay_triggering_player() {
-    for (text, name) in [(
+    let def = parse_trigger_line(
         "Whenever a creature an opponent controls dies, that player loses 2 life.",
         "Massacre Wurm",
-    )] {
-        let def = parse_trigger_line(text, name);
-        assert_eq!(
-            lose_life_target(&def),
-            Some(TargetFilter::TriggeringPlayer),
-            "{name}"
-        );
-    }
+    );
+    assert_eq!(
+        lose_life_target(&def),
+        Some(TargetFilter::TriggeringPlayer),
+        "Massacre Wurm"
+    );
     for (text, name) in [
         (
             "Whenever a creature an opponent controls dies, ~ deals 1 damage to that player.",
