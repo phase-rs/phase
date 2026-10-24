@@ -7,6 +7,116 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn relative_complete_cda_attached_and_cost_statics() {
+    let sources = [
+        "~'s power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.",
+        "~'s power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.",
+        "Enchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.",
+        "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.",
+    ];
+    for (index, source) in sources.into_iter().enumerate() {
+        let definitions = parse_static_line_multi(source);
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        assert_eq!(definition.description.as_deref(), Some(source));
+        assert_eq!(definition.condition, None);
+        if index < 3 {
+            let (head, legs) = if index == 1 {
+                (
+                    TypeFilter::Creature,
+                    vec![
+                        TypeFilter::Subtype("Fungus".into()),
+                        TypeFilter::Subtype("Saproling".into()),
+                    ],
+                )
+            } else {
+                (
+                    TypeFilter::Permanent,
+                    vec![
+                        TypeFilter::Subtype("Spirit".into()),
+                        TypeFilter::Enchantment,
+                    ],
+                )
+            };
+            let value = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::AnyOf(legs), head],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                },
+            };
+            let modifiers = if index == 2 {
+                vec![
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Lifelink,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(
+                            crate::types::keywords::ProtectionTarget::CardType("vampires".into()),
+                        ),
+                    },
+                    ContinuousModification::AddDynamicPower {
+                        value: value.clone(),
+                    },
+                    ContinuousModification::AddDynamicToughness { value },
+                ]
+            } else {
+                vec![
+                    ContinuousModification::SetDynamicPower {
+                        value: value.clone(),
+                    },
+                    ContinuousModification::SetDynamicToughness { value },
+                ]
+            };
+            let expected = StaticDefinition::continuous()
+                .affected(if index == 2 {
+                    TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    )
+                } else {
+                    TargetFilter::SelfRef
+                })
+                .modifications(modifiers)
+                .description(source.into());
+            let expected = if index == 2 { expected } else { expected.cda() };
+            assert_eq!(definition, &expected);
+        } else {
+            let count = QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+                scope: CountScope::Controller,
+                card_types: vec![],
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        TargetFilter::Typed(
+                            TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                        ),
+                    ],
+                }),
+            };
+            let expected = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(1),
+                spell_filter: None,
+                dynamic_count: Some(count),
+                reach: CostReductionReach::SpillsToGeneric,
+            })
+            .affected(TargetFilter::SelfRef)
+            .active_zones(crate::types::zones::self_spell_cost_mod_active_zones())
+            .description(source.into());
+            assert_eq!(definition, &expected);
+        }
+        insta::assert_json_snapshot!(format!("relative_complete_static_{index}"), definitions);
+    }
+}
+
+#[test]
 fn retained_noncreature_prohibition_cost_and_nth_static() {
     let sources = [
         "Noncreature spells you cast cost {1} less to cast.",

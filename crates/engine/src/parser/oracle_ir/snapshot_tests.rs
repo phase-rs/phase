@@ -7,6 +7,164 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn relative_eight_full_sources_ir_and_lowered() {
+    use crate::types::ability::{ContinuousModification, TypeFilter};
+    let sources = [
+        ("Collision Course", "Choose one —\n• Collision Course deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.\n• Destroy target artifact.", vec!["Sorcery"], vec![], vec![], (2,0,0,0,0)),
+        ("Katilda, Dawnhart Martyr", "Flying, lifelink, protection from Vampires\nKatilda's power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.\nDisturb {3}{W}{W} (You may cast this card from your graveyard transformed for its disturb cost.)", vec!["Creature"], vec!["Spirit","Warlock"], vec!["Flying","Lifelink","Protection","Disturb"], (0,1,0,0,4)),
+        ("Katilda's Rising Dawn", "Enchant creature\nEnchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.\nIf Katilda's Rising Dawn would be put into a graveyard from anywhere, exile it instead.", vec!["Enchantment"], vec!["Aura"], vec!["Enchant"], (0,1,0,1,1)),
+        ("The Mycotyrant", "Trample\nThe Mycotyrant's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)", vec!["Creature"], vec!["Elder","Fungus"], vec!["Trample"], (0,1,1,0,1)),
+        ("Frantic Firebolt", "Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.", vec!["Instant"], vec![], vec![], (1,0,0,0,0)),
+        ("Hearth Elemental", "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.", vec!["Creature"], vec!["Elemental"], vec![], (0,1,0,0,0)),
+        ("Stoke Genius", "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)", vec!["Sorcery"], vec!["Adventure"], vec![], (1,0,0,0,0)),
+        ("Thought Sponge", "Flash\nThis creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen this creature dies, draw cards equal to its power.", vec!["Creature"], vec!["Sponge"], vec!["Flash"], (0,0,1,1,1)),
+    ];
+    for (index, (name, text, types, subtypes, hints, counts)) in sources.into_iter().enumerate() {
+        let strings = |values: Vec<&str>| values.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let mut doc = parse_oracle_ir(
+            text,
+            name,
+            &strings(hints),
+            &strings(types),
+            &strings(subtypes),
+        );
+        assert_eq!(doc.source_text, text);
+        let mut identities = std::collections::HashSet::new();
+        for item in &doc.items {
+            assert!(identities.insert(item.id));
+            let span = item.source.span();
+            assert!(span.is_exact());
+            assert_eq!(
+                item.source.fragment(),
+                Some(&text[span.start_byte..span.end_byte])
+            );
+        }
+        let lowered = lower_oracle_ir(&mut doc);
+        assert_eq!(
+            (
+                lowered.abilities.len(),
+                lowered.statics.len(),
+                lowered.triggers.len(),
+                lowered.replacements.len(),
+                lowered.extracted_keywords.len()
+            ),
+            counts,
+            "{name}"
+        );
+        assert!(lowered.parse_warnings.is_empty(), "{name}: {lowered:#?}");
+        assert!(!lowered
+            .abilities
+            .iter()
+            .any(crate::parser::oracle::has_unimplemented));
+        if index == 1 || index == 3 {
+            let expected = if index == 1 {
+                vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Spirit".into()),
+                        TypeFilter::Enchantment,
+                    ]),
+                    TypeFilter::Permanent,
+                ]
+            } else {
+                vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Fungus".into()),
+                        TypeFilter::Subtype("Saproling".into()),
+                    ]),
+                    TypeFilter::Creature,
+                ]
+            };
+            assert!(lowered.statics[0].characteristic_defining);
+            for modification in &lowered.statics[0].modifications {
+                let value = match modification {
+                    ContinuousModification::SetDynamicPower { value }
+                    | ContinuousModification::SetDynamicToughness { value } => value,
+                    other => panic!("own numeric setters: {other:?}"),
+                };
+                assert!(
+                    matches!(value, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { filter: TargetFilter::Typed(typed) } } if typed.type_filters == expected && typed.controller == Some(crate::types::ability::ControllerRef::You))
+                );
+            }
+        }
+        if index == 2 {
+            assert!(!lowered.statics[0].characteristic_defining);
+            assert_eq!(lowered.statics[0].modifications.len(), 5);
+            assert_eq!(
+                lowered.replacements[0].valid_card,
+                Some(TargetFilter::SelfRef)
+            );
+            assert_eq!(
+                lowered.replacements[0].destination_zone,
+                Some(crate::types::zones::Zone::Graveyard)
+            );
+        }
+        if index == 3 {
+            assert!(matches!(
+                lowered.triggers[0]
+                    .execute
+                    .as_deref()
+                    .unwrap()
+                    .effect
+                    .as_ref(),
+                Effect::Token {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeCountThisTurn {
+                            from: None,
+                            to: Some(crate::types::zones::Zone::Graveyard),
+                            ..
+                        }
+                    },
+                    power: crate::types::ability::PtValue::Fixed(1),
+                    toughness: crate::types::ability::PtValue::Fixed(1),
+                    ..
+                }
+            ));
+        }
+        if index == 6 {
+            let OracleNodeIr::Spell(spell) = &doc.items[0].node else {
+                panic!("whole Stoke");
+            };
+            assert_eq!(spell.body.clauses.len(), 2);
+            for (clause, fragment) in spell
+                .body
+                .clauses
+                .iter()
+                .zip(["Discard your hand", "draw two cards"])
+            {
+                assert_eq!(clause.source.fragment(), Some(fragment));
+                assert_eq!(
+                    clause.source.span().precision,
+                    crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+                );
+            }
+            assert!(matches!(
+                lowered.abilities[0].effect.as_ref(),
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize { .. }
+                    },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                lowered.abilities[0]
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .effect
+                    .as_ref(),
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            ));
+        }
+        insta::assert_json_snapshot!(format!("relative_complete_{index}_ir"), doc);
+        insta::assert_json_snapshot!(format!("relative_complete_{index}_lowered"), lowered);
+    }
+}
+
+#[test]
 fn retained_spell_context_full_lyse_ir_and_lowered() {
     let text = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nNoncreature spells you cast cost {1} less to cast.\nAs long as you've cast two or more noncreature spells this turn, Lyse Hext has double strike.";
     let mut doc = parse_oracle_ir(

@@ -7,6 +7,107 @@ use super::*;
 use crate::parser::oracle::has_unimplemented as has_unimplemented_ability;
 
 #[test]
+fn relative_collision_firebolt_and_stoke_keep_complete_spell_vectors() {
+    // SHAPE: expectations derive from each complete pinned instruction.
+    let collision = "Choose one —\n• Collision Course deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.\n• Destroy target artifact.";
+    let expected_quantity = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Vehicle".into()),
+                    ]),
+                    TypeFilter::Permanent,
+                ],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+        },
+    };
+    let parsed = crate::parser::parse_oracle_text(
+        collision,
+        "Collision Course",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let mode0 = AbilityDefinition::new(AbilityKind::Spell, Effect::DealDamage { amount: expected_quantity, target: TargetFilter::Typed(TypedFilter::creature()), damage_source: None, excess: None })
+        .description("~ deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.".to_owned());
+    let mode1 = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::artifact()),
+            cant_regenerate: false,
+        },
+    )
+    .description("Destroy target artifact.".to_owned());
+    assert_eq!(parsed.abilities, vec![mode0, mode1]);
+    assert!(
+        parsed.statics.is_empty()
+            && parsed.triggers.is_empty()
+            && parsed.replacements.is_empty()
+            && parsed.extracted_keywords.is_empty()
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    let frantic = "Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    let expected: AbilityDefinition = serde_json::from_value(serde_json::json!({"kind":"Spell","description":"~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","effect":{"type":"DealDamage","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"amount":{"type":"Offset","offset":2,"inner":{"type":"Ref","qty":{"type":"ZoneCardCount","zone":"Graveyard","scope":"Controller","card_types":[],"filter":{"type":"Or","filters":[{"type":"Typed","type_filters":["Instant"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Sorcery"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Card"],"controller":null,"properties":[{"type":"HasAdventure"}]}]}}}}}})).unwrap();
+    let parsed = crate::parser::parse_oracle_text(
+        frantic,
+        "Frantic Firebolt",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities, vec![expected]);
+    assert!(
+        parsed.statics.is_empty()
+            && parsed.triggers.is_empty()
+            && parsed.replacements.is_empty()
+            && parsed.extracted_keywords.is_empty()
+            && parsed.parse_warnings.is_empty()
+    );
+    let stoke = "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)";
+    let expected = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            },
+            target: TargetFilter::Controller,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        },
+    ))
+    .description("Discard your hand, then draw two cards.".into());
+    let parsed = crate::parser::parse_oracle_text(
+        stoke,
+        "Stoke Genius",
+        &[],
+        &["Sorcery".into()],
+        &["Adventure".into()],
+    );
+    assert_eq!(parsed.abilities, vec![expected]);
+    assert!(
+        parsed.statics.is_empty()
+            && parsed.triggers.is_empty()
+            && parsed.replacements.is_empty()
+            && parsed.extracted_keywords.is_empty()
+            && parsed.parse_warnings.is_empty()
+    );
+}
+
+#[test]
 fn temporary_noncreature_ban_keeps_full_noun_and_surrounding_chain() {
     let source = "Exile all graveyards. Players can't cast noncreature spells this turn. Exile Calamity's Wake.";
     let parsed =

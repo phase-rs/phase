@@ -2717,30 +2717,26 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 
     let (rest, head) = parse_type_filter_word(input)?;
     let (rest, controller) = parse_quantity_controller_suffix(rest)?;
-    // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
-    // controlled population to objects that have any of the listed card types.
-    // CR 205.2b makes a multi-type object satisfy any of its types, so a
-    // permanent that is both a creature and a Vehicle is counted once via the
-    // `AnyOf` disjunction (Collision Course). When the relative clause names a
-    // single type, that type alone replaces the head. A non-type "that are"
-    // clause (e.g. "that are tapped") leaves the suffix unconsumed so a later
-    // arm can handle it rather than mis-parsing it here.
-    let (rest, type_filters) =
-        match opt(preceded(tag(" that are "), parse_type_filter_list)).parse(rest)? {
-            (r, Some(list)) if list.len() > 1 => (r, vec![TypeFilter::AnyOf(list)]),
-            (r, Some(list)) => (r, list),
-            (r, None) => (r, vec![head]),
-        };
-    Ok((
-        rest,
-        QuantityRef::ObjectCount {
-            filter: TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller: Some(controller),
-                properties: Vec::new(),
-            }),
-        },
+    // CR 109.2 + CR 205.2b: a relative union restricts the original head,
+    // including single-leg forms. It never replaces that head's domain.
+    let (rest, relative) = opt(preceded(
+        tag(" "),
+        crate::parser::oracle_target::parse_relative_card_filter,
     ))
+    .parse(rest)?;
+    let head = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![head],
+        controller: Some(controller),
+        properties: Vec::new(),
+    });
+    let filter = if let Some(relative) = relative {
+        TargetFilter::And {
+            filters: vec![head, relative],
+        }
+    } else {
+        head
+    };
+    Ok((rest, QuantityRef::ObjectCount { filter }))
 }
 
 /// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
@@ -2777,6 +2773,79 @@ mod complete_publication_quantity_tests {
     use super::*;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::card_type::Supertype;
+
+    #[test]
+    fn relative_populations_keep_complete_nouns_zones_and_remainders() {
+        // SHAPE: CR 109.2 + CR 109.2a: head and relative union intersect.
+        let types = vec![
+            TypeFilter::AnyOf(vec![
+                TypeFilter::Subtype("Fungus".into()),
+                TypeFilter::Subtype("Saproling".into()),
+            ]),
+            TypeFilter::Creature,
+        ];
+        let expected = QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            }),
+        };
+        assert_eq!(
+            parse_quantity_ref(
+                "the number of other creatures you control that are Fungi and/or Saprolings, tail"
+            )
+            .unwrap(),
+            (", tail", expected)
+        );
+        for (head, card_types) in [
+            ("cards", vec![]),
+            ("creature cards", vec![TypeFilter::Creature]),
+        ] {
+            for (relative, mut leaves) in [
+                (
+                    "that are instant cards, sorcery cards, and/or have an adventure",
+                    vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                ),
+                (
+                    "that are sorcery cards or instant cards or have an adventure",
+                    vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    ],
+                ),
+                ("that are cards that have an adventure", vec![]),
+            ] {
+                let source = format!("{head} in your graveyard {relative}");
+                leaves.push(TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                ));
+                let expected = QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                    card_types: card_types.clone(),
+                    filter: Some(TargetFilter::Or { filters: leaves }),
+                };
+                assert_eq!(parse_quantity_ref_complete(&source).unwrap().1, expected);
+                assert_eq!(
+                    parse_zone_card_count(&format!("{source}, outer")).unwrap(),
+                    (", outer", expected)
+                );
+            }
+        }
+        for source in [
+            "cards in your graveyard that are instants or mysterious",
+            "creatures you control that are Fungi or have",
+            "legendary you control that are Fungi",
+            "mysteries in your graveyard that are instants",
+            "creatures you control that are",
+        ] {
+            assert!(parse_quantity_ref_complete(source).is_err(), "{source}");
+        }
+    }
 
     #[test]
     fn complete_qualified_counts_preserve_exact_controller_and_properties() {
@@ -3649,31 +3718,14 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         }
     }
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
-    // CR 715.2: Hearth Elemental counts cards that are instants, sorceries,
-    // and/or have an Adventure. Adventure cards have their permanent face's
-    // types in the graveyard, so type filters alone undercount this set.
-    let (rest, includes_adventure) = opt(nom::bytes::complete::tag_no_case(
-        " that are instant cards, sorcery cards, and/or have an adventure",
+    // CR 109.2a + CR 715.2a: retain both the stated zone/head and the shared
+    // relative predicate. Adventure is an alternative characteristic, not a
+    // replacement card type in that zone.
+    let (rest, filter) = opt(preceded(
+        tag(" "),
+        crate::parser::oracle_target::parse_relative_card_filter,
     ))
     .parse(rest)?;
-    let (card_types, filter) = if includes_adventure.is_some() {
-        (
-            Vec::new(),
-            Some(TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
-                        TypeFilter::Instant,
-                        TypeFilter::Sorcery,
-                    ]))),
-                    TargetFilter::Typed(
-                        TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
-                    ),
-                ],
-            }),
-        )
-    } else {
-        (card_types, None)
-    };
     Ok((
         rest,
         QuantityRef::ZoneCardCount {
@@ -12130,10 +12182,8 @@ mod tests {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Or {
                     filters: vec![
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
-                            TypeFilter::Instant,
-                            TypeFilter::Sorcery,
-                        ]))),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         TargetFilter::Typed(
                             TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
                         ),
@@ -14682,10 +14732,13 @@ mod tests {
             q,
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::AnyOf(vec![
-                        TypeFilter::Creature,
-                        TypeFilter::Subtype("Vehicle".to_string()),
-                    ])],
+                    type_filters: vec![
+                        TypeFilter::AnyOf(vec![
+                            TypeFilter::Creature,
+                            TypeFilter::Subtype("Vehicle".to_string()),
+                        ]),
+                        TypeFilter::Permanent
+                    ],
                     controller: Some(ControllerRef::You),
                     properties: Vec::new(),
                 }),
@@ -14715,8 +14768,7 @@ mod tests {
         );
     }
 
-    /// A single-type "that are" clause replaces the head with that one type
-    /// (no `AnyOf` wrapper).
+    /// A single-type relative clause also retains its original nominal head.
     #[test]
     fn parse_quantity_ref_controlled_type_single_clause() {
         let (rest, q) =
@@ -14726,7 +14778,7 @@ mod tests {
             q,
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Artifact],
+                    type_filters: vec![TypeFilter::Permanent, TypeFilter::Artifact],
                     controller: Some(ControllerRef::You),
                     properties: Vec::new(),
                 }),

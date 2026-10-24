@@ -3243,6 +3243,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // informational suffixes ("creature card") or belong to the subtype slot.
     let mut extra_core_type_filters: Vec<TypeFilter> = Vec::new();
     let mut relative_core_type_filters: Vec<TypeFilter> = Vec::new();
+    let mut relative_card_filter: Option<TargetFilter> = None;
     if matches!(
         card_type,
         Some(
@@ -3711,25 +3712,41 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += consumed;
     }
 
-    // CR 205.3 (#2905): positive "that's a/an <Subtype> [or a/an <Subtype>]"
-    // relative-clause restriction ("creature you control that's an Ape or a
-    // Monkey"). Append the subtype constraint as an adjective type filter so it
-    // AND-merges with the core type (Creature) rather than being dropped — the
-    // clause previously fell through, leaving every creature eligible. Checked
-    // before `parse_that_clause_suffix` (mirrors the `that isn't` arm); it only
-    // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
-    if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
-        adjective_type_filters.push(subtype_filter);
-        pos += consumed;
-    }
-
-    // Positive relative card-type restriction:
-    // "permanent that's an artifact, creature, or enchantment" keeps the base
-    // permanent/supertype restrictions and distributes the trailing card-type
-    // list as OR branches.
-    if let Some((core_types, consumed)) = parse_that_is_core_type_suffix(&lower[pos..]) {
-        relative_core_type_filters = core_types;
-        pos += consumed;
+    // CR 109.2 + CR 205.2b: the relative union restricts the complete noun.
+    // Retain the established pure-type encodings; property-bearing alternatives
+    // stay a filter so their conjunction with the head cannot be flattened away.
+    let relative_input = lower[pos..].trim_start();
+    if let Ok((rest, relative)) = parse_relative_card_filter(relative_input) {
+        let TargetFilter::Or { filters } = &relative else {
+            unreachable!()
+        };
+        let types: Option<Vec<_>> = filters
+            .iter()
+            .map(|filter| match filter {
+                TargetFilter::Typed(typed)
+                    if typed.controller.is_none()
+                        && typed.properties.is_empty()
+                        && typed.type_filters.len() == 1 =>
+                {
+                    Some(typed.type_filters[0].clone())
+                }
+                _ => None,
+            })
+            .collect();
+        match types {
+            Some(types) if types.iter().all(is_relative_core_type_filter) => {
+                relative_core_type_filters = types;
+            }
+            Some(mut types) => {
+                adjective_type_filters.push(if types.len() == 1 {
+                    types.pop().expect("relative list is nonempty")
+                } else {
+                    TypeFilter::AnyOf(types)
+                });
+            }
+            None => relative_card_filter = Some(relative),
+        }
+        pos += lower[pos..].len() - rest.len();
     }
 
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
@@ -4352,6 +4369,13 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 controller: controller.clone(),
                 properties: properties.clone(),
             });
+            let population = if let Some(relative) = &relative_card_filter {
+                TargetFilter::And {
+                    filters: vec![population, relative.clone()],
+                }
+            } else {
+                population
+            };
             let prop = superlative_property_filter_prop(function, property, population);
             properties.push(prop);
         } else {
@@ -4434,6 +4458,13 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         filters.pop().expect("single typed filter should exist")
     } else {
         TargetFilter::Or { filters }
+    };
+    let filter = if let Some(relative) = relative_card_filter {
+        TargetFilter::And {
+            filters: vec![filter, relative],
+        }
+    } else {
+        filter
     };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
@@ -10223,22 +10254,25 @@ fn parse_relative_core_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
     }
 }
 
-fn parse_relative_core_type_separator(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag::<_, _, OracleError<'_>>(", and/or "),
-            tag(", and "),
-            tag(", or "),
-            tag(" and/or "),
-            tag(" and "),
-            tag(" or "),
-            tag(", "),
-        )),
-    )
+fn parse_relative_core_type_separator(input: &str) -> OracleResult<'_, bool> {
+    alt((
+        value(
+            true,
+            alt((
+                tag::<_, _, OracleError<'_>>(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(" and/or "),
+                tag(" and "),
+                tag(" or "),
+            )),
+        ),
+        value(false, tag(", ")),
+    ))
     .parse(input)
 }
 
+#[cfg(test)]
 fn parse_relative_core_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_relative_core_type_leg(input)?;
     let mut type_filters = vec![first];
@@ -10274,7 +10308,12 @@ fn parse_relative_card_leg(input: &str) -> OracleResult<'_, TargetFilter> {
             }
         }
     }
-    let (rest, kind) = parse_relative_core_type_leg(input)?;
+    let (rest, kind) = alt((parse_relative_core_type_leg, |input| {
+        let (subtype, rest) = parse_relative_subtype_leg(input)
+            .ok_or_else(|| super::oracle_nom::error::oracle_err(input))?;
+        Ok((rest, TypeFilter::Subtype(subtype)))
+    }))
+    .parse(input)?;
     let (rest, _) = opt(preceded(tag(" "), nom_quantity::parse_card_word)).parse(rest)?;
     Ok((rest, TargetFilter::Typed(TypedFilter::new(kind))))
 }
@@ -10302,7 +10341,7 @@ pub(crate) fn parse_relative_card_continuation_head(input: &str) -> OracleResult
             ),
         ),
         value((), nom_primitives::parse_article),
-        value((), parse_relative_core_type_leg),
+        value((), parse_relative_card_leg),
         value((), nom_quantity::parse_card_word),
     ))
     .parse(input)
@@ -10351,28 +10390,17 @@ pub(crate) fn parse_relative_card_filter(input: &str) -> OracleResult<'_, Target
     if negated {
         return Err(super::oracle_nom::error::oracle_err(input));
     }
-    let (rest, filters) =
-        separated_list1(parse_relative_core_type_separator, parse_relative_card_leg)
-            .parse(after_intro)?;
+    let (rest, first) = parse_relative_card_leg(after_intro)?;
+    let (rest, following) = nom::multi::many0(|input| {
+        let (after_separator, conjunction) = parse_relative_core_type_separator(input)?;
+        if !conjunction && parse_relative_card_continuation_head(after_separator).is_err() {
+            return Err(super::oracle_nom::error::oracle_err(input));
+        }
+        nom::combinator::cut(parse_relative_card_leg).parse(after_separator)
+    })
+    .parse(rest)?;
+    let filters = std::iter::once(first).chain(following).collect();
     Ok((rest, TargetFilter::Or { filters }))
-}
-
-/// Parses a positive relative card-type clause like
-/// "that's an artifact, creature, or enchantment" into the trailing card-type
-/// list. The caller applies those types as branches against the already-parsed
-/// base filter, so shared prefixes like Legendary/Permanent stay attached to
-/// every leg.
-fn parse_that_is_core_type_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
-    if negated {
-        return None;
-    }
-
-    let (rest, type_filters) = parse_relative_core_type_list(after_intro).ok()?;
-    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
-    Some((type_filters, consumed))
 }
 
 /// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
@@ -15942,6 +15970,198 @@ mod tests {
         }
 
         assert!(parse_that_clause_suffix(" that has an adventures", None).is_none());
+    }
+
+    #[test]
+    fn relative_population_retains_head_and_subtype_adventure_legs() {
+        // SHAPE: CR 109.2 + CR 205.2b: the noun remains a conjunction;
+        // overlapping relative alternatives describe one population.
+        let (filter, rest) = parse_type_phrase_folding(
+            "other legendary creatures you control that are Fungi and/or Saprolings, tail",
+        );
+        assert_eq!(rest, ", tail");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Fungus".into()),
+                        TypeFilter::Subtype("Saproling".into()),
+                    ]),
+                    TypeFilter::Creature
+                ],
+                controller: Some(ControllerRef::You),
+                properties: vec![
+                    FilterProp::Another,
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary
+                    }
+                ],
+            })
+        );
+        for (text, types) in [
+            (
+                "that are Spirits and/or enchantments",
+                vec![
+                    TypeFilter::Subtype("Spirit".into()),
+                    TypeFilter::Enchantment,
+                ],
+            ),
+            (
+                "that are creatures and/or Vehicles",
+                vec![TypeFilter::Creature, TypeFilter::Subtype("Vehicle".into())],
+            ),
+            (
+                "that is a Fungus",
+                vec![TypeFilter::Subtype("Fungus".into())],
+            ),
+            (
+                "that are Vehicles or Vehicles",
+                vec![
+                    TypeFilter::Subtype("Vehicle".into()),
+                    TypeFilter::Subtype("Vehicle".into()),
+                ],
+            ),
+        ] {
+            let expected = TargetFilter::Or {
+                filters: types
+                    .into_iter()
+                    .map(|kind| TargetFilter::Typed(TypedFilter::new(kind)))
+                    .collect(),
+            };
+            assert_eq!(parse_relative_card_filter(text).unwrap(), ("", expected));
+        }
+        for text in [
+            "that are Fungi or ",
+            "that are Fungi or are",
+            "that are Fungi or mysterious",
+            "that are creatures, have an adventures",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_relative_card_filter)
+                    .parse(text)
+                    .is_err(),
+                "{text}"
+            );
+        }
+        for head in ["Fungi", "Saprolings", "Vehicles", "are", "have"] {
+            assert!(
+                parse_relative_card_continuation_head(head).is_ok(),
+                "{head}"
+            );
+            let input = format!("that are creatures or {head}");
+            assert!(relative_card_predicate_owns_boundary(
+                &input,
+                "that are creatures or ".len()
+            ));
+        }
+        for text in ["green mysteries you control", "legendary you control", ""] {
+            assert_eq!(
+                parse_type_phrase_folding(text),
+                (TargetFilter::Typed(TypedFilter::default()), text)
+            );
+        }
+        let (negative, rest) = parse_type_phrase_folding("creature that isn't a Fungus");
+        assert_eq!(rest, "");
+        assert_eq!(
+            negative,
+            TargetFilter::Typed(TypedFilter::creature().with_type(TypeFilter::Non(Box::new(
+                TypeFilter::Subtype("Fungus".into())
+            ))))
+        );
+        let (property, rest) = parse_type_phrase_folding("creatures that are tapped");
+        assert_eq!(rest, "");
+        assert_eq!(
+            property,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]))
+        );
+    }
+
+    #[test]
+    fn relative_population_geometry_transactions_and_whole_superlative() {
+        // SHAPE: CR 109.2 + CR 611.3a: ranking and candidacy read the same
+        // complete controlled noun, including its relative alternative.
+        let relative = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Fungus".into()))),
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasAdventure])),
+            ],
+        };
+        let head = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        for text in [
+            "creatures you control that are Fungi or have an Adventure, outer",
+            "creatures you control that are Fungi or cards that have an Adventure, outer",
+        ] {
+            assert_eq!(
+                parse_type_phrase_folding(text),
+                (
+                    TargetFilter::And {
+                        filters: vec![head.clone(), relative.clone()]
+                    },
+                    ", outer"
+                )
+            );
+        }
+        let (ranked, rest) = parse_type_phrase_folding("creatures you control with the greatest power that are Fungi or have an Adventure, outer");
+        assert_eq!(rest, ", outer");
+        let TargetFilter::And { filters } = &ranked else {
+            panic!("whole relative ranking: {ranked:?}");
+        };
+        assert_eq!(filters[1], relative);
+        let (_, population) = bare_superlative_parts(&filters[0]);
+        assert_eq!(
+            population,
+            &TargetFilter::And {
+                filters: vec![head, relative]
+            }
+        );
+        for separator in [" or ", " and/or ", ", or ", ", and/or ", ", "] {
+            let prefix = format!("that are Fungi{separator}");
+            for continuation in [
+                "Saprolings",
+                "have",
+                "are",
+                "a",
+                "cards that have an Adventure",
+            ] {
+                let text = format!("{prefix}{continuation}");
+                assert!(
+                    relative_card_predicate_owns_boundary(&text, prefix.len()),
+                    "{text}"
+                );
+            }
+        }
+        let outside = "that are Fungi, creatures you control have flying";
+        assert!(!relative_card_predicate_owns_boundary(
+            outside,
+            "that are Fungi, creatures you control ".len()
+        ));
+        assert_eq!(
+            parse_relative_card_filter("that are Fungi, outer instruction")
+                .unwrap()
+                .0,
+            ", outer instruction"
+        );
+        for malformed in [
+            "creatures you control that are Fungi or mysterious",
+            "creatures you control that are Fungi or have an adventures",
+            "creatures you control that are Fungi or are",
+            "legendary you control that are Fungi",
+            "green mysteries you control that are Fungi",
+        ] {
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            let (filter, remainder) = parse_type_phrase_folding_with_ctx(malformed, &mut context);
+            assert!(
+                !remainder.is_empty() || filter == TargetFilter::Typed(TypedFilter::default()),
+                "{malformed}"
+            );
+            assert_eq!(
+                format!("{context:?}"),
+                before,
+                "a failed relative trial cannot mutate context"
+            );
+        }
     }
 
     #[test]

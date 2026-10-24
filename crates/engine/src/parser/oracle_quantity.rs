@@ -30,6 +30,56 @@ mod retained_spell_history_tests {
     use super::*;
 
     #[test]
+    fn relative_population_legacy_and_cda_delegates_are_complete() {
+        // SHAPE: the legacy entry points retain the same complete noun class.
+        let expected = QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Fungus".into()),
+                        TypeFilter::Subtype("Saproling".into()),
+                    ]),
+                    TypeFilter::Creature,
+                ],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+        };
+        let source = "the number of creatures you control that are Fungi and/or Saprolings";
+        assert_eq!(parse_quantity_ref(source), Some(expected.clone()));
+        assert_eq!(
+            parse_cda_quantity(source),
+            Some(QuantityExpr::Ref {
+                qty: expected.clone()
+            })
+        );
+        assert_eq!(
+            parse_for_each_clause("for each creature you control that is a Fungus"),
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Fungus".into()), TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                })
+            })
+        );
+        for source in [
+            "the number of creatures you control that are Fungi or mysterious",
+            "the number of creatures you control that are Fungi or have",
+            "the number of legendary you control that are Fungi",
+        ] {
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            assert!(
+                parse_cda_quantity_with_context(source, &mut context).is_none(),
+                "{source}"
+            );
+            assert_eq!(format!("{context:?}"), before);
+            assert!(parse_quantity_ref(source).is_none(), "{source}");
+        }
+    }
+
+    #[test]
     fn legacy_history_refuses_failed_qualified_and_empty_nouns() {
         assert_eq!(
             parse_spell_history_clause("noncreature spells you've cast this turn", CountScope::All),

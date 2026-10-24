@@ -1,5 +1,83 @@
 use super::anthem::*;
 
+// SHAPE: complete independent static vectors from the pinned relative quantities.
+#[test]
+fn relative_numeric_statics_retain_complete_head_and_modifier_kind() {
+    for (source, head, legs) in [
+        ("~'s power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.", TypeFilter::Permanent, vec![TypeFilter::Subtype("Spirit".into()), TypeFilter::Enchantment]),
+        ("~'s power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.", TypeFilter::Creature, vec![TypeFilter::Subtype("Fungus".into()), TypeFilter::Subtype("Saproling".into())]),
+    ] {
+        let value = QuantityExpr::Ref { qty: QuantityRef::ObjectCount { filter: TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(legs), head], controller: Some(ControllerRef::You), properties: vec![],
+        }) } };
+        let expected = StaticDefinition::continuous().affected(TargetFilter::SelfRef).cda()
+            .modifications(vec![ContinuousModification::SetDynamicPower { value: value.clone() }, ContinuousModification::SetDynamicToughness { value }]).description(source.to_owned());
+        assert_eq!(parse_static_line_multi(source), vec![expected.clone()]);
+        assert_eq!(parse_static_line(source), Some(expected));
+        let refused = source.replace("and/or", "and/or mysterious");
+        assert!(parse_static_line(&refused).is_none(), "{refused}");
+    }
+    let source = "Enchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.";
+    let value = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Spirit".into()),
+                        TypeFilter::Enchantment,
+                    ]),
+                    TypeFilter::Permanent,
+                ],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+        },
+    };
+    let definitions = parse_static_line_multi(source);
+    let modifications: Vec<_> = definitions
+        .iter()
+        .flat_map(|definition| definition.modifications.clone())
+        .collect();
+    assert!(definitions.iter().all(|definition| definition.affected
+        == Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+        ))
+        && !definition.characteristic_defining
+        && definition.condition.is_none()));
+    assert_eq!(
+        modifications,
+        vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::CardType("vampires".into()))
+            },
+            ContinuousModification::AddDynamicPower {
+                value: value.clone()
+            },
+            ContinuousModification::AddDynamicToughness { value },
+        ]
+    );
+    let hearth = "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    let expected: QuantityRef = serde_json::from_value(serde_json::json!({"type":"ZoneCardCount","zone":"Graveyard","scope":"Controller","card_types":[],"filter":{"type":"Or","filters":[{"type":"Typed","type_filters":["Instant"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Sorcery"],"controller":null,"properties":[]},{"type":"Typed","type_filters":["Card"],"controller":null,"properties":[{"type":"HasAdventure"}]}]}})).unwrap();
+    let definition = parse_static_line(hearth).unwrap();
+    let expected = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: crate::types::statics::CostModifyMode::Reduce,
+        amount: ManaCost::generic(1),
+        spell_filter: None,
+        dynamic_count: Some(expected),
+        reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+    })
+    .affected(TargetFilter::SelfRef)
+    .active_zones(crate::types::zones::self_spell_cost_mod_active_zones())
+    .description(hearth.to_owned());
+    assert_eq!(definition, expected);
+}
+
 mod retained_spell_context {
     use super::super::{cost_mod, grammar, restriction};
     use super::*;

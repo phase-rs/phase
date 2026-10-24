@@ -350,6 +350,1368 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 
 const MARO: &str = "Maro's power and toughness are each equal to the number of cards in your hand.";
+const KATILDA: &str = "Flying, lifelink, protection from Vampires\nKatilda's power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.\nDisturb {3}{W}{W} (You may cast this card from your graveyard transformed for its disturb cost.)";
+const MYCOTYRANT: &str = "Trample\nThe Mycotyrant's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)";
+const SPONGE: &str = "Flash\nThis creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen this creature dies, draw cards equal to its power.";
+
+/// CR 604.3 + CR 113.6a + CR 611.3a: parsed own numeric definitions
+/// count the full live population in every zone and reset after ability loss.
+#[test]
+fn relative_cdas_paid_sources_keep_head_overlap_and_live_membership() {
+    for myco in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let (name, source, subtypes, colors) = if myco {
+            (
+                "The Mycotyrant",
+                MYCOTYRANT,
+                vec!["Elder", "Fungus"],
+                vec![ManaType::Colorless, ManaType::Black, ManaType::Green],
+            )
+        } else {
+            (
+                "Katilda, Dawnhart Martyr",
+                KATILDA,
+                vec!["Spirit", "Warlock"],
+                vec![ManaType::Colorless, ManaType::White, ManaType::White],
+            )
+        };
+        let spell = scenario
+            .add_creature_to_hand(P0, name, 0, 0)
+            .with_subtypes(subtypes.clone())
+            .as_legendary()
+            .from_oracle_text_with_keywords(
+                if myco {
+                    &["Trample"]
+                } else {
+                    &["Flying", "Lifelink", "Protection", "Disturb"]
+                },
+                source,
+            )
+            .with_mana_cost(cda_cost(
+                1,
+                if myco {
+                    vec![ManaCostShard::Black, ManaCostShard::Green]
+                } else {
+                    vec![ManaCostShard::White, ManaCostShard::White]
+                },
+            ))
+            .id();
+        let first = scenario
+            .add_creature(P0, "First qualifying member", 2, 2)
+            .with_subtypes(vec![if myco { "Fungus" } else { "Spirit" }])
+            .id();
+        if myco {
+            scenario
+                .add_creature(P0, "Saproling", 2, 2)
+                .with_subtypes(vec!["Saproling"]);
+            scenario
+                .add_creature(P0, "Overlapping Fungus Saproling", 2, 2)
+                .with_subtypes(vec!["Fungus", "Saproling"]);
+            scenario
+                .add_artifact_from_oracle(P0, "Noncreature Fungus", "")
+                .with_subtypes(vec!["Fungus"]);
+        } else {
+            scenario.add_enchantment_from_oracle(P0, "Ordinary enchantment", "");
+            scenario
+                .add_creature(P0, "Overlapping Spirit enchantment", 2, 2)
+                .as_enchantment()
+                .as_creature()
+                .with_subtypes(vec!["Spirit"]);
+            scenario.add_creature(P0, "Nonmatching creature", 2, 2);
+        }
+        scenario
+            .add_creature(P1, "Foreign qualifying member", 2, 2)
+            .with_subtypes(vec![if myco { "Fungus" } else { "Spirit" }]);
+        let later = scenario
+            .add_creature_to_hand(P0, "Later qualifying member", 2, 2)
+            .with_subtypes(vec![if myco { "Saproling" } else { "Spirit" }])
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Green]))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+            .id();
+        let humble = scenario.add_spell_to_hand_from_oracle(P0, "Humble", true, "Until end of turn, target creature loses all abilities and has base power and toughness 0/1.")
+            .with_mana_cost(cda_cost(1, vec![ManaCostShard::White])).id();
+        let reset = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+            .id();
+        let mut runner = scenario.build();
+        engine::game::layers::flush_layers(runner.state_mut());
+        cda_pt(runner.state(), spell, 3);
+        cda_fund(&mut runner, P0, &colors);
+        let committed = runner.cast(spell).commit();
+        assert_eq!(committed.state().objects[&spell].zone, Zone::Stack);
+        cda_pt(committed.state(), spell, 3);
+        assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+        let outcome = committed.resolve();
+        cda_pt(outcome.state(), spell, 4);
+        cda_full_source(outcome.state(), spell);
+        assert!(engine::game::keywords::object_has_effective_keyword_kind(
+            outcome.state(),
+            spell,
+            if myco {
+                engine::types::keywords::KeywordKind::Trample
+            } else {
+                engine::types::keywords::KeywordKind::Lifelink
+            }
+        ));
+        cda_complete(outcome.state());
+        cda_fund(&mut runner, P0, &[ManaType::Green]);
+        runner.cast(later).resolve();
+        cda_pt(runner.state(), spell, 5);
+        cda_fund(&mut runner, P0, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(first).resolve();
+        cda_pt(runner.state(), spell, 4);
+        cda_fund(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
+        runner.cast(humble).target_object(spell).resolve();
+        assert_eq!(
+            (
+                runner.state().objects[&spell].power,
+                runner.state().objects[&spell].toughness
+            ),
+            (Some(0), Some(1))
+        );
+        assert!(runner.state().objects[&spell].static_definitions.is_empty());
+        let old_birth = runner.state().objects[&spell].incarnation;
+        cda_fund(&mut runner, P0, &[ManaType::Blue]);
+        runner.cast(reset).target_object(spell).resolve();
+        assert_ne!(runner.state().objects[&spell].incarnation, old_birth);
+        cda_pt(runner.state(), spell, 3);
+        cda_full_source(runner.state(), spell);
+        cda_complete(runner.state());
+        assert!(runner.state().trigger_stack.is_empty());
+    }
+}
+
+/// CR 109.4 + CR 109.5 + CR 113.6a: an off-zone own CDA uses its
+/// owner; battlefield and stack instances use their current controller.
+#[test]
+fn relative_cdas_all_zones_keep_numeric_definition_authority() {
+    for populated in [false, true] {
+        for myco in [false, true] {
+            for zone in [
+                Zone::Hand,
+                Zone::Stack,
+                Zone::Library,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Battlefield,
+            ] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                for index in 0..if populated { 3 } else { 0 } {
+                    scenario
+                        .add_creature(P0, &format!("Own member {index}"), 2, 2)
+                        .with_subtypes(vec![if myco { "Fungus" } else { "Spirit" }]);
+                }
+                for index in 0..if populated { 2 } else { 0 } {
+                    scenario
+                        .add_creature(P1, &format!("Foreign member {index}"), 2, 2)
+                        .with_subtypes(vec![if myco { "Saproling" } else { "Spirit" }]);
+                }
+                let source = scenario
+                    .add_creature_to_hand(
+                        P0,
+                        if myco {
+                            "The Mycotyrant"
+                        } else {
+                            "Katilda, Dawnhart Martyr"
+                        },
+                        0,
+                        0,
+                    )
+                    .with_subtypes(if myco {
+                        vec!["Elder", "Fungus"]
+                    } else {
+                        vec!["Spirit", "Warlock"]
+                    })
+                    .from_oracle_text_with_keywords(
+                        if myco {
+                            &["Trample"]
+                        } else {
+                            &["Flying", "Lifelink", "Protection", "Disturb"]
+                        },
+                        if myco { MYCOTYRANT } else { KATILDA },
+                    )
+                    .id();
+                let mut runner = scenario.build();
+                // Ordinary zone setup; no numeric effect, history, permission or LKI is seeded.
+                if zone == Zone::Stack {
+                    // Represent a real announced spell, not merely an object's zone tag.
+                    runner
+                        .state_mut()
+                        .objects
+                        .get_mut(&source)
+                        .unwrap()
+                        .mana_cost = ManaCost::zero();
+                    runner.cast(source).commit();
+                    assert!(runner.state().stack.iter().any(|entry| entry.id == source));
+                } else if zone != Zone::Hand {
+                    engine::game::zones::move_to_zone(
+                        runner.state_mut(),
+                        source,
+                        zone,
+                        &mut vec![],
+                    );
+                }
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&source)
+                    .unwrap()
+                    .controller = P1;
+                if matches!(zone, Zone::Battlefield | Zone::Stack) {
+                    runner
+                        .state_mut()
+                        .objects
+                        .get_mut(&source)
+                        .unwrap()
+                        .base_controller = Some(P1);
+                }
+                runner.state_mut().layers_dirty.mark_full();
+                engine::game::layers::flush_layers(runner.state_mut());
+                assert_eq!(runner.state().objects[&source].owner, P0);
+                cda_pt(
+                    runner.state(),
+                    source,
+                    if populated {
+                        if zone == Zone::Stack {
+                            2
+                        } else {
+                            3
+                        }
+                    } else if zone == Zone::Battlefield {
+                        1
+                    } else {
+                        0
+                    },
+                );
+                cda_full_source(runner.state(), source);
+                assert_eq!(runner.state().objects[&source].zone, zone);
+            }
+        }
+    }
+}
+fn relative_saved_states(state: &GameState) -> Vec<GameState> {
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::resolution::ResolutionStateWire;
+    let raw = serde_json::to_value(state).unwrap();
+    let current = serde_json::from_value(raw.clone()).unwrap();
+    let trusted = PersistedGameState::capture(state.clone())
+        .into_game_state()
+        .unwrap();
+    let mut v1 = raw;
+    v1.as_object_mut().unwrap().remove("resolution_stack");
+    v1["resolution_state_version"] = serde_json::json!(1);
+    if let Some(continuation) = state.active_ability_continuation() {
+        v1["pending_continuation"] = serde_json::to_value(continuation).unwrap();
+    }
+    if let Some(spell) = state.active_spell_resolution() {
+        v1["pending_spell_resolution"] = serde_json::to_value(spell).unwrap();
+    }
+    let legacy = serde_json::from_value::<ResolutionStateWire>(v1)
+        .unwrap()
+        .into_game_state();
+    vec![current, trusted, legacy]
+}
+
+/// CR 121.1 + CR 608.2h + CR 603.10a: real draw events supply each
+/// opponent's turn total; the death trigger reads the departed incarnation.
+#[test]
+fn relative_thought_sponge_public_totals_entry_death_and_new_birth() {
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for team in [false, true] {
+        for delta in [0, 3, -4, -6] {
+            let mut scenario = if team {
+                GameScenario::new_with_format(
+                    engine::types::format::FormatConfig::two_headed_giant(),
+                    4,
+                    42,
+                )
+            } else {
+                GameScenario::new_n_player(3, 42)
+            };
+            scenario.at_phase(Phase::PreCombatMain);
+            let sponge = scenario
+                .add_creature_to_hand(P0, "Thought Sponge", 1, 1)
+                .with_subtypes(vec!["Sponge"])
+                .from_oracle_text_with_keywords(&["Flash"], SPONGE)
+                .with_mana_cost(cda_cost(3, vec![ManaCostShard::Blue]))
+                .id();
+            let opponent_a = if team { p2 } else { P1 };
+            let opponent_b = if team { p3 } else { p2 };
+            let draws: Vec<_> = [(opponent_a, 2), (opponent_b, 1), (opponent_b, 2), (P0, 5)]
+                .into_iter()
+                .chain(team.then_some((P1, 8)))
+                .map(|(target, count)| {
+                    let text = if count == 1 {
+                        "Target player draws a card.".into()
+                    } else {
+                        format!(
+                            "Target player draws {} cards.",
+                            match count {
+                                2 => "two",
+                                5 => "five",
+                                8 => "eight",
+                                _ => unreachable!(),
+                            }
+                        )
+                    };
+                    (
+                        target,
+                        count,
+                        scenario
+                            .add_spell_to_hand_from_oracle(
+                                P0,
+                                "Synthetic public draw producer",
+                                true,
+                                &text,
+                            )
+                            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                            .id(),
+                    )
+                })
+                .collect();
+            let change = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic power-only change",
+                    true,
+                    &format!("Target creature gets {delta:+}/+0 until end of turn."),
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                .id();
+            let kill = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic public destroy",
+                    true,
+                    "Destroy target creature.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Black]))
+                .id();
+            let return_spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic new birth",
+                    true,
+                    "Return target creature card from your graveyard to the battlefield.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Black]))
+                .id();
+            for player in [P0, P1, p2].into_iter().chain(team.then_some(p3)) {
+                for n in 0..32 {
+                    scenario
+                        .add_card_to_library_top(player, &format!("{player:?} draw reserve {n}"));
+                }
+            }
+            let mut runner = scenario.build();
+            for (target, count, spell) in draws {
+                cda_fund(&mut runner, P0, &[ManaType::Blue]);
+                let outcome = runner.cast(spell).target_player(target).resolve();
+                outcome.assert_hand_drawn(target, count);
+                cda_full_source(outcome.state(), spell);
+                cda_complete(outcome.state());
+            }
+            assert_eq!(
+                runner.state().players[opponent_a.0 as usize].cards_drawn_this_turn,
+                2
+            );
+            assert_eq!(
+                runner.state().players[opponent_b.0 as usize].cards_drawn_this_turn,
+                3
+            );
+            if !team {
+                for _ in 0..4 {
+                    if runner.state().priority_player == opponent_b {
+                        break;
+                    }
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                assert_eq!(runner.state().priority_player, opponent_b);
+                runner
+                    .act(GameAction::Concede {
+                        player_id: opponent_b,
+                    })
+                    .unwrap();
+                assert!(runner.state().players[opponent_b.0 as usize].is_eliminated);
+                for _ in 0..4 {
+                    if runner.state().priority_player == P0 {
+                        break;
+                    }
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+            }
+            cda_fund(
+                &mut runner,
+                P0,
+                &[
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::Blue,
+                ],
+            );
+            let committed = runner.cast(sponge).commit();
+            assert_eq!(committed.state().objects[&sponge].zone, Zone::Stack);
+            assert_eq!(committed.state().players[0].mana_pool.total(), 0);
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[sponge], Zone::Battlefield);
+            assert_eq!(
+                outcome.state().objects[&sponge]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&3)
+            );
+            outcome.assert_power_toughness(sponge, 4, 4);
+            assert!(engine::game::keywords::object_has_effective_keyword_kind(
+                outcome.state(),
+                sponge,
+                engine::types::keywords::KeywordKind::Flash
+            ));
+            cda_full_source(outcome.state(), sponge);
+            cda_complete(outcome.state());
+            if delta != 0 {
+                cda_fund(&mut runner, P0, &[ManaType::Blue]);
+                runner.cast(change).target_object(sponge).resolve();
+            }
+            assert_eq!(runner.state().objects[&sponge].power, Some(4 + delta));
+            let old_birth = runner.state().objects[&sponge].incarnation;
+            cda_fund(&mut runner, P0, &[ManaType::Black]);
+            runner.cast(kill).target_object(sponge).commit();
+            for _ in 0..8 {
+                if runner.state().objects[&sponge].zone == Zone::Graveyard {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().objects[&sponge].zone, Zone::Graveyard);
+            assert_eq!(runner.state().stack.len(), 1);
+            assert_eq!(runner.state().stack.back().unwrap().source_id, sponge);
+            cda_fund(&mut runner, P0, &[ManaType::Black]);
+            runner.cast(return_spell).target_object(sponge).commit();
+            for _ in 0..8 {
+                if runner.state().objects[&sponge].zone == Zone::Battlefield {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().objects[&sponge].zone, Zone::Battlefield);
+            assert_ne!(runner.state().objects[&sponge].incarnation, old_birth);
+            assert_eq!(runner.state().objects[&sponge].power, Some(4));
+            let expected = (4 + delta).max(0) as usize;
+            let expected_draws: Vec<_> = runner.state().players[0]
+                .library
+                .iter()
+                .take(expected)
+                .copied()
+                .collect();
+            let hand_before = runner.state().players[0].hand.clone();
+            for restored in relative_saved_states(runner.state()) {
+                let mut resumed = GameRunner::from_state(restored);
+                resumed.advance_until_stack_empty();
+                assert_eq!(
+                    resumed.state().players[0].hand.len(),
+                    hand_before.len() + expected
+                );
+                assert!(hand_before
+                    .iter()
+                    .all(|id| resumed.state().players[0].hand.contains(id)));
+                assert!(expected_draws
+                    .iter()
+                    .all(|id| resumed.state().players[0].hand.contains(id)));
+                assert_eq!(resumed.state().objects[&sponge].power, Some(4));
+                assert!(resumed.state().trigger_stack.is_empty());
+                cda_complete(resumed.state());
+            }
+        }
+    }
+}
+
+/// CR 700.11 + CR 608.2h: descend counts actual permanent-card occurrences,
+/// including one moved away before the trigger, and excludes token deaths.
+#[test]
+fn relative_mycotyrant_descend_journal_and_created_fungi_cannot_block() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let myco = scenario
+        .add_creature_to_hand(P0, "The Mycotyrant", 0, 0)
+        .as_legendary()
+        .with_subtypes(vec!["Elder", "Fungus"])
+        .from_oracle_text_with_keywords(&["Trample"], MYCOTYRANT)
+        .with_mana_cost(cda_cost(
+            1,
+            vec![ManaCostShard::Black, ManaCostShard::Green],
+        ))
+        .id();
+    let cards = [
+        scenario
+            .add_enchantment_from_oracle(P0, "Descended card one", "")
+            .id(),
+        scenario
+            .add_artifact_from_oracle(P0, "Descended card two", "")
+            .id(),
+    ];
+    let foreign = scenario
+        .add_artifact_from_oracle(P1, "Foreign descended card", "")
+        .id();
+    let ordinary = scenario
+        .add_creature(P0, "Ordinary legal blocker", 2, 20)
+        .id();
+    let attacker = scenario
+        .add_creature(P1, "Ordinary attacking creature", 1, 20)
+        .id();
+    let spawn = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic token producer",
+            true,
+            "Create a 1/1 green Saproling creature token.",
+        )
+        .with_mana_cost(cda_cost(0, vec![ManaCostShard::Green]))
+        .id();
+    let kills: Vec<_> = (0..4)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic permanent destroy",
+                    true,
+                    "Destroy target permanent.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Black]))
+                .id()
+        })
+        .collect();
+    let recover = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic graveyard recovery",
+            true,
+            "Return target permanent card from your graveyard to your hand.",
+        )
+        .with_mana_cost(cda_cost(0, vec![ManaCostShard::Green]))
+        .id();
+    scenario.with_library_top(P0, &["Turn reserve A", "Turn reserve B", "Turn reserve C"]);
+    scenario.with_library_top(P1, &["Opponent turn reserve A", "Opponent turn reserve B"]);
+    let mut runner = scenario.build();
+    cda_fund(&mut runner, P0, &[ManaType::Green]);
+    runner.cast(spawn).resolve();
+    let token = runner
+        .state()
+        .objects
+        .values()
+        .find(|o| o.is_token && o.zone == Zone::Battlefield)
+        .unwrap()
+        .id;
+    for (kill, target) in kills.into_iter().zip([cards[0], cards[1], foreign, token]) {
+        cda_fund(&mut runner, P0, &[ManaType::Black]);
+        runner.cast(kill).target_object(target).resolve();
+    }
+    cda_fund(&mut runner, P0, &[ManaType::Green]);
+    runner.cast(recover).target_object(cards[0]).resolve();
+    assert_eq!(runner.state().objects[&cards[0]].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&cards[1]].zone, Zone::Graveyard);
+    cda_fund(
+        &mut runner,
+        P0,
+        &[ManaType::Colorless, ManaType::Black, ManaType::Green],
+    );
+    runner.cast(myco).resolve();
+    cda_pt(runner.state(), myco, 1);
+    cda_full_source(runner.state(), myco);
+    assert!(engine::game::keywords::object_has_effective_keyword_kind(
+        runner.state(),
+        myco,
+        engine::types::keywords::KeywordKind::Trample
+    ));
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    let fungi: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.is_token && o.zone == Zone::Battlefield && o.controller == P0)
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(fungi.len(), 2);
+    for id in &fungi {
+        let object = &runner.state().objects[id];
+        assert_eq!((object.power, object.toughness), (Some(1), Some(1)));
+        assert_eq!(object.color, vec![ManaColor::Black]);
+        assert_eq!(object.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(object.card_types.subtypes, vec!["Fungus"]);
+        assert!(object
+            .static_definitions
+            .iter_unchecked()
+            .any(|d| d.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: engine::types::statics::StaticMode::CantBlock
+                }
+            ))));
+    }
+    cda_pt(runner.state(), myco, 3);
+    cda_complete(runner.state());
+    for restored in relative_saved_states(runner.state()) {
+        let mut resumed = GameRunner::from_state(restored);
+        resumed.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(resumed.state().active_player, P1);
+        resumed.advance_to_combat();
+        resumed
+            .declare_attackers(&[(attacker, engine::game::combat::AttackTarget::Player(P0))])
+            .unwrap();
+        resumed.advance_to_phase(Phase::DeclareBlockers);
+        assert!(matches!(
+            resumed.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ));
+        assert!(resumed.declare_blockers(&[(fungi[0], attacker)]).is_err());
+        assert!(matches!(
+            resumed.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ));
+        resumed.declare_blockers(&[(ordinary, attacker)]).unwrap();
+        resumed.combat_damage();
+        assert_eq!(resumed.state().players[0].life, 20);
+        cda_complete(resumed.state());
+    }
+}
+
+/// CR 604.3a + CR 611.3a + CR 400.7: real copied definitions retain own
+/// numeric identity; control/type/ability changes and new births re-evaluate it.
+#[test]
+fn relative_cdas_public_copy_control_type_loss_and_new_birth_keep_two_authorities() {
+    for myco in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let name = if myco {
+            "The Mycotyrant"
+        } else {
+            "Katilda, Dawnhart Martyr"
+        };
+        let oracle = if myco { MYCOTYRANT } else { KATILDA };
+        let subtype = if myco { "Fungus" } else { "Spirit" };
+        let hints = if myco {
+            vec!["Trample"]
+        } else {
+            vec!["Flying", "Lifelink", "Protection", "Disturb"]
+        };
+        let cost = cda_cost(
+            1,
+            if myco {
+                vec![ManaCostShard::Black, ManaCostShard::Green]
+            } else {
+                vec![ManaCostShard::White; 2]
+            },
+        );
+        let source = scenario
+            .add_creature_to_hand(P0, name, 0, 0)
+            .as_legendary()
+            .with_subtypes(vec![subtype])
+            .from_oracle_text_with_keywords(&hints, oracle)
+            .with_mana_cost(cost.clone())
+            .id();
+        let foreign = scenario
+            .add_creature_from_oracle(P1, name, 0, 0, oracle)
+            .as_legendary()
+            .with_subtypes(vec![subtype])
+            .id();
+        let member = scenario
+            .add_creature(P0, "Type-changing member", 2, 2)
+            .with_subtypes(vec![subtype])
+            .id();
+        scenario
+            .add_creature(P0, "Second own member", 2, 2)
+            .with_subtypes(vec![subtype]);
+        for n in 0..3 {
+            scenario
+                .add_creature(P1, &format!("Foreign member {n}"), 2, 2)
+                .with_subtypes(vec![subtype]);
+        }
+        let copy = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic nonlegendary copy",
+                true,
+                "Create a token that's a copy of target creature, except it isn't legendary.",
+            )
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+            .id();
+        let control = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Synthetic creature control",
+                true,
+                "Gain control of target creature.",
+            )
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+            .id();
+        let type_change=scenario.add_spell_to_hand_from_oracle(P0,"Synthetic Frog change",true,"Target creature becomes a 0/1 blue Frog and loses all abilities until end of turn.").with_mana_cost(cda_cost(0,vec![ManaCostShard::Blue])).id();
+        let humble=scenario.add_spell_to_hand_from_oracle(P0,"Humble",true,"Until end of turn, target creature loses all abilities and has base power and toughness 0/1.").with_mana_cost(cda_cost(1,vec![ManaCostShard::White])).id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+            .id();
+        let mut runner = scenario.build();
+        cda_fund(
+            &mut runner,
+            P0,
+            if myco {
+                &[ManaType::Colorless, ManaType::Black, ManaType::Green]
+            } else {
+                &[ManaType::Colorless, ManaType::White, ManaType::White]
+            },
+        );
+        runner.cast(source).resolve();
+        cda_pt(runner.state(), source, 3);
+        cda_pt(runner.state(), foreign, 4);
+        if !myco {
+            let object = &runner.state().objects[&source];
+            for keyword in [
+                engine::types::keywords::Keyword::Flying,
+                engine::types::keywords::Keyword::Lifelink,
+                engine::types::keywords::Keyword::Protection(
+                    engine::types::keywords::ProtectionTarget::CardType("vampires".into()),
+                ),
+                engine::types::keywords::Keyword::Disturb(cda_cost(
+                    3,
+                    vec![ManaCostShard::White; 2],
+                )),
+            ] {
+                assert!(object.keywords.contains(&keyword));
+            }
+        }
+        cda_fund(&mut runner, P0, &[ManaType::Blue]);
+        runner.cast(copy).target_object(source).resolve();
+        let copied = runner
+            .state()
+            .objects
+            .values()
+            .find(|o| o.is_token && o.zone == Zone::Battlefield)
+            .unwrap()
+            .id;
+        assert!(!runner.state().objects[&copied]
+            .card_types
+            .supertypes
+            .contains(&engine::types::card_type::Supertype::Legendary));
+        cda_pt(runner.state(), source, 4);
+        assert_eq!(runner.state().objects[&copied].power, Some(4));
+        runner.act(GameAction::PassPriority).unwrap();
+        cda_fund(&mut runner, P1, &[ManaType::Blue]);
+        runner.cast(control).target_object(copied).resolve();
+        assert_eq!(runner.state().objects[&copied].controller, P1);
+        cda_pt(runner.state(), source, 3);
+        cda_pt(runner.state(), foreign, 5);
+        assert_eq!(runner.state().objects[&copied].power, Some(5));
+        assert_eq!(runner.state().priority_player, P0);
+        cda_fund(&mut runner, P0, &[ManaType::Blue]);
+        runner.cast(type_change).target_object(member).resolve();
+        assert_eq!(
+            runner.state().objects[&member].card_types.subtypes,
+            vec!["Frog"]
+        );
+        cda_pt(runner.state(), source, 2);
+        cda_pt(runner.state(), foreign, 5);
+        cda_fund(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
+        runner.cast(humble).target_object(source).resolve();
+        assert_eq!(
+            (
+                runner.state().objects[&source].power,
+                runner.state().objects[&source].toughness
+            ),
+            (Some(0), Some(1))
+        );
+        let birth = runner.state().objects[&source].incarnation;
+        for restored in relative_saved_states(runner.state()) {
+            let mut resumed = GameRunner::from_state(restored);
+            cda_fund(&mut resumed, P0, &[ManaType::Blue]);
+            resumed.cast(bounce).target_object(source).resolve();
+            assert_eq!(resumed.state().objects[&source].zone, Zone::Hand);
+            assert_ne!(resumed.state().objects[&source].incarnation, birth);
+            cda_pt(resumed.state(), source, 1);
+            cda_pt(resumed.state(), foreign, 5);
+            assert_eq!(resumed.state().objects[&copied].power, Some(5));
+            cda_full_source(resumed.state(), source);
+            cda_fund(
+                &mut resumed,
+                P0,
+                if myco {
+                    &[ManaType::Colorless, ManaType::Black, ManaType::Green]
+                } else {
+                    &[ManaType::Colorless, ManaType::White, ManaType::White]
+                },
+            );
+            resumed.cast(source).resolve();
+            cda_pt(resumed.state(), source, 2);
+            assert!(resumed.state().trigger_stack.is_empty());
+            cda_complete(resumed.state());
+        }
+    }
+}
+
+const KATILDA_BACK: &str = "Enchant creature\nEnchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.\nIf Katilda's Rising Dawn would be put into a graveyard from anywhere, exile it instead.";
+
+fn relative_katilda_back() -> engine::game::game_object::BackFaceData {
+    let parsed = engine::parser::parse_oracle_text(
+        KATILDA_BACK,
+        "Katilda's Rising Dawn",
+        &["Enchant".into()],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    engine::game::game_object::BackFaceData {
+        name: "Katilda's Rising Dawn".into(),
+        mana_cost: ManaCost::NoCost,
+        card_types: engine::types::card_type::CardType {
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Aura".into()],
+            supertypes: vec![engine::types::card_type::Supertype::Legendary],
+        },
+        keywords: parsed.extracted_keywords,
+        abilities: parsed.abilities,
+        trigger_definitions: parsed.triggers.into(),
+        static_definitions: parsed.statics.into(),
+        replacement_definitions: parsed.replacements.into(),
+        color: vec![ManaColor::White],
+        layout_kind: Some(engine::types::card::LayoutKind::Transform),
+        ..Default::default()
+    }
+}
+
+/// CR 702.146a + CR 702.146b + CR 613.4c: the paid transformed Aura
+/// binds an actual host and follows its current controller's live population.
+#[test]
+fn relative_katilda_paid_disturb_attachment_live_controller_and_replacement() {
+    use engine::types::game_state::{CastingVariant, StackEntryKind};
+    use engine::types::keywords::KeywordKind;
+    for caster in [P0, P1] {
+        for departure in 0..3 {
+            let other = if caster == P0 { P1 } else { P0 };
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(caster, &["Aura caster turn reserve"]);
+            scenario.with_library_top(other, &["Aura other turn reserve"]);
+            let source = scenario
+                .add_creature_to_graveyard(caster, "Katilda, Dawnhart Martyr", 0, 0)
+                .as_legendary()
+                .with_subtypes(vec!["Spirit", "Warlock"])
+                .from_oracle_text_with_keywords(
+                    &["Flying", "Lifelink", "Protection", "Disturb"],
+                    KATILDA,
+                )
+                .with_mana_cost(cda_cost(1, vec![ManaCostShard::White; 2]))
+                .id();
+            scenario
+                .add_creature(caster, "Own Spirit", 2, 2)
+                .with_subtypes(vec!["Spirit"]);
+            scenario
+                .add_creature(caster, "Own overlapping Spirit enchantment", 2, 2)
+                .as_enchantment()
+                .as_creature()
+                .with_subtypes(vec!["Spirit"]);
+            scenario
+                .add_creature(other, "Foreign Spirit", 2, 2)
+                .with_subtypes(vec!["Spirit"]);
+            let untouched = scenario
+                .add_creature(caster, "First host option", 2, 2)
+                .id();
+            let host = scenario
+                .add_creature(other, "Second host option", 2, 2)
+                .id();
+            let later = scenario
+                .add_spell_to_hand_from_oracle(caster, "Later qualifying enchantment", false, "")
+                .as_enchantment()
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::White]))
+                .id();
+            let control = scenario
+                .add_spell_to_hand_from_oracle(
+                    other,
+                    "Synthetic Aura control",
+                    true,
+                    "Gain control of target enchantment.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                .id();
+            let destroy = scenario
+                .add_spell_to_hand_from_oracle(
+                    other,
+                    "Synthetic source destroy",
+                    true,
+                    "Destroy target permanent.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Black]))
+                .id();
+            let bounce = scenario
+                .add_spell_to_hand_from_oracle(
+                    caster,
+                    "Unsummon",
+                    true,
+                    "Return target creature to its owner's hand.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                .id();
+            let source_bounce = scenario
+                .add_spell_to_hand_from_oracle(
+                    caster,
+                    "Synthetic Aura bounce",
+                    true,
+                    "Return target enchantment to its owner's hand.",
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .back_face = Some(relative_katilda_back());
+            // The successful paid cast below is the reach guard for both
+            // funded ownership denial and invalid-host announcement.
+            if departure == 0 {
+                let mut empty = GameScenario::new();
+                empty.at_phase(Phase::PreCombatMain);
+                let uncast = empty
+                    .add_creature_to_graveyard(caster, "Katilda, Dawnhart Martyr", 0, 0)
+                    .as_legendary()
+                    .with_subtypes(vec!["Spirit", "Warlock"])
+                    .from_oracle_text_with_keywords(
+                        &["Flying", "Lifelink", "Protection", "Disturb"],
+                        KATILDA,
+                    )
+                    .with_mana_cost(cda_cost(1, vec![ManaCostShard::White; 2]))
+                    .id();
+                let mut no_host = empty.build();
+                no_host.state_mut().active_player = caster;
+                no_host.state_mut().priority_player = caster;
+                no_host.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+                no_host
+                    .state_mut()
+                    .objects
+                    .get_mut(&uncast)
+                    .unwrap()
+                    .back_face = Some(relative_katilda_back());
+                cda_fund(
+                    &mut no_host,
+                    caster,
+                    &[
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::White,
+                        ManaType::White,
+                    ],
+                );
+                let announcement = no_host.act(GameAction::CastSpell {
+                    object_id: uncast,
+                    card_id: no_host.state().objects[&uncast].card_id,
+                    targets: vec![],
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                });
+                if announcement.is_ok() {
+                    let WaitingFor::CastingVariantChoice { options, .. } =
+                        &no_host.state().waiting_for
+                    else {
+                        panic!("no-host spell cannot commit");
+                    };
+                    if let Some(index) = options
+                        .iter()
+                        .position(|option| option.variant == CastingVariant::Disturb)
+                    {
+                        assert!(no_host
+                            .act(GameAction::ChooseCastingVariant { index })
+                            .is_err());
+                    }
+                }
+                assert_eq!(no_host.state().objects[&uncast].zone, Zone::Graveyard);
+                assert_eq!(
+                    no_host.state().players[caster.0 as usize].mana_pool.total(),
+                    5
+                );
+                let mut foreign = GameRunner::from_state(runner.state().clone());
+                for _ in 0..64 {
+                    if foreign.state().active_player == other
+                        && foreign.state().phase == Phase::PreCombatMain
+                        && matches!(foreign.state().waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    let action = match foreign.state().waiting_for {
+                        WaitingFor::Priority { .. } => GameAction::PassPriority,
+                        WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                        WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                        ref other => panic!("ordinary turn crossing: {other:?}"),
+                    };
+                    foreign.act(action).unwrap();
+                }
+                assert_eq!(foreign.state().active_player, other);
+                assert_eq!(foreign.state().phase, Phase::PreCombatMain);
+                cda_fund(
+                    &mut foreign,
+                    other,
+                    &[
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::White,
+                        ManaType::White,
+                    ],
+                );
+                assert!(foreign
+                    .cast(source)
+                    .casting_variant(CastingVariant::Disturb)
+                    .target_object(host)
+                    .try_resolve()
+                    .is_err());
+                assert_eq!(foreign.state().objects[&source].zone, Zone::Graveyard);
+                assert_eq!(
+                    foreign.state().players[other.0 as usize].mana_pool.total(),
+                    5
+                );
+                let mut illegal = GameRunner::from_state(runner.state().clone());
+                cda_fund(
+                    &mut illegal,
+                    caster,
+                    &[
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::Colorless,
+                        ManaType::White,
+                        ManaType::White,
+                    ],
+                );
+                illegal
+                    .act(GameAction::CastSpell {
+                        object_id: source,
+                        card_id: illegal.state().objects[&source].card_id,
+                        targets: vec![],
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                    })
+                    .unwrap();
+                if let WaitingFor::CastingVariantChoice { options, .. } =
+                    &illegal.state().waiting_for
+                {
+                    let index = options
+                        .iter()
+                        .position(|option| option.variant == CastingVariant::Disturb)
+                        .unwrap();
+                    illegal
+                        .act(GameAction::ChooseCastingVariant { index })
+                        .unwrap();
+                }
+                let WaitingFor::TargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } = &illegal.state().waiting_for
+                else {
+                    panic!("Disturb host announcement");
+                };
+                let options = &target_slots[selection.current_slot].legal_targets;
+                assert!(options.contains(&TargetRef::Object(host)));
+                assert!(!options.contains(&TargetRef::Object(later)));
+                assert!(illegal
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(later))
+                    })
+                    .is_err());
+                assert_eq!(illegal.state().objects[&later].zone, Zone::Hand);
+            }
+            cda_fund(
+                &mut runner,
+                caster,
+                &[
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::White,
+                    ManaType::White,
+                ],
+            );
+            let committed = runner
+                .cast(source)
+                .casting_variant(CastingVariant::Disturb)
+                .target_object(host)
+                .commit();
+            assert_eq!(
+                committed.state().objects[&source].name,
+                "Katilda's Rising Dawn"
+            );
+            assert_eq!(committed.state().objects[&source].zone, Zone::Stack);
+            assert!(matches!(
+                committed.state().stack.back().unwrap().kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 5,
+                    ..
+                }
+            ));
+            assert_eq!(
+                committed
+                    .state()
+                    .stack
+                    .back()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(host)]
+            );
+            let result = committed.resolve();
+            result.assert_power_toughness(host, 5, 5);
+            result.assert_power_toughness(untouched, 2, 2);
+            assert_eq!(
+                result.state().objects[&source].attached_to,
+                Some(engine::game::game_object::AttachTarget::Object(host))
+            );
+            for kind in [
+                KeywordKind::Flying,
+                KeywordKind::Lifelink,
+                KeywordKind::Protection,
+            ] {
+                assert!(engine::game::keywords::object_has_effective_keyword_kind(
+                    result.state(),
+                    host,
+                    kind
+                ));
+                assert!(!engine::game::keywords::object_has_effective_keyword_kind(
+                    result.state(),
+                    untouched,
+                    kind
+                ));
+            }
+            assert!(result.state().objects[&source]
+                .static_definitions
+                .iter_unchecked()
+                .all(|d| !d.characteristic_defining));
+            cda_full_source(result.state(), source);
+            cda_complete(result.state());
+            cda_fund(&mut runner, caster, &[ManaType::White]);
+            runner.cast(later).resolve();
+            assert_eq!(runner.state().objects[&host].power, Some(6));
+            if departure == 2 {
+                let old_birth = runner.state().objects[&source].incarnation;
+                cda_fund(&mut runner, caster, &[ManaType::Blue]);
+                runner.cast(source_bounce).target_object(source).resolve();
+                assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+                assert_ne!(runner.state().objects[&source].incarnation, old_birth);
+                assert_eq!(
+                    runner.state().objects[&source].name,
+                    "Katilda, Dawnhart Martyr"
+                );
+                assert_eq!(runner.state().objects[&host].power, Some(2));
+                assert!(!engine::game::keywords::object_has_effective_keyword_kind(
+                    runner.state(),
+                    host,
+                    KeywordKind::Lifelink
+                ));
+                assert_eq!(runner.state().objects[&untouched].power, Some(2));
+                cda_complete(runner.state());
+            } else if departure == 1 {
+                let old_birth = runner.state().objects[&host].incarnation;
+                cda_fund(&mut runner, caster, &[ManaType::Blue]);
+                runner.cast(bounce).target_object(host).resolve();
+                assert_ne!(runner.state().objects[&host].incarnation, old_birth);
+                assert_eq!(runner.state().objects[&host].zone, Zone::Hand);
+                assert_eq!(runner.state().objects[&host].power, Some(2));
+                assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+            } else {
+                runner.act(GameAction::PassPriority).unwrap();
+                assert_eq!(runner.state().priority_player, other);
+                cda_fund(&mut runner, other, &[ManaType::Blue]);
+                runner.cast(control).target_object(source).resolve();
+                assert_eq!(runner.state().objects[&source].owner, caster);
+                assert_eq!(runner.state().objects[&source].controller, other);
+                // The stolen Aura plus the other player's Spirit is N=2.
+                assert_eq!(runner.state().objects[&host].power, Some(4));
+                for restored in relative_saved_states(runner.state()) {
+                    let mut resumed = GameRunner::from_state(restored);
+                    if resumed.state().priority_player != other {
+                        resumed.act(GameAction::PassPriority).unwrap();
+                    }
+                    assert_eq!(resumed.state().priority_player, other);
+                    assert_eq!(resumed.state().objects[&host].power, Some(4));
+                    cda_fund(&mut resumed, other, &[ManaType::Black]);
+                    resumed.cast(destroy).target_object(source).resolve();
+                    assert_eq!(resumed.state().objects[&source].zone, Zone::Exile);
+                    assert_eq!(resumed.state().objects[&host].power, Some(2));
+                    assert!(!engine::game::keywords::object_has_effective_keyword_kind(
+                        resumed.state(),
+                        host,
+                        KeywordKind::Lifelink
+                    ));
+                    assert_eq!(resumed.state().objects[&untouched].zone, Zone::Battlefield);
+                    cda_complete(resumed.state());
+                }
+            }
+        }
+    }
+}
+
+/// CR 614.1a + CR 702.146b: the printed back replacement works on the
+/// actual transformed Stack spell as well as the resolved Aura. A second
+/// redirect's distinct counter rider must follow the selected identity.
+#[test]
+fn relative_katilda_two_replacements_preserve_selected_source_and_stack_origin() {
+    use engine::types::game_state::CastingVariant;
+    for countered in [false, true] {
+        for choose_printed in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_to_graveyard(P0, "Katilda, Dawnhart Martyr", 0, 0)
+                .as_legendary()
+                .with_subtypes(vec!["Spirit", "Warlock"])
+                .from_oracle_text_with_keywords(
+                    &["Flying", "Lifelink", "Protection", "Disturb"],
+                    KATILDA,
+                )
+                .with_mana_cost(cda_cost(1, vec![ManaCostShard::White; 2]))
+                .id();
+            let first = scenario.add_creature(P0, "First ordinary host", 2, 2).id();
+            let host = scenario
+                .add_creature(P0, "Selected ordinary host", 2, 2)
+                .id();
+            let redirect = scenario.add_enchantment_from_oracle(P0,"Synthetic competing redirect",
+                "If a card would be put into a graveyard from anywhere, instead exile it with a void counter on it.").id();
+            let removal = scenario
+                .add_spell_to_hand_from_oracle(
+                    if countered { P1 } else { P0 },
+                    "Synthetic removal",
+                    true,
+                    if countered {
+                        "Counter target spell."
+                    } else {
+                        "Destroy target enchantment."
+                    },
+                )
+                .with_mana_cost(cda_cost(0, vec![ManaCostShard::Blue]))
+                .id();
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .back_face = Some(relative_katilda_back());
+            cda_fund(
+                &mut runner,
+                P0,
+                &[
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::Colorless,
+                    ManaType::White,
+                    ManaType::White,
+                ],
+            );
+            runner
+                .cast(source)
+                .casting_variant(CastingVariant::Disturb)
+                .target_object(host)
+                .commit();
+            if countered {
+                runner.act(GameAction::PassPriority).unwrap();
+                assert_eq!(runner.state().priority_player, P1);
+            } else {
+                runner.advance_until_stack_empty();
+                assert_eq!(runner.state().objects[&host].power, Some(4));
+                assert_eq!(runner.state().objects[&first].power, Some(2));
+            }
+            let actor = if countered { P1 } else { P0 };
+            cda_fund(&mut runner, actor, &[ManaType::Blue]);
+            runner.cast(removal).target_object(source).commit();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            let WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                candidate_count,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("both actual redirect sources must be offered");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*candidate_count, 2);
+            assert!(candidates.iter().any(|c| c.source_id == source));
+            assert!(candidates.iter().any(|c| c.source_id == redirect));
+            assert_eq!(
+                runner.state().objects[&source].zone,
+                if countered {
+                    Zone::Stack
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            for restored in relative_saved_states(runner.state()) {
+                let mut resumed = GameRunner::from_state(restored);
+                let WaitingFor::ReplacementChoice { candidates, .. } = &resumed.state().waiting_for
+                else {
+                    panic!("saved exact choice");
+                };
+                let selected = if choose_printed { source } else { redirect };
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == selected)
+                    .unwrap();
+                resumed
+                    .act(GameAction::ChooseReplacement { index })
+                    .unwrap();
+                resumed.advance_until_stack_empty();
+                assert_eq!(resumed.state().objects[&source].zone, Zone::Exile);
+                assert_eq!(
+                    resumed.state().objects[&source]
+                        .counters
+                        .get(&CounterType::Generic("void".into()))
+                        .copied()
+                        .unwrap_or(0),
+                    if choose_printed { 0 } else { 1 }
+                );
+                assert_eq!(resumed.state().objects[&host].power, Some(2));
+                assert_eq!(resumed.state().objects[&first].power, Some(2));
+                assert_eq!(resumed.state().objects[&redirect].zone, Zone::Battlefield);
+                assert!(resumed.state().trigger_stack.is_empty());
+                cda_complete(resumed.state());
+            }
+        }
+    }
+}
+
 const CRUSADER: &str = "Crusader of Odric's power and toughness are each equal to the number of creatures you control.";
 const LORD: &str = "Lord of Extinction's power and toughness are each equal to the number of cards in all graveyards.";
 const DAKKON: &str =

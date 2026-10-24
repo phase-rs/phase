@@ -1,5 +1,463 @@
 use super::*;
 
+mod relative_population_publication {
+    use super::*;
+    use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
+    use crate::types::ability::{
+        AggregateFunction, CardSelectionMode, ModalChoice, PlayerScope, PtValue, PtValueScope,
+        TriggerConstraint,
+    };
+    use crate::types::card::{CardFace, LayoutKind, PrintedCardRef};
+    use crate::types::card_type::{CardType, Supertype};
+    use crate::types::keywords::ProtectionTarget;
+    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::phase::Phase;
+
+    const COLLISION: &str = "Choose one —\n• Collision Course deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.\n• Destroy target artifact.";
+    const KATILDA: &str = "Flying, lifelink, protection from Vampires\nKatilda's power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.\nDisturb {3}{W}{W} (You may cast this card from your graveyard transformed for its disturb cost.)";
+    const DAWN: &str = "Enchant creature\nEnchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.\nIf Katilda's Rising Dawn would be put into a graveyard from anywhere, exile it instead.";
+    const MYCO: &str = "Trample\nThe Mycotyrant's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)";
+    const FRANTIC: &str = "Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    const HEARTH: &str = "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    const STOKE: &str = "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)";
+    const SPONGE: &str = "Flash\nThis creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen this creature dies, draw cards equal to its power.";
+
+    fn population(head: TypeFilter, legs: Vec<TypeFilter>) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(legs), head],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+        }
+    }
+    fn graveyard() -> QuantityRef {
+        QuantityRef::ZoneCardCount {
+            zone: crate::types::ability::ZoneRef::Graveyard,
+            scope: crate::types::ability::CountScope::Controller,
+            card_types: vec![],
+            filter: Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                    ),
+                ],
+            }),
+        }
+    }
+    fn spell(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    }
+    fn mana(generic: u32, shards: Vec<ManaCostShard>) -> ManaCost {
+        ManaCost::Cost { generic, shards }
+    }
+    fn cda(text: &str, value: QuantityExpr) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .cda()
+            .modifications(vec![
+                ContinuousModification::SetDynamicPower {
+                    value: value.clone(),
+                },
+                ContinuousModification::SetDynamicToughness { value },
+            ])
+            .description(text.into())
+    }
+    // All expected values are specified before any production parser is called.
+    // Defaults here are typed, complete empty sibling categories and normal fields.
+    fn cases() -> Vec<(crate::database::mtgjson::AtomicCard, CardFace)> {
+        let spirit = population(
+            TypeFilter::Permanent,
+            vec![
+                TypeFilter::Subtype("Spirit".into()),
+                TypeFilter::Enchantment,
+            ],
+        );
+        let fungus = population(
+            TypeFilter::Creature,
+            vec![
+                TypeFilter::Subtype("Fungus".into()),
+                TypeFilter::Subtype("Saproling".into()),
+            ],
+        );
+        let protection = Keyword::Protection(ProtectionTarget::CardType("vampires".into()));
+        let damage = spell(Effect::DealDamage { amount: population(TypeFilter::Permanent, vec![TypeFilter::Creature, TypeFilter::Subtype("Vehicle".into())]), target: TargetFilter::Typed(TypedFilter::creature()), damage_source: None, excess: None })
+            .description("~ deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.".into());
+        let destroy = spell(Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::artifact()),
+            cant_regenerate: false,
+        })
+        .description("Destroy target artifact.".into());
+        let discard = spell(Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            target: TargetFilter::Controller,
+            selection: CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        })
+        .sub_ability(spell(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        }))
+        .description("Discard your hand, then draw two cards.".into());
+        let reducer = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            dynamic_count: Some(graveyard()),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        })
+        .affected(TargetFilter::SelfRef)
+        .active_zones(crate::types::zones::self_spell_cost_mod_active_zones())
+        .description(HEARTH.into());
+        let dawn_static = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink,
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: protection.clone(),
+                },
+                ContinuousModification::AddDynamicPower {
+                    value: spirit.clone(),
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: spirit.clone(),
+                },
+            ])
+            .description(DAWN.lines().nth(1).unwrap().into());
+        let dawn_redirect: ReplacementDefinition = serde_json::from_value(serde_json::json!({
+            "event":"Moved","destination_zone":"Graveyard","valid_card":{"type":"SelfRef"},"mode":{"type":"Mandatory"},"description":"If ~ would be put into a graveyard from anywhere, exile it instead.",
+            "execute":{"kind":"Spell","effect":{"type":"ChangeZone","target":{"type":"SelfRef"},"destination":"Exile"}}
+        })).unwrap();
+        let token = Effect::Token {
+            name: "Fungus".into(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".into(), "Fungus".into()],
+            colors: vec![ManaColor::Black],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: None,
+                    to: Some(Zone::Graveyard),
+                    filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                        FilterProp::NonToken,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ])),
+                },
+            },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            enter_with_counters: vec![],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBlock,
+                }])],
+        };
+        let mut descend = TriggerDefinition::new(TriggerMode::Phase).phase(Phase::End).trigger_zones(vec![Zone::Battlefield]).execute(spell(token))
+            .description("At the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn.".into());
+        descend.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+        let mut death = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Graveyard])
+            .execute(spell(Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: PtValueScope::Anaphoric,
+                    },
+                },
+                target: TargetFilter::Controller,
+            }))
+            .description("When ~ dies, draw cards equal to its power.".into());
+        death.origin = Some(Zone::Battlefield);
+        death.destination = Some(Zone::Graveyard);
+        let entry = ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved).valid_card(TargetFilter::SelfRef).destination_zone(Zone::Battlefield)
+            .execute(spell(Effect::PutCounter { counter_type: crate::types::counter::CounterType::Plus1Plus1, count: QuantityExpr::Ref { qty: QuantityRef::CardsDrawnThisTurn { player: PlayerScope::Opponent { aggregate: AggregateFunction::Max } } }, target: TargetFilter::SelfRef }))
+            .description("~ enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.".into());
+        let specs = [
+            ("Collision Course", COLLISION, "49ca0ca8-0733-4aa9-bd0c-1c661725b81b", mana(1, vec![ManaCostShard::White]), vec![CoreType::Sorcery], vec![], vec![], None, None, vec![ManaColor::White], vec![], vec![damage, destroy], vec![], vec![], vec![], Some(ModalChoice { min_choices: 1, max_choices: 1, mode_count: 2, mode_descriptions: vec!["~ deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.".into(), "Destroy target artifact.".into()], chooser: crate::types::ability::PlayerFilter::Controller, ..Default::default() })),
+            ("Katilda, Dawnhart Martyr", KATILDA, "493b2820-c250-48bd-9f3c-e1b5639ee101", mana(1, vec![ManaCostShard::White; 2]), vec![CoreType::Creature], vec!["Spirit", "Warlock"], vec![Supertype::Legendary], Some(PtValue::Variable("*".into())), Some(PtValue::Variable("*".into())), vec![ManaColor::White], vec![Keyword::Flying, Keyword::Lifelink, protection.clone(), Keyword::Disturb(mana(3, vec![ManaCostShard::White; 2]))], vec![], vec![cda("~'s power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.", spirit)], vec![], vec![], None),
+            ("Katilda's Rising Dawn", DAWN, "493b2820-c250-48bd-9f3c-e1b5639ee101", ManaCost::NoCost, vec![CoreType::Enchantment], vec!["Aura"], vec![Supertype::Legendary], None, None, vec![ManaColor::White], vec![Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()))], vec![], vec![dawn_static], vec![], vec![dawn_redirect], None),
+            ("The Mycotyrant", MYCO, "b69bbb8d-7f8c-45d6-983a-759b5fce6ebd", mana(1, vec![ManaCostShard::Black, ManaCostShard::Green]), vec![CoreType::Creature], vec!["Elder", "Fungus"], vec![Supertype::Legendary], Some(PtValue::Variable("*".into())), Some(PtValue::Variable("*".into())), vec![ManaColor::Black, ManaColor::Green], vec![Keyword::Trample], vec![], vec![cda("~'s power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.", fungus)], vec![descend], vec![], None),
+            ("Frantic Firebolt", FRANTIC, "f1882cc8-c81a-4131-b639-1bd6e083f8ba", mana(2, vec![ManaCostShard::Red]), vec![CoreType::Instant], vec![], vec![], None, None, vec![ManaColor::Red], vec![], vec![spell(Effect::DealDamage { amount: QuantityExpr::Offset { inner: Box::new(QuantityExpr::Ref { qty: graveyard() }), offset: 2 }, target: TargetFilter::Typed(TypedFilter::creature()), damage_source: None, excess: None }).description("~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.".into())], vec![], vec![], vec![], None),
+            ("Hearth Elemental", HEARTH, "f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e", mana(5, vec![ManaCostShard::Red]), vec![CoreType::Creature], vec!["Elemental"], vec![], Some(PtValue::Fixed(4)), Some(PtValue::Fixed(5)), vec![ManaColor::Red], vec![], vec![], vec![reducer], vec![], vec![], None),
+            ("Stoke Genius", STOKE, "f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e", mana(1, vec![ManaCostShard::Red]), vec![CoreType::Sorcery], vec!["Adventure"], vec![], None, None, vec![ManaColor::Red], vec![], vec![discard], vec![], vec![], vec![], None),
+            ("Thought Sponge", SPONGE, "256e094a-a9e8-42d9-90e2-7a24ed85e426", mana(3, vec![ManaCostShard::Blue]), vec![CoreType::Creature], vec!["Sponge"], vec![], Some(PtValue::Fixed(1)), Some(PtValue::Fixed(1)), vec![ManaColor::Blue], vec![Keyword::Flash], vec![], vec![], vec![death], vec![entry], None),
+        ];
+        specs.into_iter().enumerate().map(|(index, (name, text, id, cost, core, subtypes, supertypes, power, toughness, colors, keywords, abilities, statics, triggers, replacements, modal))| {
+            let commander = index == 1 || index == 3;
+            let expected = CardFace { name: name.into(), mana_cost: cost.clone(), card_type: CardType { core_types: core.clone(), subtypes: subtypes.iter().map(|s| (*s).into()).collect(), supertypes: supertypes.clone() }, power: power.clone(), toughness: toughness.clone(), oracle_text: Some(text.into()), keywords, abilities, static_abilities: statics, triggers, replacements, modal, color_identity: colors.clone(), color_override: (index == 2).then_some(colors), scryfall_oracle_id: Some(id.into()), brawl_commander: commander, is_commander: commander, ..Default::default() };
+            let (layout, side, whole_name) = match index { 1 => ("transform", Some("a"), "Katilda, Dawnhart Martyr // Katilda's Rising Dawn"), 2 => ("transform", Some("b"), "Katilda, Dawnhart Martyr // Katilda's Rising Dawn"), 5 => ("adventure", Some("a"), "Hearth Elemental // Stoke Genius"), 6 => ("adventure", Some("b"), "Hearth Elemental // Stoke Genius"), _ => ("normal", None, name) };
+            let (cost_text, mv) = [(Some("{1}{W}"),2), (Some("{1}{W}{W}"),3), (None,3), (Some("{1}{B}{G}"),3), (Some("{2}{R}"),3), (Some("{5}{R}"),6), (Some("{1}{R}"),6), (Some("{3}{U}"),4)][index];
+            let codes: Vec<_> = expected.color_identity.iter().map(|c| match c { ManaColor::White => "W", ManaColor::Blue => "U", ManaColor::Black => "B", ManaColor::Red => "R", ManaColor::Green => "G" }).collect();
+            let pt = |value: &Option<PtValue>| value.as_ref().map(|v| match v { PtValue::Fixed(v) => v.to_string(), PtValue::Variable(v) => v.clone(), PtValue::Quantity(_) => unreachable!() });
+            let type_line = ["Sorcery", "Legendary Creature — Spirit Warlock", "Legendary Enchantment — Aura", "Legendary Creature — Elder Fungus", "Instant", "Creature — Elemental", "Sorcery — Adventure", "Creature — Sponge"][index];
+            let metadata = serde_json::json!({"name":whole_name,"type":type_line,"faceName":side.map(|_|name),"side":side,"layout":layout,"manaCost":cost_text,"manaValue":mv,"types":core.iter().map(|t|format!("{t:?}")).collect::<Vec<_>>(),"subtypes":subtypes,"supertypes":supertypes.iter().map(|t|format!("{t:?}")).collect::<Vec<_>>(),"colors":codes,"colorIdentity":codes,"power":pt(&power),"toughness":pt(&toughness),"text":text,"identifiers":{"scryfallOracleId":id},"keywords":if index==1 || index==2 {vec!["Disturb","Enchant","Flying","Lifelink","Protection","Transform"]} else if index==3 {vec!["Trample"]} else if index==7 {vec!["Flash"]} else {vec![]}});
+            (serde_json::from_value(metadata).unwrap(), expected)
+        }).collect()
+    }
+
+    fn item_kind(item: &OracleItemIr) -> &'static str {
+        // Reuse the production payload readers across native and compatibility
+        // representations; category association does not constrain relations.
+        match (
+            item_ability(item).is_some(),
+            item_trigger(item).is_some(),
+            item_static(item).is_some(),
+            item_replacement(item).is_some(),
+            matches!(&item.node, OracleNodeIr::Keyword(_)),
+            matches!(&item.node, OracleNodeIr::Modal(_)),
+        ) {
+            (false, false, false, false, false, true) => "modal",
+            (false, false, false, false, true, false) => "keyword",
+            (false, false, true, false, false, false) => "static",
+            (false, false, false, true, false, false) => "replacement",
+            (false, true, false, false, false, false) => "trigger",
+            (true, false, false, false, false, false) => "spell",
+            other => panic!("unexpected delivered item categories: {other:?}: {item:#?}"),
+        }
+    }
+
+    #[test]
+    fn relative_eight_complete_faces_source_associations_and_both_whole_loaders() {
+        let cases = cases();
+        let expected_associations: Vec<Vec<(usize, u32, u32, &str)>> = vec![
+            vec![(0, 0, 2, "modal"), (1, 0, 0, "spell"), (2, 0, 1, "spell")],
+            vec![
+                (0, 0, 0, "keyword"),
+                (0, 1, 1, "keyword"),
+                (0, 2, 2, "keyword"),
+                (1, 0, 3, "static"),
+                (2, 0, 4, "keyword"),
+            ],
+            vec![
+                (0, 0, 0, "keyword"),
+                (1, 0, 1, "static"),
+                (2, 0, 2, "replacement"),
+            ],
+            vec![
+                (0, 0, 0, "keyword"),
+                (1, 0, 1, "static"),
+                (2, 0, 2, "trigger"),
+            ],
+            vec![(0, 0, 0, "spell")],
+            vec![(0, 0, 0, "static")],
+            vec![(0, 0, 0, "spell")],
+            vec![
+                (0, 0, 0, "keyword"),
+                (1, 0, 1, "replacement"),
+                (2, 0, 2, "trigger"),
+            ],
+        ];
+        let mut exports = serde_json::Map::new();
+        for (index, (card, expected)) in cases.iter().enumerate() {
+            let input =
+                crate::database::synthesis::prepare_oracle_parser_input(card, card.side.is_some());
+            let mut doc = parse_oracle_ir(
+                &input.oracle_text,
+                &input.card_name,
+                &input.keyword_names,
+                &card.types,
+                &card.subtypes,
+            );
+            let source = card.text.as_deref().unwrap();
+            let reparsed = parse_oracle_ir(
+                &input.oracle_text,
+                &input.card_name,
+                &input.keyword_names,
+                &card.types,
+                &card.subtypes,
+            );
+            assert_eq!(
+                doc.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                reparsed
+                    .items
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                doc.items
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                doc.items.len()
+            );
+            assert_eq!(doc.source_text, source);
+            assert_eq!(
+                doc.items.len(),
+                expected_associations[index].len(),
+                "{}: {doc:#?}",
+                expected.name
+            );
+            for (item, &(line, ordinal, id, kind)) in
+                doc.items.iter().zip(&expected_associations[index])
+            {
+                let span = item.source.span();
+                assert_eq!(item.id, OracleItemId(id));
+                assert_eq!(
+                    (span.first_line, span.last_line, span.ordinal_within_span),
+                    (line, line, ordinal)
+                );
+                assert_eq!(item_kind(item), kind);
+                assert!(span.is_exact());
+                let fragment = source.lines().nth(line).unwrap();
+                assert_eq!(item.source.fragment(), Some(fragment));
+                assert_eq!(&source[span.start_byte..span.end_byte], fragment);
+            }
+            if index == 6 {
+                let OracleNodeIr::Spell(spell) = &doc.items[0].node else {
+                    panic!("whole Stoke chain");
+                };
+                assert_eq!(spell.body.clauses.len(), 2);
+                for (clause, fragment) in spell
+                    .body
+                    .clauses
+                    .iter()
+                    .zip(["Discard your hand", "draw two cards"])
+                {
+                    assert_eq!(clause.source.span().precision, SpanPrecision::ChainRelative);
+                    assert_eq!(clause.source.fragment(), Some(fragment));
+                }
+            }
+            let parsed = lower_oracle_ir(&mut doc);
+            assert_eq!(parsed.abilities, expected.abilities);
+            assert_eq!(parsed.statics, expected.static_abilities);
+            assert_eq!(parsed.triggers, expected.triggers);
+            assert_eq!(parsed.replacements, expected.replacements);
+            assert_eq!(parsed.extracted_keywords, expected.keywords);
+            assert_eq!(parsed.modal, expected.modal);
+            assert_eq!(parsed.additional_cost, None);
+            assert_eq!(parsed.solve_condition, None);
+            assert_eq!(parsed.strive_cost, None);
+            assert!(
+                parsed.casting_options.is_empty()
+                    && parsed.casting_restrictions.is_empty()
+                    && parsed.parse_warnings.is_empty()
+            );
+            let face = if card.side.is_some() {
+                crate::database::synthesis::build_oracle_face_multi(
+                    card,
+                    card.identifiers.scryfall_oracle_id.clone(),
+                )
+            } else {
+                crate::database::synthesis::build_oracle_face(
+                    card,
+                    card.identifiers.scryfall_oracle_id.clone(),
+                )
+            };
+            assert_eq!(&face, expected, "complete independent {}", expected.name);
+            assert!(crate::game::coverage::card_face_gaps(&face).is_empty());
+            let mut entry = serde_json::to_value(expected).unwrap();
+            entry["layout"] = serde_json::json!(card.layout);
+            entry["face_index"] = serde_json::json!(if index == 2 || index == 6 { 1 } else { 0 });
+            exports.insert(expected.name.to_lowercase(), entry);
+        }
+        for legacy in [false, true] {
+            let mut entries = exports.clone();
+            if legacy {
+                for entry in entries.values_mut() {
+                    let fields = entry.as_object_mut().unwrap();
+                    for key in [
+                        "casting_options",
+                        "casting_restrictions",
+                        "solve_condition",
+                        "strive_cost",
+                        "additional_cost",
+                        "parse_warnings",
+                    ] {
+                        fields.remove(key);
+                    }
+                    // Existing legacy P/T is a string. Nondefault metadata,
+                    // modal and linked-face fields are retained explicitly.
+                    for key in ["power", "toughness"] {
+                        if let Some(value) = fields.get_mut(key) {
+                            if value["type"] == "Variable" {
+                                *value = value["value"].clone();
+                            } else if value["type"] == "Fixed" {
+                                *value =
+                                    serde_json::json!(value["value"].as_i64().unwrap().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            let whole = serde_json::to_string(&entries).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), whole.as_bytes()).unwrap();
+            for database in [
+                crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+                crate::database::CardDatabase::from_export(file.path()).unwrap(),
+            ] {
+                for (_, expected) in &cases {
+                    assert_eq!(database.get_face_by_name(&expected.name), Some(expected));
+                }
+                for (front, back, layout) in
+                    [(1, 2, LayoutKind::Transform), (5, 6, LayoutKind::Adventure)]
+                {
+                    let front_face = &cases[front].1;
+                    let back_face = &cases[back].1;
+                    let id = front_face.scryfall_oracle_id.as_ref().unwrap();
+                    assert_eq!(database.get_layout_kind(id), Some(layout));
+                    let subset = database.export_subset_json(
+                        &[front_face.name.clone(), back_face.name.clone()]
+                            .into_iter()
+                            .collect(),
+                    );
+                    let indexed: serde_json::Value = serde_json::from_str(&subset).unwrap();
+                    for (order, face) in [(0, front_face), (1, back_face)] {
+                        let entry = &indexed[face.name.to_lowercase()];
+                        assert_eq!(entry["face_index"], order);
+                        assert_eq!(
+                            entry["layout"],
+                            if layout == LayoutKind::Transform {
+                                "transform"
+                            } else {
+                                "adventure"
+                            }
+                        );
+                        assert_eq!(
+                            serde_json::from_value::<CardFace>(entry.clone()).unwrap(),
+                            *face
+                        );
+                    }
+                    for (face, other) in [(front_face, back_face), (back_face, front_face)] {
+                        assert_eq!(
+                            database.get_other_face_by_printed_ref(&PrintedCardRef {
+                                oracle_id: id.clone(),
+                                face_name: face.name.clone()
+                            }),
+                            Some(other)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn retained_spell_printed_cases() -> Vec<crate::database::mtgjson::AtomicCard> {
     [
         r###"{"name":"Alicia Masters, Skilled Sculptor","manaCost":"{1}{R}","manaValue":2,"type":"Legendary Creature — Human Artificer","types":["Creature"],"subtypes":["Human","Artificer"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["R"],"power":"0","toughness":"4","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a Treasure token.\nSense the Good — At the beginning of your end step, each player gains control of all creatures they own.","keywords":["Sense the Good","Treasure"],"identifiers":{"scryfallOracleId":"223504ba-174a-46f2-a4a2-5d663a82dfd3"}}"###,
@@ -1058,10 +1516,8 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
         card_types: vec![],
         filter: Some(TargetFilter::Or {
             filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
-                    TypeFilter::Instant,
-                    TypeFilter::Sorcery,
-                ]))),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                 TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasAdventure])),
             ],
         }),
@@ -1257,10 +1713,8 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
                 card_types: vec![],
                 filter: Some(TargetFilter::Or {
                     filters: vec![
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
-                            TypeFilter::Instant,
-                            TypeFilter::Sorcery,
-                        ]))),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         TargetFilter::Typed(
                             TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
                         ),
@@ -1583,7 +2037,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
         ),
         (
             r###"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"f1882cc8-c81a-4131-b639-1bd6e083f8ba"},"layout":"normal","manaCost":"{2}{R}","manaValue":3.0,"name":"Frantic Firebolt","subtypes":[],"supertypes":[],"text":"Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","type":"Instant","types":["Instant"]}"###,
-            r###"{"triggers":[],"replacements":[],"abilities":[{"condition":null,"cost":null,"description":"~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","duration":null,"effect":{"amount":{"inner":{"qty":{"card_types":[],"filter":{"filters":[{"controller":null,"properties":[],"type":"Typed","type_filters":[{"AnyOf":["Instant","Sorcery"]}]},{"controller":null,"properties":[{"type":"HasAdventure"}],"type":"Typed","type_filters":["Card"]}],"type":"Or"},"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"offset":2,"type":"Offset"},"target":{"controller":null,"properties":[],"type":"Typed","type_filters":["Creature"]},"type":"DealDamage"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null}],"keywords":[]}"###,
+            r###"{"triggers":[],"replacements":[],"abilities":[{"condition":null,"cost":null,"description":"~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","duration":null,"effect":{"amount":{"inner":{"qty":{"card_types":[],"filter":{"filters":[{"controller":null,"properties":[],"type":"Typed","type_filters":["Instant"]},{"controller":null,"properties":[],"type":"Typed","type_filters":["Sorcery"]},{"controller":null,"properties":[{"type":"HasAdventure"}],"type":"Typed","type_filters":["Card"]}],"type":"Or"},"scope":"Controller","type":"ZoneCardCount","zone":"Graveyard"},"type":"Ref"},"offset":2,"type":"Offset"},"target":{"controller":null,"properties":[],"type":"Typed","type_filters":["Creature"]},"type":"DealDamage"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null}],"keywords":[]}"###,
         ),
         (
             r###"{"colorIdentity":["B","U"],"colors":["B","U"],"identifiers":{"scryfallOracleId":"c14bcef2-6d49-4430-86d0-e5a87ba442d9"},"keywords":["Surveil"],"layout":"normal","manaCost":"{U}{B}","manaValue":2.0,"name":"Lazav, the Multifarious","power":"1","subtypes":["Shapeshifter"],"supertypes":["Legendary"],"text":"When Lazav enters, surveil 1. (Look at the top card of your library. You may put it into your graveyard.)\n{X}: Lazav becomes a copy of target creature card in your graveyard with mana value X, except its name is Lazav, the Multifarious, it's legendary in addition to its other types, and it has this ability.","toughness":"3","type":"Legendary Creature — Shapeshifter","types":["Creature"]}"###,
