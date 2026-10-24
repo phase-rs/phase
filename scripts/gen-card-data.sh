@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/lib/mtgjson-fetch.sh"
 DATA_DIR="data"
 OUTPUT_DIR="client/public"
 OUTPUT="${OUTPUT_DIR}/card-data.json"
+PROVENANCE_OUTPUT="${OUTPUT_DIR}/card-data.provenance.json"
 NAMES_OUTPUT="${OUTPUT_DIR}/card-names.json"
 COVERAGE_OUTPUT="${OUTPUT_DIR}/coverage-data.json"
 COVERAGE_SUMMARY="${OUTPUT_DIR}/coverage-summary.json"
@@ -209,6 +210,7 @@ run_tool_with_recovery() {
 }
 
 OUTPUT_TMP="${OUTPUT}.tmp"
+PROVENANCE_OUTPUT_TMP="${PROVENANCE_OUTPUT}.tmp"
 NAMES_OUTPUT_TMP="${NAMES_OUTPUT}.tmp"
 COVERAGE_OUTPUT_TMP="${COVERAGE_OUTPUT}.tmp"
 COVERAGE_SUMMARY_TMP="${COVERAGE_SUMMARY}.tmp"
@@ -283,6 +285,7 @@ else
 fi
 
 track_tmp "$OUTPUT_TMP"
+track_tmp "$PROVENANCE_OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
 # `--write-subtypes` refreshes the committed creature-subtype vocabulary
 # (crates/engine/data/oracle-subtypes.json, `include_str!`d by the parser).
@@ -294,6 +297,7 @@ track_tmp "$NAMES_OUTPUT_TMP"
 # `cargo export-cards`) omits the flag and leaves the tracked file untouched.
 ORACLE_GEN_ARGS=(
   "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR"
+  --output "$OUTPUT_TMP" --provenance-out "$PROVENANCE_OUTPUT_TMP"
 )
 if [ "$ALLOW_TRACKED_WRITES" = "1" ]; then
   ORACLE_GEN_ARGS+=(--write-subtypes)
@@ -303,7 +307,7 @@ else
   # stale cache cannot regress this watched, committed vocabulary.
   echo "WARNING: refusing to update crates/engine/data/oracle-subtypes.json: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
 fi
-run_tool_with_recovery "$OUTPUT_TMP" "${ORACLE_GEN_ARGS[@]}"
+run_tool_with_recovery /dev/null "${ORACLE_GEN_ARGS[@]}"
 
 # A forward vintage may produce byte-identical catalogs, but it still proves
 # the committed inputs are current. Stage the sidecar beside its watched final
@@ -329,6 +333,14 @@ if [ ! -s "$OUTPUT_TMP" ]; then
   echo "Generated $OUTPUT_TMP is empty; aborting." >&2
   exit 1
 fi
+if [ ! -s "$PROVENANCE_OUTPUT_TMP" ] || ! jq -e '
+  type == "object"
+  and (.source_corpus_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+  and (.card_data_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+' "$PROVENANCE_OUTPUT_TMP" >/dev/null 2>&1; then
+  echo "Generated $PROVENANCE_OUTPUT_TMP is empty or invalid; aborting." >&2
+  exit 1
+fi
 if [ ! -s "$NAMES_OUTPUT_TMP" ] || ! jq -e '.' "$NAMES_OUTPUT_TMP" >/dev/null 2>&1; then
   echo "Generated $NAMES_OUTPUT_TMP is empty or not valid JSON; aborting." >&2
   exit 1
@@ -347,8 +359,9 @@ fi
 
 # Promote immediately — coverage-report failure below must NOT invalidate this.
 promote_tmp "$OUTPUT_TMP"       "$OUTPUT"
+promote_tmp "$PROVENANCE_OUTPUT_TMP" "$PROVENANCE_OUTPUT"
 promote_tmp "$NAMES_OUTPUT_TMP" "$NAMES_OUTPUT"
-echo "Promoted $OUTPUT and $NAMES_OUTPUT"
+echo "Promoted $OUTPUT, $PROVENANCE_OUTPUT, and $NAMES_OUTPUT"
 
 # Mirror card-data.json into the data/ root so downstream tools that consume
 # `<data-root>/card-data.json` (coverage-report, card-data-validate when run
@@ -361,6 +374,7 @@ mkdir -p "$DATA_DIR"
 if ! [ "$OUTPUT" -ef "$DATA_DIR/card-data.json" ]; then
   cp "$OUTPUT" "$DATA_DIR/card-data.json"
 fi
+cp "$PROVENANCE_OUTPUT" "$DATA_DIR/card-data.provenance.json"
 
 # Content-addressed copy: emit a sibling `card-data-<sha256-prefix>.json` that
 # deploys can upload to a long-cache, immutable R2 URL. Each WASM bundle is
