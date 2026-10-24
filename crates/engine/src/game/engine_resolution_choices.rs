@@ -2182,6 +2182,12 @@ pub(super) fn handle_resolution_choice(
                 effects::life::LifeAssignmentOutcome::Deferred => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
+                // The difference was unrepresentable: nothing was assigned. The
+                // open ingress window rejects the action at the boundary, which
+                // restores this prompt.
+                effects::life::LifeAssignmentOutcome::Unrepresentable => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
                 effects::life::LifeAssignmentOutcome::Applied => {
                     ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
                         state, player, events,

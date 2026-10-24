@@ -66,6 +66,10 @@ pub enum OfferRefusal {
     /// CR 704.5a: the period moves some player toward losing the game, and the threshold
     /// authority refused its replayed frames.
     LossAxis,
+    /// The replayed play or answer settled a life change the engine cannot represent. This is
+    /// an engine limit, not a rules outcome: the replay propagates it so the public shortcut
+    /// entry can reject the take instead of silently stopping the repetition.
+    LifeChangeUnrepresentable { player: PlayerId },
 }
 
 /// One recorded play or answer of a period, as the replay makes it.
@@ -478,7 +482,16 @@ fn step(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), OfferRefusal> {
     let outcomes = replay.rng.outcome_draws();
-    events.extend(apply(replay, seat, action).map_err(|_| rejected)?.events);
+    events.extend(
+        apply(replay, seat, action)
+            .map_err(|error| match error {
+                crate::game::engine::EngineError::LifeChangeUnrepresentable { player } => {
+                    OfferRefusal::LifeChangeUnrepresentable { player }
+                }
+                _ => rejected,
+            })?
+            .events,
+    );
     if replay.rng.outcome_draws() != outcomes {
         return Err(OfferRefusal::Randomness);
     }
@@ -1150,4 +1163,44 @@ pub fn performed_for_tests(state: &GameState) -> Option<Result<Vec<String>, Offe
         None,
         &mut Vec::new(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::actions::DebugAction;
+    use crate::types::player::PlayerId;
+
+    /// A replayed play whose final life edit is unrepresentable carries its own
+    /// refusal, so the public shortcut entry can reject the take rather than
+    /// treating it as an illegal play or silently stopping the repetition.
+    #[test]
+    fn step_carries_an_unrepresentable_life_change_as_its_own_refusal() {
+        let mut state = GameState::new_two_player(7);
+        state.debug_mode = true;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.players[0].life = i32::MAX - 1;
+        let mut events = Vec::new();
+        let refusal = step(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::GainLife {
+                player_id: PlayerId(0),
+                amount: 2,
+            }),
+            OfferRefusal::IllegalReplayedPlay,
+            &mut events,
+        )
+        .expect_err("the impossible gain must refuse the replay");
+        assert_eq!(
+            refusal,
+            OfferRefusal::LifeChangeUnrepresentable {
+                player: PlayerId(0)
+            }
+        );
+    }
 }

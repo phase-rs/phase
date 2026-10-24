@@ -3004,17 +3004,11 @@ mod tests {
                 .contains(&id)
         }
 
-        /// The exact rejection text of an unrepresentable final life edit (no other
-        /// engine error carries it).
-        const NOT_REPRESENTABLE: &str = "life change is not representable";
-
+        /// The typed rejection of an unrepresentable final life edit.
         fn assert_not_representable(error: &EngineError) {
             assert!(
-                matches!(
-                    error,
-                    EngineError::InvalidAction(message) if message == NOT_REPRESENTABLE
-                ),
-                "expected the exact unrepresentable-life rejection, got {error:?}"
+                matches!(error, EngineError::LifeChangeUnrepresentable { .. }),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
             );
         }
 
@@ -3597,6 +3591,79 @@ mod tests {
             assert_eq!(life(&runner, P0), 20);
             assert!(runner.state().stack.is_empty());
             assert_eq!(p1p1(&runner, mate), 0);
+        }
+
+        /// CR 608.2c: an interactive branch answer that resolves an impossible
+        /// life change rejects the answer's action and restores the branch
+        /// prompt, so the choice is not lost and nothing partially commits.
+        #[test]
+        fn debug_branch_answer_rejects_unrepresentable_life_and_keeps_the_prompt() {
+            let mut scenario = scenario();
+            scenario.with_life(P0, i32::MAX - 1);
+            let mut runner = debug_runner(scenario);
+            let lich = create_object(
+                runner.state_mut(),
+                CardId(9_703),
+                P0,
+                "Interactive Lich".to_string(),
+                Zone::Battlefield,
+            );
+            let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 2 },
+                                player: TargetFilter::Controller,
+                            },
+                        )],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                ),
+            );
+            {
+                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
+                obj.replacement_definitions = vec![substitution.clone()].into();
+                obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
+            }
+
+            act_ok(&mut runner, gain(P0, 4));
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ),
+                "reach guard: the substitution must park its branch prompt, got {:?}",
+                runner.state().waiting_for
+            );
+            // The branch's own gain must not be substituted again, or the answer
+            // would only re-park the same prompt instead of reaching the overflow.
+            {
+                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
+                obj.replacement_definitions = Vec::new().into();
+                obj.base_replacement_definitions = std::sync::Arc::new(Vec::new());
+            }
+            let revision = runner.state().state_revision;
+            let pending_before = runner.state().pending_replacement.clone();
+
+            let error = runner
+                .act(GameAction::ChooseBranch { index: 0 })
+                .expect_err("the branch's impossible gain must reject the answer");
+            assert_not_representable(&error);
+            assert_eq!(life(&runner, P0), i32::MAX - 1);
+            assert_eq!(runner.state().state_revision, revision);
+            assert_eq!(runner.state().pending_replacement, pending_before);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ),
+                "the rejected answer must restore its branch prompt, got {:?}",
+                runner.state().waiting_for
+            );
         }
 
         /// The cap is accepted; cap + 1 is rejected before any state change.

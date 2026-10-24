@@ -12108,6 +12108,7 @@ fn park_as_enters_pay_choice(
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: state.ingress_life_policy(),
     });
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }

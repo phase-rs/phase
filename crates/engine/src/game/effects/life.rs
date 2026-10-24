@@ -59,9 +59,13 @@ impl LifeChangeUnrepresentable {
 }
 
 impl From<LifeChangeUnrepresentable> for EngineError {
-    /// Diagnostic only: clients see a stable rejection code, never this text.
-    fn from(_: LifeChangeUnrepresentable) -> Self {
-        EngineError::InvalidAction("life change is not representable".to_string())
+    /// The typed carrier survives to the action boundary, which recognizes the
+    /// failure and restores its snapshot. Clients see only the stable
+    /// `InvalidAction` rejection code, never the diagnostic payload.
+    fn from(unrepresentable: LifeChangeUnrepresentable) -> Self {
+        EngineError::LifeChangeUnrepresentable {
+            player: unrepresentable.player,
+        }
     }
 }
 
@@ -442,7 +446,7 @@ fn drain_substitution_continuation(
     }
 }
 
-/// CR 119.1: Settle a post-replacement `ProposedEvent::LifeGain`: the one
+/// CR 119.3: Settle a post-replacement `ProposedEvent::LifeGain`: the one
 /// place the final gain edit is made and its representability is decided.
 ///
 /// Order before anything observable: a recorded replacement-quantity overflow,
@@ -790,23 +794,42 @@ pub(crate) fn settle_life_loss_after_choice(
 pub enum LifeAssignmentOutcome {
     Applied,
     Deferred,
+    /// A receiver's current-to-resulting difference does not fit an `i32`.
+    /// Nothing was mutated (every delta is computed before the first edit) and
+    /// the failure is recorded in the open ingress window, so the action
+    /// boundary rejects the whole action.
+    Unrepresentable,
 }
 
-/// The signed life change that takes `current` to `target`. A
-/// difference the engine cannot represent as an `i32` is that player's
-/// impossible change: it is logged once and treated as no change (the ordinary
-/// skip), so the other players' changes and the instruction's completion
-/// proceed. Shared by every site that feeds the life authority a difference.
+/// The signed life change that takes `current` to `target`, or `None` when the
+/// difference is not representable as an `i32`.
+///
+/// `Some(0)` is a real no-op; `None` is a failure. The failure is recorded in
+/// the open ingress life window (so an action boundary rejects the whole
+/// action), or logged as a discarded change when no window is open. Callers
+/// must stop mutating on `None` rather than substituting zero: a partial
+/// assignment would be observable if no boundary rolled it back. Shared by
+/// every site that feeds the life authority a difference.
 pub(super) fn life_total_difference(
+    state: &mut GameState,
     player: PlayerId,
     target: i32,
     current: i32,
     site: &'static str,
-) -> i32 {
-    target.checked_sub(current).unwrap_or_else(|| {
-        LifeChangeUnrepresentable { player }.log_discarded(site);
-        0
-    })
+) -> Option<i32> {
+    match target.checked_sub(current) {
+        Some(diff) => Some(diff),
+        None => {
+            let unrepresentable = LifeChangeUnrepresentable { player };
+            let _ = settle_unrepresentable(
+                state,
+                unrepresentable,
+                UnrepresentablePolicy::IgnoreImpossible,
+                site,
+            );
+            None
+        }
+    }
 }
 
 /// CR 701.12c / CR 119.7 + CR 119.8: Apply a simultaneous life-total permutation.
@@ -832,22 +855,23 @@ pub fn apply_life_totals_assignment(
     events: &mut Vec<GameEvent>,
 ) -> Result<LifeAssignmentOutcome, EffectError> {
     // CR 701.12c: snapshot every receiver's current life BEFORE any mutation so
-    // each delta is measured against the pre-permutation total.
-    let deltas: Vec<(PlayerId, i32)> = assignment
-        .iter()
-        .map(|&(pid, new_life)| {
-            let old = state
-                .players
-                .iter()
-                .find(|p| p.id == pid)
-                .map(|p| p.life)
-                .ok_or(EffectError::PlayerNotFound)?;
-            Ok((
-                pid,
-                life_total_difference(pid, new_life, old, "life-total assignment"),
-            ))
-        })
-        .collect::<Result<Vec<_>, EffectError>>()?;
+    // each delta is measured against the pre-permutation total. A difference
+    // that does not fit an `i32` fails the whole assignment before the first
+    // edit, so no receiver's change is partially committed.
+    let mut deltas: Vec<(PlayerId, i32)> = Vec::with_capacity(assignment.len());
+    for &(pid, new_life) in assignment {
+        let old = state
+            .players
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.life)
+            .ok_or(EffectError::PlayerNotFound)?;
+        let Some(diff) = life_total_difference(state, pid, new_life, old, "life-total assignment")
+        else {
+            return Ok(LifeAssignmentOutcome::Unrepresentable);
+        };
+        deltas.push((pid, diff));
+    }
 
     for (index, (pid, diff)) in deltas.iter().copied().enumerate() {
         let deferred = match diff.signum() {
@@ -1077,7 +1101,17 @@ pub fn resolve_set_life_total(
             return Err(EffectError::PlayerNotFound);
         }
         let current_life = crate::game::players::team_life_total(state, target_player_id);
-        let diff = life_total_difference(target_player_id, amount, current_life, "set life total");
+        let Some(diff) = life_total_difference(
+            state,
+            target_player_id,
+            amount,
+            current_life,
+            "set life total",
+        ) else {
+            // The failure is recorded in the ingress window (or logged when no
+            // window is open). Stop before any later player's life is set.
+            return Ok(());
+        };
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
@@ -2494,7 +2528,7 @@ mod tests {
         fn activate_serpent_gain(
             start_life: i32,
             doublers: &[&str],
-        ) -> (GameRunner, Vec<GameEvent>, usize) {
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, usize) {
             let mut scenario = scenario();
             scenario.with_life(P0, start_life);
             let serpent = add_card(&mut scenario, P0, "Lochmere Serpent");
@@ -2507,21 +2541,23 @@ mod tests {
             scenario.with_library_top(P0, &["Filler One", "Filler Two"]);
             let mut runner = scenario.build();
             let hand_before = runner.state().players[0].hand.len();
-            let outcome = runner
+            let events = runner
                 .activate(serpent, 1)
                 .pay_with(&[sacrificed])
-                .resolve();
-            let events = outcome.events().to_vec();
+                .try_resolve()
+                .map(|outcome| outcome.events().to_vec());
             (runner, events, hand_before)
         }
 
-        /// CR 101.3: ordinary resolution skips the impossible gain and runs the
-        /// rest of the instruction ("draw a card").
+        /// Ordinary resolution of an impossible gain fails explicitly: the action
+        /// is rejected and restored, so neither the impossible gain nor the rest
+        /// of the instruction ("draw a card") commits.
         #[test]
-        fn ordinary_resolution_skips_the_impossible_gain_and_runs_the_rest() {
+        fn ordinary_resolution_rejects_the_impossible_gain_and_rolls_back() {
             // Control: one below the limit — 1 doubled to 2 reaches i32::MAX.
             let (runner, events, hand_before) =
                 activate_serpent_gain(i32::MAX - 2, &["Rhox Faithmender"]);
+            let events = events.expect("the control activation must resolve");
             assert!(
                 matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
                 "reach guard: the control activation must settle, got {:?}",
@@ -2532,34 +2568,47 @@ mod tests {
             assert_eq!(runner.state().players[0].hand.len(), hand_before + 1);
             assert!(gain_life_effect_resolved(&events));
 
-            // Impossible: i32::MAX - 1 + 2 overflows; the gain is skipped (CR 101.3)
-            // while the draw still runs and the ability still resolves.
+            // Impossible: i32::MAX - 1 + 2 overflows; the resolving action is
+            // rejected, so neither the gain nor the draw commits and the caller
+            // sees the explicit failure.
             let (runner, events, hand_before) =
                 activate_serpent_gain(i32::MAX - 1, &["Rhox Faithmender"]);
+            let error = events.expect_err("the impossible gain must reject the action");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
+            );
+            assert_eq!(runner.life(P0), i32::MAX - 1);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                hand_before,
+                "the rejected resolution must not run the draw"
+            );
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "the rejected resolution leaves the ability on the stack"
+            );
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
             ));
-            assert_eq!(runner.life(P0), i32::MAX - 1);
-            assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
-            assert_eq!(life_changed_count(&events), 0);
-            assert_eq!(
-                runner.state().players[0].hand.len(),
-                hand_before + 1,
-                "the rest of the instruction (draw a card) must still run"
-            );
-            assert!(gain_life_effect_resolved(&events));
         }
 
-        /// An ordinary parked life event (an activated ability whose gain meets
-        /// two doublers) is stamped ordinary: its resumed delivery skips the
-        /// impossible change instead of rejecting the answer.
+        /// A parked ordinary life event that resumes into an impossible change
+        /// rejects the answering action and restores its prompt; it never commits
+        /// the impossible gain or the rest of the instruction.
         #[test]
-        fn ordinary_parked_gain_is_skipped_on_resume_not_rejected() {
+        fn ordinary_parked_gain_rejects_the_impossible_resume_and_keeps_the_prompt() {
             let doublers = ["Rhox Faithmender", "Boon Reflection"];
             for (start_life, applies) in [(i32::MAX - 4, true), (i32::MAX - 3, false)] {
-                let (mut runner, mut events, hand_before) =
+                let (mut runner, result, hand_before) =
                     activate_serpent_gain(start_life, &doublers);
+                result.expect("the activation must stop at the ordering prompt");
                 assert!(
                     matches!(
                         runner.state().waiting_for,
@@ -2574,9 +2623,11 @@ mod tests {
                         .pending_replacement
                         .as_ref()
                         .map(|pending| pending.unrepresentable_life_change),
-                    Some(UnrepresentablePolicy::IgnoreImpossible),
-                    "an ability's parked gain is ordinary, not ingress"
+                    Some(UnrepresentablePolicy::Reject),
+                    "a gain parked inside the activation's action window rejects on resume"
                 );
+                let mut events = Vec::new();
+                let mut rejected = None;
                 for _ in 0..4 {
                     if !matches!(
                         runner.state().waiting_for,
@@ -2584,39 +2635,50 @@ mod tests {
                     ) {
                         break;
                     }
-                    let result = runner
-                        .act(GameAction::ChooseReplacement { index: 0 })
-                        .expect("an ordinary parked gain must never reject the answer");
-                    events.extend(result.events);
+                    match runner.act(GameAction::ChooseReplacement { index: 0 }) {
+                        Ok(result) => events.extend(result.events),
+                        Err(error) => {
+                            rejected = Some(error);
+                            break;
+                        }
+                    }
                 }
-                assert!(matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::Priority { .. }
-                ));
-                assert_eq!(
-                    runner.state().players[0].hand.len(),
-                    hand_before + 1,
-                    "the draw after the gain must run (start life {start_life})"
-                );
-                // Lochmere Serpent: "You gain 1 life and draw a card." Skipping the
-                // impossible gain changes only the gain: in both runs the rest of the
-                // instruction ran, so P0 drew exactly one card.
-                let cards_drawn = events
-                    .iter()
-                    .filter(|event| {
-                        matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
-                    })
-                    .count();
-                assert_eq!(
-                    cards_drawn, 1,
-                    "the draw after the gain must run once (start life {start_life})"
-                );
                 if applies {
+                    assert!(
+                        rejected.is_none(),
+                        "the representable resume must be accepted: {rejected:?}"
+                    );
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert_eq!(
+                        runner.state().players[0].hand.len(),
+                        hand_before + 1,
+                        "the draw after the gain must run (start life {start_life})"
+                    );
                     assert_eq!(runner.life(P0), i32::MAX, "1 doubled twice is 4");
                     assert_eq!(life_changed_count(&events), 1);
                 } else {
+                    let error = rejected.expect("the impossible resume must reject its answer");
+                    assert!(
+                        matches!(
+                            error,
+                            EngineError::LifeChangeUnrepresentable { player } if player == P0
+                        ),
+                        "expected the typed unrepresentable-life rejection, got {error:?}"
+                    );
+                    assert!(
+                        matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ),
+                        "the rejected answer must restore its prompt, got {:?}",
+                        runner.state().waiting_for
+                    );
                     assert_eq!(runner.life(P0), start_life);
                     assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
+                    assert_eq!(runner.state().players[0].hand.len(), hand_before);
                     assert_eq!(life_changed_count(&events), 0);
                 }
             }
@@ -2630,7 +2692,7 @@ mod tests {
         fn cast_dazzling_reflection(
             power: i32,
             doublers: &[&str],
-        ) -> (GameRunner, Vec<GameEvent>, ObjectId) {
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, ObjectId) {
             cast_dazzling_reflection_answering(power, doublers, Some(0))
         }
 
@@ -2640,7 +2702,7 @@ mod tests {
             power: i32,
             doublers: &[&str],
             replacement_choice: Option<usize>,
-        ) -> (GameRunner, Vec<GameEvent>, ObjectId) {
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, ObjectId) {
             let mut scenario = scenario();
             for doubler in doublers {
                 add_card(&mut scenario, P0, doubler);
@@ -2661,12 +2723,12 @@ mod tests {
                 // legal creatures, so it must be declared explicitly.
                 .target_object(creature)
                 .target_object(creature);
-            let outcome = match replacement_choice {
+            let events = match replacement_choice {
                 Some(index) => cast.replacement_choice(index),
                 None => cast,
             }
-            .resolve();
-            let events = outcome.events().to_vec();
+            .try_resolve()
+            .map(|outcome| outcome.events().to_vec());
             (runner, events, spell)
         }
 
@@ -2682,64 +2744,53 @@ mod tests {
             })
         }
 
-        /// CR 101.3 + CR 119.3: in ordinary play a replacement-quantity overflow
-        /// (Boon Reflection doubling 1,100,000,000 to 2,200,000,000, past
-        /// `i32::MAX`) skips only the impossible gain; the rest of the ability
-        /// ("The next time that creature would deal damage ... prevent") runs.
-        /// The carrier does not leak into the next action.
+        /// A replacement-quantity overflow (Boon Reflection doubling
+        /// 1,100,000,000 to 2,200,000,000, past `i32::MAX`) rejects the resolving
+        /// action: the whole spell rolls back, so the gain, the prevention, and
+        /// the graveyard move all wait for an explicit caller decision.
         #[test]
-        fn ordinary_replacement_quantity_overflow_skips_only_the_gain_and_the_ability_resolves() {
+        fn ordinary_replacement_quantity_overflow_rejects_the_resolution() {
             // Control A: no doubler — the whole power is gained.
             let (runner, events, _) = cast_dazzling_reflection(1_100_000_000, &[]);
+            let events = events.expect("the representable cast must resolve");
             assert_eq!(runner.life(P0), 1_100_000_020);
             assert!(prevent_damage_resolved(&events));
 
             // Control B: Boon Reflection is live and applies when representable.
             let (runner, events, _) = cast_dazzling_reflection(500_000_000, &["Boon Reflection"]);
+            let events = events.expect("the representable cast must resolve");
             assert_eq!(runner.life(P0), 1_000_000_020);
             assert!(prevent_damage_resolved(&events));
 
-            // The overflow: the gain is skipped, the ability still resolves.
-            let (mut runner, events, spell) =
+            // The overflow: the resolving action is rejected and restored whole.
+            let (runner, events, spell) =
                 cast_dazzling_reflection(1_100_000_000, &["Boon Reflection"]);
+            let error = events.expect_err("the overflow must reject the resolution");
             assert!(
-                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-                "reach guard: the cast must settle, got {:?}",
-                runner.state().waiting_for
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
             );
             assert_eq!(runner.life(P0), 20);
             assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
-            assert_eq!(life_changed_count(&events), 0);
             assert!(
-                prevent_damage_resolved(&events),
-                "the rest of the ability must still resolve"
+                !runner.state().players[0].graveyard.contains(&spell),
+                "the rejected resolution leaves the spell on the stack"
             );
-            assert!(runner.state().players[0].graveyard.contains(&spell));
+            assert_eq!(runner.state().stack.len(), 1);
             assert_eq!(
                 runner.state().replacement_quantity_overflow,
                 None,
-                "the settle step takes the record"
+                "the rejected action restores the pre-resolution record"
             );
-
-            // No leak: the next action's gain is doubled normally (a leaked record
-            // would stop the pipeline at its head and the gain would be 1).
-            runner.state_mut().debug_mode = true;
-            runner
-                .act(GameAction::Debug(
-                    crate::types::actions::DebugAction::GainLife {
-                        player_id: P0,
-                        amount: 1,
-                    },
-                ))
-                .expect("a later debug gain must apply");
-            assert_eq!(runner.life(P0), 22);
         }
 
-        /// A choice-resumed ordinary delivery whose later answer overflows is
-        /// still ordinary: every answer is accepted (never rejected) and the
-        /// spell resolves with the gain skipped.
+        /// A choice-resumed ordinary delivery whose later answer overflows
+        /// rejects the answering action and restores its ordering prompt.
         #[test]
-        fn choice_resumed_ordinary_quantity_overflow_is_skipped_not_rejected() {
+        fn choice_resumed_ordinary_quantity_overflow_rejects_the_answer() {
             // Reach guard: the same setup, left unanswered, halts at the CR 616.1
             // ordering prompt for the two doublers, so the answer below is a real
             // prompt answer rather than a no-prompt degenerate path.
@@ -2763,10 +2814,20 @@ mod tests {
             // 600,000,000 doubled is 1,200,000,000; doubled again overflows i32.
             let (runner, events, spell) =
                 cast_dazzling_reflection(600_000_000, &["Rhox Faithmender", "Boon Reflection"]);
+            let error = events.expect_err("the overflow must reject the answer");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
+            );
             assert_eq!(runner.life(P0), 20);
-            assert_eq!(life_changed_count(&events), 0);
-            assert!(prevent_damage_resolved(&events));
-            assert!(runner.state().players[0].graveyard.contains(&spell));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            assert!(!runner.state().players[0].graveyard.contains(&spell));
             assert_eq!(runner.state().replacement_quantity_overflow, None);
         }
 
@@ -2939,18 +3000,33 @@ mod tests {
         }
 
         /// The sibling difference helper: an `i32` overflow is the receiver's
-        /// impossible change (treated as no change), a representable difference
-        /// passes through.
+        /// impossible change and reports `None` (never a substitute zero), while
+        /// a representable difference — including `i32::MIN` — passes through.
         #[test]
-        fn life_total_difference_degrades_overflow_to_no_change() {
-            assert_eq!(life_total_difference(P0, 7, 20, "test"), -13);
-            assert_eq!(life_total_difference(P0, 20, 7, "test"), 13);
-            assert_eq!(life_total_difference(P0, i32::MAX, -1, "test"), 0);
-            assert_eq!(life_total_difference(P0, i32::MIN, 1, "test"), 0);
+        fn life_total_difference_reports_overflow_as_failure() {
+            let mut state = GameState::new_two_player(42);
             assert_eq!(
-                life_total_difference(P0, i32::MIN, 0, "test").unsigned_abs(),
+                life_total_difference(&mut state, P0, 7, 20, "test"),
+                Some(-13)
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, 20, 7, "test"),
+                Some(13)
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MAX, -1, "test"),
+                None
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MIN, 1, "test"),
+                None
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MIN, 0, "test")
+                    .expect("i32::MIN stays representable as a difference")
+                    .unsigned_abs(),
                 1 << 31,
-                "i32::MIN stays representable as a difference; its magnitude needs unsigned_abs"
+                "its magnitude needs unsigned_abs"
             );
         }
     }
