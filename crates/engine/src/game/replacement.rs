@@ -6569,6 +6569,24 @@ fn replacement_valid_card_matches(
     source_id: ObjectId,
     controller: Option<PlayerId>,
 ) -> bool {
+    // CR 400.7 + CR 614.1c: a cast-triggered rider modifies only its pinned
+    // spell's entry. Check the pre-move object, not a future incarnation or a
+    // stack entry that resolution may already have removed. Never refresh a
+    // stale pin from a recast sharing the storage id.
+    if let Some(pin) = repl_def.triggering_spell {
+        if !matches!(
+            event,
+            ProposedEvent::ZoneChange {
+                object_id,
+                from: Zone::Stack,
+                to: Zone::Battlefield,
+                ..
+            } if *object_id == pin.object_id
+        ) || !pin.is_current(state)
+        {
+            return false;
+        }
+    }
     let ctx = &repl_def.valid_card_context(state, source_id, controller);
     if let ProposedEvent::Connive { subject, .. } = event {
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);

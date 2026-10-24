@@ -34999,6 +34999,24 @@ pub struct ReplacementDefinition {
     pub choice_authority: ReplacementChoiceAuthority,
     #[serde(default)]
     pub valid_card: Option<TargetFilter>,
+    /// CR 400.7 + CR 614.1c: recipient spell occurrence for a cast-triggered
+    /// entry rider. Captured when the trigger goes on the stack and latched
+    /// unchanged from the resolving carrier when the rider is installed.
+    ///
+    /// Distinct from the installer's `source_object` / `source_controller`,
+    /// `granting_object`, and `runtime_execute`. Control changes do not change
+    /// the recipient. Installation requires the pinned spell still on the
+    /// stack; absent, departed, or mismatched authority installs nothing.
+    /// Applicability checks this pin against the pre-move object for a
+    /// stack-to-battlefield event, without requiring a surviving stack entry.
+    /// Leaving and recasting the same storage id never refreshes this pin.
+    ///
+    /// Pin-bearing riders must retain `valid_card: Some(...)`, whose matcher
+    /// enforces the identity gate. Older definitions default to no pin;
+    /// historical in-flight saves with installed raw-id riders cannot be
+    /// migrated because they never recorded the recipient incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_spell: Option<ObjectIncarnationRef>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -35382,6 +35400,7 @@ impl ReplacementDefinition {
             mode: ReplacementMode::Mandatory,
             choice_authority: ReplacementChoiceAuthority::AffectedPlayer,
             valid_card: None,
+            triggering_spell: None,
             description: None,
             condition: None,
             destination_zone: None,
