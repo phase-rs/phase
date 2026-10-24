@@ -3947,12 +3947,68 @@ fn redact_record_payment(
 /// A resolved ability latches its source's payment snapshots and linked-exile members in
 /// `trigger_source`; blank only the hidden-source payment entries and zero only the hidden
 /// linked-exile members' mana values, across the whole sub/else chain.
+fn replacement_event_names_hidden_source(
+    event: &crate::types::ability::ReplacementEventContext,
+    hidden_ids: &HashSet<ObjectId>,
+) -> bool {
+    event.source_id.is_some_and(|id| hidden_ids.contains(&id))
+        || event
+            .source_identity
+            .is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id))
+        || matches!(event.event_target, Some(crate::types::ability::TargetRef::Object(id)) if hidden_ids.contains(&id))
+}
+
+fn redact_replacement_event(
+    event: &mut crate::types::ability::ReplacementEventContext,
+    hidden_ids: &HashSet<ObjectId>,
+) {
+    if event.source_id.is_some_and(|id| hidden_ids.contains(&id))
+        || event
+            .source_identity
+            .is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id))
+    {
+        event.source_id = None;
+        event.source_identity = None;
+    }
+    if matches!(event.event_target, Some(crate::types::ability::TargetRef::Object(id)) if hidden_ids.contains(&id))
+    {
+        event.event_target = None;
+    }
+}
+
 fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
+    }
+    if ability
+        .context
+        .source_identity
+        .is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id))
+    {
+        ability.context.source_identity = None;
+    }
+    if let Some(event) = ability.context.replacement_event.as_mut() {
+        redact_replacement_event(event, hidden_ids);
+    }
+    if let Some(event) = ability
+        .instruction_actor
+        .as_mut()
+        .and_then(|actor| actor.replacement_event_mut())
+    {
+        redact_replacement_event(event, hidden_ids);
+    }
+    if let crate::types::ability::Effect::ApplyPostReplacementDamage { context, .. } =
+        &mut ability.effect
+    {
+        if context
+            .source_identity
+            .is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id))
+        {
+            context.source_identity = None;
+        }
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         redact_ability_payment(sub_ability, hidden_ids);
@@ -3981,9 +4037,24 @@ fn ability_payment_names_hidden_source(
     hidden_ids: &HashSet<ObjectId>,
 ) -> bool {
     ability
-        .trigger_source
-        .as_ref()
-        .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
+        .context
+        .source_identity
+        .is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id))
+        || ability
+            .context
+            .replacement_event
+            .as_ref()
+            .is_some_and(|event| replacement_event_names_hidden_source(event, hidden_ids))
+        || ability
+            .instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.replacement_event())
+            .is_some_and(|event| replacement_event_names_hidden_source(event, hidden_ids))
+        || matches!(&ability.effect, crate::types::ability::Effect::ApplyPostReplacementDamage { context, .. } if context.source_identity.is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id)))
+        || ability
+            .trigger_source
+            .as_ref()
+            .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
         || ability
             .sub_ability
             .as_deref()
@@ -4178,6 +4249,16 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
 /// members' mana values zeroed.
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    if let Some(pending) = state.pending_replacement.as_mut() {
+        if let crate::types::proposed_event::ProposedEvent::Damage {
+            source_identity, ..
+        } = &mut pending.proposed
+        {
+            if source_identity.is_some_and(|pin| hidden_ids.contains(&pin.reference.object_id)) {
+                *source_identity = None;
+            }
+        }
+    }
     if let Some(pending) = state.pending_cast.as_deref_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
     }
@@ -14190,6 +14271,67 @@ mod tests {
     /// every projected event carrier, and a ResolvedAbility's library
     /// `effect_context_object` is dropped from the projection; a battlefield
     /// subject is untouched in both. The authoritative state keeps all of it.
+    #[test]
+    fn hidden_instruction_source_and_event_pins_are_redacted_as_whole_values() {
+        use crate::types::ability::{InstructionActorRef, ReplacementEventContext};
+        use crate::types::identifiers::ObjectIdentityBinding;
+        let hidden = ObjectId(91);
+        let visible = ObjectId(92);
+        let hidden_ids = HashSet::from([hidden]);
+        for source in [hidden, visible] {
+            let pin =
+                ObjectIdentityBinding::new(ObjectIncarnationRef::of(source, 7), Zone::Library);
+            let event = ReplacementEventContext {
+                source_id: Some(source),
+                source_identity: Some(pin),
+                event_target: Some(TargetRef::Player(PlayerId(1))),
+            };
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+            ability.context.source_identity = Some(pin);
+            ability.context.replacement_event = Some(event.clone());
+            let mut actor =
+                InstructionActorRef::event(TargetFilter::PostReplacementDamageTarget).unwrap();
+            actor.capture_replacement_event(&event);
+            ability.instruction_actor = Some(actor);
+            ability.sub_ability = Some(Box::new(ability.clone()));
+            ability.else_ability = Some(Box::new(ability.clone()));
+            let canonical = ability.clone();
+            assert_eq!(
+                ability_payment_names_hidden_source(&ability, &hidden_ids),
+                source == hidden
+            );
+            redact_ability_payment(&mut ability, &hidden_ids);
+            for node in [
+                &ability,
+                ability.sub_ability.as_deref().unwrap(),
+                ability.else_ability.as_deref().unwrap(),
+            ] {
+                let event = node.context.replacement_event.as_ref().unwrap();
+                let actor_event = node
+                    .instruction_actor
+                    .as_ref()
+                    .unwrap()
+                    .replacement_event()
+                    .unwrap();
+                assert_eq!(
+                    node.context.source_identity,
+                    (source == visible).then_some(pin)
+                );
+                for context in [event, actor_event] {
+                    assert_eq!(context.source_id, (source == visible).then_some(source));
+                    assert_eq!(context.source_identity, (source == visible).then_some(pin));
+                    assert_eq!(context.event_target, Some(TargetRef::Player(PlayerId(1))));
+                }
+            }
+            assert!(!ability_payment_names_hidden_source(&ability, &hidden_ids));
+            assert_eq!(canonical.context.source_identity, Some(pin));
+            assert_eq!(canonical.context.replacement_event, Some(event));
+            if source == visible {
+                assert_eq!(ability, canonical);
+            }
+        }
+    }
+
     #[test]
     fn hidden_library_identity_is_dropped_from_viewer_event_and_ability_carriers() {
         use crate::types::game_state::StackEntry;

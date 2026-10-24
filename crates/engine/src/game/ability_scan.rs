@@ -7595,9 +7595,15 @@ mod tests {
         let baseline = resolved_ability_axes(&base, ScanMode::Conservative);
         assert!(!baseline.event && !baseline.sibling && !baseline.projected);
         for actor in crate::types::ability::instruction_actor_test_refs() {
-            let expected = scan_controller_ref(&actor);
+            let expected = actor.classify(scan_controller_ref, |filter| {
+                scan_target_filter(
+                    filter,
+                    FilterReadContext::SnapshotOrEvent,
+                    ScanMode::Conservative,
+                )
+            });
             let mut resolved = base.clone();
-            resolved.instruction_actor = (Some(actor.clone())).map(Into::into);
+            resolved.instruction_actor = Some(actor.clone());
             let actual = resolved_ability_axes(&resolved, ScanMode::Conservative);
             assert_eq!(
                 (
@@ -7615,7 +7621,7 @@ mod tests {
                 "{actor:?}"
             );
             let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
-            definition.instruction_actor = (Some(actor.clone())).map(Into::into);
+            definition.instruction_actor = Some(actor.clone());
             let actual = ability_definition_axes(&definition, ScanMode::Conservative);
             assert_eq!(
                 (

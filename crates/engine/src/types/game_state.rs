@@ -17440,6 +17440,7 @@ pub struct PendingLifelinkGain {
 /// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
 /// while the CR 616.1 prompt is open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct PendingCombatLifelink {
     /// CR 608.2h: Phase A source occurrences retained through the lifelink tail.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -24499,6 +24500,7 @@ pub struct PostReplacementDrainDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct PostReplacementDrain {
     /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
@@ -24681,6 +24683,42 @@ pub struct PostReplacementDrainStack {
     /// field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<PostReplacementFrameId>,
+}
+
+impl Serialize for PostReplacementDrain {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PostReplacementDrain {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let drain = Self::deserialize(deserializer)?;
+        crate::types::ability::validate_source_identity(
+            drain.event_source,
+            drain.event_source_identity,
+            None,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(drain)
+    }
+}
+
+impl Serialize for PendingCombatLifelink {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PendingCombatLifelink {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tail = Self::deserialize(deserializer)?;
+        for (source, identity) in &tail.source_identities {
+            crate::types::ability::validate_source_identity(Some(*source), Some(*identity), None)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(tail)
+    }
 }
 
 impl PostReplacementDrain {
@@ -34115,6 +34153,56 @@ mod drain_stack_reentrancy_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persisted_damage_drains_and_combat_tail_reject_source_pin_contradictions() {
+        let pin = crate::types::identifiers::ObjectIdentityBinding::new(
+            ObjectIncarnationRef::of(ObjectId(91), 7),
+            Zone::Battlefield,
+        );
+        let mut drain = PostReplacementDrain::ready(
+            crate::types::ability::PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+            )),
+        );
+        drain.event_source = Some(ObjectId(91));
+        drain.event_source_identity = Some(pin);
+        let wire = serde_json::to_value(&drain).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PostReplacementDrain>(wire.clone()).unwrap(),
+            drain
+        );
+        for missing in [false, true] {
+            let mut malformed = wire.clone();
+            malformed["event_source"] = if missing {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(92)
+            };
+            assert!(serde_json::from_value::<PostReplacementDrain>(malformed).is_err());
+        }
+        let tail = PendingCombatLifelink {
+            source_identities: std::collections::BTreeMap::from([(ObjectId(91), pin)]),
+            remaining: VecDeque::new(),
+            batch_events: vec![],
+            damage_to_players: vec![],
+            prevention_tally: vec![],
+            lives_before: vec![20, 20],
+            sub_step: CombatDamageSubStep::Regular,
+        };
+        let mut malformed = serde_json::to_value(&tail).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingCombatLifelink>(malformed.clone()).unwrap(),
+            tail
+        );
+        let value = malformed["source_identities"]
+            .as_object_mut()
+            .unwrap()
+            .remove("91")
+            .unwrap();
+        malformed["source_identities"]["92"] = value;
+        assert!(serde_json::from_value::<PendingCombatLifelink>(malformed).is_err());
+    }
+
     use super::*;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;

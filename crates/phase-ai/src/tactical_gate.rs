@@ -4727,6 +4727,45 @@ mod tests {
         );
     }
 
+    fn instruction_actor_test_refs() -> Vec<engine::types::ability::InstructionActorRef> {
+        let controllers = [
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            ControllerRef::ScopedPlayer,
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+            ControllerRef::DeclaredPlayer {
+                group: ChosenGroupId(1),
+            },
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+            ControllerRef::EventTargetController,
+            ControllerRef::DefendingPlayer,
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::SourceChosenPlayer,
+            ControllerRef::TriggeringPlayer,
+            ControllerRef::EnchantedPlayer,
+            ControllerRef::ActivePlayer,
+            ControllerRef::SpecificPlayer { id: P1 },
+        ];
+        controllers
+            .into_iter()
+            .map(Into::into)
+            .chain(
+                [
+                    TargetFilter::TriggeringSpellController,
+                    TargetFilter::PostReplacementSourceController,
+                    TargetFilter::PostReplacementDamageTarget,
+                    TargetFilter::PostReplacementDamageTargetOwner,
+                ]
+                .into_iter()
+                .map(|reference| {
+                    engine::types::ability::InstructionActorRef::event(reference).unwrap()
+                }),
+            )
+            .collect()
+    }
+
     #[test]
     fn instruction_actor_broad_consumer_root_and_recursive_payloads_keep_the_issued_zero_cast() {
         for position in 0..4 {
@@ -4786,12 +4825,7 @@ mod tests {
                 !zero_cast_is_retained(&control, harvest),
                 "all-None stable control reaches real known-zero rejection"
             );
-            for actor in [
-                ControllerRef::You,
-                ControllerRef::ScopedPlayer,
-                ControllerRef::SpecificPlayer { id: P1 },
-                ControllerRef::ChosenPlayer { index: 0 },
-            ] {
+            for actor in instruction_actor_test_refs() {
                 let mut marked = control.clone();
                 let root =
                     &mut Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0];
@@ -4802,7 +4836,7 @@ mod tests {
                     3 => &mut root.mode_abilities[0],
                     _ => unreachable!(),
                 };
-                node.instruction_actor = (Some(actor.clone())).map(Into::into);
+                node.instruction_actor = Some(actor.clone());
                 let root = &marked.objects[&source].abilities[0];
                 assert_eq!(
                     root.instruction_actor,
@@ -4887,15 +4921,10 @@ mod tests {
             !zero_cast_is_retained(&control, harvest),
             "positive reach of the exact unbound-X exception"
         );
-        for actor in [
-            ControllerRef::You,
-            ControllerRef::ScopedPlayer,
-            ControllerRef::SpecificPlayer { id: P1 },
-            ControllerRef::ChosenPlayer { index: 0 },
-        ] {
+        for actor in instruction_actor_test_refs() {
             let mut marked = control.clone();
             Arc::make_mut(&mut marked.objects.get_mut(&source).unwrap().abilities)[0]
-                .instruction_actor = (Some(actor.clone())).map(Into::into);
+                .instruction_actor = Some(actor.clone());
             let definition = &marked.objects[&source].abilities[0];
             assert!(
                 matches!(definition.effect.as_ref(), Effect::Mana { produced: ManaProduction::Colorless { count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } } }, restrictions, grants, expiry: None, target: None } if name == "X" && restrictions.is_empty() && grants.is_empty())
@@ -6133,26 +6162,7 @@ mod tests {
             true,
             false,
         ));
-        for actor in [
-            ControllerRef::You,
-            ControllerRef::Opponent,
-            ControllerRef::ScopedPlayer,
-            ControllerRef::TargetPlayer,
-            ControllerRef::TargetOpponent,
-            ControllerRef::DeclaredPlayer {
-                group: ChosenGroupId(1),
-            },
-            ControllerRef::ParentTargetController,
-            ControllerRef::ParentTargetOwner,
-            ControllerRef::EventTargetController,
-            ControllerRef::DefendingPlayer,
-            ControllerRef::ChosenPlayer { index: 0 },
-            ControllerRef::SourceChosenPlayer,
-            ControllerRef::TriggeringPlayer,
-            ControllerRef::EnchantedPlayer,
-            ControllerRef::ActivePlayer,
-            ControllerRef::SpecificPlayer { id: P1 },
-        ] {
+        for actor in instruction_actor_test_refs() {
             for child_only in [false, true] {
                 let mut definition = zero_controller_gain_definition();
                 if child_only {
@@ -6171,7 +6181,7 @@ mod tests {
                 } else {
                     &mut definition
                 };
-                node.instruction_actor = (Some(actor.clone())).map(Into::into);
+                node.instruction_actor = Some(actor.clone());
                 assert!(
                     !definition_is_componentwise_known_zero(
                         state,
@@ -6242,12 +6252,7 @@ mod tests {
                     && object.casting_restrictions.is_empty()
             );
             assert!(control.battlefield.is_empty() && control.stack.is_empty());
-            for actor in [
-                ControllerRef::You,
-                ControllerRef::ScopedPlayer,
-                ControllerRef::SpecificPlayer { id: P1 },
-                ControllerRef::ChosenPlayer { index: 0 },
-            ] {
+            for actor in instruction_actor_test_refs() {
                 let mut state = control.clone();
                 for marker in [None, Some(actor.clone()), None] {
                     let definition =
@@ -6258,10 +6263,10 @@ mod tests {
                             .sub_ability
                             .as_deref_mut()
                             .unwrap()
-                            .instruction_actor = (marker.clone()).map(Into::into);
+                            .instruction_actor = marker.clone();
                         assert_eq!(definition.instruction_actor, None);
                     } else {
-                        definition.instruction_actor = (marker.clone()).map(Into::into);
+                        definition.instruction_actor = marker.clone();
                         assert!(definition.sub_ability.is_none());
                     }
                     let definition = &state.objects[&spell].abilities[0];

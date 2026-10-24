@@ -594,11 +594,11 @@ mod tests {
                 ObjectId(1),
                 PlayerId(0),
             );
-            root.instruction_actor = (actor.clone()).map(Into::into);
+            root.instruction_actor = actor.clone();
             root.sub_ability = Some(Box::new(root.clone()));
             root.else_ability = Some(Box::new(root.clone()));
             let mut mode = AbilityDefinition::new(AbilityKind::Spell, root.effect.clone());
-            mode.instruction_actor = (actor.clone()).map(Into::into);
+            mode.instruction_actor = actor.clone();
             root.mode_abilities.push(mode);
             assert!(
                 rewrite_resolved_ability(&mut root, &substitution) > 0,

@@ -156,7 +156,7 @@ pub fn build_resolved_from_def_with_targets(
     let mut resolved =
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
     resolved.declares_chosen_group = def.declares_chosen_group;
-    resolved.instruction_actor = (def.instruction_actor.clone()).map(Into::into);
+    resolved.instruction_actor = def.instruction_actor.clone();
     resolved.reads_chosen_group = def.reads_chosen_group;
     resolved.target_reads = def.target_reads;
     resolved.declares_return_result = def.declares_return_result;
@@ -289,7 +289,7 @@ pub(crate) fn apply_instead_swap(
 ) -> ResolvedAbility {
     let mut overridden = parent.clone();
     overridden.effect = sub.effect.clone();
-    overridden.instruction_actor = (sub.instruction_actor.clone()).map(Into::into);
+    overridden.instruction_actor = sub.instruction_actor.clone();
     overridden.declares_chosen_group = sub.declares_chosen_group;
     overridden.reads_chosen_group = sub.reads_chosen_group;
     overridden.declares_return_result = sub.declares_return_result;

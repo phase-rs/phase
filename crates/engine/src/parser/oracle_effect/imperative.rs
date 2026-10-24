@@ -9930,7 +9930,7 @@ fn lower_target_referenced_search_library(
     };
 
     let mut search_def = AbilityDefinition::new(AbilityKind::Spell, search_clause.effect);
-    search_def.instruction_actor = (search_clause.instruction_actor.clone()).map(Into::into);
+    search_def.instruction_actor = search_clause.instruction_actor.clone();
     search_def.sub_ability = search_clause.sub_ability;
 
     let mut clause = parsed_clause(Effect::TargetOnly {

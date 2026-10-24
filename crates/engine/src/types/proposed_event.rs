@@ -519,6 +519,7 @@ pub enum PlaneswalkCause {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum ProposedEvent {
     ZoneChange {
         object_id: ObjectId,
@@ -983,6 +984,28 @@ impl EntryChoices {
     }
 }
 
+impl Serialize for ProposedEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProposedEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let event = Self::deserialize(deserializer)?;
+        if let Self::Damage {
+            source_id,
+            source_identity,
+            ..
+        } = &event
+        {
+            super::ability::validate_source_identity(Some(*source_id), *source_identity, None)
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(event)
+    }
+}
+
 impl ProposedEvent {
     /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
@@ -1342,6 +1365,43 @@ impl ProposedEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn damage_source_binding_decode_preserves_legacy_and_refuses_mismatched_ids() {
+        let pin = crate::types::identifiers::ObjectIdentityBinding::new(
+            ObjectIncarnationRef::of(ObjectId(8), 3),
+            Zone::Battlefield,
+        );
+        let mut event = ProposedEvent::Damage {
+            source_id: ObjectId(8),
+            source_identity: Some(pin),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(wire.clone()).unwrap(),
+            event
+        );
+        let mut malformed = wire;
+        malformed["Damage"]["source_id"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<ProposedEvent>(malformed).is_err());
+        let ProposedEvent::Damage {
+            source_identity, ..
+        } = &mut event
+        else {
+            unreachable!()
+        };
+        *source_identity = None;
+        let wire = serde_json::to_value(&event).unwrap();
+        assert!(wire["Damage"].get("source_identity").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(wire).unwrap(),
+            event
+        );
+    }
+
     use super::*;
 
     #[test]

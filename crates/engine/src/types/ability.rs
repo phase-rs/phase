@@ -6512,7 +6512,7 @@ where
 /// CR 615.5 + CR 608.2h: the original event owned by a replacement follow-up.
 /// An owned snapshot with missing members must not borrow a nested event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, remote = "Self")]
 pub struct ReplacementEventContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
@@ -6520,6 +6520,39 @@ pub struct ReplacementEventContext {
     pub source_identity: Option<ObjectIdentityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_target: Option<TargetRef>,
+}
+
+impl Serialize for ReplacementEventContext {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplacementEventContext {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let event = Self::deserialize(deserializer)?;
+        validate_source_identity(event.source_id, event.source_identity, None)
+            .map_err(de::Error::custom)?;
+        Ok(event)
+    }
+}
+
+/// Checks redundant source identifiers without requiring the captured object to
+/// remain live. An absent legacy pin cannot acquire an occurrence during decode.
+pub(crate) fn validate_source_identity(
+    source_id: Option<ObjectId>,
+    identity: Option<ObjectIdentityBinding>,
+    incarnation: Option<u64>,
+) -> Result<(), &'static str> {
+    if let Some(identity) = identity {
+        if source_id != Some(identity.reference.object_id) {
+            return Err("source identity disagrees with source id");
+        }
+        if incarnation.is_some_and(|value| value != identity.reference.incarnation) {
+            return Err("source identity disagrees with source incarnation");
+        }
+    }
+    Ok(())
 }
 
 /// CR 608.2c: an instruction's single-player authority. Controller references
@@ -6590,6 +6623,13 @@ impl InstructionActorRef {
         match &self.0 {
             InstructionActorAuthority::Controller(_) => None,
             InstructionActorAuthority::Event(event) => event.replacement_event.as_ref(),
+        }
+    }
+
+    pub(crate) fn replacement_event_mut(&mut self) -> Option<&mut ReplacementEventContext> {
+        match &mut self.0 {
+            InstructionActorAuthority::Controller(_) => None,
+            InstructionActorAuthority::Event(event) => event.replacement_event.as_mut(),
         }
     }
 
@@ -16246,6 +16286,7 @@ pub enum ExcessRecipient {
 /// damage event. Used only by internal continuations that resume Phase C damage
 /// application after a nested replacement choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct DamageContextSnapshot {
     pub source_id: ObjectId,
     /// CR 608.2h: the damaging source's expected-zone occurrence.
@@ -16271,6 +16312,25 @@ pub struct DamageContextSnapshot {
     /// so the combined lifelink total is still gained on resume.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub lifelink_bonus: u32,
+}
+
+impl Serialize for DamageContextSnapshot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DamageContextSnapshot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let snapshot = Self::deserialize(deserializer)?;
+        validate_source_identity(
+            Some(snapshot.source_id),
+            snapshot.source_identity,
+            snapshot.source_incarnation,
+        )
+        .map_err(de::Error::custom)?;
+        Ok(snapshot)
+    }
 }
 
 /// A single conjured card entry: card source + quantity.
@@ -35869,6 +35929,12 @@ impl<'de> Deserialize<'de> for ResolvedAbility {
         ability
             .normalize_decoded_target_pins()
             .map_err(de::Error::custom)?;
+        validate_source_identity(
+            Some(ability.source_id),
+            ability.context.source_identity,
+            ability.source_incarnation,
+        )
+        .map_err(de::Error::custom)?;
         Ok(ability)
     }
 }
@@ -36627,18 +36693,19 @@ impl ResolvedAbility {
         let owned = self
             .context
             .replacement_event
-            .get_or_insert_with(|| event.clone());
+            .get_or_insert_with(|| event.clone())
+            .clone();
         if let Some(actor) = self.instruction_actor.as_mut() {
-            actor.capture_replacement_event(owned);
+            actor.capture_replacement_event(&owned);
         }
         let detach_prevention_rider = matches!(self.effect, Effect::PreventDamage { .. });
         if let Some(sub) = self.sub_ability.as_deref_mut() {
             if !detach_prevention_rider || sub.sub_link != SubAbilityLink::ContinuationStep {
-                sub.capture_replacement_event_recursive(event);
+                sub.capture_replacement_event_recursive(&owned);
             }
         }
         if let Some(otherwise) = self.else_ability.as_deref_mut() {
-            otherwise.capture_replacement_event_recursive(event);
+            otherwise.capture_replacement_event_recursive(&owned);
         }
     }
 
@@ -38007,8 +38074,29 @@ impl ResolvedAbility {
         }
     }
 
-    pub fn set_context_recursive(&mut self, context: SpellContext) {
+    /// CR 400.7 + CR 615.5: inherit shared resolution facts while retaining
+    /// this node's source occurrence and already-owned replacement event.
+    pub(crate) fn inherit_context(&mut self, context: &SpellContext) {
+        let source_identity = self.context.source_identity.or_else(|| {
+            context.source_identity.filter(|pin| {
+                pin.reference.object_id == self.source_id
+                    && self
+                        .source_incarnation
+                        .is_none_or(|incarnation| incarnation == pin.reference.incarnation)
+            })
+        });
+        let replacement_event = self
+            .context
+            .replacement_event
+            .take()
+            .or_else(|| context.replacement_event.clone());
         self.context = context.clone();
+        self.context.source_identity = source_identity;
+        self.context.replacement_event = replacement_event;
+    }
+
+    pub fn set_context_recursive(&mut self, context: SpellContext) {
+        self.inherit_context(&context);
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_context_recursive(context.clone());
         }
@@ -38133,7 +38221,7 @@ where
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-pub(crate) fn instruction_actor_test_refs() -> [ControllerRef; 16] {
+pub(crate) fn instruction_actor_controller_test_refs() -> [ControllerRef; 16] {
     [
         ControllerRef::You,
         ControllerRef::ScopedPlayer,
@@ -38154,6 +38242,25 @@ pub(crate) fn instruction_actor_test_refs() -> [ControllerRef; 16] {
         ControllerRef::ActivePlayer,
         ControllerRef::SpecificPlayer { id: PlayerId(1) },
     ]
+}
+
+#[cfg(test)]
+pub(crate) fn instruction_actor_test_refs() -> [InstructionActorRef; 20] {
+    let mut references: Vec<_> = instruction_actor_controller_test_refs()
+        .into_iter()
+        .map(InstructionActorRef::controller)
+        .collect();
+    references.extend(
+        [
+            TargetFilter::TriggeringSpellController,
+            TargetFilter::PostReplacementSourceController,
+            TargetFilter::PostReplacementDamageTarget,
+            TargetFilter::PostReplacementDamageTargetOwner,
+        ]
+        .into_iter()
+        .map(|reference| InstructionActorRef::event(reference).unwrap()),
+    );
+    references.try_into().unwrap()
 }
 
 #[cfg(test)]
@@ -38193,11 +38300,11 @@ mod tests {
         assert_eq!(roundtrip, present);
         assert_eq!(
             roundtrip.sub_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ScopedPlayer)
+            Some(ControllerRef::ScopedPlayer).map(Into::into)
         );
         assert_eq!(
             roundtrip.else_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ChosenPlayer { index: 1 })
+            Some(ControllerRef::ChosenPlayer { index: 1 }).map(Into::into)
         );
 
         let legacy = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
@@ -38216,7 +38323,7 @@ mod tests {
         assert_eq!(resolved.original_controller, Some(PlayerId(0)));
         assert_eq!(
             resolved.sub_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ScopedPlayer)
+            Some(ControllerRef::ScopedPlayer).map(Into::into)
         );
         let restored: ResolvedAbility =
             serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
@@ -38225,6 +38332,229 @@ mod tests {
         different.sub_ability.as_mut().unwrap().instruction_actor =
             (Some(ControllerRef::You)).map(Into::into);
         assert_ne!(restored, different);
+    }
+
+    #[test]
+    fn instruction_actor_closed_twenty_domain_retains_legacy_wire_and_owned_context() {
+        let expected = [
+            r#""You""#,
+            r#""ScopedPlayer""#,
+            r#""Opponent""#,
+            r#""TargetPlayer""#,
+            r#""TargetOpponent""#,
+            r#"{"DeclaredPlayer":{"group":1}}"#,
+            r#""ParentTargetController""#,
+            r#""ParentTargetOwner""#,
+            r#""EventTargetController""#,
+            r#""DefendingPlayer""#,
+            r#"{"ChosenPlayer":{"index":0}}"#,
+            r#""SourceChosenPlayer""#,
+            r#""TriggeringPlayer""#,
+            r#""EnchantedPlayer""#,
+            r#""ActivePlayer""#,
+            r#"{"SpecificPlayer":{"id":1}}"#,
+        ];
+        for (reference, wire) in instruction_actor_controller_test_refs()
+            .into_iter()
+            .zip(expected)
+        {
+            let actor = InstructionActorRef::controller(reference);
+            assert_eq!(serde_json::to_string(&actor).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<InstructionActorRef>(wire).unwrap(),
+                actor
+            );
+        }
+        for actor in instruction_actor_test_refs() {
+            let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            definition.instruction_actor = Some(actor.clone());
+            definition.sub_ability = Some(Box::new(definition.clone()));
+            definition.else_ability = Some(Box::new(definition.clone()));
+            definition.mode_abilities.push(definition.clone());
+            let restored: AbilityDefinition =
+                serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap();
+            assert_eq!(restored, definition, "{actor:?}");
+            let resolved = crate::game::ability_utils::build_resolved_from_def(
+                &definition,
+                ObjectId(1),
+                PlayerId(0),
+            );
+            assert_eq!(resolved.instruction_actor, Some(actor.clone()));
+            assert_eq!(
+                resolved.sub_ability.as_ref().unwrap().instruction_actor,
+                Some(actor.clone())
+            );
+            assert_eq!(
+                resolved.else_ability.as_ref().unwrap().instruction_actor,
+                Some(actor.clone())
+            );
+            assert_eq!(resolved.mode_abilities[0].instruction_actor, Some(actor));
+            assert_eq!(
+                serde_json::from_value::<ResolvedAbility>(serde_json::to_value(&resolved).unwrap())
+                    .unwrap(),
+                resolved
+            );
+        }
+        let missing = ReplacementEventContext::default();
+        for reference in [
+            TargetFilter::PostReplacementSourceController,
+            TargetFilter::PostReplacementDamageTarget,
+            TargetFilter::PostReplacementDamageTargetOwner,
+        ] {
+            let mut actor = InstructionActorRef::event(reference).unwrap();
+            actor.capture_replacement_event(&missing);
+            let restored: InstructionActorRef =
+                serde_json::from_value(serde_json::to_value(&actor).unwrap()).unwrap();
+            assert_eq!(restored.replacement_event(), Some(&missing));
+            let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            definition.instruction_actor = Some(actor);
+            for position in 0..4 {
+                let mut root = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                match position {
+                    0 => root = definition.clone(),
+                    1 => root.sub_ability = Some(Box::new(definition.clone())),
+                    2 => root.else_ability = Some(Box::new(definition.clone())),
+                    3 => root.mode_abilities.push(definition.clone()),
+                    _ => unreachable!(),
+                }
+                assert!(serde_json::from_value::<AbilityDefinition>(
+                    serde_json::to_value(root).unwrap()
+                )
+                .is_err());
+            }
+        }
+        for value in [
+            serde_json::json!({"event_reference": {"type": "Any"}}),
+            serde_json::json!({"event_reference": {"type": "PostReplacementDamageTarget"}, "unknown": true}),
+            serde_json::json!({"event_reference": {"type": "TriggeringSpellController"}, "replacement_event": {}}),
+            serde_json::json!({"event_reference": {"type": "PostReplacementDamageTarget"}, "replacement_event": {"unknown": 1}}),
+            serde_json::json!({"event_reference": null}),
+        ] {
+            assert!(
+                serde_json::from_value::<InstructionActorRef>(value.clone()).is_err(),
+                "{value}"
+            );
+        }
+        assert!(InstructionActorRef::event(TargetFilter::Any).is_err());
+        let mut old = serde_json::to_value(ResolvedAbility::new(
+            Effect::NoOp,
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        ))
+        .unwrap();
+        old["instruction_actor"] = serde_json::Value::Null;
+        let restored: ResolvedAbility = serde_json::from_value(old).unwrap();
+        assert!(restored.instruction_actor.is_none());
+        assert!(serde_json::to_value(restored)
+            .unwrap()
+            .get("instruction_actor")
+            .is_none());
+    }
+
+    #[test]
+    fn source_identity_decode_rejects_contradiction_without_requiring_a_live_object() {
+        let pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::of(ObjectId(91), 7),
+            Zone::Battlefield,
+        );
+        let event = ReplacementEventContext {
+            source_id: Some(ObjectId(91)),
+            source_identity: Some(pin),
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        assert_eq!(
+            serde_json::from_value::<ReplacementEventContext>(
+                serde_json::to_value(&event).unwrap()
+            )
+            .unwrap(),
+            event
+        );
+        let mut malformed = serde_json::to_value(&event).unwrap();
+        malformed["source_id"] = serde_json::json!(92);
+        assert!(serde_json::from_value::<ReplacementEventContext>(malformed).is_err());
+        let mut resolved = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(91), PlayerId(0));
+        resolved.context.source_identity = Some(pin);
+        resolved.source_incarnation = Some(7);
+        assert_eq!(
+            serde_json::from_value::<ResolvedAbility>(serde_json::to_value(&resolved).unwrap())
+                .unwrap(),
+            resolved
+        );
+        for key in ["source_id", "source_incarnation"] {
+            let mut malformed = serde_json::to_value(&resolved).unwrap();
+            malformed[key] = serde_json::json!(92);
+            assert!(
+                serde_json::from_value::<ResolvedAbility>(malformed).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_capture_inherits_each_nodes_owned_event_and_preserves_child_authority() {
+        let outer = ReplacementEventContext {
+            source_id: Some(ObjectId(11)),
+            source_identity: None,
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        let nested = ReplacementEventContext {
+            source_id: Some(ObjectId(22)),
+            source_identity: None,
+            event_target: Some(TargetRef::Player(PlayerId(2))),
+        };
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        root.context.replacement_event = Some(outer.clone());
+        let mut child = root.clone();
+        child.context.replacement_event = None;
+        child.instruction_actor =
+            Some(InstructionActorRef::event(TargetFilter::PostReplacementDamageTarget).unwrap());
+        let mut otherwise = child.clone();
+        otherwise.context.replacement_event = Some(ReplacementEventContext::default());
+        root.sub_ability = Some(Box::new(child));
+        root.else_ability = Some(Box::new(otherwise));
+        root.capture_replacement_event_recursive(&nested);
+        let child = root.sub_ability.as_ref().unwrap();
+        assert_eq!(child.context.replacement_event.as_ref(), Some(&outer));
+        assert_eq!(
+            child
+                .instruction_actor
+                .as_ref()
+                .unwrap()
+                .replacement_event(),
+            Some(&outer)
+        );
+        let otherwise = root.else_ability.as_ref().unwrap();
+        assert_eq!(
+            otherwise.context.replacement_event,
+            Some(ReplacementEventContext::default())
+        );
+        assert_eq!(
+            otherwise
+                .instruction_actor
+                .as_ref()
+                .unwrap()
+                .replacement_event(),
+            Some(&ReplacementEventContext::default())
+        );
+        let pin =
+            ObjectIdentityBinding::new(ObjectIncarnationRef::of(ObjectId(2), 4), Zone::Battlefield);
+        let mut independently_owned = child.as_ref().clone();
+        independently_owned.source_id = ObjectId(2);
+        independently_owned.source_incarnation = Some(4);
+        independently_owned.context.source_identity = Some(pin);
+        independently_owned.context.replacement_event = Some(nested.clone());
+        independently_owned.inherit_context(&root.context);
+        assert_eq!(independently_owned.context.source_identity, Some(pin));
+        assert_eq!(
+            independently_owned.context.replacement_event.as_ref(),
+            Some(&nested)
+        );
+        let unstarted = serde_json::from_value::<ResolvedAbility>(
+            serde_json::to_value(&independently_owned).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unstarted, independently_owned);
     }
 
     #[test]

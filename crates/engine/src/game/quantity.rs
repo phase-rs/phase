@@ -10184,7 +10184,7 @@ mod tests {
 
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = definition.clone();
-            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            marked.instruction_actor = Some(actor.clone());
             assert!(
                 !ability_definition_is_cast_stable_for_pre_cast(&marked),
                 "root {actor:?}"
@@ -10226,7 +10226,7 @@ mod tests {
         assert!(ability_definition_has_only_unbound_variable_quantities_for_pre_cast(&mana));
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = mana.clone();
-            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            marked.instruction_actor = Some(actor.clone());
             assert!(
                 !ability_definition_has_only_unbound_variable_quantities_for_pre_cast(&marked),
                 "mana {actor:?}"

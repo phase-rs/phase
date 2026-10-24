@@ -2652,8 +2652,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     ReplaceMeaningKind::KeywordOverride => {
                         // Build the def for this clause and attach to previous as sub_ability
                         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
-                        def.instruction_actor =
-                            (clause_ir.parsed.instruction_actor.clone()).map(Into::into);
+                        def.instruction_actor = clause_ir.parsed.instruction_actor.clone();
                         let effective_cond = clause_ir
                             .condition
                             .as_ref()
@@ -2677,8 +2676,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // produced by the previous SearchLibrary's intrinsic continuation
                 // (SearchDestination).
                 let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
-                def.instruction_actor =
-                    (clause_ir.parsed.instruction_actor.clone()).map(Into::into);
+                def.instruction_actor = clause_ir.parsed.instruction_actor.clone();
                 let effective_cond = clause_ir
                     .condition
                     .as_ref()
@@ -2895,7 +2893,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
         let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
         let mut def = AbilityDefinition::new(kind, clause_effect);
-        def.instruction_actor = (clause_ir.parsed.instruction_actor.clone()).map(Into::into);
+        def.instruction_actor = clause_ir.parsed.instruction_actor.clone();
         def.declares_chosen_group = clause_ir
             .declares_chosen_clause
             .map(|id| ChosenGroupId(id.0))

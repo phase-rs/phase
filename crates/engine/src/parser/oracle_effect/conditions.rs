@@ -4499,7 +4499,7 @@ pub(super) fn strip_routed_suffix_conditional(
 /// filter is a player-chosen target (not a context reference or the untyped
 /// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
 fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
-    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway(), None);
     clause
         .effect
         .target_filter()

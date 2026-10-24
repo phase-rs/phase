@@ -280,7 +280,7 @@ fn clause_delayed_payload(clause: &ClauseIr, kind: AbilityKind) -> Option<Abilit
         Effect::CreateDelayedTrigger { ref effect, .. } => Some((**effect).clone()),
         _ if clause.delayed_condition.is_some() => {
             let mut payload = AbilityDefinition::new(kind, clause.parsed.effect.clone());
-            payload.instruction_actor = (clause.parsed.instruction_actor.clone()).map(Into::into);
+            payload.instruction_actor = clause.parsed.instruction_actor.clone();
             payload.sub_ability = clause.parsed.sub_ability.clone();
             Some(payload)
         }
@@ -8043,7 +8043,7 @@ fn ability_definition_from_clause(
         unlowered_guard: _,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
-    def.instruction_actor = (instruction_actor).map(Into::into);
+    def.instruction_actor = instruction_actor;
     def.sub_ability = sub_ability;
     def.duration = duration;
     def.condition = condition;
@@ -10115,7 +10115,7 @@ fn try_parse_choose_player_to_verb(
         // ability controller. Rebind the player-recipient field.
         retarget_effect_to_chosen_player(&mut verb_clause.effect, index, tp.original);
         let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
-        sub.instruction_actor = (verb_clause.instruction_actor.clone()).map(Into::into);
+        sub.instruction_actor = verb_clause.instruction_actor.clone();
         sub.sub_ability = verb_clause.sub_ability;
         sub.duration = verb_clause.duration;
         clause.sub_ability = Some(Box::new(sub));
@@ -10170,7 +10170,7 @@ fn try_parse_an_opponent_to_verb(
         selection: TargetSelectionMode::Chosen,
     });
     let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
-    sub.instruction_actor = (verb_clause.instruction_actor.clone()).map(Into::into);
+    sub.instruction_actor = verb_clause.instruction_actor.clone();
     sub.sub_ability = verb_clause.sub_ability;
     sub.duration = verb_clause.duration;
     clause.sub_ability = Some(Box::new(sub));
@@ -21751,7 +21751,7 @@ fn try_parse_reanimate_self_and_target(
     // Wrap the second conjunct as the chained sub_ability, preserving the
     // "up to N" cardinality (which the generic try_split wrapper omits).
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
-    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
+    sub_ability.instruction_actor = sub_clause.instruction_actor.clone();
     sub_ability.sub_ability = sub_clause.sub_ability;
     sub_ability.multi_target = multi_target;
     sub_ability.optional = sub_clause.optional;
@@ -22159,7 +22159,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         sub_clause.multi_target.is_some(),
     );
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
-    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
+    sub_ability.instruction_actor = sub_clause.instruction_actor.clone();
     sub_ability.target_choice_timing = continuation_timing;
     sub_ability.sub_ability = sub_clause.sub_ability;
     // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
@@ -23768,7 +23768,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     }
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
-    sub_ability.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
+    sub_ability.instruction_actor = sub_clause.instruction_actor.clone();
     sub_ability.sub_ability = sub_clause.sub_ability;
     sub_ability.target_chooser = sub_target_chooser;
 
@@ -23923,7 +23923,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     };
     let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
-    sub_def.instruction_actor = (sub_clause.instruction_actor.clone()).map(Into::into);
+    sub_def.instruction_actor = sub_clause.instruction_actor.clone();
     sub_def.sub_ability = sub_clause.sub_ability;
 
     // Build ChangeZone for the first subject as the primary effect
@@ -27804,7 +27804,7 @@ fn lower_subject_predicate_ast_body(
                 if let Some(object_target) = subject.target.clone() {
                     bind_player_recipient_to_possessive_actor(&mut clause.effect, &affected);
                     let mut inner = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
-                    inner.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+                    inner.instruction_actor = clause.instruction_actor.clone();
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
                     return ParsedEffectClause {
@@ -27999,8 +27999,7 @@ fn lower_subject_predicate_ast_body(
                     sync_player_into_nested_shuffle_sub(&mut clause, &TargetFilter::ParentTarget);
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
-                    sub_ability.instruction_actor =
-                        (clause.instruction_actor.clone()).map(Into::into);
+                    sub_ability.instruction_actor = clause.instruction_actor.clone();
                     sub_ability.sub_ability = clause.sub_ability;
                     // CR 115.1d: an "up to N target" count on the moved-object
                     // clause (Memory's Journey — "shuffles up to three target
@@ -29448,7 +29447,7 @@ fn wrap_target_subject_damage(
     }
 
     let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
-    damage_ability.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+    damage_ability.instruction_actor = clause.instruction_actor.clone();
     damage_ability.sub_ability = clause.sub_ability;
     damage_ability.duration = clause.duration.clone();
     damage_ability.condition = clause.condition.clone();
@@ -45862,7 +45861,7 @@ fn parse_effect_chain_ir_body(
         ) {
             // Build the def that lowering will attach — apply condition + effect
             let mut instead_def = AbilityDefinition::new(kind, clause.effect.clone());
-            instead_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+            instead_def.instruction_actor = clause.instruction_actor.clone();
             if let Some(ref cond) = condition {
                 instead_def = instead_def.condition(cond.clone());
             }
@@ -46365,7 +46364,7 @@ fn parse_effect_chain_ir_body(
         // The intrinsic continuation parser needs the assembled effect to determine
         // what continuation pattern applies.
         let mut temp_def = AbilityDefinition::new(kind, clause.effect.clone());
-        temp_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+        temp_def.instruction_actor = clause.instruction_actor.clone();
         // Wire sub_ability for TargetOnly unwrapping in intrinsic_continuation_effect.
         if matches!(clause.effect, Effect::TargetOnly { .. }) {
             temp_def.sub_ability = clause.sub_ability.clone();
@@ -46389,7 +46388,7 @@ fn parse_effect_chain_ir_body(
             };
             // Build temporary defs for the cascade check
             let mut check_def = AbilityDefinition::new(kind, clause.effect.clone());
-            check_def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+            check_def.instruction_actor = clause.instruction_actor.clone();
             if is_optional {
                 check_def.optional = true;
                 check_def.optional_for = opponent_may_scope;

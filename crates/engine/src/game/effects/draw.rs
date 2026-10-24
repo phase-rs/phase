@@ -2363,12 +2363,12 @@ mod tests {
             let mut seats = legacy.clone();
             for (player, ability) in &mut seats {
                 ability.scoped_player = Some(*player);
-                ability.instruction_actor = (Some(actor.clone())).map(Into::into);
+                ability.instruction_actor = Some(actor.clone());
             }
             let before = seats.clone();
             assert_eq!(
                 plan_simultaneous_draw(&state, &seats).is_some(),
-                actor == crate::types::ability::ControllerRef::ScopedPlayer,
+                actor.as_controller() == Some(&crate::types::ability::ControllerRef::ScopedPlayer),
                 "{actor:?}"
             );
             assert_eq!(seats, before, "planning cannot consume templates");

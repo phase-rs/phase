@@ -7550,13 +7550,14 @@ mod tests {
         );
         assert_eq!(ability_rw_profile(&base), RwProfile::empty());
         for actor in crate::types::ability::instruction_actor_test_refs() {
-            let mut expected = rw_controller_ref(&actor);
-            expected.legacy_batch_prompt = legacy_controller_ref(&actor);
+            let mut expected = actor.classify(rw_controller_ref, rw_target_filter);
+            expected.legacy_batch_prompt =
+                actor.classify(legacy_controller_ref, legacy_target_filter);
             let mut resolved = base.clone();
-            resolved.instruction_actor = (Some(actor.clone())).map(Into::into);
+            resolved.instruction_actor = Some(actor.clone());
             assert_eq!(ability_rw_profile(&resolved), expected, "{actor:?}");
             let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
-            definition.instruction_actor = (Some(actor.clone())).map(Into::into);
+            definition.instruction_actor = Some(actor.clone());
             let mut nested = base.clone();
             nested.mode_abilities.push(definition);
             assert_eq!(

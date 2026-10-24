@@ -380,7 +380,7 @@ impl Walk<'_> {
     /// every later instruction.
     fn with_root_context(&self, ability: &ResolvedAbility) -> ResolvedAbility {
         let mut owned = ability.clone();
-        owned.context = self.root.context.clone();
+        owned.inherit_context(&self.root.context);
         owned
     }
 

@@ -492,7 +492,7 @@ fn handle_opponent_may_choice_inner(
                         // sacrifice/tap target is chosen — otherwise the
                         // consequence (e.g. "put this creature on top of its
                         // owner's library") is silently skipped.
-                        sub.context = ability.context.clone();
+                        sub.inherit_context(&ability.context);
                         sub.context.optional_effect_performed = true;
                         state.park_ability_continuation(PendingContinuation::new(sub, state));
                     }
@@ -591,7 +591,7 @@ fn resolve_all_declined_opponent_may(
                 if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
                     else_resolved.mirror_targets_from(ability);
                 }
-                else_resolved.context = ability.context.clone();
+                else_resolved.inherit_context(&ability.context);
                 else_resolved
                     .set_replacement_applied_recursive(ability.replacement_applied.clone());
                 effects::resolve_ability_chain(state, &else_resolved, events, 1)
@@ -609,7 +609,7 @@ fn resolve_all_declined_opponent_may(
             // sub's effect now. (On accept, the head's own chain resolution
             // evaluates this same negated condition as false and skips it.)
             let mut sub_resolved = sub.as_ref().clone();
-            sub_resolved.context = ability.context.clone();
+            sub_resolved.inherit_context(&ability.context);
             effects::resolve_ability_chain(state, &sub_resolved, events, 1)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         }
@@ -2034,7 +2034,7 @@ pub(crate) fn finish_successful_unless_payment(
         if sub_resolved.targets.is_empty() {
             sub_resolved.mirror_targets_from(pending_effect);
         }
-        sub_resolved.context = pending_effect.context.clone();
+        sub_resolved.inherit_context(&pending_effect.context);
         sub_resolved.context.optional_effect_performed = true;
         post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
             state,
@@ -2053,7 +2053,7 @@ pub(crate) fn finish_successful_unless_payment(
         if sub_resolved.targets.is_empty() {
             sub_resolved.mirror_targets_from(pending_effect);
         }
-        sub_resolved.context = pending_effect.context.clone();
+        sub_resolved.inherit_context(&pending_effect.context);
         let event_start =
             resolve_ability_chain_for_unless_payment(state, &sub_resolved, events, trigger_event)?;
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

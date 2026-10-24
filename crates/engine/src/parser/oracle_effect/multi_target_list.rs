@@ -174,7 +174,7 @@ pub(super) fn try_split_multi_target_list(
     for body in &bodies[1..] {
         let mut link_ctx = ctx.clone_throwaway();
         link_ctx.target_chooser = None;
-        let clause = parse_effect_clause_inner(body, &mut link_ctx);
+        let clause = parse_effect_clause_inner(body, &mut link_ctx, None);
         if matches!(clause.effect, Effect::Unimplemented { .. })
             || clause.sub_ability.is_some()
             || clause.duration.is_some()
@@ -201,7 +201,7 @@ pub(super) fn try_split_multi_target_list(
     // the enclosing context untouched for the single-clause fallback.
     let mut tentative = ctx.clone();
     tentative.target_chooser = None;
-    let mut primary = parse_effect_clause_inner(&bodies[0], &mut tentative);
+    let mut primary = parse_effect_clause_inner(&bodies[0], &mut tentative, None);
     if matches!(primary.effect, Effect::Unimplemented { .. })
         || primary.sub_ability.is_some()
         || primary.effect.target_filter() == Some(&TargetFilter::Any)
@@ -214,7 +214,7 @@ pub(super) fn try_split_multi_target_list(
         .rev()
         .fold(None, |chain, (clause, chooser)| {
             let mut def = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
-            def.instruction_actor = (clause.instruction_actor.clone()).map(Into::into);
+            def.instruction_actor = clause.instruction_actor.clone();
             def.multi_target = clause.multi_target;
             def.target_chooser = chooser;
             def.sub_ability = chain;

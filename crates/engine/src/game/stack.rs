@@ -6491,16 +6491,16 @@ mod tests {
         assert!(fixed_opponent_effect_ability_is_batch_candidate(&loss));
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut a = counter.clone();
-            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            a.instruction_actor = Some(actor.clone());
             assert!(!self_counter_ability_is_batch_candidate(&a), "{actor:?}");
             let mut a = gain.clone();
-            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            a.instruction_actor = Some(actor.clone());
             assert!(
                 !fixed_controller_gain_life_ability_is_batch_candidate(&a),
                 "{actor:?}"
             );
             let mut a = loss.clone();
-            a.instruction_actor = (Some(actor.clone())).map(Into::into);
+            a.instruction_actor = Some(actor.clone());
             assert!(
                 !fixed_opponent_effect_ability_is_batch_candidate(&a),
                 "{actor:?}"
@@ -6509,9 +6509,9 @@ mod tests {
                 let mut left = gain.clone();
                 let mut right = left.clone();
                 let mut child = gain.clone();
-                child.instruction_actor = (Some(actor.clone())).map(Into::into);
+                child.instruction_actor = Some(actor.clone());
                 match branch {
-                    0 => right.instruction_actor = Some(actor.clone().into()),
+                    0 => right.instruction_actor = Some(actor.clone()),
                     1 => {
                         left.sub_ability = Some(Box::new(gain.clone()));
                         right.sub_ability = Some(Box::new(child));

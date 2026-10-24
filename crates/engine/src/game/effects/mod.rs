@@ -4292,7 +4292,7 @@ pub(crate) fn apply_parent_chain_context(
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
-    child.context = parent.context.clone();
+    child.inherit_context(&parent.context);
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
@@ -4776,7 +4776,7 @@ pub(super) fn resolve_optional_effect_decision(
                 {
                     resolved.mirror_targets_from(&ability);
                 }
-                resolved.context = ability.context.clone();
+                resolved.inherit_context(&ability.context);
                 // CR 608.2c: This optional effect was DECLINED — the decline
                 // branch's `Not{IfYouDo}` / `IfYouDo` gate must evaluate
                 // relative to *this* decision, not a stale `true` inherited
@@ -16985,7 +16985,7 @@ fn resolve_chain_body(
                 if should_propagate_parent_targets(ability, &else_resolved) {
                     else_resolved.mirror_targets_from(ability);
                 }
-                else_resolved.context = ability.context.clone();
+                else_resolved.inherit_context(&ability.context);
                 if try_begin_deferred_else_branch_target_selection(
                     state,
                     &mut else_resolved,
@@ -17095,7 +17095,7 @@ fn resolve_chain_body(
                     if should_propagate_parent_targets(ability, &sub_resolved) {
                         sub_resolved.mirror_targets_from(ability);
                     }
-                    sub_resolved.context = ability.context.clone();
+                    sub_resolved.inherit_context(&ability.context);
                     // CR 608.2c: The false-parent ordinal escape bypasses the
                     // ordinary post-effect chain handoff, so it must explicitly
                     // carry this printed ability's index to the next ordinal
@@ -22356,7 +22356,7 @@ mod tests {
             });
             random.instruction_actor = (actor.clone()).map(Into::into);
             if actor == Some(ControllerRef::ScopedPlayer) {
-                random.player_scope = Some(PlayerFilter::SpecificPlayer { id: P1 });
+                random.player_scope = Some(marked_instruction_scope(&mut scenario, &[P1]));
             }
             let mut tail = AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -22618,7 +22618,7 @@ mod tests {
                     cards.into_iter().collect()
                 }
             );
-            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::RevealTop, source_id, .. } if *source_id == spell)).count(), usize::from(!missing));
+            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Reveal, source_id, .. } if *source_id == spell)).count(), usize::from(!missing));
             outcome.assert_zone(&cards, Zone::Library);
             outcome.assert_zone(&[spell], Zone::Graveyard);
             assert!(outcome.state().stack.is_empty());
@@ -22712,7 +22712,7 @@ mod tests {
         assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Choose, source_id, .. } if *source_id == spell)).count(), 4);
         assert_eq!(
             outcome.state().objects[&spell].abilities[0].instruction_actor,
-            Some(ControllerRef::ScopedPlayer)
+            Some(ControllerRef::ScopedPlayer).map(Into::into)
         );
         assert!(matches!(
             outcome.final_waiting_for(),
@@ -23134,6 +23134,36 @@ mod tests {
         }
     }
 
+    fn marked_instruction_scope(scenario: &mut GameScenario, players: &[PlayerId]) -> PlayerFilter {
+        for &player in players {
+            let marker = scenario
+                .add_enchantment_from_oracle(player, "Synthetic instruction scope seat", "")
+                .id();
+            // The affected fixtures select/count creatures or choose players.
+            // A pure enchantment is outside every object candidate population.
+            let object = &scenario.state.objects[&marker];
+            assert_eq!(
+                object.card_types.core_types,
+                vec![crate::types::card_type::CoreType::Enchantment]
+            );
+            assert!(
+                object.abilities.is_empty()
+                    && object.trigger_definitions.is_empty()
+                    && object.replacement_definitions.is_empty()
+            );
+        }
+        PlayerFilter::ControlsCount {
+            relation: crate::types::ability::PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Named {
+                    name: "Synthetic instruction scope seat".into(),
+                },
+            ])),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        }
+    }
+
     fn actor_sacrifice_definition(
         actor: Option<ControllerRef>,
         scope: PlayerFilter,
@@ -23410,8 +23440,15 @@ mod tests {
             Some(ControllerRef::ChosenPlayer { index: 0 }),
             PlayerFilter::AnyOf {
                 filters: vec![
-                    PlayerFilter::SpecificPlayer { id: P0 },
-                    PlayerFilter::SpecificPlayer { id: PlayerId(2) },
+                    PlayerFilter::Controller,
+                    PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::AnyOf {
+                            filters: vec![
+                                PlayerFilter::Controller,
+                                PlayerFilter::ChosenPlayer { index: 0 },
+                            ],
+                        }),
+                    },
                 ],
             },
         );
@@ -23880,12 +23917,7 @@ mod tests {
                 .collect();
             let definition = actor_sacrifice_definition(
                 Some(ControllerRef::SpecificPlayer { id: P1 }),
-                PlayerFilter::AnyOf {
-                    filters: vec![
-                        PlayerFilter::SpecificPlayer { id: P1 },
-                        PlayerFilter::SpecificPlayer { id: PlayerId(2) },
-                    ],
-                },
+                marked_instruction_scope(&mut scenario, &[P1, PlayerId(2)]),
             );
             let spell = scenario
                 .add_spell_to_hand(P0, "Synthetic Frozen Population", false)
@@ -23983,12 +24015,7 @@ mod tests {
             let decoy = scenario.add_creature(P1, "Unselected decoy", 2, 2).id();
             let mut sacrifice = actor_sacrifice_definition(
                 Some(ControllerRef::ParentTargetOwner),
-                PlayerFilter::AnyOf {
-                    filters: vec![
-                        PlayerFilter::SpecificPlayer { id: P1 },
-                        PlayerFilter::SpecificPlayer { id: PlayerId(2) },
-                    ],
-                },
+                marked_instruction_scope(&mut scenario, &[P1, PlayerId(2)]),
             );
             sacrifice.sub_link = SubAbilityLink::ContinuationStep;
             let mut root = AbilityDefinition::new(
@@ -24736,8 +24763,8 @@ mod tests {
             assert_eq!(
                 !declined_gate_surviving_instructions(&gated(DRAW, vec![later])).is_empty(),
                 matches!(
-                    actor,
-                    ControllerRef::You | ControllerRef::SpecificPlayer { .. }
+                    actor.as_controller(),
+                    Some(ControllerRef::You | ControllerRef::SpecificPlayer { .. })
                 ),
                 "{actor:?}"
             );
@@ -47892,7 +47919,10 @@ mod tests {
             AbilityKind::Spell,
         );
         let parsed = build_resolved_from_def(&definition, ObjectId(100), P0);
-        assert_eq!(parsed.instruction_actor, Some(ControllerRef::ScopedPlayer));
+        assert_eq!(
+            parsed.instruction_actor,
+            Some(ControllerRef::ScopedPlayer).map(Into::into)
+        );
         assert!(shared_library_wheel_split(
             &dandan_state(),
             &parsed,

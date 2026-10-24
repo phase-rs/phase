@@ -825,7 +825,7 @@ mod tests {
         assert!(!chain_offers_choice(&base));
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = base.clone();
-            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            marked.instruction_actor = Some(actor.clone());
             assert!(!chain_offers_choice(&marked), "{actor:?}");
             let mut optional = base.clone();
             optional.optional = true;
@@ -851,7 +851,7 @@ mod tests {
         ));
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = plain.clone();
-            marked.instruction_actor = (Some(actor)).map(Into::into);
+            marked.instruction_actor = Some(actor);
             assert_eq!(
                 ability_resolution_choice_freedom(&state, &marked, &mut budget()),
                 expected

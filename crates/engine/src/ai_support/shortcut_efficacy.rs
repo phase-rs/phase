@@ -1695,7 +1695,7 @@ mod tests {
         );
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = confined_actor_control.clone();
-            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            marked.instruction_actor = Some(actor.clone());
             assert_eq!(
                 ability_window_reach(&marked),
                 WindowReach::MayInterfere,

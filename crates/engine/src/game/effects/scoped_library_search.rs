@@ -2209,7 +2209,7 @@ mod tests {
         assert!(has_no_resolution_riders(&bare()), "reach: a bare effect");
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = bare();
-            marked.instruction_actor = (Some(actor.clone())).map(Into::into);
+            marked.instruction_actor = Some(actor.clone());
             assert!(!has_no_resolution_riders(&marked), "unconsumed {actor:?}");
         }
         type Mutation = fn(&mut ResolvedAbility);

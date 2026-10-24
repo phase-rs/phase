@@ -6147,7 +6147,7 @@ mod tests {
             assert!(runner.state().stack.is_empty());
             assert_eq!(
                 runner.state().objects[&source].abilities[0].instruction_actor,
-                actor,
+                actor.map(Into::into),
                 "the printed template remains unconsumed"
             );
         }
