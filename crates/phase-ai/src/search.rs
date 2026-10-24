@@ -2017,7 +2017,8 @@ pub fn fallback_action(
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },
             ..
-        } => Some(GameAction::ChooseAdventureFace { creature: true }),
+        } => issued(|action| matches!(action, GameAction::ChooseAdventureFace { creature: true }))
+            .or_else(|| issued(|action| matches!(action, GameAction::ChooseAdventureFace { creature: false }))),
         WaitingFor::ModalFaceChoice { .. } => {
             issued(|action| matches!(action, GameAction::ChooseModalFace { back_face: false }))
                 .or_else(|| {
@@ -6546,6 +6547,92 @@ mod tests {
             &create_config(AiDifficulty::VeryHard, Platform::Native),
             &test_contract(state),
         )
+    }
+
+    #[test]
+    fn adventure_fallback_uses_the_issued_spell_face_when_normal_front_is_unaffordable() {
+        use engine::game::game_object::BackFaceData;
+        use engine::types::card::LayoutKind;
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        for funded_front in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let hearth = scenario
+                .add_creature_to_hand(P0, "Hearth Elemental", 4, 5)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![ManaCostShard::Red],
+                }).with_subtypes(vec!["Elemental"]).from_oracle_text("This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.")
+                .id();
+            scenario.with_library_top(P0, &["Draw first", "Draw second", "Reserve"]);
+            scenario.with_mana_pool(
+                P0,
+                (0..if funded_front { 6 } else { 2 })
+                    .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let parsed=engine::parser::parse_oracle_text("Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)","Stoke Genius",&[],&["Sorcery".into()],&["Adventure".into()]);
+            let mut runner = scenario.build();
+            let mut back = BackFaceData {
+                name: "Stoke Genius".into(),
+                layout_kind: Some(LayoutKind::Adventure),
+                mana_cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Red],
+                },
+                abilities: parsed.abilities,
+                ..Default::default()
+            };
+            back.card_types
+                .core_types
+                .push(engine::types::card_type::CoreType::Sorcery);
+            back.card_types.subtypes.push("Adventure".into());
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&hearth)
+                .unwrap()
+                .back_face = Some(back);
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: hearth,
+                    card_id: runner.state().objects[&hearth].card_id,
+                    targets: vec![],
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::CastOffer {
+                    player: P0,
+                    kind: engine::types::game_state::CastOfferKind::Adventure { .. }
+                }
+            ));
+            let action = fallback_action_default(runner.state())
+                .expect("the actual face prompt has an issued fallback");
+            assert_eq!(
+                action,
+                GameAction::ChooseAdventureFace {
+                    creature: funded_front
+                }
+            );
+            assert!(test_contract(runner.state()).contains_action(runner.state(), &action));
+            runner.act(action).unwrap();
+            runner.resolve_top();
+            assert_eq!(
+                runner.state().objects[&hearth].zone,
+                if funded_front {
+                    Zone::Battlefield
+                } else {
+                    Zone::Exile
+                }
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+        }
     }
 
     #[test]

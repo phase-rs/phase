@@ -504,11 +504,613 @@ fn an_adventure_paused_on_its_search_is_exiled_with_its_creature_castable() {
         state.objects[&giant]
             .casting_permissions
             .iter()
-            .any(|permission| matches!(permission, CastingPermission::AdventureCreature)),
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::AdventureCreature {
+                    granted_to: Some(_),
+                    exile_incarnation: Some(_)
+                }
+            )),
         "CR 715.3d: its controller may cast the creature from exile"
     );
     assert_eq!(stack_resolved_count(&events, giant), 1);
     assert_settled(state);
+}
+
+fn adventure_existing_legacy_states(state: &GameState) -> Vec<GameState> {
+    use engine::types::resolution::ResolutionStateWire;
+    fn strip_owner(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("delivery_owner");
+                for child in fields.values_mut() {
+                    strip_owner(child);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    strip_owner(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut v1 = serde_json::to_value(state).unwrap();
+    v1.as_object_mut().unwrap().remove("resolution_stack");
+    v1["resolution_state_version"] = serde_json::json!(1);
+    if let Some(drains) = state.active_post_replacement_drains() {
+        v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+    }
+    if let Some(continuation) = state.active_ability_continuation() {
+        v1["pending_continuation"] = serde_json::to_value(continuation).unwrap();
+    }
+    strip_owner(&mut v1);
+    let mut values = vec![v1];
+    for version in [2, 3, 4] {
+        let mut value =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        strip_owner(&mut value);
+        value["resolution_state_version"] = serde_json::json!(version);
+        values.push(value);
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            assert_eq!(
+                value["resolving_spell_final_part"],
+                serde_json::to_value(state.owed_spell_final_part().unwrap()).unwrap()
+            );
+            let loaded = serde_json::from_value::<ResolutionStateWire>(value)
+                .unwrap()
+                .into_game_state();
+            assert_eq!(
+                loaded.owed_spell_final_part(),
+                state.owed_spell_final_part()
+            );
+            assert_eq!(loaded.waiting_for, state.waiting_for);
+            loaded
+        })
+        .collect()
+}
+
+#[test]
+fn adventure_self_departure_before_its_final_part_and_elimination_never_earn_a_grant() {
+    use engine::types::mana::{ManaType, ManaUnit};
+    for eliminate in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 715_310);
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = scenario.add_real_card(P0, "Beanstalk Giant", Zone::Hand, db());
+        let forest = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+        scenario.with_library_top(P0, &["Scry A", "Scry B", "Reserve A", "Reserve B"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        engine::game::zones::move_to_library_at_index(
+            runner.state_mut(),
+            forest,
+            Some(0),
+            &mut vec![],
+        );
+        let object = runner.state_mut().objects.get_mut(&giant).unwrap();
+        let back = object.back_face.as_mut().unwrap();
+        let mut tail = &mut back.abilities[0];
+        while let Some(ref mut child) = tail.sub_ability {
+            tail = child;
+        }
+        tail.sub_ability = Some(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )),
+        ));
+        runner.cast(giant).adventure_face(false).commit();
+        runner.resolve_top();
+        assert!(
+            matches!(&runner.state().waiting_for,WaitingFor::SearchChoice {player:P0,cards,..} if cards==&vec![forest])
+        );
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![forest],
+            })
+            .unwrap();
+        let WaitingFor::ScryChoice { player, cards } = &runner.state().waiting_for else {
+            panic!("the typed self-move's child must remain a public pause");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(cards.len(), 2);
+        let mut reversed = cards.clone();
+        reversed.reverse();
+        assert_eq!(runner.state().objects[&giant].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&giant].name, "Beanstalk Giant");
+        assert!(runner.state().objects[&giant]
+            .casting_permissions
+            .is_empty());
+        assert!(runner
+            .state()
+            .owed_spell_final_part()
+            .unwrap()
+            .pending_adventure_exile
+            .is_none());
+        let current: GameState =
+            serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+        if eliminate {
+            let events = concede(&mut runner, P0);
+            assert!(!runner.state().objects.contains_key(&giant));
+            assert!(runner.state().owed_spell_final_part().is_none());
+            assert_eq!(stack_resolved_count(&events, giant), 0);
+        } else {
+            for loaded in
+                std::iter::once(current).chain(adventure_existing_legacy_states(runner.state()))
+            {
+                let mut resumed = GameRunner::from_state(loaded);
+                let result = resumed
+                    .act(GameAction::SelectCards {
+                        cards: reversed.clone(),
+                    })
+                    .unwrap();
+                assert!(resumed.state().objects[&giant]
+                    .casting_permissions
+                    .is_empty());
+                assert!(resumed.state().owed_spell_final_part().is_none());
+                assert_eq!(stack_resolved_count(&result.events, giant), 1);
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+                );
+            }
+        }
+    }
+}
+
+fn assert_adventure_debt_save_and_viewer_boundaries(state: &GameState) {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+    let debt = state
+        .owed_spell_final_part()
+        .expect("the real final-part owner is still installed")
+        .clone();
+    assert!(debt.pending_adventure_exile.is_some());
+    let exact = serde_json::to_value(&debt).unwrap();
+    let raw = serde_json::to_value(state).unwrap();
+    assert_eq!(raw["resolving_spell_final_part"], exact);
+    let current: GameState = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(current.owed_spell_final_part(), Some(&debt));
+    let persisted: PersistedGameState = serde_json::from_value(raw).unwrap();
+    assert_eq!(
+        persisted.into_game_state().unwrap().owed_spell_final_part(),
+        Some(&debt)
+    );
+    let trusted: PersistedGameState =
+        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
+            .unwrap();
+    assert_eq!(
+        trusted.into_game_state().unwrap().owed_spell_final_part(),
+        Some(&debt)
+    );
+    assert_eq!(adventure_existing_legacy_states(state).len(), 4);
+    let actor = state.waiting_for.acting_player();
+    for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
+        let filtered = match viewer {
+            Some(viewer) => filter_state_for_viewer(state, viewer),
+            None => filter_state_for_unseated_viewer(state),
+        };
+        assert!(filtered.owed_spell_final_part().is_none());
+        assert_eq!(filtered.waiting_for.acting_player(), actor);
+        let filtered_json = serde_json::to_value(&filtered).unwrap();
+        assert!(filtered_json.get("resolving_spell_final_part").is_none());
+        for envelope in [
+            serde_json::to_value(ClientGameStateRef::wrap(state, viewer)).unwrap(),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(state, &filtered, viewer))
+                .unwrap(),
+        ] {
+            assert!(envelope["state"]
+                .get("resolving_spell_final_part")
+                .is_none());
+            assert_eq!(
+                envelope["derived"]["unique_authorized_submitter"],
+                serde_json::to_value(actor).unwrap()
+            );
+        }
+    }
+    assert_eq!(
+        state.owed_spell_final_part(),
+        Some(&debt),
+        "viewing never retires execution authority"
+    );
+}
+
+fn adventure_redirect_definition(
+    spell: ObjectId,
+    destination: Zone,
+    tail: AbilityDefinition,
+) -> engine::types::ability::ReplacementDefinition {
+    use engine::types::ability::{FilterProp, ReplacementDefinition, ReplacementMode};
+    use engine::types::replacements::ReplacementEvent;
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .mode(ReplacementMode::Optional { decline: None })
+        .valid_card(TargetFilter::And {
+            filters: vec![
+                TargetFilter::SpecificObject { id: spell },
+                TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::card()
+                        .properties(vec![FilterProp::InZone { zone: Zone::Stack }]),
+                ),
+            ],
+        })
+        .destination_zone(Zone::Exile)
+        .execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(tail),
+        )
+}
+
+#[test]
+fn adventure_selected_final_delivery_reparks_retains_terminal_and_hides_execution_buffer() {
+    use engine::types::ability::QuantityModification;
+    use engine::types::game_state::ZoneMoveCompletion;
+    // Each begins with the real paid Fertile Footsteps and its public search.
+    // Typed replacement definitions isolate the terminal boundary; none seeds
+    // an earned grant, causal journal entry, or last-known controller.
+    for case in [
+        "eligible",
+        "library",
+        "prevented-child",
+        "remained-child",
+        "new-birth",
+    ] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = scenario.add_real_card(P0, "Beanstalk Giant", Zone::Hand, db());
+        let first = scenario.add_real_card(P0, "Forest", Zone::Library, db());
+        let chosen = scenario.add_real_card(P0, "Island", Zone::Library, db());
+        scenario.add_land_to_library_top(P0, "Nonbasic decoy");
+        scenario.with_library_top(P0, &["Scry A", "Scry B", "Scry C", "Scry D"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Green, 3));
+        let scry = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Scry {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        let move_card = |destination| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination,
+                    target: TargetFilter::SpecificObject { id: giant },
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+        };
+        let tail = if matches!(case, "prevented-child" | "remained-child") {
+            scry().sub_ability(move_card(Zone::Exile))
+        } else if case == "new-birth" {
+            scry().sub_ability(move_card(Zone::Graveyard).sub_ability(move_card(Zone::Exile)))
+        } else {
+            scry()
+        };
+        let destination = match case {
+            "library" => Zone::Library,
+            "remained-child" => Zone::Stack,
+            _ => Zone::Exile,
+        };
+        let mut first_definition = adventure_redirect_definition(giant, destination, tail)
+            .description("First selected terminal".into());
+        if case == "prevented-child" {
+            first_definition.quantity_modification = Some(QuantityModification::Prevent);
+        }
+        scenario
+            .add_enchantment_from_oracle(P0, "Typed first final-part replacement", "")
+            .with_replacement_definition(first_definition);
+        scenario
+            .add_enchantment_from_oracle(P0, "Typed second final-part replacement", "")
+            .with_replacement_definition(
+                adventure_redirect_definition(giant, Zone::Exile, scry())
+                    .description("Second eligible delivery".into()),
+            );
+        let mut runner = scenario.build();
+        runner.cast(giant).adventure_face(false).commit();
+        runner.resolve_top();
+        let WaitingFor::SearchChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("paid Fertile Footsteps must pause on its real search");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(cards.contains(&first) && cards.contains(&chosen));
+        assert_eq!(cards.len(), 2);
+        let search_saved = serde_json::to_value(runner.state()).unwrap();
+        let mut restored_search =
+            GameRunner::from_state(serde_json::from_value(search_saved).unwrap());
+        restored_search
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .unwrap();
+        let mut events = runner
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .unwrap()
+            .events;
+        assert_eq!(runner.state().objects[&chosen].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert!(engine::ai_support::legal_actions(runner.state())
+            .contains(&GameAction::ChooseReplacement { index: 1 }));
+        assert_adventure_debt_save_and_viewer_boundaries(runner.state());
+        let original = runner
+            .state()
+            .owed_spell_final_part()
+            .unwrap()
+            .pending_adventure_exile
+            .as_ref()
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(original.terminal_completion, None);
+        assert!(original.delivery_events.is_empty());
+        let selected = if case == "eligible" { 1 } else { 0 };
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: selected })
+                .unwrap()
+                .events,
+        );
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            assert_adventure_debt_save_and_viewer_boundaries(runner.state());
+            assert_eq!(
+                runner
+                    .state()
+                    .owed_spell_final_part()
+                    .unwrap()
+                    .pending_adventure_exile
+                    .as_ref()
+                    .unwrap()
+                    .1
+                    .expected_event,
+                original.expected_event
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            // Eligible declines the Library redirect; the new-birth hostile
+            // accepts the remaining eligible modifier before its child moves.
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: if case == "eligible" { 1 } else { 0 },
+                    })
+                    .unwrap()
+                    .events,
+            );
+        } else {
+            assert!(matches!(
+                case,
+                "library" | "prevented-child" | "remained-child"
+            ));
+        }
+        let expected_terminal = match case {
+            "prevented-child" => ZoneMoveCompletion::Prevented,
+            "remained-child" => ZoneMoveCompletion::Remained,
+            _ => ZoneMoveCompletion::Moved,
+        };
+        assert_eq!(
+            runner
+                .state()
+                .owed_spell_final_part()
+                .unwrap()
+                .pending_adventure_exile
+                .as_ref()
+                .unwrap()
+                .1
+                .terminal_completion,
+            Some(expected_terminal)
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ScryChoice { player: P0, .. }
+        ));
+        assert_adventure_debt_save_and_viewer_boundaries(runner.state());
+        let retained = &runner
+            .state()
+            .owed_spell_final_part()
+            .unwrap()
+            .pending_adventure_exile
+            .as_ref()
+            .unwrap()
+            .1;
+        if case == "library" {
+            assert_eq!(runner.state().objects[&giant].zone, Zone::Library);
+            assert!(retained.delivery_events.iter().any(|event|matches!(event,GameEvent::ZoneChanged {record,..} if record.name=="Fertile Footsteps"&&record.to_zone==Zone::Library)));
+            let selected_record = retained
+                .delivery_events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::ZoneChanged { record, .. }
+                        if record.object_id == giant && record.to_zone == Zone::Library =>
+                    {
+                        Some(record)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                selected_record
+                    .trigger_source_context()
+                    .unwrap()
+                    .identity
+                    .reference,
+                retained.member
+            );
+            assert_eq!(
+                selected_record.trigger_source_context().unwrap().lki.name,
+                "Fertile Footsteps"
+            );
+            let hidden = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+            let projected = hidden
+                .zone_changes_this_turn
+                .iter()
+                .find(|record| {
+                    record.turn_zone_change_index == selected_record.turn_zone_change_index
+                })
+                .unwrap();
+            assert_ne!(projected.name, "Fertile Footsteps");
+            assert!(projected
+                .trigger_source_context()
+                .is_none_or(|context| context.lki.name != "Fertile Footsteps"));
+            assert_ne!(
+                hidden
+                    .objects
+                    .get(&giant)
+                    .map(|object| object.name.as_str()),
+                Some("Fertile Footsteps")
+            );
+        }
+        let checkpoint = serde_json::to_value(runner.state()).unwrap();
+        let mut restored: Vec<_> = std::iter::once(serde_json::from_value(checkpoint).unwrap())
+            .chain(adventure_existing_legacy_states(runner.state()))
+            .map(GameRunner::from_state)
+            .collect();
+        for (board_index, board) in std::iter::once(&mut runner)
+            .chain(restored.iter_mut())
+            .enumerate()
+        {
+            for _ in 0..12 {
+                let action = match &board.state().waiting_for {
+                    WaitingFor::ScryChoice { player, cards } => {
+                        assert_eq!(*player, P0);
+                        assert_eq!(cards.len(), 2);
+                        let mut reverse = cards.clone();
+                        reverse.reverse();
+                        GameAction::SelectCards { cards: reverse }
+                    }
+                    WaitingFor::ReplacementChoice { player, .. } => {
+                        assert_eq!(*player, P0);
+                        assert_eq!(
+                            board
+                                .state()
+                                .owed_spell_final_part()
+                                .unwrap()
+                                .pending_adventure_exile
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .terminal_completion,
+                            Some(expected_terminal)
+                        );
+                        GameAction::ChooseReplacement { index: 0 }
+                    }
+                    WaitingFor::Priority { .. } => break,
+                    other => panic!("unexpected selected-delivery child: {other:?}"),
+                };
+                let result = board.act(action).unwrap();
+                if board_index == 0 {
+                    events.extend(result.events);
+                }
+            }
+            assert!(board.state().owed_spell_final_part().is_none());
+            assert!(matches!(
+                board.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(board.state().stack.is_empty() && board.state().resolution_stack.is_empty());
+            let grants: Vec<_> = board.state().objects[&giant]
+                .casting_permissions
+                .iter()
+                .filter(|permission| {
+                    matches!(permission, CastingPermission::AdventureCreature { .. })
+                })
+                .collect();
+            assert_eq!(grants.len(), usize::from(case == "eligible"), "{case}");
+            if case == "eligible" {
+                assert_eq!(
+                    grants[0],
+                    &CastingPermission::resolved_adventure(
+                        P0,
+                        engine::types::identifiers::ObjectIncarnationRef::from_object(
+                            &board.state().objects[&giant]
+                        )
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            stack_resolved_count(&events, giant),
+            1,
+            "{case}: final part settles once after its child"
+        );
+    }
 }
 
 /// CR 702.27a + CR 608.2n: a spell whose buyback cost was paid is put into its
@@ -1039,7 +1641,7 @@ fn a_copy_of_a_paused_spell_inherits_no_owed_final_part() {
                     assert_eq!(*player, P1, "Chain of Smog's target discards");
                     assert_eq!(
                         state.owed_spell_final_part(),
-                        Some(&OwedSpellFinalPart { spell: smog }),
+                        Some(&OwedSpellFinalPart::unattempted(smog)),
                         "the paused Chain of Smog's carrier owes its final part"
                     );
                     smog_owed_at_its_discard = true;
@@ -3054,7 +3656,8 @@ fn a_persisted_bare_spell_rest_owing_a_final_part_fails_closed() {
     let (state, spell) = bare_spell_resolution_frame(CoreType::Sorcery, Zone::Stack);
     let mut raw = serde_json::to_value(&state).expect("the state serializes");
     raw["resolving_spell_final_part"] =
-        serde_json::to_value(OwedSpellFinalPart { spell }).expect("the marker serializes");
+        serde_json::to_value(OwedSpellFinalPart::unattempted(spell))
+            .expect("the marker serializes");
     let persisted: PersistedGameState =
         serde_json::from_value(raw.clone()).expect("the snapshot decodes");
     assert!(

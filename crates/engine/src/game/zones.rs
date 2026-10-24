@@ -359,6 +359,38 @@ pub(crate) fn apply_zone_exit_cleanup(
 
     let selected_cast = super::filter::CastSpellContext::announced(state, object_id);
 
+    // CR 715.4: normal characteristics return at the actual Stack departure,
+    // including when a post-delivery child keeps resolution paused. The final
+    // part later grants authority only from its selected terminal evidence.
+    let adventure_exit = selected_cast.map(|cast| cast.casting_variant).or_else(|| {
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .filter(|entry| entry.id == object_id)
+            .filter(|_| {
+                state
+                    .resolving_spell_final_part
+                    .as_ref()
+                    .is_none_or(|owed| {
+                        owed.stack_incarnation
+                            .is_none_or(|incarnation| incarnation == occurrence.incarnation)
+                    })
+            })
+            .and_then(|entry| match entry.kind {
+                crate::types::game_state::StackEntryKind::Spell {
+                    casting_variant, ..
+                } => Some(casting_variant),
+                _ => None,
+            })
+    }) == Some(crate::types::game_state::CastingVariant::Adventure);
+    if from == Zone::Stack && to != Zone::Stack && adventure_exit {
+        super::stack::restore_alternative_spell_normal_face(
+            state,
+            object_id,
+            crate::types::game_state::CastingVariant::Adventure,
+        );
+    }
+
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
         // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
         // transient marker on the spell object. The stack resolver snapshots it
@@ -460,7 +492,7 @@ pub(crate) fn apply_zone_exit_cleanup(
             obj_mut.casting_permissions.retain(|p| {
                 !matches!(
                     p,
-                    crate::types::ability::CastingPermission::AdventureCreature
+                    crate::types::ability::CastingPermission::AdventureCreature { granted_to: _, exile_incarnation: _ }
                         | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
                         | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
                         | crate::types::ability::CastingPermission::PlayFromExile { .. }

@@ -421,6 +421,21 @@ fn handle_replacement_choice_inner(
                         // epilogue still owns the continuation drain). Surface
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                                let delivered = &events[delivery_start..];
+                                if crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                    paused.member,
+                                    delivered,
+                                ) == crate::types::game_state::ZoneMoveCompletion::Moved
+                                {
+                                    state.capture_paused_zone_change_delivery(
+                                        paused.member,
+                                        &paused.expected_event,
+                                        delivered,
+                                        crate::types::game_state::ZoneMoveCompletion::Moved,
+                                    );
+                                }
+                            }
                             if let (Some(provenance), Some(pending)) = (
                                 parked_sacrifice_provenance,
                                 state.pending_replacement.as_mut(),
@@ -1563,7 +1578,13 @@ fn handle_replacement_choice_inner(
                 // settles that owner's paused delivery even though an answered
                 // choice or applied replacement has changed the proposal since.
                 if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                    pending.inherit_delivery_boundary(&paused.expected_event);
+                    if matches!((&pending.proposed, &paused.expected_event),
+                        (ProposedEvent::ZoneChange { object_id, from, .. },
+                         ProposedEvent::ZoneChange { object_id: parked_id, from: parked_from, .. })
+                            if object_id == parked_id && from == parked_from)
+                    {
+                        pending.inherit_delivery_boundary(&paused.expected_event);
+                    }
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(

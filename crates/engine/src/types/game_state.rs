@@ -7695,9 +7695,23 @@ pub enum BatchCompletion {
 /// leaving the stack — once those instructions are done. Owned by the resolution
 /// carrier it names (`resolving_stack_entry`), never by the spell's ability or
 /// stack entry, so a copy of the spell (CR 707.10) cannot inherit it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OwedSpellFinalPart {
     pub spell: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_incarnation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_adventure_exile: Option<(PlayerId, PendingZoneChangeDelivery)>,
+}
+
+impl OwedSpellFinalPart {
+    pub fn unattempted(spell: ObjectId) -> Self {
+        Self {
+            spell,
+            stack_incarnation: None,
+            pending_adventure_exile: None,
+        }
+    }
 }
 
 /// CR 603.3b + CR 608.2g: terminal settlement that must wait until the
@@ -15359,7 +15373,7 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
 /// spell (CR 608.3: its resolution is not the instant/sorcery path) is rejected
 /// rather than published.
 pub(crate) fn validate_owed_spell_final_part_coherence(state: &GameState) -> Result<(), String> {
-    let Some(owed) = state.resolving_spell_final_part else {
+    let Some(owed) = state.resolving_spell_final_part.as_ref() else {
         return Ok(());
     };
     let names_installed_spell =
@@ -15376,10 +15390,72 @@ pub(crate) fn validate_owed_spell_final_part_coherence(state: &GameState) -> Res
     if !names_installed_spell {
         return Err("an owed spell final part must name the installed spell carrier".to_string());
     }
+    if let Some((controller, delivery)) = &owed.pending_adventure_exile {
+        if !state.resolving_stack_entry.as_ref().is_some_and(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::Adventure,
+                    ..
+                }
+            )
+        }) || delivery.member.object_id != owed.spell
+            || owed.stack_incarnation != Some(delivery.member.incarnation)
+            || !matches!(&delivery.expected_event, ProposedEvent::ZoneChange {
+                object_id, from: Zone::Stack, performed_by: Some(player), ..
+            } if *object_id == owed.spell && player == controller)
+        {
+            return Err("Adventure final part has an incoherent selected delivery".into());
+        }
+        let moved = delivery.delivery_events.iter().any(|event| {
+            matches!(event,
+            GameEvent::ZoneChanged { record, .. } if record.trigger_source_context()
+                .is_some_and(|context| context.identity.reference == delivery.member))
+        });
+        if delivery.terminal_completion.is_none() {
+            if let Some(pending) = state.pending_replacement.as_ref().filter(|pending|
+                matches!(pending.proposed, ProposedEvent::ZoneChange {object_id,from:Zone::Stack,..} if object_id==owed.spell)) {
+                if !pending.parks_delivery(&delivery.expected_event) {
+                    return Err("Adventure pending replacement disagrees with its selected boundary".into());
+                }
+            }
+        }
+        match delivery.terminal_completion {
+            Some(ZoneMoveCompletion::Moved) if !moved => {
+                return Err("Adventure moved terminal has no exact-member witness".into())
+            }
+            Some(ZoneMoveCompletion::Prevented | ZoneMoveCompletion::Remained) if moved => {
+                return Err("Adventure no-move terminal contains a movement witness".into())
+            }
+            None if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && crate::game::engine::resolution_instructions_are_done(state) =>
+            {
+                return Err("settled Adventure delivery has no selected terminal".into())
+            }
+            _ => {}
+        }
+        // The selected terminal may outlive its holder or name a normal face.
+        // New births are lifetime refusals, not malformed historical evidence.
+        return Ok(());
+    }
     if !state.objects.contains_key(&owed.spell) {
         return Err("an owed spell final part must name an existing spell object".to_string());
     }
-    if crate::game::stack::is_permanent_spell(state, owed.spell) {
+    let departed_adventure = state.resolving_stack_entry.as_ref().is_some_and(|entry| {
+        matches!(
+            entry.kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Adventure,
+                ..
+            }
+        )
+    }) && owed.stack_incarnation.is_some_and(|incarnation| {
+        state
+            .objects
+            .get(&owed.spell)
+            .is_some_and(|object| object.zone != Zone::Stack || object.incarnation != incarnation)
+    });
+    if crate::game::stack::is_permanent_spell(state, owed.spell) && !departed_adventure {
         return Err(
             "an owed spell final part must name an instant or sorcery spell, not a permanent spell"
                 .to_string(),
@@ -31356,6 +31432,34 @@ impl GameState {
             }
             return true;
         }
+        let carrier_agrees = self.resolving_stack_entry.as_ref().is_some_and(|entry| {
+            entry.id == member.object_id
+                && matches!(
+                    entry.kind,
+                    StackEntryKind::Spell {
+                        casting_variant: CastingVariant::Adventure,
+                        ..
+                    }
+                )
+        });
+        if carrier_agrees {
+            if let Some((_, paused)) = self
+                .resolving_spell_final_part
+                .as_mut()
+                .filter(|owed| {
+                    owed.spell == member.object_id
+                        && owed.stack_incarnation == Some(member.incarnation)
+                })
+                .and_then(|owed| owed.pending_adventure_exile.as_mut())
+                .filter(|(_, paused)| paused.captures(member, expected_event))
+            {
+                paused.append_delivery_events(delivery_events);
+                paused
+                    .record_terminal_completion(terminal_completion)
+                    .expect("one Adventure final-part proposal has one terminal completion");
+                return true;
+            }
+        }
         false
     }
 
@@ -31386,6 +31490,39 @@ impl GameState {
         {
             paused.append_delivery_events(delivery_events);
             return true;
+        }
+        let carrier_agrees = self.resolving_stack_entry.as_ref().is_some_and(|entry| {
+            entry.id == member_id
+                && matches!(
+                    entry.kind,
+                    StackEntryKind::Spell {
+                        casting_variant: CastingVariant::Adventure,
+                        ..
+                    }
+                )
+        });
+        if carrier_agrees {
+            if let Some((_, paused)) = self
+                .resolving_spell_final_part
+                .as_mut()
+                .filter(|owed| owed.spell == member_id)
+                .and_then(|owed| owed.pending_adventure_exile.as_mut())
+                .filter(|(_, paused)| {
+                    paused.member.object_id == member_id && paused.terminal_completion.is_some()
+                })
+            {
+                let exact_events: Vec<_> = delivery_events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event,
+                    GameEvent::ZoneChanged { record, .. } if record.trigger_source_context()
+                        .is_some_and(|context| context.identity.reference == paused.member))
+                    })
+                    .cloned()
+                    .collect();
+                paused.append_delivery_events(&exact_events);
+                return true;
+            }
         }
         false
     }
@@ -39401,6 +39538,109 @@ mod tests {
     }
 
     #[test]
+    fn adventure_final_part_capture_requires_the_exact_proposal_and_incarnation() {
+        let mut state = GameState::new_two_player(73);
+        let spell = create_object(
+            &mut state,
+            CardId(73),
+            PlayerId(1),
+            "Typed Adventure capture boundary".into(),
+            Zone::Stack,
+        );
+        let member = ObjectIncarnationRef::from_object(&state.objects[&spell]);
+        let mut expected = ProposedEvent::zone_change(spell, Zone::Stack, Zone::Exile, Some(spell));
+        if let ProposedEvent::ZoneChange { performed_by, .. } = &mut expected {
+            *performed_by = Some(PlayerId(0));
+        }
+        state.resolving_stack_entry = Some(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(73),
+                ability: None,
+                casting_variant: CastingVariant::Adventure,
+                actual_mana_spent: 2,
+            },
+        });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+            spell,
+            stack_incarnation: Some(member.incarnation),
+            pending_adventure_exile: Some((
+                PlayerId(0),
+                PendingZoneChangeDelivery::new(member, expected.clone()),
+            )),
+        });
+        let unchanged = state.resolving_spell_final_part.clone();
+        assert!(
+            !state.capture_paused_zone_change_delivery_for_member(spell, &[]),
+            "a member-only callback cannot initialize the selected terminal"
+        );
+        assert!(!state.capture_paused_zone_change_delivery(
+            ObjectIncarnationRef::of(spell, member.incarnation + 1),
+            &expected,
+            &[],
+            ZoneMoveCompletion::Moved
+        ));
+        for field in ["cause", "destination", "actor"] {
+            let mut child = expected.clone();
+            if let ProposedEvent::ZoneChange {
+                cause,
+                to,
+                performed_by,
+                ..
+            } = &mut child
+            {
+                match field {
+                    "cause" => *cause = Some(ObjectId(99)),
+                    "destination" => *to = Zone::Graveyard,
+                    _ => *performed_by = Some(PlayerId(1)),
+                }
+            }
+            assert!(
+                !state.capture_paused_zone_change_delivery(
+                    member,
+                    &child,
+                    &[],
+                    ZoneMoveCompletion::Prevented
+                ),
+                "same holder is insufficient: {field}"
+            );
+            assert_eq!(state.resolving_spell_final_part, unchanged);
+        }
+        assert!(state.capture_paused_zone_change_delivery(
+            member,
+            &expected,
+            &[],
+            ZoneMoveCompletion::Prevented
+        ));
+        let terminal = &state
+            .owed_spell_final_part()
+            .unwrap()
+            .pending_adventure_exile
+            .as_ref()
+            .unwrap()
+            .1;
+        assert_eq!(
+            terminal.terminal_completion,
+            Some(ZoneMoveCompletion::Prevented)
+        );
+        assert!(terminal.delivery_events.is_empty());
+        assert!(state.capture_paused_zone_change_delivery_for_member(spell, &[]));
+        assert_eq!(
+            state
+                .owed_spell_final_part()
+                .unwrap()
+                .pending_adventure_exile
+                .as_ref()
+                .unwrap()
+                .1
+                .terminal_completion,
+            Some(ZoneMoveCompletion::Prevented)
+        );
+    }
+
+    #[test]
     fn paused_zone_change_delivery_derives_a_terminal_outcome_after_resume() {
         let member = ObjectIncarnationRef::of(ObjectId(71), 4);
         let mut delivery = PendingZoneChangeDelivery::new(
@@ -42616,7 +42856,7 @@ mod tests {
     fn owed_final_part_state(carrier: Option<StackEntry>, spell: ObjectId) -> GameState {
         let mut state = GameState::new_two_player(42);
         state.resolving_stack_entry = carrier;
-        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
         state
     }
 
@@ -42723,7 +42963,7 @@ mod tests {
             .card_types
             .core_types = vec![crate::types::card_type::CoreType::Sorcery];
         coherent.resolving_stack_entry = Some(owed_final_part_spell_carrier(spell));
-        coherent.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        coherent.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
         let raw = serde_json::to_value(&coherent).expect("the fixture serializes");
         let decoded = serde_json::from_value::<GameState>(raw.clone())
             .expect("a marker naming its installed spell carrier decodes");
@@ -42767,7 +43007,7 @@ mod tests {
                 .card_types
                 .core_types = vec![core];
             state.resolving_stack_entry = Some(owed_final_part_spell_carrier(spell));
-            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
             let raw = serde_json::to_value(&state).expect("the fixture serializes");
             let transport = serde_json::from_value::<GameState>(raw);
             let persisted = serde_json::from_value::<PersistedGameState>(

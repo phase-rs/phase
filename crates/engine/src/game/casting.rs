@@ -12,6 +12,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
+use crate::types::card_type::CoreType;
 use crate::types::casting_costs::{
     amount_is_order_relevant, ActivationCostLock, ActivationCostLockPoint, ActivationCostSnapshot,
     CostReductionAnalysis, CostReductionCoverage, CostReductionElection, CostReductionEntry,
@@ -2725,6 +2726,15 @@ pub(super) fn exile_cast_pays_printed_mana_cost(
     let Some(index) = casting_permission_index else {
         return false;
     };
+    if obj
+        .casting_permissions
+        .get(index.0)
+        .is_some_and(|permission| {
+            adventure_permission_supports_play(obj, player, permission, None, CardPlayMode::Cast)
+        })
+    {
+        return state.exile.contains(&obj.id);
+    }
     if play_from_exile_permission_source_at_index(
         state,
         obj,
@@ -2748,7 +2758,10 @@ pub(super) fn exile_cast_pays_printed_mana_cost(
             ..
         } => permission.is_normal_cost_authority_for_rider(),
         CastingPermission::PlayFromExile { .. }
-        | CastingPermission::AdventureCreature
+        | CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
         | CastingPermission::ExileWithAltCost { .. }
         | CastingPermission::ExileWithAltAbilityCost { .. }
         | CastingPermission::ExileWithEnergyCost
@@ -3840,6 +3853,35 @@ fn normal_cost_grant_supports_cast(
 /// Normal-cost routes (Adventure creature face, Warp's later cast,
 /// `PlayFromExile`, battlefield exile-cast statics) are method-agnostic zone
 /// authority and remain available to every variant.
+fn adventure_permission_supports_play(
+    obj: &GameObject,
+    player: PlayerId,
+    permission: &CastingPermission,
+    variant: Option<CastingVariant>,
+    play_mode: CardPlayMode,
+) -> bool {
+    let (granted_to, exile_incarnation) = match permission {
+        CastingPermission::AdventureCreature {
+            granted_to,
+            exile_incarnation,
+        } => (*granted_to, *exile_incarnation),
+        _ => return false,
+    };
+    // CR 715.3d: normal characteristics only, including noncreature
+    // permanents and land play. A swapped clone with no method is still an
+    // instant/sorcery and cannot borrow this grant.
+    matches!((granted_to, exile_incarnation), (Some(grantee), Some(incarnation))
+        if grantee == player && incarnation == obj.incarnation)
+        && obj.zone == Zone::Exile
+        && variant != Some(CastingVariant::Adventure)
+        && !obj
+            .card_types
+            .core_types
+            .iter()
+            .any(|ty| matches!(ty, CoreType::Instant | CoreType::Sorcery))
+        && (play_mode == CardPlayMode::Play || object_may_enter_cast_path(obj))
+}
+
 fn has_exile_cast_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -3884,7 +3926,10 @@ fn has_exile_cast_permission(
     };
     play_from_exile_route
         || obj.casting_permissions.iter().any(|p| match p {
-            crate::types::ability::CastingPermission::AdventureCreature => obj.owner == player,
+            permission @ crate::types::ability::CastingPermission::AdventureCreature { granted_to: _, exile_incarnation: _ } => {
+                state.exile.contains(&obj.id)
+                    && adventure_permission_supports_play(obj, player, permission, variant, CardPlayMode::Cast)
+            }
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
                 !alt_rider && obj.owner == player
             }
@@ -3994,8 +4039,17 @@ pub fn has_potentially_authorizing_object_cast_permission(
             .casting_permissions
             .iter()
             .any(|permission| match permission {
-                CastingPermission::AdventureCreature
-                | CastingPermission::ExileWithEnergyCost
+                permission @ CastingPermission::AdventureCreature {
+                    granted_to: _,
+                    exile_incarnation: _,
+                } => adventure_permission_supports_play(
+                    obj,
+                    player,
+                    permission,
+                    None,
+                    CardPlayMode::Cast,
+                ),
+                CastingPermission::ExileWithEnergyCost
                 | CastingPermission::WarpExile { .. }
                 | CastingPermission::Plotted { .. }
                 | CastingPermission::Foretold { .. } => obj.owner == player,
@@ -4129,7 +4183,13 @@ pub(crate) fn cast_permissions_name_their_grantee(obj: &GameObject) -> bool {
     !obj.casting_permissions.iter().any(|permission| {
         matches!(
             permission,
-            CastingPermission::ExileWithAltCost {
+            CastingPermission::AdventureCreature {
+                granted_to: None,
+                exile_incarnation: _
+            } | CastingPermission::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: None
+            } | CastingPermission::ExileWithAltCost {
                 granted_to: None,
                 ..
             } | CastingPermission::ExileWithAltAbilityCost {
@@ -4348,7 +4408,11 @@ pub(super) fn cast_has_elected_alternative_cost(
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }
         | CastingPermission::Foretold { .. } => true,
-        CastingPermission::AdventureCreature | CastingPermission::PlayFromExile { .. } => false,
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
+        | CastingPermission::PlayFromExile { .. } => false,
     })
 }
 
@@ -4387,7 +4451,10 @@ pub(super) fn cast_pays_nonexistent_printed_cost(
             // A face-based cast, an impulse permission, a non-mana alternative
             // cost, or an exile mechanic with its own cost: none stores the
             // normal-cost grant this predicate reads.
-            crate::types::ability::CastingPermission::AdventureCreature
+            crate::types::ability::CastingPermission::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            }
             | crate::types::ability::CastingPermission::PlayFromExile { .. }
             | crate::types::ability::CastingPermission::ExileWithEnergyCost
             | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
@@ -4936,7 +5003,8 @@ pub(super) fn selected_object_cast_permission_index(
     }
 
     let selected_alt_cost = match selected_variant {
-        None | Some(CastingVariant::Normal | CastingVariant::Suspend) => obj
+        None
+        | Some(CastingVariant::Normal | CastingVariant::Suspend | CastingVariant::Adventure) => obj
             .casting_permissions
             .iter()
             .enumerate()
@@ -5005,7 +5073,18 @@ pub(super) fn selected_object_cast_permission_index(
                         }
                     )
             })
-            .find_map(|(index, _)| {
+            .find_map(|(index, permission)| {
+                if state.exile.contains(&obj.id)
+                    && adventure_permission_supports_play(
+                        obj,
+                        player,
+                        permission,
+                        selected_variant,
+                        CardPlayMode::Cast,
+                    )
+                {
+                    return Some(CastingPermissionIndex(index));
+                }
                 play_from_exile_permission_source_at_index(
                     state,
                     obj,
@@ -5016,6 +5095,61 @@ pub(super) fn selected_object_cast_permission_index(
                 .map(|_| CastingPermissionIndex(index))
             })
     })
+}
+
+pub(super) fn selected_object_cast_permission_is_valid(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    index: Option<CastingPermissionIndex>,
+    variant: CastingVariant,
+) -> bool {
+    let Some(index) = index else {
+        return true;
+    };
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    let Some(permission) = obj.casting_permissions.get(index.0) else {
+        return false;
+    };
+    match permission {
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        } => {
+            state.exile.contains(&obj.id)
+                && adventure_permission_supports_play(
+                    obj,
+                    player,
+                    permission,
+                    Some(variant),
+                    CardPlayMode::Cast,
+                )
+        }
+        CastingPermission::PlayFromExile { .. } => play_from_exile_permission_source_at_index(
+            state,
+            obj,
+            player,
+            index,
+            Some(CardPlayMode::Cast),
+        )
+        .is_some(),
+        CastingPermission::ExileWithAltCost { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. } => {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        }
+        CastingPermission::Foretold { turn_foretold, .. } => {
+            obj.owner == player && state.turn_number > *turn_foretold
+        }
+        CastingPermission::Plotted { turn_plotted } => {
+            obj.owner == player && state.turn_number > *turn_plotted
+        }
+        CastingPermission::WarpExile {
+            castable_after_turn,
+        } => obj.owner == player && state.turn_number > *castable_after_turn,
+        CastingPermission::ExileWithEnergyCost => obj.owner == player,
+    }
 }
 
 /// CR 406.3a + CR 406.3b: The single authority for "may `player` look at this
@@ -5092,7 +5226,10 @@ fn selected_permission_cast_cost_modifier<'a>(
         // CR 715.3d + CR 702.185a + CR 702.170a + CR 702.143a: the card-native
         // exile casting methods carry no rider slot, so `cast_cost_modifier()`
         // above has already returned `None` for them.
-        CastingPermission::AdventureCreature
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
         | CastingPermission::ExileWithEnergyCost
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }
@@ -7455,6 +7592,29 @@ pub(super) fn exile_land_play_authorization(
     {
         return None;
     }
+    if state.exile.contains(&land_id) {
+        if let Some((index, _)) =
+            obj.casting_permissions
+                .iter()
+                .enumerate()
+                .find(|(_, permission)| {
+                    adventure_permission_supports_play(
+                        obj,
+                        player,
+                        permission,
+                        None,
+                        CardPlayMode::Play,
+                    )
+                })
+        {
+            return Some(ExileLandPlayAuthorization::ObjectAttached {
+                source: obj.id,
+                frequency: CastFrequency::Unlimited,
+                casting_permission_index: CastingPermissionIndex(index),
+                single_use_group: None,
+            });
+        }
+    }
     if let Some((casting_permission_index, source, frequency)) =
         play_from_exile_permission_source_with_index(
             state,
@@ -8364,7 +8524,16 @@ pub fn for_each_structurally_selectable_alternate_spell_payload(
         && object.owner == player
         && object.is_commander;
 
-    if (owned_hand_card || owned_commander) && alternative_spell_layout(object).is_some() {
+    let independent_adventure = alternative_spell_layout(object) == Some(LayoutKind::Adventure)
+        && matches!(object.zone, Zone::Exile | Zone::Graveyard)
+        && {
+            let mut selected = object.clone();
+            swap_to_alternative_spell_face(&mut selected);
+            has_potentially_authorizing_object_cast_permission(&selected, player)
+        };
+    if (owned_hand_card || owned_commander || independent_adventure)
+        && alternative_spell_layout(object).is_some()
+    {
         if let Some(back_face) = object.back_face.as_ref() {
             visit(StructurallySelectableAlternateSpellPayload::BackFace(
                 back_face,
@@ -15509,6 +15678,22 @@ fn cast_face_choice_offered_from_zone(
         || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
 }
 
+fn alternative_spell_face_choice_offered_from_zone(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    if cast_face_choice_offered_from_zone(state, obj) {
+        return true;
+    }
+    if alternative_spell_layout(obj) != Some(LayoutKind::Adventure) {
+        return false;
+    }
+    let mut selected = obj.clone();
+    swap_to_alternative_spell_face(&mut selected);
+    castable_from_current_zone(state, &selected, player, Some(CastingVariant::Adventure))
+}
+
 /// CR 709.3 + CR 712.11b: Spell//spell split cards and spell//spell MDFCs need a
 /// cast-time face choice from any zone that permits casting the card, not only
 /// hand or command (#3987 — Life // Death from graveyard via Jace, Telepath
@@ -18380,7 +18565,8 @@ pub fn handle_cast_spell_with_payment_mode(
     // from the command zone) require choosing the normal creature face or
     // alternative spell face.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
+        if alternative_spell_face_choice_offered_from_zone(state, obj, player)
+            && alternative_spell_layout(obj).is_some()
         {
             return Ok(WaitingFor::CastOffer {
                 player,
@@ -20681,7 +20867,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         // CR 715.3 / CR 720.3 / CR 712.11b: Adventure, Omen, and modal DFC
         // face choices happen before target selection, so no single target-slot
         // preview exists until the face is chosen.
-        if (cast_face_choice_offered_from_zone(state, obj)
+        if (alternative_spell_face_choice_offered_from_zone(state, obj, player)
             && alternative_spell_layout(obj).is_some())
             || cast_spell_face_choice_offered_from_zone(state, obj)
         {
@@ -21133,12 +21319,18 @@ pub fn can_cast_adventure_face_now(
     let Some(obj) = sim.objects.get_mut(&object_id) else {
         return false;
     };
-    if creature {
+    let variant = if creature {
         obj.back_face = None;
+        CastingVariant::Normal
     } else {
+        let Some(layout) = alternative_spell_layout(obj) else {
+            return false;
+        };
         swap_to_alternative_spell_face(obj);
-    }
-    can_cast_object_now(&sim, player, object_id)
+        casting_variant_for_alternative_spell(layout)
+    };
+    prepare_spell_cast_with_variant_override(&sim, player, object_id, Some(variant))
+        .is_ok_and(|prepared| can_cast_prepared_now_with_probe(&sim, player, &prepared, None))
 }
 
 /// CR 709.3 + CR 712.11c: Test one split-card or spell//spell MDFC face
@@ -21220,10 +21412,17 @@ fn castable_alternative_spell_face_verdict(
     // CR 715.3a / CR 720.3a: An Adventure instant/sorcery face may be
     // castable even when `prepare_spell_cast` fails on the creature face —
     // most commonly the sorcery-speed timing gate outside main phases.
-    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
+    if alternative_spell_layout(obj).is_some()
+        && alternative_spell_face_choice_offered_from_zone(state, obj, player)
+    {
         let mut transformed_state = state.clone();
         swap_to_alternative_spell_face(transformed_state.objects.get_mut(&object_id)?);
-        if let Ok(prepared) = prepare_spell_cast(&transformed_state, player, object_id) {
+        if let Ok(prepared) = prepare_spell_cast_with_variant_override(
+            &transformed_state,
+            player,
+            object_id,
+            alternative_spell_layout(obj).map(casting_variant_for_alternative_spell),
+        ) {
             if can_cast_prepared_now_with_probe(&transformed_state, player, &prepared, None) {
                 return Some(CastableSpellVerdict {
                     payment_state: Some(transformed_state),
@@ -21899,12 +22098,20 @@ fn can_cast_prepared_now_with_probe(
     // alternative spell face. The creature face may be unaffordable while the
     // spell face is castable; in that case the card is still legally castable
     // and will prompt AdventureCastChoice.
-    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
+    if alternative_spell_layout(obj).is_some()
+        && alternative_spell_face_choice_offered_from_zone(state, obj, player)
+    {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
         }
-        return can_cast_object_now_with_probe(&sim, player, prepared.object_id, None);
+        return prepare_spell_cast_with_variant_override(
+            &sim,
+            player,
+            prepared.object_id,
+            alternative_spell_layout(obj).map(casting_variant_for_alternative_spell),
+        )
+        .is_ok_and(|selected| can_cast_prepared_now_with_probe(&sim, player, &selected, None));
     }
 
     // CR 712.11c: For a spell//spell Modal DFC, only the face that will be face

@@ -1321,7 +1321,10 @@ pub fn casting_permission_is_cast_stable_for_pre_cast(permission: &CastingPermis
         .duration
         .is_none_or(duration_is_cast_stable_for_pre_cast);
     let payload_is_stable = match permission {
-        CastingPermission::AdventureCreature
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
         | CastingPermission::ExileWithEnergyCost
         | CastingPermission::WarpExile { .. }
         | CastingPermission::Plotted { .. }

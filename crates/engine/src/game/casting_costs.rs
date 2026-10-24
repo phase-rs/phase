@@ -12572,6 +12572,17 @@ fn finalize_cast_pre_payment_checks(
     cast_timing_permission: Option<CastTimingPermission>,
     events: &mut Vec<GameEvent>,
 ) -> Result<FinalizePrePaymentChecks, EngineError> {
+    if !super::casting::selected_object_cast_permission_is_valid(
+        state,
+        object_id,
+        player,
+        casting_permission_index,
+        casting_variant,
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected casting permission no longer authorizes this cast".into(),
+        ));
+    }
     // CR 614.1c + CR 122.1 + CR 205.1b + CR 613.1d: Snapshot the exact
     // cast-this-way ETB riders before resulting-MV evaluation consumes the
     // during-resolution permission. Legacy pending casts without an index keep
@@ -18859,8 +18870,9 @@ mod tests {
             vec![completed, stale],
             0,
         );
-        state.resolving_spell_final_part =
-            Some(crate::types::game_state::OwedSpellFinalPart { spell });
+        state.resolving_spell_final_part = Some(
+            crate::types::game_state::OwedSpellFinalPart::unattempted(spell),
+        );
         state.objects.get_mut(&stale).unwrap().incarnation += 1;
 
         let mut events = Vec::new();

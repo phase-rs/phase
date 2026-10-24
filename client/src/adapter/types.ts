@@ -1420,7 +1420,8 @@ export type CastCostModifier = {
 };
 
 export type CastingPermission =
-  | { type: "AdventureCreature" }
+  // Legacy absent fields carry no engine play authority.
+  | { type: "AdventureCreature"; granted_to?: PlayerId; exile_incarnation?: number }
   | {
       type: "ExileWithAltCost";
       cost: ManaCost;

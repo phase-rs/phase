@@ -140,13 +140,16 @@ fn issue_4001_exiled_adventure_creature_does_not_simulate_instant_face() {
 
     let mut events = Vec::new();
     move_to_zone(runner.state_mut(), obj_id, Zone::Exile, &mut events);
+    let identity = engine::types::identifiers::ObjectIncarnationRef::from_object(
+        &runner.state().objects[&obj_id],
+    );
     runner
         .state_mut()
         .objects
         .get_mut(&obj_id)
         .unwrap()
         .casting_permissions
-        .push(CastingPermission::AdventureCreature);
+        .push(CastingPermission::resolved_adventure(P0, identity));
 
     assert!(
         !can_cast_object_now(runner.state(), P0, obj_id),

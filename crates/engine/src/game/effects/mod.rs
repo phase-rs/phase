@@ -9368,7 +9368,10 @@ fn effect_fields_read_filter_population(
                             || constraint.as_ref().is_some_and(has_cast_constraint)
                             || duration.as_ref().is_some_and(has_duration)
                     }
-                    CastingPermission::AdventureCreature
+                    CastingPermission::AdventureCreature {
+                        granted_to: _,
+                        exile_incarnation: _,
+                    }
                     | CastingPermission::ExileWithEnergyCost
                     | CastingPermission::WarpExile { .. }
                     | CastingPermission::Plotted { .. }

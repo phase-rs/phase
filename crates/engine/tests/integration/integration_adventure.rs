@@ -295,8 +295,13 @@ fn adventure_exile_on_resolve() {
 
     // Should have AdventureCreature permission
     assert!(
-        obj.casting_permissions
-            .contains(&CastingPermission::AdventureCreature),
+        obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "Should have AdventureCreature permission after Adventure resolves"
     );
 
@@ -371,8 +376,13 @@ fn adventure_countered_to_graveyard() {
         "Countered Adventure should go to graveyard"
     );
     assert!(
-        !obj.casting_permissions
-            .contains(&CastingPermission::AdventureCreature),
+        !obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "Countered spell should NOT get AdventureCreature permission"
     );
 }
@@ -405,7 +415,10 @@ fn adventure_cast_creature_from_exile() {
         zones::move_to_zone(state, obj_id, Zone::Exile, &mut Vec::new());
         let obj = state.objects.get_mut(&obj_id).unwrap();
         obj.casting_permissions
-            .push(CastingPermission::AdventureCreature);
+            .push(CastingPermission::resolved_adventure(
+                P0,
+                engine::types::identifiers::ObjectIncarnationRef::from_object(obj),
+            ));
     }
 
     let card_id = runner.state().objects[&obj_id].card_id;
@@ -652,8 +665,13 @@ fn bonecrusher_full_flow() {
         "After Stomp resolves: should be in exile"
     );
     assert!(
-        obj.casting_permissions
-            .contains(&CastingPermission::AdventureCreature),
+        obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "After Stomp resolves: should have AdventureCreature permission"
     );
     assert_eq!(
@@ -701,8 +719,13 @@ fn bonecrusher_full_flow() {
 
     // AdventureCreature permission should be cleared (cleared on zone change from exile)
     assert!(
-        !obj.casting_permissions
-            .contains(&CastingPermission::AdventureCreature),
+        !obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "AdventureCreature permission should be cleared after leaving exile"
     );
 }
@@ -772,4 +795,669 @@ fn garenbrig_squire_triggers_only_for_adventure_creature_casts() {
     let squire_after_adventure = runner.state().objects.get(&squire).unwrap();
     assert_eq!(squire_after_adventure.power, Some(3));
     assert_eq!(squire_after_adventure.toughness, Some(3));
+}
+
+// Complete fixed-pin records for the noncreature/land members of CR 715.
+fn normal_permanent_adventure_db() -> engine::database::CardDatabase {
+    let records = [
+        serde_json::json!({"name":"Jidoor, Aristocratic Capital // Overture","faceName":"Jidoor, Aristocratic Capital","side":"a","layout":"adventure","manaValue":0,"types":["Land"],"type":"Land — Town","subtypes":["Town"],"supertypes":[],"colors":[],"colorIdentity":["U"],"text":"This land enters tapped.\n{T}: Add {U}.","identifiers":{"scryfallOracleId":"bd513d9d-5aa2-4860-bd86-8b5d9430f133"}}),
+        serde_json::json!({"name":"Jidoor, Aristocratic Capital // Overture","faceName":"Overture","side":"b","layout":"adventure","manaCost":"{4}{U}{U}","manaValue":0,"types":["Sorcery"],"type":"Sorcery — Adventure","subtypes":["Adventure"],"supertypes":[],"colors":[],"colorIdentity":["U"],"text":"Target opponent mills half their library, rounded down. (Then exile this card. You may play the land later from exile.)","identifiers":{"scryfallOracleId":"bd513d9d-5aa2-4860-bd86-8b5d9430f133"}}),
+        serde_json::json!({"name":"My Precious // Allure of Power","faceName":"My Precious","side":"a","layout":"adventure","manaCost":"{3}","manaValue":3,"types":["Artifact"],"type":"Legendary Artifact — Equipment","subtypes":["Equipment"],"supertypes":["Legendary"],"colors":[],"colorIdentity":["B"],"text":"Equipped creature has hexproof and can't be blocked.\nEquip—{2}, Pay 2 life.","identifiers":{"scryfallOracleId":"2e728381-6db0-4c66-883d-82d718fef833"}}),
+        serde_json::json!({"name":"My Precious // Allure of Power","faceName":"Allure of Power","side":"b","layout":"adventure","manaCost":"{1}{B}","manaValue":3,"types":["Instant"],"type":"Instant — Adventure","subtypes":["Adventure"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"text":"As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.","identifiers":{"scryfallOracleId":"2e728381-6db0-4c66-883d-82d718fef833"}}),
+    ];
+    let mut export = serde_json::Map::new();
+    for (index, record) in records.into_iter().enumerate() {
+        let card: engine::database::mtgjson::AtomicCard = serde_json::from_value(record).unwrap();
+        let face = engine::database::synthesis::build_oracle_face_multi(
+            &card,
+            card.identifiers.scryfall_oracle_id.clone(),
+        );
+        assert!(engine::game::coverage::card_face_gaps(&face).is_empty());
+        let mut value = serde_json::to_value(&face).unwrap();
+        value["layout"] = serde_json::json!("adventure");
+        value["face_index"] = serde_json::json!(index % 2);
+        export.insert(face.name.to_lowercase(), value);
+    }
+    engine::database::CardDatabase::from_json_str(&serde_json::to_string(&export).unwrap()).unwrap()
+}
+
+#[test]
+fn resolving_adventure_noncreature_additional_cost_and_normal_equipment_play() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = normal_permanent_adventure_db();
+    for free in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Allure draw A", "Allure draw B", "Allure reserve"]);
+        let precious = scenario.add_real_card(
+            if free { P1 } else { P0 },
+            "My Precious",
+            if free { Zone::Library } else { Zone::Hand },
+            &db,
+        );
+        let first = scenario
+            .add_creature(P0, "First sacrifice candidate", 1, 1)
+            .id();
+        let chosen = scenario
+            .add_creature(P0, "Nonfirst sacrifice candidate", 2, 2)
+            .id();
+        let goods = if free {
+            Some(scenario.add_spell_to_hand_from_oracle(P0, "Stolen Goods", false, "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.").with_mana_cost(ManaCost::Cost { generic:3, shards:vec![ManaCostShard::Blue] }).id())
+        } else {
+            None
+        };
+        if free {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Fist of Suns",
+                "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+            );
+        }
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            P0,
+            if free {
+                ManaType::Blue
+            } else {
+                ManaType::Black
+            },
+            if free { 4 } else { 2 },
+        );
+        if let Some(goods) = goods {
+            runner
+                .cast(goods)
+                .target_player(P1)
+                .resolve()
+                .assert_zone(&[precious], Zone::Exile);
+        }
+        if free {
+            for color in [
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ] {
+                add_mana(&mut runner, P0, color, 1);
+            }
+        }
+        runner
+            .act(GameAction::CastSpell {
+                object_id: precious,
+                card_id: runner.state().objects[&precious].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                player: P0,
+                kind: CastOfferKind::Adventure { .. }
+            }
+        ));
+        assert!(legal_actions(runner.state())
+            .contains(&GameAction::ChooseAdventureFace { creature: false }));
+        runner
+            .act(GameAction::ChooseAdventureFace { creature: false })
+            .unwrap();
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Allure's mandatory sacrifice must be paid even when its mana cost is free");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert!(choices.contains(&first) && choices.contains(&chosen));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![chosen],
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&chosen].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&precious].name, "Allure of Power");
+        assert!(
+            matches!(runner.state().stack.back().unwrap().kind, engine::types::game_state::StackEntryKind::Spell { actual_mana_spent,.. } if actual_mana_spent == if free {0} else {2})
+        );
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&precious].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&precious].name, "My Precious");
+        assert!(runner.state().objects[&precious]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact));
+        assert!(!runner.state().objects[&precious]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        assert_eq!(runner.state().players[0].hand.len(), 2);
+        add_mana(&mut runner, P0, ManaType::Colorless, 3);
+        let committed = runner.cast(precious).commit();
+        assert!(matches!(
+            committed.state().stack.back().unwrap().kind,
+            engine::types::game_state::StackEntryKind::Spell {
+                actual_mana_spent: 3,
+                ..
+            }
+        ));
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[precious], Zone::Battlefield);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
+fn resolving_adventure_land_front_plays_jidoor_without_a_spell_or_mana_payment() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = normal_permanent_adventure_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(
+        P1,
+        &[
+            "Mill A",
+            "Mill B",
+            "Mill C",
+            "Retained D",
+            "Retained E",
+            "Retained F",
+            "Retained G",
+        ],
+    );
+    let jidoor = scenario.add_real_card(P0, "Jidoor, Aristocratic Capital", Zone::Hand, &db);
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let timing_witness = scenario
+        .add_creature_to_hand(P0, "Ordinary zero-cost stack witness", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Blue, 6);
+    runner
+        .act(GameAction::CastSpell {
+            object_id: jidoor,
+            card_id: runner.state().objects[&jidoor].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            player: P0,
+            kind: CastOfferKind::Adventure { .. }
+        }
+    ));
+    let issued = legal_actions(runner.state());
+    assert!(issued.contains(&GameAction::ChooseAdventureFace { creature: false }));
+    assert!(!issued.contains(&GameAction::ChooseAdventureFace { creature: true }));
+    runner
+        .act(GameAction::ChooseAdventureFace { creature: false })
+        .unwrap();
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .unwrap();
+    }
+    assert_eq!(runner.state().objects[&jidoor].mana_cost.mana_value(), 6);
+    assert!(matches!(
+        runner.state().stack.back().unwrap().kind,
+        engine::types::game_state::StackEntryKind::Spell {
+            actual_mana_spent: 6,
+            ..
+        }
+    ));
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&jidoor].zone, Zone::Exile);
+    assert_eq!(runner.state().players[1].graveyard.len(), 3);
+    assert_eq!(runner.state().players[1].library.len(), 4);
+    assert_eq!(runner.state().objects[&jidoor].mana_cost.mana_value(), 0);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        jidoor
+    ));
+    let play = GameAction::PlayLand {
+        object_id: jidoor,
+        card_id: runner.state().objects[&jidoor].card_id,
+    };
+    assert!(legal_actions(runner.state()).contains(&play));
+    let mut used = GameRunner::from_state(runner.state().clone());
+    used.act(GameAction::PlayLand {
+        object_id: forest,
+        card_id: used.state().objects[&forest].card_id,
+    })
+    .unwrap();
+    assert_eq!(used.state().players[0].lands_played_this_turn, 1);
+    assert!(!legal_actions(used.state()).contains(&play));
+    assert!(used.act(play.clone()).is_err());
+    let mut busy = GameRunner::from_state(runner.state().clone());
+    busy.cast(timing_witness).commit();
+    assert!(!legal_actions(busy.state()).contains(&play));
+    assert!(busy.act(play.clone()).is_err());
+    let mut combat = GameRunner::from_state(runner.state().clone());
+    combat.advance_to_phase(Phase::BeginCombat);
+    assert!(!legal_actions(combat.state()).contains(&play));
+    assert!(combat.act(play.clone()).is_err());
+    let mut opponent = GameRunner::from_state(runner.state().clone());
+    opponent.advance_to_phase(Phase::End);
+    opponent.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(opponent.state().active_player, P1);
+    assert!(!legal_actions(opponent.state()).contains(&play));
+    assert!(opponent.act(play.clone()).is_err());
+    let result = runner.act(play).unwrap();
+    assert_eq!(runner.state().objects[&jidoor].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&jidoor].tapped);
+    assert_eq!(runner.state().players[0].lands_played_this_turn, 1);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(runner.state().objects[&jidoor]
+        .casting_permissions
+        .is_empty());
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| matches!(event, engine::types::events::GameEvent::SpellCast { .. })));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn resolving_adventure_public_counter_and_illegal_target_do_not_earn_authority() {
+    for response in ["Cancel", "Unsummon", "Resolved"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = add_bonecrusher_to_hand(&mut scenario);
+        let untouched = scenario
+            .add_creature(P1, "Stomp first unselected creature", 3, 3)
+            .id();
+        let victim = scenario.add_creature(P1, "Stomp target", 3, 3).id();
+        let response_spell = if response == "Resolved" {
+            None
+        } else {
+            Some(
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        P1,
+                        response,
+                        true,
+                        if response == "Cancel" {
+                            "Counter target spell."
+                        } else {
+                            "Return target creature to its owner's hand."
+                        },
+                    )
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: if response == "Cancel" { 1 } else { 0 },
+                        shards: vec![ManaCostShard::Blue; if response == "Cancel" { 2 } else { 1 }],
+                    })
+                    .id(),
+            )
+        };
+        let mut runner = scenario.build();
+        setup_bonecrusher_adventure(&mut runner, giant);
+        let parsed = engine::parser::parse_oracle_text(
+            "Damage can't be prevented this turn. Stomp deals 2 damage to any target.",
+            "Stomp",
+            &[],
+            &["Instant".into()],
+            &["Adventure".into()],
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&giant)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .abilities = parsed.abilities;
+        add_mana(&mut runner, P0, ManaType::Red, 2);
+        add_mana(&mut runner, P1, ManaType::Blue, 3);
+        runner
+            .cast(giant)
+            .adventure_face(false)
+            .target_object(victim)
+            .commit();
+        assert_eq!(runner.state().objects[&giant].name, "Stomp");
+        if let Some(spell) = response_spell {
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            let committed = runner
+                .cast(spell)
+                .target_object(if response == "Cancel" { giant } else { victim })
+                .commit();
+            assert!(
+                matches!(committed.state().stack.back().unwrap().kind,engine::types::game_state::StackEntryKind::Spell {actual_mana_spent,..} if actual_mana_spent==if response=="Cancel" {3} else {1})
+            );
+            committed.resolve();
+        } else {
+            runner.resolve_top();
+        }
+        let object = &runner.state().objects[&giant];
+        assert_eq!(
+            object.zone,
+            if response == "Resolved" {
+                Zone::Exile
+            } else {
+                Zone::Graveyard
+            }
+        );
+        assert_eq!(object.name, "Bonecrusher Giant");
+        assert_eq!(
+            object
+                .casting_permissions
+                .iter()
+                .filter(|permission| matches!(
+                    permission,
+                    CastingPermission::AdventureCreature { .. }
+                ))
+                .count(),
+            usize::from(response == "Resolved")
+        );
+        assert_eq!(runner.state().objects[&untouched].damage_marked, 0);
+        if response == "Unsummon" {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Hand);
+        }
+        if response == "Resolved" {
+            assert_eq!(runner.state().objects[&victim].damage_marked, 2);
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
+fn resolving_adventure_normal_cost_combines_fist_and_sphere_without_borrowing_a_free_sibling() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = normal_permanent_adventure_db();
+    for choose_fist in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Draw first", "Draw second", "Reserve"]);
+        let precious = scenario.add_real_card(P0, "My Precious", Zone::Hand, &db);
+        let sacrifice = scenario.add_creature(P0, "Allure sacrifice", 1, 1).id();
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Sphere of Resistance",
+            "Spells cost {1} more to cast.",
+        );
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Fist of Suns",
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+        );
+        let mut runner = scenario.build();
+        add_mana(&mut runner, P0, ManaType::Black, 3);
+        runner
+            .cast(precious)
+            .adventure_face(false)
+            .decline_optional()
+            .sacrifice_with(&[sacrifice])
+            .resolve()
+            .assert_zone(&[precious], Zone::Exile);
+        if choose_fist {
+            for color in [
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+                ManaType::Colorless,
+            ] {
+                add_mana(&mut runner, P0, color, 1);
+            }
+        } else {
+            add_mana(&mut runner, P0, ManaType::Colorless, 4);
+        }
+        runner
+            .act(GameAction::CastSpell {
+                object_id: precious,
+                card_id: runner.state().objects[&precious].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        if choose_fist {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { player: P0, .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalCost { pay: true })
+                .unwrap();
+        } else if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ) {
+            runner
+                .act(GameAction::DecideOptionalCost { pay: false })
+                .unwrap();
+        }
+        assert!(
+            matches!(runner.state().stack.back().unwrap().kind,engine::types::game_state::StackEntryKind::Spell {actual_mana_spent,..} if actual_mana_spent==if choose_fist {6} else {4})
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&precious].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn resolving_adventure_pull_and_crypt_clear_only_the_departed_incarnation() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = normal_permanent_adventure_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C", "Draw D", "Reserve"]);
+    let first = scenario.add_real_card(P0, "My Precious", Zone::Hand, &db);
+    let second = scenario.add_real_card(P0, "My Precious", Zone::Hand, &db);
+    let sacrifices = [
+        scenario.add_creature(P0, "First sacrifice", 1, 1).id(),
+        scenario.add_creature(P0, "Second sacrifice", 1, 1).id(),
+    ];
+    let pull = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Pull from Eternity",
+            true,
+            "Put target face-up exiled card into its owner's graveyard.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let crypt = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Tormod's Crypt",
+            "{T}, Sacrifice this artifact: Exile target player's graveyard.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::Black, 4);
+    for (card, sacrifice) in [(first, sacrifices[0]), (second, sacrifices[1])] {
+        runner
+            .cast(card)
+            .adventure_face(false)
+            .sacrifice_with(&[sacrifice])
+            .resolve()
+            .assert_zone(&[card], Zone::Exile);
+    }
+    let old = runner.state().objects[&first].casting_permissions.clone();
+    let old_incarnation = runner.state().objects[&first].incarnation;
+    let second_permissions = runner.state().objects[&second].casting_permissions.clone();
+    let loaded: engine::types::game_state::GameState =
+        serde_json::from_str(&serde_json::to_string(runner.state()).unwrap()).unwrap();
+    runner = GameRunner::from_state(loaded);
+    add_mana(&mut runner, P0, ManaType::White, 1);
+    runner
+        .cast(pull)
+        .target_object(first)
+        .resolve()
+        .assert_zone(&[first], Zone::Graveyard);
+    assert!(runner.state().objects[&first]
+        .casting_permissions
+        .is_empty());
+    runner
+        .activate(crypt, 0)
+        .target_player(P0)
+        .resolve()
+        .assert_zone(&[first, crypt], Zone::Exile);
+    assert!(runner.state().objects[&first].incarnation > old_incarnation);
+    assert!(runner.state().objects[&first]
+        .casting_permissions
+        .is_empty());
+    assert_eq!(
+        runner.state().objects[&second].casting_permissions,
+        second_permissions
+    );
+    add_mana(&mut runner, P0, ManaType::Colorless, 3);
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        second
+    ));
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        first
+    ));
+    // Supplemental stale-value attack cannot promote the old stay to this birth.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .casting_permissions = old;
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        first
+    ));
+    runner
+        .cast(second)
+        .resolve()
+        .assert_zone(&[second], Zone::Battlefield);
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn allure_mandatory_sacrifice_cannot_be_skipped_by_paid_or_free_face_selection() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = normal_permanent_adventure_db();
+    for free in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Draw first", "Draw second", "Reserve"]);
+        let precious = scenario.add_real_card(
+            if free { P1 } else { P0 },
+            "My Precious",
+            if free { Zone::Library } else { Zone::Hand },
+            &db,
+        );
+        let goods = if free {
+            Some(scenario.add_spell_to_hand_from_oracle(P0,"Stolen Goods",false,"Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.").with_mana_cost(ManaCost::Cost {generic:3,shards:vec![ManaCostShard::Blue]}).id())
+        } else {
+            None
+        };
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            P0,
+            if free {
+                ManaType::Blue
+            } else {
+                ManaType::Black
+            },
+            if free { 4 } else { 2 },
+        );
+        if let Some(goods) = goods {
+            runner
+                .cast(goods)
+                .target_player(P1)
+                .resolve()
+                .assert_zone(&[precious], Zone::Exile);
+        }
+        assert!(!engine::game::casting::can_cast_adventure_face_now(
+            runner.state(),
+            P0,
+            precious,
+            false
+        ));
+        if free {
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: precious,
+                    card_id: runner.state().objects[&precious].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::CastOffer {
+                    player: P0,
+                    kind: CastOfferKind::Adventure { .. }
+                }
+            ));
+            assert!(!legal_actions(runner.state())
+                .contains(&GameAction::ChooseAdventureFace { creature: false }));
+            assert!(legal_actions(runner.state())
+                .contains(&GameAction::ChooseAdventureFace { creature: true }));
+            assert!(runner
+                .act(GameAction::ChooseAdventureFace { creature: false })
+                .is_err());
+            runner
+                .act(GameAction::ChooseAdventureFace { creature: true })
+                .unwrap();
+            assert!(matches!(
+                runner.state().stack.back().unwrap().kind,
+                engine::types::game_state::StackEntryKind::Spell {
+                    actual_mana_spent: 0,
+                    ..
+                }
+            ));
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&precious].zone, Zone::Battlefield);
+        } else {
+            assert!(runner
+                .cast(precious)
+                .adventure_face(false)
+                .try_resolve()
+                .is_err());
+            assert_eq!(runner.state().objects[&precious].zone, Zone::Hand);
+        }
+        assert_eq!(runner.state().players[0].hand.len(), usize::from(!free));
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
 }

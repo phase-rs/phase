@@ -591,7 +591,10 @@ fn redact_casting_permission_cleanup_authority(
 ) {
     for permission in permissions {
         match permission {
-            crate::types::ability::CastingPermission::AdventureCreature
+            crate::types::ability::CastingPermission::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            }
             | crate::types::ability::CastingPermission::PlayFromExile { .. }
             | crate::types::ability::CastingPermission::ExileWithEnergyCost
             | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
@@ -998,10 +1001,32 @@ fn exempt_from_hiding(
     obj: &crate::game::game_object::GameObject,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
+    // The resolving-Adventure permission has no look capability. Preserve the
+    // existing cast-to-look inference only for an independent authority.
+    let mut independent;
+    let cast_object = if obj.zone == Zone::Exile
+        && obj.face_down
+        && obj.casting_permissions.iter().any(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::AdventureCreature { .. }
+            )
+        }) {
+        independent = obj.clone();
+        independent.casting_permissions.retain(|permission| {
+            !matches!(
+                permission,
+                crate::types::ability::CastingPermission::AdventureCreature { .. }
+            )
+        });
+        &independent
+    } else {
+        obj
+    };
     crate::game::casting::cast_permissions_name_their_grantee(obj)
         && state.players.iter().any(|pl| {
             can_view_private_for_player(pl.id)
-                && crate::game::casting::castable_from_current_zone(state, obj, pl.id, None)
+                && crate::game::casting::castable_from_current_zone(state, cast_object, pl.id, None)
         })
 }
 
@@ -1648,6 +1673,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         Some(viewer) => crate::game::payment_transaction::project_for_viewer(state, viewer),
         None => crate::game::payment_transaction::project_without_viewer(state),
     };
+    // Execution authority can retain private proposed events and delivery
+    // snapshots. Public prompts derive their actor/options independently.
+    filtered.resolving_spell_final_part = None;
     filtered.play_trace = None;
     filtered.spell_cast_reversal = None;
     let viewer_knows = |object_id: ObjectId| {
@@ -14884,6 +14912,51 @@ mod tests {
         (state, card)
     }
 
+    #[test]
+    fn resolving_adventure_authority_never_discloses_face_down_exile() {
+        use crate::types::ability::CastingPermission;
+        use crate::types::game_state::{ExileLink, ExileLinkKind, LookGrant};
+        for fields in [
+            (Some(PlayerId(0)), Some(0)),
+            (None, None),
+            (Some(PlayerId(0)), None),
+            (None, Some(0)),
+        ] {
+            let (mut state, card) = face_down_exile_under_alt_cost_grant(Some(PlayerId(0)));
+            let incarnation = state.objects[&card].incarnation;
+            state.objects.get_mut(&card).unwrap().casting_permissions =
+                vec![CastingPermission::AdventureCreature {
+                    granted_to: fields.0,
+                    exile_incarnation: fields.1.map(|_| incarnation),
+                }];
+            for viewer in [PlayerId(0), PlayerId(1)] {
+                assert_eq!(proj(&state, viewer, card), Some(IdentityProjection::Hidden));
+            }
+            let hidden = filter_state_for_unseated_viewer(&state);
+            assert_ne!(hidden.objects[&card].name, "Exiled Card");
+            state.exile_links.push(ExileLink {
+                exiled_id: card,
+                source_id: card,
+                kind: ExileLinkKind::HideawayLookable {
+                    grant: LookGrant::Player {
+                        player: PlayerId(0),
+                    },
+                    lookers: std::collections::BTreeSet::from([PlayerId(0)]),
+                    source_incarnation: incarnation,
+                },
+            });
+            assert_eq!(
+                proj(&state, PlayerId(0), card),
+                None,
+                "an independent explicit look authority is a positive witness"
+            );
+            assert_eq!(
+                proj(&state, PlayerId(1), card),
+                Some(IdentityProjection::Hidden)
+            );
+        }
+    }
+
     /// **CR 406.3b: the exemption fires only where the grant NAMES its grantee.**
     ///
     /// `casting::exile_alt_cost_permission_grants_to_player` reads an absent `granted_to` as
@@ -15455,7 +15528,10 @@ mod tests {
             .objects
             .get_mut(&adventurer)
             .unwrap()
-            .casting_permissions = vec![CastingPermission::AdventureCreature];
+            .casting_permissions = vec![CastingPermission::AdventureCreature {
+            granted_to: None,
+            exile_incarnation: None,
+        }];
         let departed = departed_record(state.objects[&redacted].clone());
         state
             .departed_stack_spells
@@ -15517,7 +15593,10 @@ mod tests {
             .objects
             .get_mut(&adventurer)
             .unwrap()
-            .casting_permissions = vec![CastingPermission::AdventureCreature];
+            .casting_permissions = vec![CastingPermission::AdventureCreature {
+            granted_to: None,
+            exile_incarnation: None,
+        }];
         let departed_id = ObjectId(ids.last().unwrap().0 + 1);
         let departed = departed_record(state.objects[&dirty].clone());
         state

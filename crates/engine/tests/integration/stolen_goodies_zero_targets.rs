@@ -118,9 +118,13 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
     let picnic = &runner.state().objects[&picnic];
     assert_eq!(picnic.zone, Zone::Exile);
     assert!(
-        picnic
-            .casting_permissions
-            .contains(&CastingPermission::AdventureCreature),
+        picnic.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "a targetless Adventure still permits the creature face to be cast later"
     );
 }

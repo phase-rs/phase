@@ -2273,9 +2273,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
 /// permission is compared with.
 fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) -> HistoryReads {
     match permission {
-        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {
-            HistoryReads::NONE
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
         }
+        | CastingPermission::ExileWithEnergyCost => HistoryReads::NONE,
         CastingPermission::WarpExile {
             castable_after_turn: _,
         }

@@ -11,8 +11,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
     GameState, MayTriggerAutoChoiceKey, OwedSpellFinalPart, PendingCounterPostAction,
-    PendingSpellResolution, StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext,
-    WaitingFor,
+    PendingSpellResolution, PendingZoneChangeDelivery, StackEntry, StackEntryKind,
+    StackPaidSnapshot, TriggerSourceContext, WaitingFor, ZoneMoveCompletion,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -32,7 +32,7 @@ use super::ability_utils::{
 };
 use super::effects;
 use super::targeting;
-use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult, ZoneMoveTerminalResult};
 
 /// A second carrier cannot begin while one is installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -999,6 +999,13 @@ pub(crate) fn restore_alternative_spell_normal_face(
     casting_variant: crate::types::game_state::CastingVariant,
 ) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
+        if casting_variant == CastingVariant::Adventure
+            && obj.back_face.as_ref().is_some_and(|back| {
+                back.layout_kind == Some(crate::types::card::LayoutKind::Adventure)
+            })
+        {
+            return;
+        }
         // #7565: the shared swap preserves the stored slot's layout_kind.
         super::printed_cards::swap_object_faces(obj);
         // CR 715.2a + CR 715.4 (#7714): restoring the creature face after an
@@ -1033,8 +1040,9 @@ fn deliver_resolved_spell_off_stack(
     spell_id: ObjectId,
     spell_controller: PlayerId,
     dest: Zone,
+    adventure_controller: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
-) -> ZoneMoveResult {
+) -> (ZoneMoveTerminalResult, Option<PendingZoneChangeDelivery>) {
     let stack_exile_link_source = stack_exile_linked_source(state, spell_id);
     // CR 603.7a + CR 702.170c: snapshot the exile-instead
     // consequence rider BEFORE the move — every zone exit clears the
@@ -1044,9 +1052,42 @@ fn deliver_resolved_spell_off_stack(
         .objects
         .get(&spell_id)
         .and_then(|o| o.exile_from_stack_rider.clone());
-    let req = ZoneMoveRequest::spell_resolution_default(spell_id, dest);
-    let result = zone_pipeline::move_object(state, req, events);
-    if matches!(result, ZoneMoveResult::Done) {
+    let mut req = ZoneMoveRequest::spell_resolution_default(spell_id, dest);
+    if let Some(controller) = adventure_controller {
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&spell_id]);
+        req = req
+            .expecting_origin(pin, Zone::Stack)
+            .performed_by(controller);
+    }
+    let anticipated = adventure_controller
+        .and_then(|_| zone_pipeline::anticipated_zone_change_delivery(state, &req));
+    let delivery_start = events.len();
+    let result = zone_pipeline::move_object_with_terminal(state, req, events);
+    let delivery = anticipated.map(|anticipated| {
+        // Only the actual selected replacement boundary may replace the
+        // request-derived key. A child proposal for this holder is different.
+        let selected_move_already_delivered = zone_pipeline::zone_move_completion_from_delivery(
+            anticipated.member,
+            &events[delivery_start..],
+        ) == ZoneMoveCompletion::Moved;
+        let mut delivery = state.pending_zone_change_delivery_from_replacement()
+            .filter(|_| matches!(result, ZoneMoveTerminalResult::NeedsChoice(_))
+                && !selected_move_already_delivered)
+            .filter(|parked| parked.member == anticipated.member
+                && matches!(&parked.expected_event,
+                    crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, from: Zone::Stack, performed_by, .. }
+                        if *object_id == spell_id && *performed_by == adventure_controller))
+            .unwrap_or(anticipated);
+        if let ZoneMoveTerminalResult::Completed(completion) = &result {
+            delivery.record_terminal_completion(*completion)
+                .expect("one final-part delivery has one terminal outcome");
+        }
+        if !matches!(result, ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented | ZoneMoveCompletion::Remained)) {
+            delivery.append_delivery_events(&events[delivery_start..]);
+        }
+        delivery
+    });
+    if matches!(result, ZoneMoveTerminalResult::Completed(_)) {
         // CR 607.2b + CR 406.6: a spell exiled by Rod of
         // Absorption's per-object linked-source rider is "exiled
         // with" the trigger source that stamped it. Now that the
@@ -1106,7 +1147,32 @@ fn deliver_resolved_spell_off_stack(
             }
         }
     }
-    result
+    (result, delivery)
+}
+
+/// CR 715.3d + CR 400.7: the selected final-part movement earns authority;
+/// current exile membership only determines whether that earned stay survives.
+fn earned_adventure_authority(
+    state: &GameState,
+    controller: PlayerId,
+    delivery: &PendingZoneChangeDelivery,
+) -> Option<(PlayerId, ObjectIncarnationRef)> {
+    if delivery.terminal_completion != Some(ZoneMoveCompletion::Moved)
+        || !delivery.delivery_events.iter().any(|event| {
+            matches!(event,
+            GameEvent::ZoneChanged { record, .. }
+                if record.from_zone == Some(Zone::Stack) && record.to_zone == Zone::Exile
+                    && record.trigger_source_context().is_some_and(|context|
+                        context.identity.reference == delivery.member))
+        })
+    {
+        return None;
+    }
+    let object = state.objects.get(&delivery.member.object_id)?;
+    (object.zone == Zone::Exile
+        && state.exile.contains(&object.id)
+        && delivery.member.incarnation.checked_add(1) == Some(object.incarnation))
+    .then(|| (controller, ObjectIncarnationRef::from_object(object)))
 }
 
 /// CR 400.7 + CR 712.11a + CR 715.3d + CR 720.3d: the bookkeeping a spell's
@@ -1117,6 +1183,8 @@ fn finish_spell_stack_exit(
     state: &mut GameState,
     spell_id: ObjectId,
     casting_variant: CastingVariant,
+    earned_adventure: Option<(PlayerId, ObjectIncarnationRef)>,
+    stack_incarnation: Option<u64>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
@@ -1124,16 +1192,24 @@ fn finish_spell_stack_exit(
     // the battlefield.
     if casting_variant.restores_front_face_after_stack_exit()
         && !spell_in_zone(state, spell_id, Zone::Battlefield)
+        && (casting_variant != CastingVariant::Adventure
+            || stack_incarnation.is_some_and(|incarnation| {
+                state.objects.get(&spell_id).is_some_and(|obj| {
+                    obj.incarnation == incarnation
+                        || incarnation.checked_add(1) == Some(obj.incarnation)
+                })
+            }))
     {
         restore_alternative_spell_normal_face(state, spell_id, casting_variant);
     }
 
     // CR 715.3d: When an Adventure spell resolves to exile, grant
     // AdventureCreature permission so it can be cast from exile.
-    if casting_variant == CastingVariant::Adventure {
+    if let Some((controller, exile)) = earned_adventure {
         if let Some(obj) = state.objects.get_mut(&spell_id) {
-            obj.casting_permissions
-                .push(crate::types::ability::CastingPermission::AdventureCreature);
+            obj.casting_permissions.push(
+                crate::types::ability::CastingPermission::resolved_adventure(controller, exile),
+            );
         }
     }
     if casting_variant == CastingVariant::Omen {
@@ -1971,8 +2047,8 @@ pub(super) enum DeferredFinalPart {
 }
 
 /// CR 608.2n: the owed final part, only while it names the installed carrier.
-fn owed_final_part(state: &GameState) -> Option<OwedSpellFinalPart> {
-    state.resolving_spell_final_part.filter(|owed| {
+fn owed_final_part(state: &GameState) -> Option<&OwedSpellFinalPart> {
+    state.resolving_spell_final_part.as_ref().filter(|owed| {
         state
             .resolving_stack_entry
             .as_ref()
@@ -2005,6 +2081,14 @@ pub(super) fn resolving_spell_owes_final_part(state: &GameState) -> bool {
 /// paused resolution.
 pub(super) fn spell_awaiting_final_part(state: &GameState) -> Option<&StackEntry> {
     owed_final_part(state)
+        .filter(|owed| {
+            owed.stack_incarnation.is_none_or(|incarnation| {
+                state
+                    .objects
+                    .get(&owed.spell)
+                    .is_some_and(|object| object.incarnation == incarnation)
+            })
+        })
         .and(state.resolving_stack_entry.as_ref())
         .filter(|entry| {
             matches!(entry.kind, StackEntryKind::Spell { .. })
@@ -2047,8 +2131,35 @@ pub(super) fn finish_deferred_spell_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DeferredFinalPart {
-    if owed_final_part(state).is_none() {
+    let Some(owed) = owed_final_part(state).cloned() else {
         return DeferredFinalPart::NotOwed;
+    };
+    if let Some((controller, delivery)) = owed.pending_adventure_exile.as_ref() {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+            || !super::engine::resolution_instructions_are_done(state)
+        {
+            return DeferredFinalPart::Parked;
+        }
+        // A member-only completion segment cannot establish this selected
+        // proposal's terminal result, even if its holder is now in exile.
+        assert!(
+            delivery.terminal_completion.is_some(),
+            "settled Adventure final part needs its selected terminal outcome"
+        );
+        let _terminal = delivery.terminal_completion_after_resume();
+        let earned = earned_adventure_authority(state, *controller, delivery);
+        finish_spell_stack_exit(
+            state,
+            owed.spell,
+            CastingVariant::Adventure,
+            earned,
+            owed.stack_incarnation,
+            events,
+        );
+        events.push(GameEvent::StackResolved {
+            object_id: owed.spell,
+        });
+        return DeferredFinalPart::Completed;
     }
     let Some(entry) = spell_awaiting_final_part(state).cloned() else {
         return finish_deferred_resolution_of_departed_spell(state, events);
@@ -2092,17 +2203,58 @@ pub(super) fn finish_deferred_spell_resolution(
         resolved_spell_destination(state, entry.id, ability.as_ref(), casting_variant, arming);
     // `spell_awaiting_final_part` admits only a spell still on the stack, so
     // the inline path's stack-residency guard holds here by construction.
-    match deliver_resolved_spell_off_stack(state, entry.id, entry.controller, dest, events) {
-        ZoneMoveResult::Done => {
-            finish_spell_stack_exit(state, entry.id, casting_variant, events);
+    let controller = (casting_variant == CastingVariant::Adventure).then_some(live_controller);
+    let (result, delivery) = deliver_resolved_spell_off_stack(
+        state,
+        entry.id,
+        entry.controller,
+        dest,
+        controller,
+        events,
+    );
+    if resolution_is_paused(state) {
+        if let Some(delivery) = delivery {
+            let debt = state
+                .resolving_spell_final_part
+                .as_mut()
+                .expect("the selected carrier owes this final part");
+            debt.stack_incarnation = Some(delivery.member.incarnation);
+            debt.pending_adventure_exile = Some((live_controller, delivery));
+            return DeferredFinalPart::Parked;
+        }
+    }
+    match result {
+        ZoneMoveTerminalResult::Completed(_) => {
+            let earned = delivery
+                .as_ref()
+                .and_then(|delivery| earned_adventure_authority(state, live_controller, delivery));
+            finish_spell_stack_exit(
+                state,
+                entry.id,
+                casting_variant,
+                earned,
+                owed.stack_incarnation
+                    .or_else(|| delivery.as_ref().map(|d| d.member.incarnation)),
+                events,
+            );
             events.push(resolved);
             DeferredFinalPart::Completed
         }
         // CR 616.1: a replacement-ordering choice parked the move; the
         // replacement-choice resume path delivers it.
-        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-            events.push(resolved);
-            clear_deferred_final_part(state);
+        ZoneMoveTerminalResult::NeedsChoice(_)
+        | ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+            if let Some(delivery) = delivery {
+                let debt = state
+                    .resolving_spell_final_part
+                    .as_mut()
+                    .expect("the selected carrier owes this final part");
+                debt.stack_incarnation = Some(delivery.member.incarnation);
+                debt.pending_adventure_exile = Some((live_controller, delivery));
+            } else {
+                events.push(resolved);
+                clear_deferred_final_part(state);
+            }
             DeferredFinalPart::Parked
         }
     }
@@ -2126,8 +2278,16 @@ fn finish_deferred_resolution_of_departed_spell(
     let Some((spell_id, casting_variant)) = owed_final_part(state)
         .and(state.resolving_stack_entry.as_ref())
         .filter(|entry| {
-            !spell_still_on_stack(state, entry.id)
-                && !state.stack.iter().any(|live| live.id == entry.id)
+            owed_final_part(state)
+                .and_then(|owed| owed.stack_incarnation)
+                .is_some_and(|incarnation| {
+                    state
+                        .objects
+                        .get(&entry.id)
+                        .is_none_or(|object| object.incarnation != incarnation)
+                })
+                || (!spell_still_on_stack(state, entry.id)
+                    && !state.stack.iter().any(|live| live.id == entry.id))
         })
         .and_then(|entry| match &entry.kind {
             StackEntryKind::Spell {
@@ -2141,7 +2301,15 @@ fn finish_deferred_resolution_of_departed_spell(
     else {
         return DeferredFinalPart::NotOwed;
     };
-    finish_spell_stack_exit(state, spell_id, casting_variant, events);
+    let stack_incarnation = owed_final_part(state).and_then(|owed| owed.stack_incarnation);
+    finish_spell_stack_exit(
+        state,
+        spell_id,
+        casting_variant,
+        None,
+        stack_incarnation,
+        events,
+    );
     events.push(GameEvent::StackResolved {
         object_id: spell_id,
     });
@@ -2369,6 +2537,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
     // With both in place a stale read here degrades to `entry.controller` -- the CR 112.2
     // value this replaces -- and never to origin-zone data.
     let live_controller = stack_object_controller(state, &entry);
+
+    let resolving_stack_incarnation = state
+        .objects
+        .get(&entry.id)
+        .map(|object| object.incarnation);
 
     // CR 608.2c + CR 109.5: re-stamp the resolving spell's baked announcement controller
     // so its own effects run for whoever controls it now. Gated on `is_spell` per CR 113.8
@@ -2709,7 +2882,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
         // Latched whatever the shape of the spell's ability (a spell with no
         // ability owes its final part too); only the carrier's identity gates it.
         if carrier_is_this_spell {
-            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell: entry.id });
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+                spell: entry.id,
+                stack_incarnation: (casting_variant == CastingVariant::Adventure)
+                    .then_some(resolving_stack_incarnation)
+                    .flatten(),
+                pending_adventure_exile: None,
+            });
         }
         state.current_trigger_event = None;
         state.current_trigger_events.clear();
@@ -2742,6 +2921,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
     // free-cast window remains on the stack and targetable until its
     // continuation ends. (A non-permanent spell paused there never reaches this
     // point: the CR 608.2n deferral above returned.)
+    let mut earned_adventure = None;
     if is_spell
         && !matches!(
             state.waiting_for,
@@ -3287,15 +3467,63 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
                 // default move through the pipeline — see
                 // `deliver_resolved_spell_off_stack`.
-                match deliver_resolved_spell_off_stack(
+                let adventure_controller = (casting_variant == CastingVariant::Adventure)
+                    .then(|| stack_object_controller(state, &entry));
+                let (result, delivery) = deliver_resolved_spell_off_stack(
                     state,
                     entry.id,
                     entry.controller,
                     dest,
+                    adventure_controller,
                     events,
-                ) {
-                    ZoneMoveResult::Done => {}
-                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                );
+                if resolution_is_paused(state) {
+                    if let Some(delivery) = delivery {
+                        state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+                            spell: entry.id,
+                            stack_incarnation: Some(delivery.member.incarnation),
+                            pending_adventure_exile: Some((
+                                adventure_controller
+                                    .expect("Adventure delivery captures its controller"),
+                                delivery,
+                            )),
+                        });
+                        state.current_trigger_event = None;
+                        state.current_trigger_events.clear();
+                        state.current_trigger_match_count = None;
+                        state.die_result_this_resolution = None;
+                        return 1;
+                    }
+                }
+                match result {
+                    ZoneMoveTerminalResult::Completed(_) => {
+                        earned_adventure = delivery.as_ref().and_then(|delivery| {
+                            earned_adventure_authority(
+                                state,
+                                adventure_controller
+                                    .expect("Adventure delivery captures its controller"),
+                                delivery,
+                            )
+                        });
+                    }
+                    ZoneMoveTerminalResult::NeedsChoice(_)
+                    | ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                        if let Some(delivery) = delivery {
+                            state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+                                spell: entry.id,
+                                stack_incarnation: Some(delivery.member.incarnation),
+                                pending_adventure_exile: Some((
+                                    adventure_controller
+                                        .expect("Adventure delivery captures its controller"),
+                                    delivery,
+                                )),
+                            });
+                            state.current_trigger_event = None;
+                            state.current_trigger_events.clear();
+                            state.current_trigger_match_count = None;
+                            state.die_result_this_resolution = None;
+                            return 1;
+                        }
                         // NOTE: the `exile_rider` snapshot is intentionally
                         // dropped on this bail — a parked move here can only be
                         // a Graveyard-destination replacement-ordering prompt
@@ -3317,7 +3545,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
             }
         }
 
-        finish_spell_stack_exit(state, entry.id, casting_variant, events);
+        finish_spell_stack_exit(
+            state,
+            entry.id,
+            casting_variant,
+            earned_adventure,
+            resolving_stack_incarnation,
+            events,
+        );
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
         // battlefield attached to the player or object it was targeting.
@@ -6661,7 +6896,7 @@ mod tests {
             Zone::Stack,
         );
         state.resolving_stack_entry = Some(pending_spell_entry(spell));
-        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -6715,7 +6950,7 @@ mod tests {
                 zone,
             );
             state.resolving_stack_entry = Some(pending_spell_entry(spell));
-            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
             state.waiting_for = WaitingFor::Priority {
                 player: PlayerId(0),
             };
@@ -6730,7 +6965,10 @@ mod tests {
                 "{zone:?}"
             );
             assert_eq!(
-                state.resolving_spell_final_part.map(|owed| owed.spell),
+                state
+                    .resolving_spell_final_part
+                    .as_ref()
+                    .map(|owed| owed.spell),
                 kept.then_some(spell),
                 "{zone:?}"
             );
@@ -6775,7 +7013,7 @@ mod tests {
             Zone::Stack,
         );
         state.resolving_stack_entry = Some(pending_spell_entry(spell));
-        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -7050,6 +7288,8 @@ mod tests {
         state.stack.push_back(pending_spell_entry(spell));
         state.resolving_spell_final_part = Some(OwedSpellFinalPart {
             spell: ObjectId(spell.0 + 100),
+            stack_incarnation: None,
+            pending_adventure_exile: None,
         });
 
         assert_eq!(

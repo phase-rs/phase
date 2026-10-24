@@ -10062,7 +10062,10 @@ fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
-        CastingPermission::AdventureCreature
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
         | CastingPermission::PlayFromExile { .. }
         | CastingPermission::ExileWithEnergyCost
         | CastingPermission::ExileWithAltAbilityCost { .. }

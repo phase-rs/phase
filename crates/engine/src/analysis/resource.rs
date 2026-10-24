@@ -5660,7 +5660,10 @@ fn turn_stamps_keep_their_relation(prior: &GameState, current: &GameState) -> bo
         CastingPermission::WarpExile {
             castable_after_turn,
         } => Some(*castable_after_turn),
-        CastingPermission::AdventureCreature
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
         | CastingPermission::ExileWithAltCost { .. }
         | CastingPermission::PlayFromExile { .. }
         | CastingPermission::ExileWithEnergyCost

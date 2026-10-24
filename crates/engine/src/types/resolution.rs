@@ -5754,6 +5754,10 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.resolution_stack.is_empty()
         && state.pending_resolution_completion.is_none()
+        && state
+            .resolving_spell_final_part
+            .as_ref()
+            .is_none_or(|owed| owed.pending_adventure_exile.is_none())
     {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
@@ -6828,6 +6832,172 @@ mod tests {
         value["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         value
+    }
+
+    #[test]
+    fn adventure_selected_terminal_survives_existing_v1_slots_and_v2_v3_v4_frames() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameRunner, P0};
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CastingPermission, Effect, QuantityExpr,
+            ReplacementDefinition, ReplacementMode, TargetFilter,
+        };
+        use crate::types::card::LayoutKind;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::events::GameEvent;
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let giant=scenario.add_creature_to_hand(P0,"Beanstalk Giant",0,0).with_subtypes(vec!["Giant"])
+            .with_mana_cost(ManaCost::Cost {generic:6,shards:vec![ManaCostShard::Green]})
+            .from_oracle_text("Beanstalk Giant's power and toughness are each equal to the number of lands you control.").id();
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.with_library_top(P0, &["Scry first", "Scry second", "Reserve", "Reserve two"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        scenario
+            .add_enchantment_from_oracle(P0, "Typed Adventure final-part side effect", "")
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SpecificObject { id: giant })
+                    .destination_zone(Zone::Exile)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Scry {
+                            count: QuantityExpr::Fixed { value: 2 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+            );
+        let parsed=crate::parser::parse_oracle_text("Search your library for a basic land card, put it onto the battlefield, then shuffle. (Then exile this card. You may cast the creature later from exile.)","Fertile Footsteps",&[],&["Sorcery".into()],&["Adventure".into()]);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&giant)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Fertile Footsteps".into(),
+            layout_kind: Some(LayoutKind::Adventure),
+            mana_cost: ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+            card_types: CardType {
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec!["Adventure".into()],
+                ..Default::default()
+            },
+            abilities: parsed.abilities,
+            trigger_definitions: parsed.triggers.into(),
+            static_definitions: parsed.statics.into(),
+            replacement_definitions: parsed.replacements.into(),
+            ..Default::default()
+        });
+        crate::game::zones::move_to_library_at_index(
+            runner.state_mut(),
+            forest,
+            Some(0),
+            &mut vec![],
+        );
+        runner.cast(giant).adventure_face(false).commit();
+        runner.resolve_top();
+        assert!(
+            matches!(&runner.state().waiting_for,WaitingFor::SearchChoice {player:P0,cards,..} if cards==&vec![forest])
+        );
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![forest],
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        let first_debt = runner.state().owed_spell_final_part().unwrap().clone();
+        assert!(first_debt
+            .pending_adventure_exile
+            .as_ref()
+            .is_some_and(|(_, delivery)| delivery.terminal_completion.is_none()));
+        let first_v1 = v1_wire_value(runner.state().clone());
+        let first_loaded = serde_json::from_value::<ResolutionStateWire>(first_v1)
+            .unwrap()
+            .into_game_state();
+        assert_eq!(first_loaded.owed_spell_final_part(), Some(&first_debt));
+        let mut resumed = GameRunner::from_state(first_loaded);
+        resumed
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        assert!(matches!(
+            resumed.state().waiting_for,
+            WaitingFor::ScryChoice { player: P0, .. }
+        ));
+        let state = resumed.state();
+        let exact = state.owed_spell_final_part().unwrap().clone();
+        let delivery = &exact.pending_adventure_exile.as_ref().unwrap().1;
+        assert_eq!(
+            delivery.terminal_completion,
+            Some(crate::types::game_state::ZoneMoveCompletion::Moved)
+        );
+        assert!(delivery.delivery_events.iter().any(|event|matches!(event,GameEvent::ZoneChanged {record,..} if record.from_zone==Some(Zone::Stack)&&record.to_zone==Zone::Exile)));
+        assert_eq!(state.objects[&giant].name, "Beanstalk Giant");
+        // Existing v1 independent slots, not a current frame relabelled v1.
+        let mut v1 = v1_wire_value(state.clone());
+        if let Some(drains) = state.active_post_replacement_drains() {
+            v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+        }
+        if let Some(continuation) = state.active_ability_continuation() {
+            v1["pending_continuation"] = serde_json::to_value(continuation).unwrap();
+        }
+        let mut versions = vec![v1];
+        for version in [2, 3, 4] {
+            let mut legacy = v2_wire_value(state.clone());
+            legacy["resolution_state_version"] = Value::from(version);
+            versions.push(legacy);
+        }
+        for value in versions {
+            assert_eq!(
+                value["resolving_spell_final_part"],
+                serde_json::to_value(&exact).unwrap()
+            );
+            let loaded = serde_json::from_value::<ResolutionStateWire>(value)
+                .unwrap()
+                .into_game_state();
+            assert_eq!(loaded.owed_spell_final_part(), Some(&exact));
+            let WaitingFor::ScryChoice { player, cards } = &loaded.waiting_for else {
+                panic!("the old representation retains its actual prompt");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(cards.len(), 2);
+            let mut reversed = cards.clone();
+            reversed.reverse();
+            let mut resumed = GameRunner::from_state(loaded);
+            let result = resumed
+                .act(GameAction::SelectCards { cards: reversed })
+                .unwrap();
+            assert_eq!(result.events.iter().filter(|event|matches!(event,GameEvent::StackResolved {object_id} if *object_id==giant)).count(),1);
+            assert!(resumed.state().owed_spell_final_part().is_none());
+            assert!(resumed.state().resolving_stack_entry.is_none());
+            assert!(
+                resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+            );
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            let object = &resumed.state().objects[&giant];
+            assert!(object
+                .casting_permissions
+                .contains(&CastingPermission::resolved_adventure(
+                    P0,
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(object)
+                )));
+        }
     }
 
     #[test]

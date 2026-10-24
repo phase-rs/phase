@@ -29487,8 +29487,13 @@ fn adventure_exile_on_resolve() {
     );
     let obj = state.objects.get(&obj_id).unwrap();
     assert!(
-        obj.casting_permissions
-            .contains(&crate::types::ability::CastingPermission::AdventureCreature),
+        obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            crate::types::ability::CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "Should have AdventureCreature permission"
     );
     // Name should be restored to creature face
@@ -29540,8 +29545,13 @@ fn adventure_countered_to_graveyard() {
     // Should NOT have AdventureCreature permission
     let obj = state.objects.get(&obj_id).unwrap();
     assert!(
-        !obj.casting_permissions
-            .contains(&crate::types::ability::CastingPermission::AdventureCreature),
+        !obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            crate::types::ability::CastingPermission::AdventureCreature {
+                granted_to: Some(_),
+                exile_incarnation: Some(_)
+            }
+        )),
         "Countered spell should not get casting permission"
     );
 }
@@ -29555,8 +29565,12 @@ fn adventure_cast_creature_from_exile() {
     // Move to exile with AdventureCreature permission (simulates resolved Adventure)
     zones::move_to_zone(&mut state, obj_id, Zone::Exile, &mut Vec::new());
     let obj = state.objects.get_mut(&obj_id).unwrap();
-    obj.casting_permissions
-        .push(crate::types::ability::CastingPermission::AdventureCreature);
+    obj.casting_permissions.push(
+        crate::types::ability::CastingPermission::resolved_adventure(
+            PlayerId(0),
+            crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
+        ),
+    );
 
     // Should appear in available to cast
     let available = spell_objects_available_to_cast(&state, PlayerId(0));

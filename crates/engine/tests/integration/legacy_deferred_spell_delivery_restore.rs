@@ -447,7 +447,7 @@ fn a_current_format_taigam_free_cast_save_roundtrips_to_one_installation_and_its
     let at_window = scene.runner.state().clone();
     assert_eq!(
         at_window.owed_spell_final_part(),
-        Some(&OwedSpellFinalPart { spell }),
+        Some(&OwedSpellFinalPart::unattempted(spell)),
         "reach: the final part is owed at the window"
     );
     assert!(
@@ -700,7 +700,7 @@ fn assert_rebound_survives_the_pause(case: &PauseCase, grant_expected_at_pause: 
     let at_pause = runner.state().clone();
     assert_eq!(
         at_pause.owed_spell_final_part(),
-        Some(&OwedSpellFinalPart { spell }),
+        Some(&OwedSpellFinalPart::unattempted(spell)),
         "reach: the final part is owed at the {} pause",
         case.pause_name
     );

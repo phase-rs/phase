@@ -4970,8 +4970,14 @@ impl<'de> Deserialize<'de> for CastCostModifier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastingPermission {
-    /// CR 715.3d: After Adventure resolves to exile, creature face castable from exile.
-    AdventureCreature,
+    /// CR 715.3d: the resolving controller may play the normal permanent face
+    /// for this exile incarnation. Missing legacy evidence grants no authority.
+    AdventureCreature {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_to: Option<PlayerId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exile_incarnation: Option<u64>,
+    },
     /// Card may be cast from exile for the specified cost by its owner.
     /// Building block for Airbending, Suspend, and similar "cast from exile" mechanics.
     /// `cast_transformed` causes the spell to resolve to its back face (CR 712.14a); used
@@ -5349,6 +5355,12 @@ pub struct PermissionLifetime<'a> {
 }
 
 impl CastingPermission {
+    pub fn resolved_adventure(granted_to: PlayerId, exile: ObjectIncarnationRef) -> Self {
+        Self::AdventureCreature {
+            granted_to: Some(granted_to),
+            exile_incarnation: Some(exile.incarnation),
+        }
+    }
     /// CR 611.2a: read this permission's stated lifetime and the provenance
     /// needed to evaluate it.
     ///
@@ -5407,7 +5419,10 @@ impl CastingPermission {
             // castable on a LATER turn, so no turn/step window may end them.
             // The remaining three are exile-resident standing grants ended by
             // `zones::apply_zone_exit_cleanup` when the card leaves exile.
-            Self::AdventureCreature
+            Self::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            }
             | Self::ExileWithEnergyCost
             | Self::WarpExile { .. }
             | Self::Plotted { .. }
@@ -5463,7 +5478,10 @@ impl CastingPermission {
                 let keyed = *granted_to;
                 (duration.as_mut(), keyed)
             }
-            Self::AdventureCreature
+            Self::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            }
             | Self::ExileWithEnergyCost
             | Self::WarpExile { .. }
             | Self::Plotted { .. }
@@ -5506,7 +5524,10 @@ impl CastingPermission {
             // rider slot — no printed card attaches a "cast this way costs
             // {N} more/less" rider to Adventure, Energy, Warp, Plot, or
             // Foretell.
-            Self::AdventureCreature
+            Self::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            }
             | Self::ExileWithEnergyCost
             | Self::WarpExile { .. }
             | Self::Plotted { .. }
@@ -5551,8 +5572,11 @@ impl CastingPermission {
                     && !without_paying_mana_cost
                     && alt_ability_cost.is_none()
             }
-            Self::AdventureCreature
-            | Self::ExileWithEnergyCost
+            Self::AdventureCreature {
+                granted_to: _,
+                exile_incarnation: _,
+            } => true,
+            Self::ExileWithEnergyCost
             | Self::ExileWithAltAbilityCost { .. }
             | Self::WarpExile { .. }
             | Self::Plotted { .. }
@@ -51381,7 +51405,11 @@ mod cast_cost_modifier_serde_tests {
         };
         assert_eq!(alt_cost.cast_cost_modifier(), Some(&modifier));
         assert_eq!(
-            CastingPermission::AdventureCreature.cast_cost_modifier(),
+            CastingPermission::AdventureCreature {
+                granted_to: None,
+                exile_incarnation: None
+            }
+            .cast_cost_modifier(),
             None
         );
         assert_eq!(
@@ -51392,6 +51420,39 @@ mod cast_cost_modifier_serde_tests {
             .cast_cost_modifier(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod resolving_adventure_payload_tests {
+    use super::*;
+    #[test]
+    fn current_and_incomplete_legacy_adventure_permission_payloads() {
+        let known = CastingPermission::resolved_adventure(
+            PlayerId(1),
+            ObjectIncarnationRef::of(ObjectId(7), 9),
+        );
+        assert_eq!(
+            serde_json::to_value(&known).unwrap(),
+            serde_json::json!({"type":"AdventureCreature","granted_to":1,"exile_incarnation":9})
+        );
+        assert_eq!(
+            serde_json::from_value::<CastingPermission>(serde_json::to_value(&known).unwrap())
+                .unwrap(),
+            known
+        );
+        for legacy in [
+            serde_json::json!({"type":"AdventureCreature"}),
+            serde_json::json!({"type":"AdventureCreature","granted_to":1}),
+            serde_json::json!({"type":"AdventureCreature","exile_incarnation":9}),
+        ] {
+            let loaded: CastingPermission = serde_json::from_value(legacy.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&loaded).unwrap(), legacy);
+            assert_eq!(loaded.lifetime().duration, None);
+            assert_eq!(loaded.cast_cost_modifier(), None);
+        }
+        assert!(known.is_normal_cost_authority_for_rider());
+        assert_eq!(known.lifetime().duration, None);
     }
 }
 

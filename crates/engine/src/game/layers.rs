@@ -25899,7 +25899,10 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
-        perms.push(CastingPermission::AdventureCreature);
+        perms.push(CastingPermission::AdventureCreature {
+            granted_to: None,
+            exile_incarnation: None,
+        });
 
         prune_end_of_turn_casting_permissions(&mut state);
 
@@ -33746,9 +33749,23 @@ mod object_sweep_sharing_tests {
         let (mut state, ids) = exiled_fixture();
         grant(&mut state, ids[0], cleanup_expiring());
         grant(&mut state, ids[1], cleanup_expiring());
-        grant(&mut state, ids[1], CastingPermission::AdventureCreature);
+        grant(
+            &mut state,
+            ids[1],
+            CastingPermission::AdventureCreature {
+                granted_to: None,
+                exile_incarnation: None,
+            },
+        );
         // Needs the sweep (holds a permission) but keeps it.
-        grant(&mut state, ids[2], CastingPermission::AdventureCreature);
+        grant(
+            &mut state,
+            ids[2],
+            CastingPermission::AdventureCreature {
+                granted_to: None,
+                exile_incarnation: None,
+            },
+        );
         assert_sweep_matches_reference(
             &state,
             &[ids[0], ids[1]],

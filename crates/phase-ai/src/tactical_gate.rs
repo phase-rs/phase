@@ -3890,6 +3890,86 @@ mod tests {
     }
 
     #[test]
+    fn independent_exile_adventure_payload_survives_the_unaffordable_structural_scan() {
+        let (mut state, _) = funded_zero_congregate_state();
+        let adventure = create_object(
+            &mut state,
+            CardId(91_899),
+            P1,
+            "Foreign Adventure structural witness".into(),
+            Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&adventure).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.mana_cost = ManaCost::generic(20);
+            let mut back = history_payoff_back_face(Some(LayoutKind::Adventure));
+            back.card_types.subtypes.push("Adventure".into());
+            back.mana_cost = ManaCost::generic(20);
+            object.back_face = Some(back);
+            object
+                .casting_permissions
+                .push(CastingPermission::resolved_adventure(
+                    P0,
+                    engine::types::identifiers::ObjectIncarnationRef::from_object(object),
+                ));
+        }
+        assert_eq!(
+            alternate_payload_count(&state, P0, adventure),
+            0,
+            "an earned normal-face grant cannot supply the spell face"
+        );
+        // Existing typed permission supplements the real public producer integration witnesses.
+        state
+            .objects
+            .get_mut(&adventure)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
+                duration: Duration::Permanent,
+                granted_to: P0,
+                mode: engine::types::ability::CardPlayMode::Cast,
+                frequency: engine::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
+                without_paying_mana_cost: false,
+                land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            });
+        assert!(
+            !engine::game::casting::can_cast_object_now(&state, P0, adventure),
+            "reach: neither face is currently affordable"
+        );
+        assert_eq!(alternate_payload_count(&state, P0, adventure), 1);
+        assert!(
+            structurally_selectable_alternate_spell_payload_has_cast_unstable_consumer(
+                &state,
+                P0,
+                &state.objects[&adventure]
+            )
+        );
+        assert_eq!(
+            alternate_payload_count(&state, P1, adventure),
+            0,
+            "ownership and a sibling grant do not borrow P0's independent authority"
+        );
+        state
+            .objects
+            .get_mut(&adventure)
+            .unwrap()
+            .casting_permissions
+            .pop();
+        assert_eq!(alternate_payload_count(&state, P0, adventure), 0);
+    }
+
+    #[test]
     fn held_fuse_right_half_history_payoff_is_paired_and_resolves() {
         let (mut state, congregate) = funded_zero_congregate_state();
         create_object(

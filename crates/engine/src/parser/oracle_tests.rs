@@ -1047,6 +1047,102 @@ mod retained_spell_publication {
 // linked export loaders. The runtime paid front-face test is in the Jev module.
 #[test]
 fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
+    use crate::types::card::CardFace;
+    use crate::types::mana::ManaColor;
+    use crate::types::zones::Zone;
+    let front_text="This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
+    let back_text="Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)";
+    let count = QuantityRef::ZoneCardCount {
+        zone: crate::types::ability::ZoneRef::Graveyard,
+        scope: crate::types::ability::CountScope::Controller,
+        card_types: vec![],
+        filter: Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]))),
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasAdventure])),
+            ],
+        }),
+    };
+    let reducer = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: crate::types::statics::CostModifyMode::Reduce,
+        amount: ManaCost::generic(1),
+        spell_filter: None,
+        dynamic_count: Some(count),
+        reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+    })
+    .affected(TargetFilter::SelfRef)
+    .active_zones(vec![
+        Zone::Hand,
+        Zone::Stack,
+        Zone::Command,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Library,
+    ])
+    .description(front_text.into());
+    let discard = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            },
+            target: TargetFilter::Controller,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        },
+    ))
+    .description("Discard your hand, then draw two cards.".into());
+    let expected_faces = [
+        CardFace {
+            name: "Hearth Elemental".into(),
+            mana_cost: ManaCost::Cost {
+                generic: 5,
+                shards: vec![crate::types::mana::ManaCostShard::Red],
+            },
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Elemental".into()],
+                ..Default::default()
+            },
+            power: Some(crate::types::ability::PtValue::Fixed(4)),
+            toughness: Some(crate::types::ability::PtValue::Fixed(5)),
+            oracle_text: Some(front_text.into()),
+            static_abilities: vec![reducer],
+            color_identity: vec![ManaColor::Red],
+            scryfall_oracle_id: Some("f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e".into()),
+            ..Default::default()
+        },
+        CardFace {
+            name: "Stoke Genius".into(),
+            mana_cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![crate::types::mana::ManaCostShard::Red],
+            },
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec!["Adventure".into()],
+                ..Default::default()
+            },
+            oracle_text: Some(back_text.into()),
+            abilities: vec![discard],
+            color_identity: vec![ManaColor::Red],
+            scryfall_oracle_id: Some("f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e".into()),
+            ..Default::default()
+        },
+    ];
     let cards: Vec<crate::database::mtgjson::AtomicCard> = [
         r###"{"colorIdentity":["R"],"colors":["R"],"faceName":"Hearth Elemental","identifiers":{"scryfallOracleId":"f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e"},"layout":"adventure","manaCost":"{5}{R}","manaValue":6.0,"name":"Hearth Elemental // Stoke Genius","power":"4","side":"a","subtypes":["Elemental"],"supertypes":[],"text":"This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.","toughness":"5","type":"Creature — Elemental","types":["Creature"]}"###,
         r###"{"colorIdentity":["R"],"colors":["R"],"faceName":"Stoke Genius","identifiers":{"scryfallOracleId":"f01cf0c5-0ac6-4ad3-8642-dd21c8e8563e"},"layout":"adventure","manaCost":"{1}{R}","manaValue":6.0,"name":"Hearth Elemental // Stoke Genius","side":"b","subtypes":["Adventure"],"supertypes":[],"text":"Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)","type":"Sorcery — Adventure","types":["Sorcery"]}"###
@@ -1067,6 +1163,27 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
         assert_eq!(doc.source_text, text);
         assert_eq!(doc.items.len(), 1);
         assert_eq!(doc.items[0].source.fragment(), Some(text));
+        if index == 1 {
+            let crate::parser::oracle_ir::doc::OracleNodeIr::Spell(ability) = &doc.items[0].node
+            else {
+                panic!("Stoke is an instruction chain");
+            };
+            assert_eq!(ability.body.clauses.len(), 2);
+            for (clause, fragment) in ability
+                .body
+                .clauses
+                .iter()
+                .zip(["Discard your hand", "draw two cards"])
+            {
+                assert_eq!(clause.source.fragment(), Some(fragment));
+                assert_eq!(
+                    clause.source.span().precision,
+                    crate::parser::oracle_ir::doc::SpanPrecision::ChainRelative
+                );
+                assert_eq!(clause.source.span().first_line, 0);
+                assert_eq!(clause.source.span().last_line, 0);
+            }
+        }
         let span = doc.items[0].source.span();
         assert!(span.is_exact());
         assert_eq!(
@@ -1081,9 +1198,29 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
         );
         let parsed = lower_oracle_ir(&mut doc);
         assert!(parsed.parse_warnings.is_empty());
+        assert_eq!(
+            doc.items[0].id,
+            crate::parser::oracle_ir::doc::OracleItemId(0)
+        );
+        assert!(doc.relations.is_empty());
+        let expected = &expected_faces[index];
+        assert_eq!(parsed.abilities, expected.abilities);
+        assert_eq!(parsed.statics, expected.static_abilities);
+        assert_eq!(parsed.triggers, expected.triggers);
+        assert_eq!(parsed.replacements, expected.replacements);
+        assert_eq!(parsed.extracted_keywords, expected.keywords);
+        assert_eq!(parsed.modal, None);
+        assert_eq!(parsed.additional_cost, None);
+        assert!(parsed.casting_restrictions.is_empty() && parsed.casting_options.is_empty());
+        assert_eq!(parsed.solve_condition, None);
+        assert_eq!(parsed.strive_cost, None);
         let face = crate::database::synthesis::build_oracle_face_multi(
             card,
             card.identifiers.scryfall_oracle_id.clone(),
+        );
+        assert_eq!(
+            &face, expected,
+            "the complete independently specified printed face"
         );
         assert_eq!(face.name, name);
         assert_eq!(face.oracle_text.as_deref(), Some(text));
@@ -1131,7 +1268,7 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
                 }),
             };
             assert!(
-                matches!(&cost.mode, StaticMode::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount, spell_filter: None, dynamic_count: Some(actual) } if *amount == ManaCost::generic(1) && actual == &expected)
+                matches!(&cost.mode, StaticMode::ModifyCost { mode: crate::types::statics::CostModifyMode::Reduce, amount, spell_filter: None, dynamic_count: Some(actual), reach: crate::types::statics::CostReductionReach::SpillsToGeneric } if *amount == ManaCost::generic(1) && actual == &expected)
             );
             assert_eq!(
                 super::super::oracle_static::parse_static_line(text),
@@ -1201,9 +1338,40 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
     ] {
         assert_eq!(
             database.get_face_by_name("Hearth Elemental"),
-            Some(&faces[0])
+            Some(&expected_faces[0])
         );
-        assert_eq!(database.get_face_by_name("Stoke Genius"), Some(&faces[1]));
+        assert_eq!(
+            database.get_face_by_name("Stoke Genius"),
+            Some(&expected_faces[1])
+        );
+        for expected in &expected_faces {
+            let current = serde_json::to_value(expected).unwrap();
+            assert_eq!(
+                serde_json::from_value::<CardFace>(current.clone()).unwrap(),
+                *expected
+            );
+            let mut legacy = current;
+            let legacy = legacy.as_object_mut().unwrap();
+            for default in [
+                "casting_restrictions",
+                "casting_options",
+                "color_identity",
+                "modal",
+                "additional_cost",
+                "solve_condition",
+                "strive_cost",
+            ] {
+                legacy.remove(default);
+            }
+            // Color identity is genuine source metadata; restore that required
+            // value while exercising the existing absent optional/default slots.
+            legacy.insert("color_identity".into(), serde_json::json!(["Red"]));
+            assert_eq!(
+                serde_json::from_value::<CardFace>(serde_json::Value::Object(legacy.clone()))
+                    .unwrap(),
+                *expected
+            );
+        }
         let oracle_id = faces[0].scryfall_oracle_id.as_ref().unwrap();
         assert_eq!(
             database.get_layout_kind(oracle_id),
@@ -1231,6 +1399,53 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
         assert_eq!(linked["hearth elemental"]["face_index"], 0);
         assert_eq!(linked["stoke genius"]["face_index"], 1);
     }
+    let refused = front_text.replace("have an Adventure", "have a synthetic unknown property");
+    let followed = format!("{refused}\nCreatures you control have flying.\nDraw a card.");
+    let mut refusal_doc = parse_oracle_ir(
+        &followed,
+        "Hearth Elemental",
+        &[],
+        &["Creature".into()],
+        &["Elemental".into()],
+    );
+    assert_eq!(
+        refusal_doc.items[0].source.fragment(),
+        Some(refused.as_str())
+    );
+    assert!(refusal_doc.items[0].source.span().is_exact());
+    assert_eq!(refusal_doc.items[0].source.span().start_byte, 0);
+    assert_eq!(refusal_doc.items[0].source.span().end_byte, refused.len());
+    let refused_lower = lower_oracle_ir(&mut refusal_doc);
+    assert!(refused_lower
+        .abilities
+        .iter()
+        .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })));
+    assert!(refused_lower.abilities.iter().any(|ability| matches!(
+        ability.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller
+        }
+    )));
+    assert!(refused_lower
+        .statics
+        .iter()
+        .any(
+            |definition| definition.modifications.iter().any(|modification| matches!(
+                modification,
+                crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Flying
+                }
+            ))
+        ));
+    assert_eq!(
+        refusal_doc.items.last().unwrap().source.fragment(),
+        Some("Draw a card.")
+    );
+    assert_eq!(
+        refusal_doc.items.last().unwrap().source.span().start_byte,
+        refused.len() + 1 + "Creatures you control have flying.".len() + 1
+    );
 }
 
 // SHAPE: the ownership query has a stronger root contract than the unchanged

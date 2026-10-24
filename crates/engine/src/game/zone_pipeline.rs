@@ -1572,7 +1572,7 @@ fn stash_batch_tail(
 /// about to attempt. Replacement pauses overwrite this with the authoritative
 /// parked `PendingReplacement` event; Aura/copy-target pauses retain this
 /// request-derived event because their prompt is surfaced after delivery.
-fn anticipated_zone_change_delivery(
+pub(crate) fn anticipated_zone_change_delivery(
     state: &GameState,
     request: &ZoneMoveRequest,
 ) -> Option<PendingZoneChangeDelivery> {

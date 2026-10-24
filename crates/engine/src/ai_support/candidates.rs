@@ -6617,6 +6617,81 @@ fn lethal_first_distribution(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn actual_resolving_adventure_grant_issues_only_the_normal_action_and_executes_it() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let hearth = scenario
+            .add_creature_to_hand(P0, "Hearth Elemental", 4, 5)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Red],
+            }).with_subtypes(vec!["Elemental"]).from_oracle_text("This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.")
+            .id();
+        scenario.with_library_top(P0, &["Draw one", "Draw two", "Reserve"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let parsed=crate::parser::parse_oracle_text("Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)","Stoke Genius",&[],&["Sorcery".into()],&["Adventure".into()]);
+        let mut runner = scenario.build();
+        let mut back = BackFaceData {
+            name: "Stoke Genius".into(),
+            layout_kind: Some(LayoutKind::Adventure),
+            mana_cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            },
+            abilities: parsed.abilities,
+            ..Default::default()
+        };
+        back.card_types.core_types.push(CoreType::Sorcery);
+        back.card_types.subtypes.push("Adventure".into());
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&hearth)
+            .unwrap()
+            .back_face = Some(back);
+        runner
+            .cast(hearth)
+            .adventure_face(false)
+            .resolve()
+            .assert_zone(&[hearth], Zone::Exile);
+        for _ in 0..6 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let cast = GameAction::CastSpell {
+            object_id: hearth,
+            card_id: runner.state().objects[&hearth].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(crate::ai_support::legal_actions(runner.state()).contains(&cast));
+        runner.act(cast).unwrap();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the earned grant does not offer its forbidden Adventure face"
+        );
+        assert_eq!(runner.state().objects[&hearth].name, "Hearth Elemental");
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&hearth].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&hearth]
+            .casting_permissions
+            .is_empty());
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
+
+    #[test]
     fn legal_actions_prune_total_mana_value_return_combinations() {
         use crate::game::scenario::{GameScenario, P0};
         use crate::types::phase::Phase;

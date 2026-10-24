@@ -2598,6 +2598,831 @@ const HEARTH: &str = "This spell costs {X} less to cast, where X is the number o
 const STOKE: &str = "Discard your hand, then draw two cards. (Then exile this card. You may cast the creature later from exile.)";
 const FRANTIC: &str = "Frantic Firebolt deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.";
 
+#[test]
+fn resolving_adventure_whole_stoke_paid_discard_draw_and_normal_play() {
+    use engine::types::ability::CastingPermission;
+    use engine::types::events::GameEvent;
+    for caster in [P0, P1] {
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let hearth = scenario
+                .add_creature_to_hand(caster, "Hearth Elemental", 4, 5)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![ManaCostShard::Red],
+                })
+                .with_subtypes(vec!["Elemental"])
+                .from_oracle_text(HEARTH)
+                .id();
+            let discarded: Vec<_> = if empty {
+                vec![]
+            } else {
+                ["First ordinary creature", "Second ordinary creature"]
+                    .into_iter()
+                    .map(|name| scenario.add_creature_to_hand(caster, name, 1, 1).id())
+                    .collect()
+            };
+            scenario.with_library_top(caster, &["First draw", "Second draw", "Reserve"]);
+            scenario.with_mana_pool(
+                caster,
+                (0..2)
+                    .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&hearth)
+                .unwrap()
+                .back_face = Some(stoke_genius_face());
+            let library: Vec<_> = runner.state().players[caster.0 as usize]
+                .library
+                .iter()
+                .copied()
+                .collect();
+            let committed = runner.cast(hearth).adventure_face(false).commit();
+            assert_eq!(committed.state().objects[&hearth].name, "Stoke Genius");
+            assert_eq!(committed.state().objects[&hearth].mana_cost.mana_value(), 2);
+            assert!(matches!(
+                committed.state().stack.back().unwrap().kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 2,
+                    ..
+                }
+            ));
+            let outcome = committed.resolve();
+            outcome.assert_zone(&discarded, Zone::Graveyard);
+            outcome.assert_zone(&[hearth], Zone::Exile);
+            assert_eq!(outcome.state().players[caster.0 as usize].hand.len(), 2);
+            assert_eq!(
+                outcome.state().players[caster.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                library[..2].iter().copied().collect()
+            );
+            assert_eq!(outcome.state().objects[&library[2]].zone, Zone::Library);
+            assert_eq!(outcome.state().objects[&hearth].name, "Hearth Elemental");
+            assert_eq!(outcome.state().objects[&hearth].mana_cost.mana_value(), 6);
+            assert!(outcome.state().objects[&hearth].casting_permissions.iter().any(|p| matches!(p,
+                CastingPermission::AdventureCreature { granted_to: Some(player), exile_incarnation: Some(incarnation) }
+                    if *player == caster && *incarnation == outcome.state().objects[&hearth].incarnation)));
+            let first_draw = outcome
+                .events()
+                .iter()
+                .position(
+                    |e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == caster),
+                )
+                .unwrap();
+            for id in &discarded {
+                let discard = outcome
+                    .events()
+                    .iter()
+                    .position(
+                        |e| matches!(e, GameEvent::Discarded { object_id, .. } if object_id == id),
+                    )
+                    .unwrap();
+                assert!(discard < first_draw);
+            }
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+            drop(outcome);
+            for _ in 0..6 {
+                runner.state_mut().players[caster.0 as usize]
+                    .mana_pool
+                    .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+            }
+            let committed = runner.cast(hearth).commit();
+            assert!(matches!(
+                committed.state().stack.back().unwrap().kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 6,
+                    ..
+                }
+            ));
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[hearth], Zone::Battlefield);
+            outcome.assert_power_toughness(hearth, 4, 5);
+            assert!(outcome.state().objects[&hearth]
+                .casting_permissions
+                .is_empty());
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn whole_stoke_payment_and_cancel_negatives_have_a_paid_positive_twin() {
+    for (pool, red) in [(1, true), (2, false), (2, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let hearth = scenario
+            .add_creature_to_hand(P0, "Hearth Elemental", 4, 5)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Red],
+            })
+            .with_subtypes(vec!["Elemental"])
+            .from_oracle_text(HEARTH)
+            .id();
+        scenario.with_library_top(P0, &["Draw first", "Draw second", "Reserve"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..pool)
+                .map(|_| {
+                    ManaUnit::new(
+                        if red {
+                            ManaType::Red
+                        } else {
+                            ManaType::Colorless
+                        },
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let remaining = [
+            scenario
+                .add_creature_to_hand(P0, "Stoke counter unchanged A", 1, 1)
+                .id(),
+            scenario
+                .add_creature_to_hand(P0, "Stoke counter unchanged B", 1, 1)
+                .id(),
+        ];
+        let cancel = scenario
+            .add_spell_to_hand_from_oracle(P1, "Cancel", true, "Counter target spell.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue; 2],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P1,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&hearth)
+            .unwrap()
+            .back_face = Some(stoke_genius_face());
+        if pool == 2 && red {
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: hearth,
+                    card_id: runner.state().objects[&hearth].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::CastOffer {
+                    player: P0,
+                    kind: engine::types::game_state::CastOfferKind::Adventure { .. }
+                }
+            ));
+            assert!(
+                engine::ai_support::legal_actions(runner.state()).contains(&GameAction::CancelCast)
+            );
+            runner.act(GameAction::CancelCast).unwrap();
+            assert_eq!(runner.state().objects[&hearth].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&hearth].name, "Hearth Elemental");
+            assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+            let mut countered = GameRunner::from_state(runner.state().clone());
+            let library_before = countered.state().players[0].library.clone();
+            countered.cast(hearth).adventure_face(false).commit();
+            countered.act(GameAction::PassPriority).unwrap();
+            assert!(matches!(
+                countered.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            let committed = countered.cast(cancel).target_object(hearth).commit();
+            assert!(matches!(
+                committed.state().stack.back().unwrap().kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 3,
+                    ..
+                }
+            ));
+            let outcome = committed.resolve();
+            outcome.assert_zone(&[hearth], Zone::Graveyard);
+            outcome.assert_zone(&remaining, Zone::Hand);
+            assert_eq!(outcome.state().players[0].library, library_before);
+            assert!(!outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::CardDrawn { player_id: P0, .. }
+                    | GameEvent::Discarded { player_id: P0, .. }
+            )));
+            assert!(outcome.state().objects[&hearth]
+                .casting_permissions
+                .is_empty());
+            assert_eq!(outcome.state().objects[&hearth].name, "Hearth Elemental");
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
+            );
+            runner
+                .cast(hearth)
+                .adventure_face(false)
+                .resolve()
+                .assert_zone(&[hearth], Zone::Exile);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        } else {
+            assert!(!engine::game::casting::can_cast_adventure_face_now(
+                runner.state(),
+                P0,
+                hearth,
+                false
+            ));
+            assert!(runner
+                .cast(hearth)
+                .adventure_face(false)
+                .try_resolve()
+                .is_err());
+            assert_eq!(runner.state().objects[&hearth].zone, Zone::Hand);
+            assert_eq!(runner.state().players[0].mana_pool.total(), pool);
+            assert!(runner.state().objects[&hearth]
+                .casting_permissions
+                .is_empty());
+        }
+    }
+}
+
+fn paid_whole_stoke_authority_scene() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(
+        P0,
+        &[
+            "Draw A",
+            "Draw B",
+            "Reserve A",
+            "Reserve B",
+            "Reserve C",
+            "Reserve D",
+        ],
+    );
+    scenario.with_library_top(
+        P1,
+        &[
+            "Opponent reserve A",
+            "Opponent reserve B",
+            "Opponent reserve C",
+        ],
+    );
+    let hearth = scenario
+        .add_creature_to_hand(P0, "Hearth Elemental", 4, 5)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![ManaCostShard::Red],
+        })
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text(HEARTH)
+        .id();
+    let silence = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Silence",
+            true,
+            "Your opponents can't cast spells this turn.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&hearth)
+        .unwrap()
+        .back_face = Some(stoke_genius_face());
+    runner
+        .cast(hearth)
+        .adventure_face(false)
+        .resolve()
+        .assert_zone(&[hearth], Zone::Exile);
+    assert_eq!(runner.state().objects[&silence].zone, Zone::Hand);
+    (runner, hearth, silence)
+}
+
+fn adventure_authority_save_representations(state: &GameState) -> Vec<GameState> {
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::resolution::ResolutionStateWire;
+    fn old_delivery_fields(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.remove("delivery_owner");
+                for child in fields.values_mut() {
+                    old_delivery_fields(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    old_delivery_fields(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let raw = serde_json::to_value(state).unwrap();
+    let direct: GameState = serde_json::from_value(raw.clone()).unwrap();
+    let persisted: PersistedGameState = serde_json::from_value(raw.clone()).unwrap();
+    let trusted: PersistedGameState =
+        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
+            .unwrap();
+    let mut restored = vec![
+        direct,
+        persisted.into_game_state().unwrap(),
+        trusted.into_game_state().unwrap(),
+    ];
+    let mut v1 = raw;
+    v1.as_object_mut().unwrap().remove("resolution_stack");
+    v1["resolution_state_version"] = serde_json::json!(1);
+    if let Some(continuation) = state.active_ability_continuation() {
+        v1["pending_continuation"] = serde_json::to_value(continuation).unwrap();
+    }
+    if let Some(spell) = state.active_spell_resolution() {
+        v1["pending_spell_resolution"] = serde_json::to_value(spell).unwrap();
+    }
+    if let Some(drains) = state.active_post_replacement_drains() {
+        v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+    }
+    old_delivery_fields(&mut v1);
+    restored.push(
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .unwrap()
+            .into_game_state(),
+    );
+    for version in [2, 3, 4] {
+        let mut value =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        old_delivery_fields(&mut value);
+        value["resolution_state_version"] = serde_json::json!(version);
+        restored.push(
+            serde_json::from_value::<ResolutionStateWire>(value)
+                .unwrap()
+                .into_game_state(),
+        );
+    }
+    for loaded in &restored {
+        assert_eq!(loaded.waiting_for, state.waiting_for);
+        assert_eq!(
+            loaded.owed_spell_final_part(),
+            state.owed_spell_final_part()
+        );
+    }
+    restored
+}
+
+#[test]
+fn resolving_adventure_selected_index_survives_payment_restore_and_rejects_a_stale_slot() {
+    use engine::types::ability::CastingPermission;
+    use engine::types::game_state::CastingPermissionIndex;
+    for foreign_first in [false, true] {
+        let (mut runner, hearth, _) = paid_whole_stoke_authority_scene();
+        let earned = runner.state().objects[&hearth].casting_permissions[0].clone();
+        let foreign = alternative_permission(P1, 0, 0);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&hearth)
+            .unwrap()
+            .casting_permissions = if foreign_first {
+            vec![foreign, earned]
+        } else {
+            vec![earned, foreign]
+        };
+        assert!(!engine::game::casting::can_cast_adventure_face_now(
+            runner.state(),
+            P0,
+            hearth,
+            false
+        ));
+        let independent = runner.state().clone();
+        for _ in 0..6 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        runner
+            .act(GameAction::CastSpell {
+                object_id: hearth,
+                card_id: runner.state().objects[&hearth].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ));
+        let index = usize::from(foreign_first);
+        let selected = runner.state().pending_cast.as_ref().unwrap();
+        assert_eq!(
+            selected.casting_permission_index,
+            Some(CastingPermissionIndex(index))
+        );
+        assert_eq!(
+            selected.cost,
+            ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Red]
+            }
+        );
+        for loaded in adventure_authority_save_representations(runner.state()) {
+            assert_eq!(
+                loaded
+                    .pending_cast
+                    .as_ref()
+                    .unwrap()
+                    .casting_permission_index,
+                Some(CastingPermissionIndex(index))
+            );
+            let mut stale = GameRunner::from_state(loaded.clone());
+            stale
+                .state_mut()
+                .objects
+                .get_mut(&hearth)
+                .unwrap()
+                .casting_permissions
+                .remove(index);
+            assert!(stale.act(GameAction::PassPriority).is_err());
+            assert_eq!(
+                stale.state().players[0].mana_pool.total(),
+                6,
+                "a missing or wrong exact slot fails before payment"
+            );
+            let mut valid = GameRunner::from_state(loaded);
+            let sibling = 1 - index;
+            let CastingPermission::ExileWithAltCost { granted_to, .. } = &mut valid
+                .state_mut()
+                .objects
+                .get_mut(&hearth)
+                .unwrap()
+                .casting_permissions[sibling]
+            else {
+                panic!("the hostile sibling remains indexed");
+            };
+            *granted_to = Some(P0);
+            valid.act(GameAction::PassPriority).unwrap();
+            assert!(
+                matches!(
+                    valid.state().stack.back().unwrap().kind,
+                    StackEntryKind::Spell {
+                        actual_mana_spent: 6,
+                        ..
+                    }
+                ),
+                "a newly free sibling must not reprice the elected normal grant"
+            );
+            assert_eq!(valid.state().players[0].mana_pool.total(), 0);
+            valid.resolve_top();
+            assert_eq!(valid.state().objects[&hearth].zone, Zone::Battlefield);
+            assert!(valid.state().stack.is_empty() && valid.state().resolution_stack.is_empty());
+        }
+        let mut independent = GameRunner::from_state(independent);
+        independent.advance_to_phase(Phase::End);
+        independent.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(independent.state().active_player, P1);
+        independent
+            .act(GameAction::CastSpell {
+                object_id: hearth,
+                card_id: independent.state().objects[&hearth].card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert!(matches!(
+            independent.state().waiting_for,
+            WaitingFor::CastOffer {
+                player: P1,
+                kind: engine::types::game_state::CastOfferKind::Adventure { .. }
+            }
+        ));
+        assert!(engine::ai_support::legal_actions(independent.state())
+            .contains(&GameAction::ChooseAdventureFace { creature: false }));
+        independent
+            .act(GameAction::ChooseAdventureFace { creature: false })
+            .unwrap();
+        assert_eq!(independent.state().objects[&hearth].name, "Stoke Genius");
+        assert!(matches!(
+            independent.state().stack.back().unwrap().kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            }
+        ));
+        independent.resolve_top();
+        let object = &independent.state().objects[&hearth];
+        assert_eq!(object.owner, P0);
+        assert_eq!(object.zone, Zone::Exile);
+        assert_eq!(
+            object.casting_permissions,
+            vec![CastingPermission::resolved_adventure(
+                P1,
+                engine::types::identifiers::ObjectIncarnationRef::from_object(object)
+            )]
+        );
+    }
+}
+
+#[test]
+fn resolving_adventure_zone_authority_preserves_timing_stack_and_silence_prohibition() {
+    let (mut runner, hearth, silence) = paid_whole_stoke_authority_scene();
+    for _ in 0..6 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    runner.advance_to_phase(Phase::PostCombatMain);
+    for _ in 0..6 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+        ManaType::White,
+        ObjectId(0),
+        false,
+        vec![],
+    ));
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    runner.cast(silence).commit();
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&silence].zone, Zone::Graveyard);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    let forbidden = GameAction::CastSpell {
+        object_id: hearth,
+        card_id: runner.state().objects[&hearth].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(!engine::ai_support::legal_actions(runner.state()).contains(&forbidden));
+    assert!(runner.act(forbidden).is_err());
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        hearth
+    ));
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    for _ in 0..6 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    runner
+        .cast(hearth)
+        .resolve()
+        .assert_zone(&[hearth], Zone::Battlefield);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn resolving_adventure_foreign_fertile_search_uses_the_current_controller_and_restores_its_response(
+) {
+    use engine::types::ability::CastingPermission;
+    use engine::types::mana::ManaColor;
+    for fail_to_find in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Controller reserve A", "Controller reserve B"]);
+        scenario.with_library_top(P1, &["Owner reserve A", "Owner reserve B"]);
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let island = scenario.add_basic_land(P0, ManaColor::Blue);
+        let giant=scenario.add_creature_to_hand(P1,"Beanstalk Giant",0,0).with_subtypes(vec!["Giant"])
+            .with_mana_cost(ManaCost::Cost {generic:6,shards:vec![ManaCostShard::Green]})
+            .from_oracle_text("Beanstalk Giant's power and toughness are each equal to the number of lands you control.").id();
+        let commandeer = scenario
+            .add_spell_to_hand_from_oracle(P0, "Commandeer", true, ADVENTURE_COMMANDEER)
+            .with_mana_cost(blue_cost(5, 2))
+            .id();
+        scenario.with_mana_pool(
+            P1,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..7)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let parsed=engine::parser::parse_oracle_text("Search your library for a basic land card, put it onto the battlefield, then shuffle. (Then exile this card. You may cast the creature later from exile.)","Fertile Footsteps",&[],&["Sorcery".into()],&["Adventure".into()]);
+        let mut runner = scenario.build();
+        for land in [forest, island] {
+            engine::game::zones::move_to_library_at_index(
+                runner.state_mut(),
+                land,
+                Some(0),
+                &mut vec![],
+            );
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&giant)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Fertile Footsteps".into(),
+            layout_kind: Some(LayoutKind::Adventure),
+            mana_cost: ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+            card_types: engine::types::card_type::CardType {
+                core_types: vec![engine::types::card_type::CoreType::Sorcery],
+                subtypes: vec!["Adventure".into()],
+                ..Default::default()
+            },
+            abilities: parsed.abilities,
+            trigger_definitions: parsed.triggers.into(),
+            static_definitions: parsed.statics.into(),
+            replacement_definitions: parsed.replacements.into(),
+            ..Default::default()
+        });
+        runner.state_mut().active_player = P1;
+        runner.state_mut().priority_player = P1;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+        runner.cast(giant).adventure_face(false).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .cast(commandeer)
+            .decline_optional()
+            .target_object(giant)
+            .commit();
+        assert!(matches!(
+            runner.state().stack.back().unwrap().kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 7,
+                ..
+            }
+        ));
+        let mut changed = false;
+        for _ in 0..12 {
+            if runner.state().objects[&commandeer].zone == Zone::Graveyard
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice { player: P0, .. } => {
+                    GameAction::DecideOptionalEffect { accept: false }
+                }
+                ref other => panic!("unexpected Commandeer prompt {other:?}"),
+            };
+            changed|=runner.act(action).unwrap().events.iter().any(|event|matches!(event,GameEvent::ControllerChanged {object_id,old_controller:P1,new_controller:P0} if *object_id==giant));
+        }
+        assert!(changed);
+        runner.resolve_top();
+        let WaitingFor::SearchChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real Fertile must pause on its controller's two basic candidates");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*count, 1);
+        assert_eq!(cards.len(), 2);
+        assert!(cards.contains(&forest) && cards.contains(&island));
+        let nonfirst = cards[1];
+        let chosen = if fail_to_find { vec![] } else { vec![nonfirst] };
+        let expected_waiting = runner.state().waiting_for.clone();
+        let mut old_unattempted = serde_json::to_value(runner.state()).unwrap();
+        let old_debt = old_unattempted["resolving_spell_final_part"]
+            .as_object_mut()
+            .unwrap();
+        old_debt.remove("stack_incarnation");
+        old_debt.remove("pending_adventure_exile");
+        let old_unattempted: GameState = serde_json::from_value(old_unattempted).unwrap();
+        for restored in adventure_authority_save_representations(runner.state())
+            .into_iter()
+            .chain(std::iter::once(old_unattempted))
+        {
+            assert_eq!(restored.waiting_for, expected_waiting);
+            let mut resumed = GameRunner::from_state(restored);
+            let response = resumed
+                .act(GameAction::SelectCards {
+                    cards: chosen.clone(),
+                })
+                .unwrap();
+            assert_eq!(resumed.state().objects[&giant].owner, P1);
+            assert_eq!(resumed.state().objects[&giant].zone, Zone::Exile);
+            let object = &resumed.state().objects[&giant];
+            assert!(object
+                .casting_permissions
+                .contains(&CastingPermission::resolved_adventure(
+                    P0,
+                    engine::types::identifiers::ObjectIncarnationRef::from_object(object)
+                )));
+            assert_eq!(
+                resumed.state().objects[&nonfirst].zone,
+                if fail_to_find {
+                    Zone::Library
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            assert_eq!(response.events.iter().filter(|event|matches!(event,GameEvent::StackResolved {object_id} if *object_id==giant)).count(),1);
+            assert!(resumed.state().owed_spell_final_part().is_none());
+            assert!(
+                resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+            );
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+}
+
 fn stoke_genius_face() -> BackFaceData {
     let parsed = engine::parser::parse_oracle_text(
         STOKE,
@@ -2649,6 +3474,618 @@ fn stoke_genius_face() -> BackFaceData {
     }
 }
 
+const ADVENTURE_COMMANDEER: &str = "You may exile two blue cards from your hand rather than pay this spell's mana cost.\nGain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent enters under your control.)";
+const ADVENTURE_STOLEN_GOODS: &str = "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.";
+
+fn assert_public_adventure_grant_current_and_legacy_saves(
+    state: &GameState,
+    spell: ObjectId,
+    grantee: engine::types::player::PlayerId,
+) {
+    use engine::types::ability::CastingPermission;
+    use engine::types::game_state::PersistedGameState;
+    let expected = CastingPermission::resolved_adventure(
+        grantee,
+        engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&spell]),
+    );
+    for loaded in adventure_authority_save_representations(state) {
+        assert!(loaded.objects[&spell]
+            .casting_permissions
+            .contains(&expected));
+    }
+
+    let raw = serde_json::to_value(state).unwrap();
+    let current: GameState = serde_json::from_value(raw.clone()).unwrap();
+    let persisted: PersistedGameState = serde_json::from_value(raw.clone()).unwrap();
+    let trusted: PersistedGameState =
+        serde_json::from_value(serde_json::to_value(PersistedGameState::capture(state)).unwrap())
+            .unwrap();
+    for loaded in [
+        current,
+        persisted.into_game_state().unwrap(),
+        trusted.into_game_state().unwrap(),
+    ] {
+        assert!(loaded.objects[&spell]
+            .casting_permissions
+            .contains(&expected));
+        assert!(
+            engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                &loaded.objects[&spell],
+                grantee
+            )
+        );
+        let other = if grantee == P0 { P1 } else { P0 };
+        assert!(
+            !engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                &loaded.objects[&spell],
+                other
+            )
+        );
+    }
+    for missing in [
+        vec!["granted_to", "exile_incarnation"],
+        vec!["granted_to"],
+        vec!["exile_incarnation"],
+    ] {
+        let mut legacy = raw.clone();
+        let object = &mut legacy["objects"][spell.0.to_string()];
+        let permission = object["casting_permissions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|p| p["type"] == "AdventureCreature")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        for field in missing {
+            permission.remove(field);
+        }
+        let loaded: GameState = serde_json::from_value(legacy).unwrap();
+        for player in [P0, P1] {
+            assert!(
+                !engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                    &loaded.objects[&spell],
+                    player
+                )
+            );
+        }
+        let mut independent = loaded;
+        independent
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .casting_permissions
+            .push(alternative_permission(grantee, 0, 0));
+        assert!(
+            engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                &independent.objects[&spell],
+                grantee
+            )
+        );
+    }
+}
+
+#[test]
+fn resolving_adventure_public_commandeer_binds_resolving_controller_and_paid_cost() {
+    use engine::types::ability::CastingPermission;
+    use engine::types::mana::ManaColor;
+    for (owner, grantee) in [(P1, P0), (P0, P1)] {
+        for alternative in [false, true] {
+            for blue_count in if alternative { vec![0, 1, 2] } else { vec![2] } {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.with_library_top(
+                    grantee,
+                    &[
+                        "grantee draw A",
+                        "grantee draw B",
+                        "grantee reserve",
+                        "grantee reserve 2",
+                    ],
+                );
+                scenario.with_library_top(
+                    owner,
+                    &["owner reserve A", "owner reserve B", "owner reserve C"],
+                );
+                let hearth = scenario
+                    .add_creature_to_hand(owner, "Hearth Elemental", 4, 5)
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 5,
+                        shards: vec![ManaCostShard::Red],
+                    })
+                    .with_subtypes(vec!["Elemental"])
+                    .from_oracle_text(HEARTH)
+                    .id();
+                let owner_hand = scenario
+                    .add_creature_to_hand(owner, "Owner's untouched creature", 1, 1)
+                    .id();
+                let first = scenario
+                    .add_creature_to_hand(grantee, "First blue payment", 1, 1)
+                    .with_color(vec![if blue_count >= 1 {
+                        ManaColor::Blue
+                    } else {
+                        ManaColor::Red
+                    }])
+                    .id();
+                let second = scenario
+                    .add_creature_to_hand(grantee, "Second blue payment", 1, 1)
+                    .with_color(vec![if blue_count >= 2 {
+                        ManaColor::Blue
+                    } else {
+                        ManaColor::Red
+                    }])
+                    .id();
+                let commandeer = scenario
+                    .add_spell_to_hand_from_oracle(
+                        grantee,
+                        "Commandeer",
+                        true,
+                        ADVENTURE_COMMANDEER,
+                    )
+                    .with_mana_cost(blue_cost(5, 2))
+                    .id();
+                scenario.with_mana_pool(
+                    owner,
+                    (0..2)
+                        .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                        .collect(),
+                );
+                scenario.with_mana_pool(
+                    grantee,
+                    (0..if alternative { 0 } else { 7 })
+                        .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                        .collect(),
+                );
+                let mut runner = scenario.build();
+                runner.state_mut().active_player = owner;
+                runner.state_mut().priority_player = owner;
+                runner.state_mut().waiting_for = WaitingFor::Priority { player: owner };
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&hearth)
+                    .unwrap()
+                    .back_face = Some(stoke_genius_face());
+                runner.cast(hearth).adventure_face(false).commit();
+                assert_eq!(runner.state().objects[&hearth].owner, owner);
+                assert_eq!(runner.state().objects[&hearth].controller, owner);
+                runner.act(GameAction::PassPriority).unwrap();
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player } if player == grantee
+                ));
+                if alternative && blue_count < 2 {
+                    let cast = GameAction::CastSpell {
+                        object_id: commandeer,
+                        card_id: runner.state().objects[&commandeer].card_id,
+                        targets: vec![],
+                        payment_mode: CastPaymentMode::Auto,
+                    };
+                    assert!(!engine::game::casting::can_cast_object_now(
+                        runner.state(),
+                        grantee,
+                        commandeer
+                    ));
+                    assert!(!engine::ai_support::legal_actions(runner.state()).contains(&cast));
+                    assert!(runner.act(cast).is_err());
+                    assert_eq!(runner.state().objects[&commandeer].zone, Zone::Hand);
+                    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+                    assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+                    assert_eq!(runner.state().objects[&hearth].controller, owner);
+                    assert_eq!(
+                        runner.state().players[grantee.0 as usize].mana_pool.total(),
+                        0
+                    );
+                    runner.resolve_top();
+                    let object = &runner.state().objects[&hearth];
+                    assert_eq!(object.zone, Zone::Exile);
+                    assert!(object.casting_permissions.contains(
+                        &CastingPermission::resolved_adventure(
+                            owner,
+                            engine::types::identifiers::ObjectIncarnationRef::from_object(object)
+                        )
+                    ));
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        runner.state().stack.is_empty()
+                            && runner.state().resolution_stack.is_empty()
+                    );
+                    continue;
+                }
+                runner
+                    .act(GameAction::CastSpell {
+                        object_id: commandeer,
+                        card_id: runner.state().objects[&commandeer].card_id,
+                        targets: vec![],
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalCostChoice { player, .. } if player == grantee
+                ));
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: alternative })
+                    .unwrap();
+                if alternative {
+                    let WaitingFor::PayCost {
+                        player,
+                        choices,
+                        count,
+                        ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!("the printed alternative must choose its two blue cards");
+                    };
+                    assert_eq!(*player, grantee);
+                    assert_eq!(*count, 2);
+                    assert!(choices.contains(&first) && choices.contains(&second));
+                    assert!(
+                        !choices.contains(&commandeer),
+                        "Commandeer is already being announced and cannot pay for itself"
+                    );
+                    let original_prompt = runner.state().waiting_for.clone();
+                    for invalid in [
+                        vec![first],
+                        vec![first, first],
+                        vec![commandeer, first],
+                        vec![owner_hand, first],
+                    ] {
+                        assert!(runner
+                            .act(GameAction::SelectCards { cards: invalid })
+                            .is_err());
+                        assert_eq!(runner.state().waiting_for, original_prompt);
+                        assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+                        assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+                    }
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![second, first],
+                        })
+                        .unwrap();
+                }
+                if let WaitingFor::TargetSelection {
+                    player,
+                    target_slots,
+                    selection,
+                    ..
+                } = &runner.state().waiting_for
+                {
+                    assert_eq!(*player, grantee);
+                    assert!(target_slots[selection.current_slot]
+                        .legal_targets
+                        .contains(&engine::types::ability::TargetRef::Object(hearth)));
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(hearth)),
+                        })
+                        .unwrap();
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    matches!(runner.state().stack.back().unwrap().kind, StackEntryKind::Spell { actual_mana_spent, .. } if actual_mana_spent == if alternative { 0 } else { 7 })
+                );
+                if alternative {
+                    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+                    assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+                }
+                let mut changed = false;
+                for _ in 0..12 {
+                    if runner.state().objects[&commandeer].zone == Zone::Graveyard
+                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    let action = match &runner.state().waiting_for {
+                        WaitingFor::Priority { .. } => GameAction::PassPriority,
+                        WaitingFor::OptionalEffectChoice { player, .. } => {
+                            assert_eq!(*player, grantee);
+                            GameAction::DecideOptionalEffect { accept: false }
+                        }
+                        other => panic!("unexpected Commandeer resolution prompt: {other:?}"),
+                    };
+                    changed |= runner.act(action).unwrap().events.iter().any(|event| matches!(event,
+                GameEvent::ControllerChanged { object_id, old_controller, new_controller } if *object_id == hearth && *old_controller == owner && *new_controller == grantee));
+                }
+                assert!(
+                    changed,
+                    "real Commandeer must change control before Stoke resolves"
+                );
+                assert_eq!(runner.state().objects[&hearth].zone, Zone::Stack);
+                assert_eq!(runner.state().objects[&hearth].controller, grantee);
+                let draw_ids: Vec<_> = runner.state().players[grantee.0 as usize]
+                    .library
+                    .iter()
+                    .copied()
+                    .collect();
+                let mut events = Vec::new();
+                for _ in 0..4 {
+                    if runner.state().objects[&hearth].zone == Zone::Exile {
+                        break;
+                    }
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                let object = &runner.state().objects[&hearth];
+                assert_eq!(object.zone, Zone::Exile);
+                assert_eq!(object.owner, owner);
+                assert_eq!(object.name, "Hearth Elemental");
+                assert!(object.casting_permissions.contains(
+                    &CastingPermission::resolved_adventure(
+                        grantee,
+                        engine::types::identifiers::ObjectIncarnationRef::from_object(object)
+                    )
+                ));
+                assert_eq!(runner.state().objects[&owner_hand].zone, Zone::Hand);
+                assert_eq!(
+                    runner.state().players[grantee.0 as usize]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    draw_ids[..2].iter().copied().collect()
+                );
+                assert_eq!(runner.state().objects[&draw_ids[2]].zone, Zone::Library);
+                if !alternative {
+                    let first_draw = events
+                .iter()
+                .position(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == grantee))
+                .unwrap();
+                    for id in [first, second] {
+                        assert!(events.iter().position(|event|matches!(event,GameEvent::Discarded {object_id,..} if *object_id==id)).unwrap()<first_draw);
+                    }
+                }
+
+                assert_public_adventure_grant_current_and_legacy_saves(
+                    runner.state(),
+                    hearth,
+                    grantee,
+                );
+                if !alternative {
+                    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+                    assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+                }
+                assert_eq!(runner.state().players[grantee.0 as usize].hand.len(), 2);
+                assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == hearth)).count(), 1);
+                for player in [grantee, owner] {
+                    for _ in 0..6 {
+                        runner.state_mut().players[player.0 as usize]
+                            .mana_pool
+                            .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+                    }
+                }
+                assert!(
+                    !engine::game::casting::can_cast_object_now(runner.state(), owner, hearth),
+                    "the adequately funded owner cannot spend the resolving controller's grant"
+                );
+                runner.advance_to_end_step();
+                runner.advance_to_phase(Phase::PreCombatMain);
+                assert_eq!(runner.state().active_player, grantee);
+                for _ in 0..5 {
+                    runner.state_mut().players[grantee.0 as usize]
+                        .mana_pool
+                        .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+                }
+                let committed = runner.cast(hearth).commit();
+                // The resolved Commandeer contributes one Instant to the reducer.
+                assert!(matches!(
+                    committed.state().stack.back().unwrap().kind,
+                    StackEntryKind::Spell {
+                        actual_mana_spent: 5,
+                        ..
+                    }
+                ));
+                let outcome = committed.resolve();
+                outcome.assert_zone(&[hearth], Zone::Battlefield);
+                outcome.assert_power_toughness(hearth, 4, 5);
+                assert_eq!(outcome.state().objects[&hearth].controller, grantee);
+                assert_eq!(outcome.state().objects[&hearth].owner, owner);
+                assert!(
+                    outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
+                );
+                assert!(matches!(
+                    outcome.final_waiting_for(),
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn resolving_adventure_paid_stolen_goods_offers_native_face_free_and_later_normal_cost() {
+    use engine::types::ability::CastingPermission;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Goods draw A", "Goods draw B", "Goods reserve"]);
+    scenario.with_library_top(P1, &["Foreign reserve"]);
+    let hearth = scenario
+        .add_spell_to_library_top(P1, "Hearth Elemental", false)
+        .as_creature()
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![ManaCostShard::Red],
+        })
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text(HEARTH)
+        .id();
+    let discarded = [
+        scenario
+            .add_creature_to_hand(P0, "Goods discard A", 1, 1)
+            .id(),
+        scenario
+            .add_creature_to_hand(P0, "Goods discard B", 1, 1)
+            .id(),
+    ];
+    let goods = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stolen Goods", false, ADVENTURE_STOLEN_GOODS)
+        .with_mana_cost(blue_cost(3, 1))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&hearth).unwrap();
+        object.back_face = Some(stoke_genius_face());
+        object.power = Some(4);
+        object.toughness = Some(5);
+        object.base_power = Some(4);
+        object.base_toughness = Some(5);
+    }
+    let outcome = runner.cast(goods).target_player(P1).resolve();
+    outcome.assert_zone(&[goods], Zone::Graveyard);
+    outcome.assert_zone(&[hearth], Zone::Exile);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let draw_ids: Vec<_> = outcome.state().players[0].library.iter().copied().collect();
+    let first_exile = outcome.state().objects[&hearth].incarnation;
+    assert!(outcome.state().objects[&hearth]
+        .casting_permissions
+        .iter()
+        .any(|permission| matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                granted_to: P0,
+                without_paying_mana_cost: true,
+                ..
+            }
+        )));
+    drop(outcome);
+    let mut expired = GameRunner::from_state(runner.state().clone());
+    expired.advance_to_phase(Phase::End);
+    expired.advance_to_phase(Phase::PreCombatMain);
+    expired.advance_to_phase(Phase::End);
+    expired.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(expired.state().active_player, P0);
+    assert!(
+        !engine::game::casting::can_cast_adventure_face_now(expired.state(), P0, hearth, false),
+        "the actual end-of-turn Goods window expires"
+    );
+    runner
+        .act(GameAction::CastSpell {
+            object_id: hearth,
+            card_id: runner.state().objects[&hearth].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            player: P0,
+            kind: engine::types::game_state::CastOfferKind::Adventure { .. }
+        }
+    ));
+    assert!(engine::ai_support::legal_actions(runner.state())
+        .contains(&GameAction::ChooseAdventureFace { creature: false }));
+    runner
+        .act(GameAction::ChooseAdventureFace { creature: false })
+        .unwrap();
+    assert_eq!(runner.state().objects[&hearth].name, "Stoke Genius");
+    assert_eq!(runner.state().objects[&hearth].mana_cost.mana_value(), 2);
+    assert!(matches!(
+        runner.state().stack.back().unwrap().kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 0,
+            casting_variant: engine::types::game_state::CastingVariant::Adventure,
+            ..
+        }
+    ));
+    let mut stoke_events = Vec::new();
+    for _ in 0..4 {
+        if runner.state().objects[&hearth].zone == Zone::Exile {
+            break;
+        }
+        stoke_events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(
+        runner.state().players[0]
+            .hand
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        draw_ids[..2].iter().copied().collect()
+    );
+    assert_eq!(runner.state().objects[&draw_ids[2]].zone, Zone::Library);
+    let first_draw = stoke_events
+        .iter()
+        .position(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, .. }))
+        .unwrap();
+    for id in discarded {
+        assert!(
+            stoke_events
+                .iter()
+                .position(
+                    |event| matches!(event,GameEvent::Discarded {object_id,..} if *object_id==id)
+                )
+                .unwrap()
+                < first_draw
+        );
+    }
+    for id in discarded {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.state().objects[&hearth].zone, Zone::Exile);
+    let object = &runner.state().objects[&hearth];
+    assert!(object.incarnation > first_exile);
+    assert_public_adventure_grant_current_and_legacy_saves(runner.state(), hearth, P0);
+    assert!(object
+        .casting_permissions
+        .contains(&CastingPermission::resolved_adventure(
+            P0,
+            engine::types::identifiers::ObjectIncarnationRef::from_object(object)
+        )));
+    assert!(!object
+        .casting_permissions
+        .iter()
+        .any(|permission| matches!(permission, CastingPermission::PlayFromExile { .. })));
+    assert!(!engine::game::casting::can_cast_adventure_face_now(
+        runner.state(),
+        P0,
+        hearth,
+        false
+    ));
+    for _ in 0..5 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    let committed = runner.cast(hearth).commit();
+    // Stolen Goods is one Sorcery in P0's graveyard: normal Hearth costs 4R.
+    assert!(matches!(
+        committed.state().stack.back().unwrap().kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 5,
+            ..
+        }
+    ));
+    let outcome = committed.resolve();
+    outcome.assert_zone(&[hearth], Zone::Battlefield);
+    outcome.assert_power_toughness(hearth, 4, 5);
+    assert_eq!(outcome.state().objects[&hearth].owner, P1);
+    assert_eq!(outcome.state().objects[&hearth].controller, P0);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+}
+
 fn coordinated_graveyard_witnesses(
     scenario: &mut GameScenario,
     caster: engine::types::player::PlayerId,
@@ -2674,6 +4111,101 @@ fn coordinated_graveyard_witnesses(
     // CR 715.2a + CR 715.2c: real alternative-characteristic metadata qualifies
     // an object once, even when that same object also has an Instant card type.
     vec![overlap, adventure, foreign]
+}
+
+#[test]
+fn coordinated_four_distinct_graveyard_ids_keep_hearth_one_red_and_frantic_six() {
+    for caster in [P0, P1] {
+        for hearth_case in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let adventures = coordinated_graveyard_witnesses(&mut scenario, caster, true);
+            scenario.add_spell_to_graveyard(caster, "Fourth distinct own graveyard instant", true);
+            let spell = if hearth_case {
+                scenario
+                    .add_creature_to_hand(caster, "Hearth Elemental", 4, 5)
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 5,
+                        shards: vec![ManaCostShard::Red],
+                    })
+                    .with_subtypes(vec!["Elemental"])
+                    .from_oracle_text(HEARTH)
+                    .id()
+            } else {
+                scenario
+                    .add_spell_to_hand_from_oracle(caster, "Frantic Firebolt", true, FRANTIC)
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![ManaCostShard::Red],
+                    })
+                    .id()
+            };
+            let target = scenario
+                .add_creature(
+                    if caster == P0 { P1 } else { P0 },
+                    "Four-ID damage target",
+                    1,
+                    10,
+                )
+                .id();
+            let untouched = scenario
+                .add_creature(
+                    if caster == P0 { P1 } else { P0 },
+                    "Four-ID untouched target",
+                    1,
+                    10,
+                )
+                .id();
+            let paid = if hearth_case { 2 } else { 3 };
+            scenario.with_mana_pool(
+                caster,
+                (0..paid)
+                    .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = caster;
+            runner.state_mut().priority_player = caster;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+            for id in adventures {
+                runner.state_mut().objects.get_mut(&id).unwrap().back_face =
+                    Some(stoke_genius_face());
+            }
+            if hearth_case {
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&spell)
+                    .unwrap()
+                    .back_face = Some(stoke_genius_face());
+            }
+            let committed = if hearth_case {
+                runner.cast(spell).adventure_face(true).commit()
+            } else {
+                runner.cast(spell).target_object(target).commit()
+            };
+            assert!(
+                matches!(committed.state().stack.back().unwrap().kind,StackEntryKind::Spell {actual_mana_spent,..} if actual_mana_spent==paid)
+            );
+            let outcome = committed.resolve();
+            if hearth_case {
+                outcome.assert_zone(&[spell], Zone::Battlefield);
+                outcome.assert_power_toughness(spell, 4, 5);
+            } else {
+                assert_eq!(outcome.state().objects[&target].damage_marked, 6);
+                assert_eq!(outcome.state().objects[&untouched].damage_marked, 0);
+                outcome.assert_zone(&[spell], Zone::Graveyard);
+            }
+            assert_eq!(outcome.mana_pool_total(caster), 0);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
+            );
+        }
+    }
 }
 
 #[test]

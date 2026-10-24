@@ -1273,7 +1273,11 @@ fn stamp_permission_printed_slot(
             enters_with_modifications,
             ..
         } => stamp_retained_mods(&mut enters_with_modifications.modifications, slot, kind),
-        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {}
+        CastingPermission::AdventureCreature {
+            granted_to: _,
+            exile_incarnation: _,
+        }
+        | CastingPermission::ExileWithEnergyCost => {}
         CastingPermission::PlayFromExile { .. }
         | CastingPermission::ExileWithAltAbilityCost { .. }
         | CastingPermission::WarpExile { .. }

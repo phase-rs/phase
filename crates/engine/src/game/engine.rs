@@ -9558,7 +9558,7 @@ fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
 /// exists to clear it. Carrier/firing parity is a separate question, answered
 /// by `resolving_carrier_parity_is_coherent` and reported on the settle path
 /// rather than gating it.
-pub(super) fn resolution_instructions_are_done(state: &GameState) -> bool {
+pub(crate) fn resolution_instructions_are_done(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
         && state.active_ability_continuation().is_none()
         && state.active_spell_resolution().is_none()
@@ -9714,7 +9714,7 @@ pub(super) fn run_spell_final_part_if_due(
         return false;
     }
     let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
-    let owed = state.resolving_spell_final_part;
+    let owed = state.resolving_spell_final_part.clone();
     let final_part_start = events.len();
     match super::stack::finish_deferred_spell_resolution(state, events) {
         super::stack::DeferredFinalPart::Parked => {}
@@ -9727,7 +9727,7 @@ pub(super) fn run_spell_final_part_if_due(
                         .resolving_stack_entry
                         .as_ref()
                         .is_some_and(|entry| entry.id == id)
-                        && owed.is_some_and(|marker| marker.spell == id)
+                        && owed.as_ref().is_some_and(|marker| marker.spell == id)
                         && state.resolving_spell_final_part == owed
                 }),
                 "completed final part must retain its exact carrier and debt"
@@ -27911,7 +27911,7 @@ mod resolving_carrier_settle_tests {
                 actual_mana_spent: 0,
             },
         });
-        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart::unattempted(spell));
         state.waiting_for = WaitingFor::Priority { player: P0 };
         let starting_turn = state.turn_number;
 
