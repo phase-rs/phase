@@ -400,6 +400,7 @@ mod escape_tunnel_landfall;
 mod esix_fractal_bloom;
 mod esper_origins_flashback_transform;
 mod etali_primal_sickness_poison;
+mod etb_rider_onset;
 mod etb_trigger_entry_time_characteristics;
 mod eternal_wanderer_attacker_limit_7153;
 mod eternal_wanderer_delayed_return_7153;

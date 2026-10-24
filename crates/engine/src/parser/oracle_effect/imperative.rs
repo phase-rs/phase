@@ -53,11 +53,11 @@ use crate::types::ability::{
     is_oneshot_target_source_prevent_shape, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AttachCardinality, AttachSelection, AttachmentReferent, BounceSelection,
     CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, CoinFlipRun,
-    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CountBinding,
-    CountScope, CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp,
-    Duration, Effect, EffectScope, ExtraPhaseAnchor, ExtraPhaseRecipient, FaceDownProfile,
-    FilterProp, ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition,
-    MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
+    CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
+    CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
+    ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
+    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -10414,6 +10414,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -15486,7 +15487,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // override at the next cleanup.
             // CR 611.2c: the affected set freezes to the resolved parent target
             // at install.
-            let override_step = AbilityDefinition::new(
+            let mut override_step = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GenericEffect {
                     static_abilities: vec![retype],
@@ -15496,6 +15497,11 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             )
             .duration(Duration::Permanent);
+            // CR 611.2e: the reminder text defines the retype with the "is" form
+            // ("It's a Borg artifact creature"), so it applies simultaneously with
+            // the entry: the resolution defers its enter observation until this step
+            // has applied.
+            override_step.entry_onset = ContinuousEffectOnset::WithEntry;
 
             // CR 110.2a: enters under the instruction's controller, not its
             // owner (CR 108.3: ownership is unchanged).
@@ -15537,13 +15543,14 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // `lower::rewire_result_anchored_subchain` already stamps the flag
             // for this shape.
             //
-            // CR 611.2e DEVIATION (pre-existing, class-wide): the definition's
-            // "It's a Borg artifact creature" is the "is [characteristic]" form,
-            // which the rule says must apply SIMULTANEOUSLY with the permanent
-            // entering the battlefield. This continuation applies it AFTER
-            // entry, so an ETB trigger keying on the new types does not see
-            // them. Same behavior as Rise from the Grave / Grave Betrayal (both
-            // also the "is" form); NOT fixed here.
+            // CR 611.2e: the definition's "It's a Borg artifact creature" is the
+            // "is [characteristic]" form, which the rule says must apply
+            // SIMULTANEOUSLY with the permanent entering the battlefield. This
+            // continuation still installs it after entry, but the step is stamped
+            // `WithEntry` above, so enter observers read the entrant only once it
+            // has applied (same as Rise from the Grave / Grave Betrayal, also the
+            // "is" form). Residual: the observation is the resolution's end, so
+            // observers also see any later instruction's change.
             clause.sub_ability = Some(Box::new(override_step));
             clause
         }

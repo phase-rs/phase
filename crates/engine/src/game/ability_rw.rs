@@ -4364,6 +4364,7 @@ fn walk_ability(
         chosen_players: _,
         sub_link: _,
         target_reads: _, // origin of `Target` reads; the reads are profiled on condition/effect
+        entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
         replacement_applied: _,
         parent_target_missing_reason: _,
@@ -4499,6 +4500,7 @@ fn walk_definition(
         target_selection_mode: _,
         sub_link: _,
         target_reads: _, // origin of `Target` reads; the reads are profiled on condition/effect
+        entry_onset: _,  // CR 611.2e onset tag, no read or write
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every

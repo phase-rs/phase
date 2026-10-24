@@ -22076,6 +22076,82 @@ fn stack_bound_reveals_is_empty(
     reveals.is_empty()
 }
 
+/// CR 611.2e: whether every ability node of this state carries the parse-time entry onset
+/// (`AbilityDefinition::entry_onset` / `ResolvedAbility::entry_onset`). Engines that predate the
+/// onset never wrote this key, so its absence identifies the writer, not a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbilityOnsetRecord {
+    /// Written by an engine that did not record onsets (the key is absent on the wire).
+    Unrecorded,
+    /// Every ability node's `entry_onset` was stamped by the current parser or copied from a
+    /// stamped node.
+    Recorded,
+}
+
+impl AbilityOnsetRecord {
+    /// Serde default for `GameState::ability_onset_record`: a payload without the key was
+    /// written by an engine that did not record onsets.
+    fn absent_on_wire() -> Self {
+        Self::Unrecorded
+    }
+}
+
+/// The serialized key of `GameState::ability_onset_record`, read by the persisted admission
+/// (`types::resolution::admit_entry_onset_record`) and by the test-support capture helper
+/// (`record_captured_onsets`).
+pub const ABILITY_ONSET_RECORD_FIELD: &str = "ability_onset_record";
+
+/// Test support: declares a committed game-state capture written before onsets were recorded
+/// (CR 611.2e) as onset-recorded, for a test whose subject does not depend on onsets. The capture
+/// then decodes exactly as it did before `admit_entry_onset_record` existed: every unrecorded node
+/// keeps the `WhenFollowed` default. Never call it on a payload whose onsets the test observes, and
+/// never outside tests; production admission refuses the same bytes
+/// (`a_frozen_v78_mode_choice_keeps_its_announcement_fold`).
+///
+/// Marks each game-state root of the document, by the committed capture shapes:
+/// - a debug export `{gameState, turnCheckpoints?, …}`: `gameState` and every `turnCheckpoints`
+///   element (each a bare state in every committed export);
+/// - a trusted envelope `{state, …}` (the dispatch `PersistedGameState::deserialize` makes):
+///   `state`;
+/// - a bare state (has `objects` and `turn_number`): the document itself.
+///
+/// Any other document (a card export, a CR 733 census map) is left unchanged.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_captured_onsets(document: &mut serde_json::Value) {
+    fn mark(root: &mut serde_json::Value) {
+        let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
+            .expect("AbilityOnsetRecord serializes");
+        root.as_object_mut()
+            .expect("a committed capture's game-state root is a JSON object")
+            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+    }
+    let Some(object) = document.as_object_mut() else {
+        return;
+    };
+    if let Some(game_state) = object.get_mut("gameState") {
+        mark(game_state);
+        if let Some(checkpoints) = object
+            .get_mut("turnCheckpoints")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            checkpoints.iter_mut().for_each(mark);
+        }
+    } else if let Some(state) = object.get_mut("state") {
+        mark(state);
+    } else if object.contains_key("objects") && object.contains_key("turn_number") {
+        mark(document);
+    }
+}
+
+/// `record_captured_onsets` over a JSON string, for loaders that hand a string onward.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_captured_onsets_json(json: &str) -> String {
+    let mut document: serde_json::Value =
+        serde_json::from_str(json).expect("a committed capture is JSON");
+    record_captured_onsets(&mut document);
+    serde_json::to_string(&document).expect("a committed capture re-serializes")
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -22225,6 +22301,13 @@ declare_game_state! {
     /// by later retained-prefix replay.
     #[serde(default)]
     pub resolved_rules_journal: ResolvedRulesJournal,
+    /// CR 611.2e: which writer produced this state's ability onsets. Serialized unconditionally
+    /// (no `skip_serializing_if`) by every writer — the derived serializer, both persistence
+    /// writers and transport — so its absence on the wire is a fact about the writer: an engine
+    /// that did not record onsets. Persisted admission (`types::resolution::admit_entry_onset_record`)
+    /// reads it; `GameState::new` states `Recorded`.
+    #[serde(default = "AbilityOnsetRecord::absent_on_wire")]
+    pub ability_onset_record: AbilityOnsetRecord,
     /// CR 118.3a: transient carrier for the caster's pin hints during a single
     /// finalize spend. `finalize_mana_payment` takes `pending_cast` (removing the
     /// pins) BEFORE the spend runs, so the pins are moved here for the duration of
@@ -31500,6 +31583,7 @@ impl GameState {
             next_pip_id: 1,
             next_spell_announcement: 0,
             resolved_rules_journal: ResolvedRulesJournal::default(),
+            ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_casting_permission_index: None,
@@ -34533,6 +34617,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_pip_id: _,
         next_spell_announcement: _,
         resolved_rules_journal: _,
+        ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
@@ -34959,6 +35044,7 @@ impl PartialEq for GameState {
             && self.next_pip_id == other.next_pip_id
             && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
+            && self.ability_onset_record == other.ability_onset_record
             && self.battlefield == other.battlefield
             && self.stack == other.stack
             && self.stack_paid_facts == other.stack_paid_facts
@@ -37976,7 +38062,9 @@ mod tests {
         flate2::read::GzDecoder::new(dump)
             .read_to_string(&mut json)
             .expect("the dump inflates");
-        let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        record_captured_onsets(&mut envelope);
         assert!(
             json.contains("\"FlipCoin\""),
             "reach guard: the capture predates the merge and carries legacy FlipCoin nodes"
@@ -38248,7 +38336,10 @@ mod tests {
             flate2::read::GzDecoder::new(dump)
                 .read_to_string(&mut json)
                 .expect("the dump inflates");
-            let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+            let mut envelope: serde_json::Value =
+                serde_json::from_str(&json).expect("the dump parses");
+            // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+            record_captured_onsets(&mut envelope);
             let board = envelope.get("gameState").unwrap_or(&envelope).clone();
             assert!(
                 board["waiting_for"]["data"].get("road").is_none(),
@@ -51635,6 +51726,67 @@ mod tests {
             deserialized.active_auto_tap_row_policy, None,
             "deserialized active_auto_tap_row_policy must be None"
         );
+    }
+
+    /// T1: `record_captured_onsets` marks exactly the game-state roots of each committed capture
+    /// shape and leaves every other document unchanged; the string form delegates.
+    #[test]
+    fn record_captured_onsets_marks_each_committed_shape_root() {
+        let recorded = serde_json::Value::from("Recorded");
+        let bare = || serde_json::json!({ "objects": {}, "turn_number": 1 });
+
+        // (a) debug export: `gameState` and every checkpoint.
+        let export = serde_json::json!({
+            "gameState": bare(),
+            "turnCheckpoints": [bare(), bare()],
+            "cardDatabase": { "objects": {}, "turn_number": 2 },
+        });
+        let mut marked = export.clone();
+        record_captured_onsets(&mut marked);
+        assert_eq!(marked["gameState"][ABILITY_ONSET_RECORD_FIELD], recorded);
+        for checkpoint in marked["turnCheckpoints"]
+            .as_array()
+            .expect("checkpoints stay an array")
+        {
+            assert_eq!(checkpoint[ABILITY_ONSET_RECORD_FIELD], recorded);
+        }
+        assert!(
+            marked.get(ABILITY_ONSET_RECORD_FIELD).is_none()
+                && marked["cardDatabase"]
+                    .get(ABILITY_ONSET_RECORD_FIELD)
+                    .is_none(),
+            "only the export's state roots are marked: {marked}"
+        );
+
+        // (b) trusted envelope: only `state`.
+        let mut envelope = serde_json::json!({
+            "state": bare(),
+            "precast_shortcut_runtime": { "objects": {}, "turn_number": 3 },
+        });
+        record_captured_onsets(&mut envelope);
+        assert_eq!(envelope["state"][ABILITY_ONSET_RECORD_FIELD], recorded);
+        assert!(envelope.get(ABILITY_ONSET_RECORD_FIELD).is_none());
+        assert!(envelope["precast_shortcut_runtime"]
+            .get(ABILITY_ONSET_RECORD_FIELD)
+            .is_none());
+
+        // (c) bare state: the root.
+        let mut state = bare();
+        record_captured_onsets(&mut state);
+        assert_eq!(state[ABILITY_ONSET_RECORD_FIELD], recorded);
+
+        // (d) a card export is left byte-identical.
+        let card_export = serde_json::json!({ "lightning bolt": { "name": "Lightning Bolt" } });
+        let mut untouched = card_export.clone();
+        record_captured_onsets(&mut untouched);
+        assert_eq!(untouched, card_export);
+
+        // (e) the string form is the value form, re-serialized.
+        let via_string: serde_json::Value = serde_json::from_str(&record_captured_onsets_json(
+            &serde_json::to_string(&export).expect("the export serializes"),
+        ))
+        .expect("the marked export parses");
+        assert_eq!(via_string, marked);
     }
 }
 

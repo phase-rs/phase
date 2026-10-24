@@ -3640,6 +3640,82 @@ mod legacy_debug_permission_restore_tests {
 }
 
 #[cfg(test)]
+mod pre_entry_onset_restore_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{WaitingFor, ABILITY_ONSET_RECORD_FIELD};
+
+    /// Rise from the Grave {4}{B} Sorcery — verbatim Oracle text.
+    const RISE_FROM_THE_GRAVE: &str = "Put target creature card from a graveyard onto the \
+         battlefield under your control. That creature is a black Zombie in addition to its \
+         other colors and types.";
+
+    /// Rise from the Grave paused at its entrant's as-enters colour choice (Voice of All's
+    /// clause, verbatim): the parked continuation holds the "is" rider stamped `WithEntry`.
+    fn rise_paused_at_entry_choice() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let chooser = scenario
+            .add_creature_to_graveyard(P1, "Color Chooser", 2, 2)
+            .from_oracle_text("As this creature enters, choose a color.")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Rise from the Grave", false, RISE_FROM_THE_GRAVE)
+            .id();
+        let mut runner = scenario.build();
+        let mut commit = runner.cast(spell).target_object(chooser).commit();
+        for _ in 0..10 {
+            match &commit.state().waiting_for {
+                WaitingFor::NamedChoice { .. } => return commit.state().clone(),
+                WaitingFor::Priority { .. } => {
+                    commit
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt {other:?}"),
+            }
+        }
+        panic!("the resolution did not pause at the entry choice");
+    }
+
+    /// The same save as a pre-onset engine wrote it: no record and no `entry_onset` keys.
+    fn as_pre_onset_writer(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                object.remove(ABILITY_ONSET_RECORD_FIELD);
+                object.remove("entry_onset");
+                object.values_mut().for_each(as_pre_onset_writer);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(as_pre_onset_writer),
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+
+    /// R4 — CR 611.2e: the engine-wasm restore surfaces the persisted onset refusal for a save
+    /// written before onsets were recorded; the same save written now decodes.
+    #[test]
+    fn pre_onset_save_is_refused_by_the_wasm_restore() {
+        let current =
+            serde_json::to_value(PersistedGameState::capture(rise_paused_at_entry_choice()))
+                .expect("the persisted save serializes");
+        decode_restored_game_state(&current.to_string()).expect("the current save decodes");
+
+        let mut legacy = current;
+        as_pre_onset_writer(&mut legacy);
+        let error = decode_restored_game_state(&legacy.to_string())
+            .expect_err("the pre-onset save is refused");
+        assert!(
+            error.contains("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod exact_attack_authority_restore_tests {
     use super::*;
     use engine::game::combat::AttackTarget;

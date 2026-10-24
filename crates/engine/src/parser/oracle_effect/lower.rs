@@ -39,13 +39,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
-    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
-    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
+    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -4569,11 +4569,16 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attachable: bool) {
-    if let Some(new_effect) =
-        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    if let Some((new_effect, onset)) =
+        rewrite_token_anaphor_with_onset(&def.effect, def.duration.clone())
     {
         *def.effect = new_effect;
         def.duration = None;
+        // CR 611.2e + CR 111.3: the rewritten node is an instruction of this chain, so it
+        // carries the onset its verb phrase states — "The tokens have \"…\"" defines the
+        // tokens as they enter; "The token gains haste" applies after they are on the
+        // battlefield.
+        def.entry_onset = onset;
         return;
     }
 
@@ -4737,6 +4742,16 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
     effect: &Effect,
     clause_duration: Option<Duration>,
 ) -> Option<Effect> {
+    rewrite_token_anaphor_with_onset(effect, clause_duration).map(|(effect, _)| effect)
+}
+
+/// [`rewrite_token_created_this_way_unimplemented`], also returning the CR 611.2e onset the
+/// anaphor's verb phrase states, read by the subject-predicate authority
+/// [`subject::predicate_onset`].
+fn rewrite_token_anaphor_with_onset(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<(Effect, ContinuousEffectOnset)> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -4765,12 +4780,13 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .affected(TargetFilter::LastCreated)
         .modifications(mods)
         .description(text.to_string());
-    Some(Effect::GenericEffect {
+    let effect = Effect::GenericEffect {
         static_abilities: vec![static_def],
         duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
         end_cost: None,
-    })
+    };
+    Some((effect, subject::predicate_onset(rest.trim())))
 }
 
 /// CR 608.2c + CR 701.20: True when this effect publishes a revealed or
@@ -9800,6 +9816,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9886,6 +9903,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9961,6 +9979,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -10072,6 +10091,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 

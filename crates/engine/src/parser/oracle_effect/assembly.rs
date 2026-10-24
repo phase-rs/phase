@@ -2974,6 +2974,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
         def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
+        // CR 611.2e: carry the onset the clause parser stamped from the verb form, so the
+        // resolution's entry-observation boundary knows whether this instruction applies
+        // with an entry of the same resolution.
+        def.entry_onset = clause_ir.parsed.entry_onset;
         // CR 608.2c: A mass zone move immediately followed by "deals that much
         // damage to each ..." reads ONE scalar result from the completed move,
         // not a different per-recipient event-context amount. Bind only this
