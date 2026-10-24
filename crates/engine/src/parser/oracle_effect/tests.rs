@@ -17861,12 +17861,35 @@ fn parse_search_aura_with_mana_value_and_different_name() {
                     "Should have DifferentNameFrom, got {:?}",
                     properties
                 );
+                // CR 201.2a: "with a different name than each Aura you control"
+                // is NOT the "that doesn't have the same name as" grammar. The
+                // negated-name arm added for the Curse/Yenna/Folly class must
+                // not hijack it into a `SharesQuality` prop.
+                assert!(
+                    !properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::Name,
+                            ..
+                        }
+                    )),
+                    "the negated-name arm must not capture the different-name grammar, got {:?}",
+                    properties
+                );
             }
             other => panic!("Expected Typed filter, got {:?}", other),
         },
         other => panic!("Expected SearchLibrary, got {:?}", other),
     }
 }
+
+// Herald of Vengeance's affirmative filter-position name clause ("… that has
+// the same name as a permanent that dealt damage to you last turn") remains an
+// unsupported history-predicate gap; issue #10280 tracks it. The arm
+// deliberately refuses the affirmative frame, and
+// `parse_that_clause_suffix_refuses_affirmative_name_clause` pins that scoping
+// at the seam, so no full-card test records the swallowed restriction as
+// expected behavior.
 
 #[test]
 fn effect_create_colored_token() {

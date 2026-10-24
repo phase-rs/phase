@@ -15,7 +15,7 @@ use crate::types::card_type::{
 };
 use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{alpha1, anychar, space1};
 use nom::combinator::{all_consuming, eof, map_res, opt, peek, recognize, value, verify};
 use nom::multi::many_till;
@@ -1977,13 +1977,15 @@ fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
 /// condition on Gideon of the Trials' emblem) can read the subtype.
 /// Per-occurrence sibling of `precedes_type_addition_clause`.
 ///
-/// Scoped to true CR 205.2a core-type words: the informational "card"/"spell"
-/// suffixes are deliberately excluded, because "a <Subtype> card" phrases
-/// (Curse of Misfortunes' "a Curse card that doesn't have the same name as
-/// …") ride search-filter suffix grammar that today parses only through the
-/// `~`-normalized short name; keeping them normalizing preserves that
-/// behavior. Extend to "card"/"spell" only together with search-filter
-/// support for literal subtype words.
+/// CR 205.2a + CR 205.3h + CR 109.2a / CR 109.2b: the informational "card"/"spell" nouns are
+/// core-type names in this vocabulary (`is_core_type_name`) and ARE type
+/// references here — "a Curse card" names the searched card's subtype exactly
+/// like "a Gideon planeswalker" names the planeswalker type. They are therefore
+/// no longer carved out: keeping the subtype literal is what lets the search
+/// filter parse its base noun phrase at all (Curse of Misfortunes). The
+/// object-level "is this card a subtype name?" suppression stays separate
+/// (`subtype_in_type_change_context`), so future cards of this shape are handled
+/// by the same grammar rather than by a card-name special case.
 /// `end` is the byte index just past the matched word.
 fn precedes_core_type_word(haystack: &str, end: usize) -> bool {
     let next_word = haystack[end..]
@@ -1999,7 +2001,25 @@ fn precedes_core_type_word(haystack: &str, end: usize) -> bool {
         next_word.strip_suffix('s').unwrap_or(""),
     ]
     .iter()
-    .any(|word| is_core_type_name(word) && !matches!(*word, "card" | "spell"))
+    .any(|word| is_core_type_name(word))
+}
+
+/// CR 303.4b + CR 303.4m + CR 205.3h: A subtype-word occurrence immediately
+/// followed by the attachment qualifier " attached to " is a TYPE reference
+/// ("a Curse attached to enchanted player" — Curse of Misfortunes' reference
+/// population; CR 303.4b defines the object or player an Aura is attached to as
+/// "enchanted"), not a self-reference. Per-occurrence sibling of
+/// `precedes_core_type_word` and `precedes_type_addition_clause`; the qualifier
+/// itself is parsed by the shared `oracle_nom::quantity` tail combinator, so
+/// this guard only decides WHETHER the occurrence is a type reference.
+/// `end` is the byte index just past the matched word.
+fn precedes_attachment_qualifier(haystack: &str, end: usize) -> bool {
+    // `tag_no_case` (the established case-insensitive phrase matcher) keeps this
+    // allocation-free; the phrase is ASCII, so its folding is identical to the
+    // lowercased-`tag` form.
+    preceded(space1::<_, OracleError<'_>>, tag_no_case("attached to "))
+        .parse(&haystack[end..])
+        .is_ok()
 }
 
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
@@ -2022,6 +2042,7 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
             && !follows_subtype_status_qualifier(haystack, pos)
             && !precedes_type_addition_clause(haystack, end)
             && !precedes_core_type_word(haystack, end)
+            && !precedes_attachment_qualifier(haystack, end)
         {
             result.push_str(&haystack[last_end..pos]);
             result.push_str(replacement);
@@ -3025,10 +3046,11 @@ pub fn normalize_card_name_refs_reporting(
             // short name is a creature subtype AND the text adds that subtype to
             // the card itself (copy / type-change context, e.g. Wall of Stolen
             // Identity: "enter as a copy … except it's a Wall in addition to its
-            // other types"). A blanket subtype suppression wrongly leaves the
-            // short name literal for cards like Curse of Misfortunes, exposing a
-            // search-filter suffix to the target-fallback path. Use the
-            // word-boundary scanner for anchor dispatch, never raw contains().
+            // other types"). Type-reference positions are handled per occurrence
+            // by the preserving replacer's guards ("a Curse card", "a Curse
+            // attached to enchanted player"), so a subtype-named card's genuine
+            // subject occurrences still normalize. Use the word-boundary scanner
+            // for anchor dispatch, never raw contains().
             let subtype_in_type_change_context = is_subtype_word(&lower_short)
                 && [
                     "in addition to its other types",
@@ -3503,22 +3525,38 @@ mod tests {
     }
 
     #[test]
-    fn normalize_of_short_name_curse_of_misfortunes_keeps_card_suffix_normalizing() {
-        // CR 205.3j + CR 201.3a: Curse of Misfortunes — the sensitive sibling
-        // the of-branch guard comment names. The `precedes_core_type_word`
-        // probe is scoped to true CR 205.2a core-type words, so the
-        // informational "card" suffix does NOT suppress replacement: both
-        // occurrences keep today's `~` normalization (the search-filter
-        // suffix grammar parses through the normalized short name; keeping
-        // this pinned prevents a coverage flip on this card).
+    fn normalize_of_short_name_curse_of_misfortunes_keeps_type_references_literal() {
+        // CR 205.3h + CR 201.5 + CR 201.5c: Curse of Misfortunes — the sensitive sibling
+        // the of-branch guard comment names. Both occurrences are TYPE
+        // references: "a Curse card" is the searched noun phrase's subtype (the
+        // informational "card" noun is a type reference by grammar, not a name
+        // subject) and "a Curse attached to enchanted player" is the reference
+        // population of the name comparison. Neither is a self-reference, so
+        // both must survive normalization literally; before the guards were
+        // completed they became `~`, which made the base search filter
+        // unrecognizable and silently dropped the whole relative clause.
         let text = "At the beginning of your upkeep, you may search your library for a Curse card that doesn't have the same name as a Curse attached to enchanted player, put it onto the battlefield attached to that player, then shuffle.";
         let normalized = normalize_card_name_refs(text, "Curse of Misfortunes");
-        // Both occurrences keep today's `~` normalization ("card" is an
-        // informational suffix, not a CR 205.2a core type) — asserted against the
-        // full normalized text so a coverage flip on this card cannot slip past.
+        assert_eq!(
+            normalized, text,
+            "both occurrences are type references and must stay literal"
+        );
+    }
+
+    #[test]
+    fn normalize_curse_attachment_qualifier_keeps_subtype_literal() {
+        // Two occurrences of the same subtype-word short name in one text: the
+        // subject occurrence ("Curse is put …" — no article, the CR 201.5c
+        // shortened-name self-reference) normalizes to `~`, while the
+        // attachment-qualified type reference ("a Curse attached to enchanted
+        // player") must stay literal. This isolates the
+        // `precedes_attachment_qualifier` guard: without it the second
+        // occurrence folds to `~` like the first.
+        let text = "Whenever Curse is put into a graveyard from the battlefield, you may attach it to a Curse attached to enchanted player.";
+        let normalized = normalize_card_name_refs(text, "Curse of Misfortunes");
         assert_eq!(
             normalized,
-            "At the beginning of your upkeep, you may search your library for a ~ card that doesn't have the same name as a ~ attached to enchanted player, put it onto the battlefield attached to that player, then shuffle."
+            "Whenever ~ is put into a graveyard from the battlefield, you may attach it to a Curse attached to enchanted player."
         );
     }
 
@@ -4282,20 +4320,21 @@ mod tests {
     }
 
     #[test]
-    fn normalize_of_short_name_normalizes_subtype_outside_type_change() {
-        // CR 201.3a: Curse of Misfortunes — the "of"-derived short name "Curse"
-        // is a subtype word, but the text does NOT add that subtype to the card
-        // (no copy / "in addition to its other types" anchor). It is a plain
-        // self-reference and must normalize to ~ so the trailing search filter
-        // parses, rather than falling through to the target-fallback path.
-        let result = normalize_card_name_refs(
-            "At the beginning of your upkeep, you may search your library for a Curse card, \
-             put it onto the battlefield attached to enchanted player, then shuffle.",
+    fn normalize_of_short_name_normalizes_subtype_outside_type_reference() {
+        // CR 201.5 + CR 201.5c: the same subtype-word short name DOES normalize
+        // when the occurrence is a genuine subject reference ("Curse is put into
+        // a graveyard …" — no article, the shortened-name self-reference).
+        // Paired with
+        // `normalize_of_short_name_curse_of_misfortunes_keeps_type_references_literal`,
+        // this proves the type-reference guards narrow the replacement rather
+        // than disabling the of-short-name strategy for subtype names.
+        let normalized = normalize_card_name_refs(
+            "Whenever Curse is put into a graveyard from the battlefield, return it to the battlefield attached to you at the beginning of the next end step.",
             "Curse of Misfortunes",
         );
-        assert!(
-            result.contains('~'), // allow-noncombinator: test assertion, not parsing dispatch
-            "subtype short name outside a type-change context must normalize, got: {result}"
+        assert_eq!(
+            normalized,
+            "Whenever ~ is put into a graveyard from the battlefield, return it to the battlefield attached to you at the beginning of the next end step."
         );
     }
 

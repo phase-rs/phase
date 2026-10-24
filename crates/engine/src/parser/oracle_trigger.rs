@@ -8605,7 +8605,8 @@ fn try_extract_entering_object_name_comparison(
 /// `try_extract_entering_object_name_comparison`. See that function's doc.
 fn parse_entering_object_name_comparison(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if it ").parse(input)?;
-    let (rest, prop) = crate::parser::oracle_effect::parse_search_name_reference_suffix(rest)?;
+    let (rest, prop) =
+        crate::parser::oracle_effect::parse_search_name_reference_suffix(rest, None)?;
     let FilterProp::SharesQuality {
         quality,
         reference,
@@ -21602,7 +21603,9 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     // CR 608.2b: "that has the same name as a card in your graveyard"
     // (Pyromancer's Ascension). Reuse the search-filter name-reference suffix
     // combinator so graveyard SharesQuality semantics stay aligned.
-    if let Ok((rest, prop)) = super::oracle_effect::parse_search_name_reference_suffix(modifier) {
+    if let Ok((rest, prop)) =
+        super::oracle_effect::parse_search_name_reference_suffix(modifier, None)
+    {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![prop]),
