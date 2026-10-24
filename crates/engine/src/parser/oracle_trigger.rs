@@ -22513,7 +22513,8 @@ fn graveyard_owner_scope(possessive: Option<PlayerRelation>) -> Option<Controlle
 /// scopes the moving object's OWNER (`FilterProp::Owned`), never its controller.
 /// `TypedFilter.controller` stays the subject's own "you control" (the CR 603.10a
 /// look-back reading), and the zone-change record matcher reads `Owned` against
-/// `record.arrival.owner`.
+/// `record.arrival.owner`. (Only the put-into-graveyard paths call it today; the hand
+/// destination still scopes the controller.)
 ///
 /// `owner == None` ("a graveyard", "a player's graveyard") scopes nothing. A
 /// `SelfRef` subject ("when this creature is put into your graveyard") is left

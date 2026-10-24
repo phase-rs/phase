@@ -3153,7 +3153,9 @@ pub(crate) fn extract_player_from_event(
         // An owner-keyed head ("put into an opponent's / a player's graveyard ...
         // that player") names the graveyard's owner instead; the parser binds that
         // anaphor to `ParentTargetOwner` (`relative_player_scope_for_condition`), so
-        // this controller reading is never its referent (CR 400.3 + CR 608.2c).
+        // the subject ("that player loses ...") and "have that player ..." forms never
+        // reach this controller reading (CR 400.3 + CR 608.2c). The object-position
+        // "deals N damage to that player" form still does (known gap).
         GameEvent::ZoneChanged { record, .. } => Some(record.arrival.controller),
         // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
         // counter-placement trigger is the player who put the counters.

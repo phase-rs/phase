@@ -1043,13 +1043,17 @@ fn r4_patron_simultaneous_mixed_ownership_deaths() {
     assert_life_delta(&runner, before, (0, -2), "R4 mixed simultaneous deaths");
 }
 
-fn bloodchief_board() -> (GameScenario, ObjectId) {
+fn bloodchief_board_with_quest_counters(counters: u32) -> (GameScenario, ObjectId) {
     let mut s = scenario();
     let ascension = s
         .add_enchantment_from_oracle(P0, "Bloodchief Ascension", BLOODCHIEF)
         .id();
-    s.with_counter(ascension, CounterType::Generic("quest".into()), 3);
+    s.with_counter(ascension, CounterType::Generic("quest".into()), counters);
     (s, ascension)
+}
+
+fn bloodchief_board() -> (GameScenario, ObjectId) {
+    bloodchief_board_with_quest_counters(3)
 }
 
 /// R5 (+R5b guard): Bloodchief Ascension with three quest counters. "You may have that
@@ -1091,6 +1095,79 @@ fn r5_bloodchief_stolen_opponent_card_makes_its_owner_lose_life() {
     accept_optional(&mut runner);
     assert_settled(&runner);
     assert_life_delta(&runner, before, (2, -2), "R5 stolen card: the OWNER loses");
+}
+
+/// R9a (preservation, intervening "if"): with only two quest counters the condition "if
+/// this enchantment has three or more quest counters on it" is false when the card goes to
+/// the opponent's graveyard, so the ability never triggers (CR 603.4): nothing is put on the
+/// stack, nobody is asked, and neither life total moves. The reach guard is that the
+/// opponent-owned card really died into P1's graveyard under P0's control, so the owner-keyed
+/// head did match the event; the three-counter version of the same board is R5.
+#[test]
+fn r9a_bloodchief_with_two_quest_counters_does_not_trigger() {
+    let (mut s, _ascension) = bloodchief_board_with_quest_counters(2);
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    // `murder` asserts the card went to its owner's (P1's) graveyard.
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_in_graveyard_of(&runner, "Bear Stolen", P1);
+    assert_eq!(
+        trigger_instances(runner.state()),
+        0,
+        "two quest counters: the intervening \"if\" is false, nothing triggers"
+    );
+    drain(&mut runner);
+    assert!(
+        !optional_prompt_pending(&runner),
+        "nobody is asked \"you may have that player lose 2 life\""
+    );
+    assert_settled(&runner);
+    assert_life_delta(&runner, before, (0, 0), "R9a two quest counters");
+}
+
+/// R9b (decline, "you may"): with three quest counters the ability triggers and P0 is asked
+/// (CR 608.2d). Declining means the opponent-owned card's owner does not lose 2 life, and
+/// "If you do, you gain 2 life" does not happen, so neither life total moves. The reach guard
+/// is that the prompt was offered to P0 for a stolen card that went to P1's graveyard.
+#[test]
+fn r9b_bloodchief_decline_changes_no_life_total() {
+    let (mut s, _ascension) = bloodchief_board();
+    let stolen = s.add_creature(P1, "Bear Stolen", 2, 2).id();
+    let threaten = s
+        .add_spell_to_hand_from_oracle(P0, "Threaten", false, THREATEN)
+        .id();
+    let murder_stolen = s
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = s.build();
+
+    steal(&mut runner, threaten, stolen, P0);
+    let before = lives(&runner);
+    murder(&mut runner, murder_stolen, stolen, P1);
+    assert_eq!(trigger_instances(runner.state()), 1, "Bloodchief triggers");
+    drain(&mut runner);
+    // Reach guard: the optional prompt was offered, to the controller of the Ascension.
+    assert_optional_prompt_for(&runner, P0);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional effect is accepted");
+    drain(&mut runner);
+    assert!(
+        !optional_prompt_pending(&runner),
+        "the optional prompt is resolved by declining"
+    );
+    assert_settled(&runner);
+    assert_in_graveyard_of(&runner, "Bear Stolen", P1);
+    assert_life_delta(&runner, before, (0, 0), "R9b declined: no loss, no gain");
 }
 
 fn duskmantle_board() -> (GameScenario, ObjectId) {
