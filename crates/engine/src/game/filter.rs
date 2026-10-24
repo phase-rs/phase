@@ -245,6 +245,14 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // ability's chosen target) — the reference set can change, so treat as
         // population dependent, mirroring `DifferentNameFrom`.
         FilterProp::DistinctFrom { .. } => true,
+        // CR 701.3a + CR 603.7c: the filter-matched host axis enumerates a
+        // POPULATION (the host set) and asks whether the candidate is attached to
+        // any of it. A board entry/exit can change that set, and its own inner
+        // filter can read whole-board facts — unconditionally population
+        // dependent, like `DistinctFrom`.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => true,
         // CR 701.15b: A functioning printed source elsewhere on the board can
         // designate an existing permanent, so entry/exit can change this prop.
         FilterProp::Goaded => true,
@@ -858,6 +866,14 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 701.15b: Printed sources and their affected filters can read
         // controller, type, abilities, or other layered characteristics.
         | FilterProp::Goaded => CharacteristicKinds::ALL,
+        // CR 701.3a: the filter-matched host axis resolves a host set from the
+        // resolving chain's targets, the creation snapshot, or the trigger event,
+        // then evaluates a whole inner `TargetFilter` against each host. Its read
+        // surface is not bounded here — conservatively every kind, so a layer
+        // dependency can never be dropped.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => CharacteristicKinds::ALL,
         // CR 109.1: identity exclusion. Against the ability's own parent target
         // this is pure object identity and reads nothing; against any other
         // reference the excluded set is filter-derived and could be anything.
@@ -1052,6 +1068,12 @@ fn entered_object_perturbs_filter_prop(
         FilterProp::DistinctFrom { reference } => {
             matches_target_filter(state, entered_id, reference, ctx)
         }
+        // CR 701.3a: an entering object perturbs the filter-matched host axis iff
+        // it can join the host set — i.e. it matches the host filter (mirrors
+        // `DistinctFrom`'s reference-membership test one level down).
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => matches_target_filter(state, entered_id, filter, ctx),
         // CR 603.4: the reference set is battlefield-derived only when a
         // reference filter is present (classifier returns false for `None`). The
         // `None` arm is therefore unreachable here, but enumerated as `false`
@@ -1199,7 +1221,14 @@ fn entered_perturbs_quantity(
 ///
 /// This intentionally supports only `Not(ParentTarget)` and
 /// `Not(ParentTargetSlot { index })` inside composite filters. Positive
-/// `ParentTarget` / `ParentTargetSlot` inside `And` / `Or` remains unresolved here.
+/// `ParentTarget` / `ParentTargetSlot` inside `And` / `Or` are NOT resolved
+/// here — a mass-population scan resolves them at its own call site through
+/// [`concretize_mass_population_parent_legs`], which
+/// `effects::resolved_object_filter` applies after this normalization. The
+/// asymmetry is deliberate and load-bearing: an EMPTY referent set under `Not`
+/// means "exclude nothing" (`Any`), while an empty POSITIVE referent set means
+/// "affect no host" (`TargetFilter::None`) — a later reader must not "fix" one
+/// into the other.
 pub fn normalize_contextual_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
@@ -1228,6 +1257,14 @@ pub fn normalize_contextual_filter(
 /// existing `[] => Any` arm makes the filter match everything again — which is
 /// exactly "nothing is excluded any more". It must NOT suppress the whole
 /// effect: the other objects are still affected.
+///
+/// POSITIVE parent legs are no longer silently unresolved: a mass-population
+/// scan concretizes them through
+/// [`concretize_mass_population_parent_legs`], which
+/// `effects::resolved_object_filter` applies after this normalization. The two
+/// rules differ on purpose — an empty set under `Not` is `Any` (nothing
+/// excluded), an empty set on a positive leg is `TargetFilter::None` (matches
+/// nothing).
 pub fn normalize_contextual_filter_with_liveness(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
@@ -1316,6 +1353,103 @@ pub fn normalize_contextual_filter_with_liveness(
     }
 }
 
+/// CR 400.7 + CR 601.2c + CR 603.7c: Concretize the POSITIVE
+/// `ParentTarget` / `ParentTargetSlot` legs of a MASS-POPULATION filter into the
+/// object targets this resolving node actually announced.
+///
+/// The runtime matcher's own `ParentTarget` arm is gated on
+/// `target_incarnations` being non-empty (it is the delayed-trigger snapshot
+/// reader), and `normalize_contextual_filter_with_liveness` only concretizes the
+/// `Not(parent)` exclusion shape. So a positive parent leg inside a mass
+/// scan's filter ("target creature and all Auras attached to it") would
+/// otherwise match nothing. This function is the positive-leg counterpart,
+/// called by `effects::resolved_object_filter` for the mass variants.
+///
+/// **Precondition:** the caller runs `normalize_contextual_filter_with_liveness`
+/// first, so a raw `Not(ParentTarget)` (Avatar's Wrath) has already become
+/// `Any`/`Not(SpecificObject)`. The `Not` descent here is sound only under that
+/// precondition: on an un-normalized filter an empty referent set would become
+/// `Not(None)` = match-everything.
+///
+/// CR 400.7: a referent that left and returned is a new object, so an object
+/// entry is admitted only while BOTH the positional announcement pin
+/// (`target_occurrence_is_current`) and the creation-time snapshot pin
+/// (`target_pin_is_current`) still name the live incarnation.
+///
+/// **Empty-set semantics.** An empty positive referent set becomes
+/// `TargetFilter::None` (matches nothing), never `Any`. This is the deliberate
+/// mirror image of the `Not` normalization above: "destroy each creature other
+/// than that one" with no referent excludes nothing, while "that creature and
+/// its Auras" with no referent must affect no host.
+pub(crate) fn concretize_mass_population_parent_legs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|inner| concretize_mass_population_parent_legs(state, ability, inner))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|inner| concretize_mass_population_parent_legs(state, ability, inner))
+                .collect(),
+        },
+        // CR 608.2c: negation reads the same game state as its inner leg; an
+        // empty referent set inside it collapses to "matches nothing", which is
+        // the correct reading of that disjunct (see the precondition above).
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(concretize_mass_population_parent_legs(
+                state, ability, inner,
+            )),
+        },
+        TargetFilter::ParentTarget => parent_target_mass_leg(state, ability),
+        // CR 601.2c: `index` is a CHAIN declared-slot number (never an index
+        // into `ability.targets`), read through the same live positional
+        // authority the matcher uses.
+        TargetFilter::ParentTargetSlot { index } => {
+            match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            {
+                Some(TargetRef::Object(id)) => TargetFilter::SpecificObject { id },
+                _ => TargetFilter::None,
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// CR 601.2c + CR 400.7: the live object set a bare `ParentTarget` leg names on
+/// a mass-population scan — see [`concretize_mass_population_parent_legs`].
+fn parent_target_mass_leg(state: &GameState, ability: &ResolvedAbility) -> TargetFilter {
+    let object_ids: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| ability.target_occurrence_is_current(*index, state))
+        .filter_map(|(_, target)| match target {
+            TargetRef::Object(id) if ability.target_pin_is_current(*id, state) => Some(*id),
+            // CR 608.2c: a player referent has no attachment relation (CR 701.3a
+            // is an object-or-player relation, but `Host` is parser-gated to
+            // object hosts), and an object scan cannot admit players.
+            _ => None,
+        })
+        .collect();
+    match object_ids.as_slice() {
+        [] => TargetFilter::None,
+        [id] => TargetFilter::SpecificObject { id: *id },
+        _ => TargetFilter::Or {
+            filters: object_ids
+                .into_iter()
+                .map(|id| TargetFilter::SpecificObject { id })
+                .collect(),
+        },
+    }
+}
+
 /// Context bundle passed into filter evaluation.
 ///
 /// Bundles the source object, its controller, and — when available — the resolving
@@ -1376,6 +1510,24 @@ pub struct FilterContext<'a> {
 }
 
 impl<'a> FilterContext<'a> {
+    /// Preserve a caller's already-resolved source authority instead of
+    /// rebuilding it from `ability` or the live object: the controller override
+    /// (`from_ability_with_controller`) and the carried recipient, trigger and
+    /// declared-slot bindings all survive into a nested host evaluation.
+    fn from_source_context(source: &SourceContext<'a>) -> Self {
+        Self {
+            source_id: source.id,
+            source_controller: source.controller,
+            ability: source.ability,
+            trigger_source: source.trigger_source,
+            recipient_id: source.recipient_id,
+            scoped_iteration_player: None,
+            triggering_object: source.triggering_object,
+            declared_slot_view: source.declared_slot_view,
+            granting_object: source.granting_object,
+        }
+    }
+
     /// CR 601.2c: Bind the declared-target view for one evaluation (see
     /// [`FilterContext::declared_slot_view`]). Returns a fresh value; the
     /// caller's context is untouched.
@@ -1824,6 +1976,7 @@ pub(crate) fn zone_axis_admits(
 ///   exit record of THAT incarnation (the `ZoneChangeRecord` whose pre-change identity is the
 ///   pin), matching each candidate by its own incarnation rather than by a reusable id. A
 ///   referent that left and returned is a new object (CR 400.7) and is never read live.
+///
 fn attached_to_referent(
     state: &GameState,
     referent: AttachmentReferentObject,
@@ -1960,6 +2113,182 @@ fn attached_to_declared_slot(
         candidate,
         candidate_id,
     )
+}
+
+/// CR 701.3a + CR 603.7c + CR 608.2h: `FilterProp::AttachedTo { to: Host { filter } }`
+/// — is `candidate` attached to any object in `filter`'s host set?
+///
+/// The referent authority is the ONE shared relation (`attached_to_referent`),
+/// so this function only decides WHICH host object(s) the inner filter names:
+///
+/// * `ParentTarget` — three tiers, in order:
+///   1. **creation snapshot** (a delayed payload; `ability.target_incarnations`
+///      non-empty): every current object target's raw snapshot id plus its
+///      creation pin, read as `Pinned { reading: EffectApplication }` so the one
+///      call covers live-and-current, departed (exit record in
+///      `zone_changes_this_turn`), and left-and-returned (stale pin). A snapshot
+///      is authoritative under CR 603.7c/400.7 and never falls through.
+///   2. **live announcement targets** (no snapshot): `ability.targets` positionally,
+///      skipping positions whose announcement pin is stale, read as `ById`
+///      (live back-reference, `lki_cache` once the host has left).
+///   3. **event tier** — only when tiers 1–2 produced NO object referent: the
+///      per-firing event authority `targeting::resolve_event_context_target`.
+///      This is what makes family A's immediate trigger bodies live (Treefolk
+///      Mystic's block pair); it is the SAME call `delayed_trigger`'s creation
+///      snapshot uses, so there is no second event table.
+/// * `TriggeringSource` / `EventTarget` / `AttachedTo` — the event authority
+///   directly, unchanged.
+/// * any other object filter (`Typed`, `Or`, `SpecificObject`, …) — a battlefield
+///   scan of the live host set under `matches_target_filter`, mirroring
+///   `attach.rs::battlefield_ids_matching_filter`'s deliberate non-use of
+///   `resolved_object_ids_for_filter` (whose explicit-target-first arm would
+///   shadow this population read).
+///
+/// A player referent is not possible in `Host` (the parser is object-only), and a
+/// player result from any tier is dropped.
+fn attached_to_host_filter<'a>(
+    state: &GameState,
+    source: &SourceContext<'a>,
+    filter: &TargetFilter,
+    candidate: &GameObject,
+    candidate_id: ObjectId,
+) -> bool {
+    debug_assert!(
+        !matches!(filter, TargetFilter::ParentTargetSlot { .. }),
+        "AttachmentReferent::Host never carries a declared-slot referent: a \
+         slot-indexed host phrase lowers to DeclaredTarget (parser invariant)"
+    );
+    match filter {
+        TargetFilter::ParentTarget => {
+            let mut produced_referent = false;
+            if let Some(ability) = source.ability {
+                if !ability.target_incarnations.is_empty() {
+                    // Tier 1 — the creation-time snapshot. Authoritative even
+                    // when stale (CR 603.7c + CR 400.7): no event-tier fallback.
+                    for (index, target) in ability.targets.iter().enumerate() {
+                        let TargetRef::Object(id) = target else {
+                            continue;
+                        };
+                        if !ability.target_occurrence_is_current(index, state) {
+                            continue;
+                        }
+                        match ability
+                            .target_incarnations
+                            .iter()
+                            .find(|pin| pin.object_id == *id)
+                        {
+                            Some(pin) => {
+                                if attached_to_referent(
+                                    state,
+                                    AttachmentReferentObject::Pinned {
+                                        referent: crate::game::targeting::SlotReferent {
+                                            id: *id,
+                                            pin: *pin,
+                                        },
+                                        reading: ReferentReading::EffectApplication,
+                                    },
+                                    candidate,
+                                    candidate_id,
+                                ) {
+                                    return true;
+                                }
+                            }
+                            // An id with no creation pin falls back to the live
+                            // back-reference (its incarnation identity is unknown,
+                            // so there is nothing to pin).
+                            None => {
+                                if attached_to_referent(
+                                    state,
+                                    AttachmentReferentObject::ById(*id),
+                                    candidate,
+                                    candidate_id,
+                                ) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+                // Tier 2 — live announcement targets, positional pin only.
+                for (index, target) in ability.targets.iter().enumerate() {
+                    let TargetRef::Object(id) = target else {
+                        continue;
+                    };
+                    if !ability.target_occurrence_is_current(index, state) {
+                        continue;
+                    }
+                    produced_referent = true;
+                    if attached_to_referent(
+                        state,
+                        AttachmentReferentObject::ById(*id),
+                        candidate,
+                        candidate_id,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            // Tier 3 — the per-firing event referent.
+            if produced_referent {
+                return false;
+            }
+            match crate::game::targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::ParentTarget,
+                source.id,
+            ) {
+                Some(TargetRef::Object(id)) => attached_to_referent(
+                    state,
+                    AttachmentReferentObject::ById(id),
+                    candidate,
+                    candidate_id,
+                ),
+                _ => false,
+            }
+        }
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
+            match crate::game::targeting::resolve_event_context_target(state, filter, source.id) {
+                Some(TargetRef::Object(id)) => {
+                    // CR 400.7 + CR 608.2h: the firing event proves WHICH
+                    // incarnation of the host the anaphor names. Pin exactly that
+                    // one: current → read live, departed → read its own exit
+                    // record. A different exit of the same storage id this turn
+                    // (an earlier blink) is not this ability's subject.
+                    let pin = state.current_trigger_event.as_ref().and_then(|event| {
+                        crate::game::targeting::event_context_incarnation(filter, event, id)
+                    });
+                    let referent = match pin {
+                        Some(pin) => AttachmentReferentObject::Pinned {
+                            referent: crate::game::targeting::SlotReferent { id, pin },
+                            reading: ReferentReading::EffectApplication,
+                        },
+                        None => AttachmentReferentObject::ById(id),
+                    };
+                    attached_to_referent(state, referent, candidate, candidate_id)
+                }
+                _ => false,
+            }
+        }
+        // Typed / Or / SpecificObject / any other object filter: scan the live
+        // battlefield for the host set, then ask the shared relation authority.
+        _ => {
+            // CR 109.4 + CR 601.2c: the caller's authority is authoritative for
+            // the nested host filter. Rebuilding from `ability` would restore the
+            // ability's controller over an explicit override and drop the carried
+            // recipient / trigger / declared-slot bindings.
+            let ctx = FilterContext::from_source_context(source);
+            state.battlefield.iter().copied().any(|host_id| {
+                matches_target_filter(state, host_id, filter, &ctx)
+                    && attached_to_referent(
+                        state,
+                        AttachmentReferentObject::ById(host_id),
+                        candidate,
+                        candidate_id,
+                    )
+            })
+        }
+    }
 }
 
 pub(crate) fn controller_ref_player(
@@ -2243,6 +2572,12 @@ pub(crate) fn filter_prop_contains(
         FilterProp::DifferentNameFrom { filter } => recurse(filter),
         // CR 109.1 + CR 120.3: the object-identity reference.
         FilterProp::DistinctFrom { reference } => recurse(reference),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`,
+        // so a leaf reference inside the host filter is found by the same
+        // traversal the siblings above use.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => recurse(filter),
         FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
         // CR 115.9b/9c: the stack entry's target-side filters.
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
@@ -2619,6 +2954,11 @@ fn filter_prop_grammar_any(
             FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
                 filter_grammar_any(filter, visit)
             }
+            // The filter-matched host is part of the filter grammar: its inner
+            // filter can itself name a target, event subject or typed quality.
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => filter_grammar_any(filter, visit),
             FilterProp::Not { prop } => filter_prop_grammar_any(prop, visit),
             FilterProp::AnyOf { props } => props
                 .iter()
@@ -3173,6 +3513,19 @@ fn filter_prop_contains_input(
             ),
             FilterProp::DistinctFrom { reference } => filter_contains_input(
                 reference,
+                predicate,
+                raw_reference,
+                scalar_filter,
+                population_leaf,
+                object_information_available,
+                slot_context,
+            ),
+            // CR 701.3a: the filter-matched host axis nests its own
+            // `TargetFilter`; route it exactly like the sibling nested filters.
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => filter_contains_input(
+                filter,
                 predicate,
                 raw_reference,
                 scalar_filter,
@@ -4080,7 +4433,11 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::AttachedTo {
             to: AttachmentReferent::Source
                 | AttachmentReferent::Recipient
-                | AttachmentReferent::DeclaredTarget { .. },
+                | AttachmentReferent::DeclaredTarget { .. }
+                // CR 701.3a: `Host` carries no `ControllerRef` of its own; its
+                // nested `TargetFilter` is visited by `rewrite_filter_props`,
+                // whose node callback binds `Typed.controller` there.
+                | AttachmentReferent::Host { .. },
         }
         | FilterProp::Another
         | FilterProp::Unpaired
@@ -4890,6 +5247,21 @@ fn rewrite_filter_prop(
             object_information_available,
             slot_context,
         ),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // every generic rewrite (declared groups, chosen card types, owner
+        // authority, …) must descend into it — this is the traversal the
+        // `DeclaredGroupBinder` and the `IsChosenCardType` rewriter share.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref_mut().into_iter().for_each(|inner| {
                 rewrite_filter_props(
@@ -5647,13 +6019,48 @@ pub(crate) fn matches_target_filter_on_departure(
     from: Zone,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
+    record: Option<&ZoneChangeRecord>,
 ) -> bool {
-    filter_inner_with_lookup(
+    // CR 603.10a + CR 704.5n: by the time a leaves-the-battlefield trigger is
+    // matched, the CR 704.5m/n SBAs have already detached the object's Auras and
+    // Equipment, so the live object's `attachments` is empty. The departure
+    // record captured the relation at the instant before the zone change; read
+    // THAT snapshot for attachment predicates.
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    let projected = record.filter(|record| !record.attachments.is_empty());
+    let Some(record) = projected else {
+        return filter_inner_with_lookup(
+            state,
+            object_id,
+            filter,
+            ctx,
+            ControllerLookup::Departed(from),
+        );
+    };
+    let mut departed = obj.clone();
+    departed.attachments = record
+        .attachments
+        .iter()
+        .map(|attachment| attachment.object_id)
+        .collect();
+    filter_inner_for_object(
         state,
+        &departed,
         object_id,
         filter,
-        ctx,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.trigger_source,
+        ctx.recipient_id,
+        ctx.scoped_iteration_player,
+        ctx.triggering_object,
+        ctx.declared_slot_view,
+        ctx.granting_object,
         ControllerLookup::Departed(from),
+        HeldObject::Live,
     )
 }
 
@@ -7594,7 +8001,7 @@ pub fn matches_zone_change_event_object_filter(
             // format modifies it).
             match origin {
                 Some(from) => {
-                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx)
+                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx, None)
                 }
                 None => matches_target_filter(state, *object_id, filter, ctx),
             }
@@ -9796,6 +10203,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        // CR 701.3a: a spell-cast record carries no host relation, exactly as it
+        // carries none for the four referents above. Fail closed.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -11027,6 +11439,14 @@ fn matches_filter_prop(
         FilterProp::AttachedTo {
             to: AttachmentReferent::DeclaredTarget { slot },
         } => attached_to_declared_slot(state, source, *slot, obj, object_id),
+        // CR 701.3a + CR 603.7c + CR 608.2h: attached to any object in the host
+        // filter's referent set — the filter-matched host axis ("all Auras
+        // attached to that creature", "… attached to creatures", "… attached to
+        // target creature"). `attached_to_host_filter` owns the tier order and
+        // reuses the same relation authority as the four bound referents above.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => attached_to_host_filter(state, source, filter, obj, object_id),
         // CR 303.4 + CR 301.5: Player-referent attachment predicate — the
         // candidate's `attached_to` must resolve to the SAME player that
         // `player` (a `ControllerRef`) identifies. This is the player-referent
@@ -12044,16 +12464,41 @@ fn zone_change_record_matches_property(
                     .contains(&record.object_id)
         }
 
+        // CR 603.10a + CR 704.5n: the departure record captures the attachment
+        // relation at the instant before the zone change, so an "equipped" /
+        // "enchanted" look-back reads THAT snapshot — the live object has already
+        // had its illegally attached permanents detached by the SBAs. The
+        // source-relative half follows the live arm: a source that is itself an
+        // attachment (or attached) can only name its own host, which a departed
+        // record is not.
+        FilterProp::EnchantedBy => {
+            source.attached_to.is_none()
+                && !source.source_is_aura
+                && record
+                    .attachments
+                    .iter()
+                    .any(|attachment| attachment.kind == crate::types::ability::AttachmentKind::Aura)
+        }
+        FilterProp::EquippedBy => {
+            source.attached_to.is_none()
+                && !source.source_is_equipment
+                && record.attachments.iter().any(|attachment| {
+                    attachment.kind == crate::types::ability::AttachmentKind::Equipment
+                })
+        }
         FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        | FilterProp::EnchantedBy
-        | FilterProp::EquippedBy
         | FilterProp::AttachedTo { to: AttachmentReferent::Source }
         | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        // CR 701.3a: a zone-change snapshot carries no host relation, exactly as
+        // it carries none for the four referents above. Fail closed.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
@@ -25246,6 +25691,12 @@ mod characteristic_read_classification_tests {
             | FilterProp::AttachedTo {
                 to: AttachmentReferent::DeclaredTarget { .. },
             }
+            // CR 701.3a: `Host` carries no `ControllerRef` field of its own; its
+            // nested filter is reached by `filter_prop_characteristic_reads_at`'s
+            // conservative ALL answer for this variant.
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { .. },
+            }
             | FilterProp::Another
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
@@ -26094,7 +26545,7 @@ mod dandan_axis_collapse_tests {
     ) -> [bool; 2] {
         [P0, P1].map(|seat| {
             let ctx = FilterContext::from_source_with_controller(SOURCE, seat);
-            matches_target_filter_on_departure(state, id, from, filter, &ctx)
+            matches_target_filter_on_departure(state, id, from, filter, &ctx, None)
         })
     }
 
@@ -27441,6 +27892,525 @@ mod entry_observation_tests {
         let self_ctx = FilterContext::from_source(&f.state, f.entrant);
         assert!(!matches_target_filter_on_entry_observation(
             &f.state, &f.record, None, &another, &self_ctx
+        ));
+    }
+}
+
+/// CR 701.3a + CR 603.7c + CR 608.2h: unit rows for
+/// `FilterProp::AttachedTo { to: Host { .. } }` (P14 a/e/f/d/g) and the
+/// classification metacontract (P23, filter-side half).
+#[cfg(test)]
+mod attached_set_host_filter_tests {
+    use super::*;
+    use crate::game::effects::attach::attach_to;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AttachmentReferent, Effect, FilterProp, ResolvedAbility, TargetFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn state() -> GameState {
+        GameState::new_two_player(42)
+    }
+
+    fn creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn aura(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        id
+    }
+
+    fn host_prop(filter: TargetFilter) -> FilterProp {
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host {
+                filter: Box::new(filter),
+            },
+        }
+    }
+
+    fn empty_lki() -> crate::types::game_state::LKISnapshot {
+        crate::types::game_state::LKISnapshot {
+            name: String::new(),
+            token_image_ref: None,
+            power: None,
+            toughness: None,
+            base_power: None,
+            base_toughness: None,
+            mana_value: 0,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: Vec::new(),
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: Vec::new(),
+            colors: Vec::new(),
+            chosen_attributes: Vec::new(),
+            counters: Default::default(),
+            tapped: false,
+            is_suspected: false,
+            was_prepared: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn host_filter(filter: TargetFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![host_prop(filter)],
+            ..TypedFilter::default()
+        })
+    }
+
+    fn ability(effect: Effect, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(effect, targets, ObjectId(900), PlayerId(0))
+    }
+
+    fn destroyed() -> Effect {
+        Effect::DestroyAll {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        }
+    }
+
+    /// P14(a): a live `ParentTarget` host reads the candidate's live
+    /// back-reference.
+    #[test]
+    fn p14a_live_parent_target_host_matches_the_attachment() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Host");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, host);
+        let mut ability = ability(destroyed(), vec![TargetRef::Object(host)]);
+        ability.announce_target_pins(&state);
+        let filter = host_filter(TargetFilter::ParentTarget);
+        assert!(matches_target_filter(
+            &state,
+            att,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+        // Hostile sibling: an unattached Aura does not match.
+        let loose = aura(&mut state, PlayerId(1), "Loose Aura");
+        assert!(!matches_target_filter(
+            &state,
+            loose,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+    }
+
+    /// P14(c): a pinned host with no departure record matches nothing. The
+    /// exit-time attachment set is the only LKI answer, so an id whose exit the
+    /// CR 608.2h ledger never recorded must not resurrect the relation — even
+    /// when an id-only `lki_cache` read would match.
+    #[test]
+    fn p14c_pinned_host_without_a_departure_record_matches_nothing() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Host");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, host);
+        // Build the payload the way delayed-trigger creation does: a creation
+        // snapshot (unpinned targets + incarnation pins), NOT positional pins.
+        // This is what enters the tier-1 `Pinned { EffectApplication }` read.
+        let mut ability = ability(destroyed(), vec![TargetRef::Object(host)]);
+        ability.set_target_incarnations_recursive(vec![
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]),
+        ]);
+        ability.set_unpinned_targets(vec![TargetRef::Object(host)]);
+        // An LKI snapshot DOES exist, so an id-only read would match. The
+        // zone-change ledger holds no record for this exit, and that is the
+        // authority the pinned arm must consult.
+        state.lki_cache.insert(
+            host,
+            crate::types::game_state::LKISnapshot {
+                name: "Host".into(),
+                token_image_ref: None,
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: Default::default(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: vec![crate::types::game_state::AttachmentSnapshot {
+                    object_id: att,
+                    identity: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&att],
+                        ),
+                    ),
+                    controller: PlayerId(1),
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                }],
+            },
+        );
+        state.objects.remove(&host);
+        let filter = host_filter(TargetFilter::ParentTarget);
+        assert!(!matches_target_filter(
+            &state,
+            att,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+    }
+
+    /// P14(d): `Host { TriggeringSource }` resolves from the event's subject.
+    #[test]
+    fn p14d_triggering_source_host_resolves_from_the_event() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Attacker");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, host);
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![host],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![],
+        });
+        let ability = ability(destroyed(), vec![]);
+        let filter = host_filter(TargetFilter::TriggeringSource);
+        assert!(matches_target_filter(
+            &state,
+            att,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+    }
+
+    /// P14(e): `Host { Typed(Creature) }` scans the live board.
+    #[test]
+    fn p14e_typed_host_scans_the_battlefield() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Host");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, host);
+        let ability = ability(destroyed(), vec![]);
+        let filter = host_filter(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(matches_target_filter(
+            &state,
+            att,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+    }
+
+    /// P14(h) — the caller's controller override is authoritative for a nested
+    /// host filter. The ability's own controller is P0, but a mass-move remap
+    /// dispatches the effect for P1; "attached to a creature YOU control" must
+    /// then mean P1's creature, not P0's.
+    #[test]
+    fn p14h_host_evaluation_preserves_the_callers_controller_override() {
+        let mut state = state();
+        let theirs = creature(&mut state, PlayerId(1), "Their Creature");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, theirs);
+        let ability = ability(destroyed(), vec![TargetRef::Object(theirs)]);
+        let mut host_type = crate::types::ability::TypedFilter::creature();
+        host_type.controller = Some(crate::types::ability::ControllerRef::You);
+        let filter = host_filter(TargetFilter::Typed(host_type));
+        assert!(
+            !matches_target_filter(&state, att, &filter, &FilterContext::from_ability(&ability)),
+            "the ability's controller (P0) does not control the host"
+        );
+        assert!(
+            matches_target_filter(
+                &state,
+                att,
+                &filter,
+                &FilterContext::from_ability_with_controller(&ability, PlayerId(1))
+            ),
+            "the caller's controller override is authoritative for the nested host"
+        );
+    }
+
+    /// P14(i) — the event host's INCARNATION comes from the firing event, not
+    /// from the storage id's latest exit. The attack record names the departed
+    /// incarnation; the same id has already returned with a bumped incarnation.
+    #[test]
+    fn p14i_event_host_reads_the_incarnation_the_event_names() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Departed Host");
+        let att = aura(&mut state, PlayerId(1), "Attached Aura");
+        attach_to(&mut state, att, host);
+        let departed =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]);
+        let source_context =
+            crate::game::trigger_matchers::test_trigger_source_context(&state, host);
+        state
+            .zone_changes_this_turn
+            .push_back(crate::types::game_state::ZoneChangeRecord {
+                attachments: vec![crate::types::game_state::AttachmentSnapshot {
+                    object_id: att,
+                    identity: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&att],
+                        ),
+                    ),
+                    controller: PlayerId(1),
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                }],
+                trigger_source_context: Some(crate::types::game_state::TriggerSourceContext {
+                    identity: crate::types::identifiers::ObjectIdentityBinding::new(
+                        departed,
+                        Zone::Battlefield,
+                    ),
+                    ..source_context
+                }),
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    host,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            });
+
+        // The host returns as a NEW object in the same storage slot and loses
+        // the Aura; the attack record still names the departed incarnation.
+        state.objects.get_mut(&host).unwrap().bump_incarnation();
+        state.objects.get_mut(&att).unwrap().attached_to = None;
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![host],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
+                object_id: host,
+                incarnation: Some(departed.incarnation),
+                lki: empty_lki(),
+                is_token: false,
+                is_commander: false,
+            }],
+        });
+
+        let ability = ability(destroyed(), vec![]);
+        let filter = host_filter(TargetFilter::TriggeringSource);
+        assert!(
+            matches_target_filter(&state, att, &filter, &FilterContext::from_ability(&ability)),
+            "the named departed incarnation's attachment set answers"
+        );
+    }
+
+    /// P14(j) — the counterexample the historical scan got wrong: an EARLIER
+    /// blink left a departure record for this id, but the firing attack names
+    /// the CURRENT incarnation, so the relation must read the live attachment
+    /// set (the new Equipment), never the old exit record.
+    #[test]
+    fn p14j_event_host_prefers_the_events_current_incarnation_over_an_earlier_exit() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Blinked Host");
+        let old_gear = aura(&mut state, PlayerId(1), "Old Aura");
+        attach_to(&mut state, old_gear, host);
+        let blink_incarnation =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]);
+        let source_context =
+            crate::game::trigger_matchers::test_trigger_source_context(&state, host);
+        // The earlier blink's departure record stays in this turn's history.
+        state
+            .zone_changes_this_turn
+            .push_back(crate::types::game_state::ZoneChangeRecord {
+                attachments: vec![crate::types::game_state::AttachmentSnapshot {
+                    object_id: old_gear,
+                    identity: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&old_gear],
+                        ),
+                    ),
+                    controller: PlayerId(1),
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                }],
+                trigger_source_context: Some(crate::types::game_state::TriggerSourceContext {
+                    identity: crate::types::identifiers::ObjectIdentityBinding::new(
+                        blink_incarnation,
+                        Zone::Battlefield,
+                    ),
+                    ..source_context
+                }),
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    host,
+                    Some(Zone::Battlefield),
+                    Zone::Exile,
+                )
+            });
+        // It returns as a new incarnation, loses the old Aura, gains a new one.
+        state.objects.get_mut(&host).unwrap().bump_incarnation();
+        state.objects.get_mut(&old_gear).unwrap().attached_to = None;
+        let current =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]);
+        let new_gear = aura(&mut state, PlayerId(1), "New Aura");
+        attach_to(&mut state, new_gear, host);
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![host],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
+                object_id: host,
+                incarnation: Some(current.incarnation),
+                lki: empty_lki(),
+                is_token: false,
+                is_commander: false,
+            }],
+        });
+
+        let ability = ability(destroyed(), vec![]);
+        let filter = host_filter(TargetFilter::TriggeringSource);
+        assert!(
+            matches_target_filter(
+                &state,
+                new_gear,
+                &filter,
+                &FilterContext::from_ability(&ability)
+            ),
+            "the live incarnation's Equipment answers"
+        );
+        assert!(
+            !matches_target_filter(
+                &state,
+                old_gear,
+                &filter,
+                &FilterContext::from_ability(&ability)
+            ),
+            "the earlier exit's attachment set must not answer"
+        );
+    }
+
+    /// P14(f): `ParentTarget` with no targets, no event, and a non-attachment
+    /// source matches nothing (the last tier is empty).
+    #[test]
+    fn p14f_parent_target_with_no_referent_matches_nothing() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Host");
+        let att = aura(&mut state, PlayerId(1), "Aura");
+        attach_to(&mut state, att, host);
+        let ability = ability(destroyed(), vec![]);
+        let filter = host_filter(TargetFilter::ParentTarget);
+        assert!(!matches_target_filter(
+            &state,
+            att,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+    }
+
+    /// P14(g) — the RF3-1 discriminator: a block event with NO seeded targets
+    /// and no creation snapshot binds the block pair's OTHER creature only
+    /// through the event tier (`blocked_attacker_from_event`).
+    #[test]
+    fn p14g_block_event_tier_resolves_the_other_combatant() {
+        let mut state = state();
+        let blocker = creature(&mut state, PlayerId(0), "Blocker");
+        let attacker = creature(&mut state, PlayerId(1), "Attacker");
+        let unrelated = creature(&mut state, PlayerId(1), "Unrelated");
+        let on_attacker = aura(&mut state, PlayerId(1), "On Attacker");
+        let on_unrelated = aura(&mut state, PlayerId(1), "On Unrelated");
+        attach_to(&mut state, on_attacker, attacker);
+        attach_to(&mut state, on_unrelated, unrelated);
+        let ability = ability(destroyed(), vec![]);
+        assert!(ability.target_incarnations.is_empty());
+        let filter = host_filter(TargetFilter::ParentTarget);
+
+        // Hostile: no event at all -> no host.
+        assert!(!matches_target_filter(
+            &state,
+            on_attacker,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+
+        // Hostile: an unrelated AttackersDeclared event names no counterpart.
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(0),
+            attacks: vec![],
+            declaration_records: vec![],
+        });
+        assert!(!matches_target_filter(
+            &state,
+            on_attacker,
+            &filter,
+            &FilterContext::from_ability(&ability)
+        ));
+
+        // The block event's other combatant is the attacker; the source is the
+        // blocker (not an attachment, so the source-attached fallback cannot
+        // fire).
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        });
+        let source_ctx = FilterContext::from_source_with_controller(blocker, PlayerId(0));
+        assert!(matches_target_filter(
+            &state,
+            on_attacker,
+            &filter,
+            &source_ctx
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            on_unrelated,
+            &filter,
+            &source_ctx
+        ));
+    }
+
+    /// P23 (filter-side half): the classification metacontract.
+    #[test]
+    fn p23_host_attachment_classification() {
+        assert!(
+            !AttachmentReferent::Host {
+                filter: Box::new(TargetFilter::ParentTarget)
+            }
+            .reads_declared_slot(),
+            "Host never reads a declared slot"
+        );
+        assert!(AttachmentReferent::DeclaredTarget { slot: 0 }.reads_declared_slot());
+        assert!(
+            filter_prop_uses_object_population(&host_prop(TargetFilter::ParentTarget)),
+            "Host enumerates a host population"
+        );
+        assert!(!filter_prop_uses_object_population(
+            &FilterProp::AttachedTo {
+                to: AttachmentReferent::Source
+            }
+        ));
+        assert!(filter_prop_contains(
+            &host_prop(TargetFilter::ParentTarget),
+            &|leaf| *leaf == TargetFilter::ParentTarget
         ));
     }
 }

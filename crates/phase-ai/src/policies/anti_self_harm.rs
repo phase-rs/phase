@@ -8736,9 +8736,16 @@ mod tests {
     /// A `controller: You` filter can never match an opponent's permanent, so
     /// "no opponent matched" is vacuously true and the mode would be penalised
     /// unconditionally. Orzhov Charm's self-bounce mode IS aimed at our own
-    /// board by design (re-buy an ETB, dodge removal). REVERT-FAILING: without
-    /// the `filter_can_reach_an_opponent` guard this scores the wasted-cast
-    /// penalty even with an opposing creature sitting on the battlefield.
+    /// board by design (re-buy an ETB, dodge removal).
+    ///
+    /// The attached-set parse shape means this row now covers the shape (the
+    /// head announces the self-scoped filter) rather than the
+    /// `filter_can_reach_an_opponent` guard: `TargetOnly` is Contextual for the
+    /// mode scan, so the guard's pre-existing `Effect::Bounce` coverage is
+    /// pinned by `pre_cast_allows_explicit_self_bounce_patterns`. Teaching the
+    /// policy the attached-set shape is a follow-up, deliberately not part of
+    /// this PR after the review found that recognizing it here regressed
+    /// self-bounce activations.
     #[test]
     fn self_scoped_harmful_mode_is_not_penalised() {
         let mut state = make_state();
@@ -8747,8 +8754,15 @@ mod tests {
 
         let modes = parsed_abilities("Orzhov Charm", ORZHOV_CHARM_ORACLE, &[], &["Instant"]);
         assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
-        let Effect::Bounce { target, .. } = &*modes[0].effect else {
-            panic!("mode 1 must still parse as a Bounce: {:?}", modes[0].effect);
+        // The attached-set bounce family lowers as a `TargetOnly` head (the
+        // announced creature) plus a mass child returning the host and its
+        // attachments together. The head still carries the self-scoped filter
+        // this fixture is about.
+        let Effect::TargetOnly { target } = &*modes[0].effect else {
+            panic!(
+                "mode 1 must still announce its self-scoped target: {:?}",
+                modes[0].effect
+            );
         };
         assert!(
             matches!(

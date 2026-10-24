@@ -6341,8 +6341,9 @@ pub enum DelayedTriggerPlayerBinding {
     /// target artifact or creature. Return that card to the battlefield
     /// under its owner's control at the beginning of that player's next end
     /// step" — the exiled permanent may belong to any player, so "that
-    /// player" (its owner, CR 400.3) is resolved from the parent target at
-    /// delayed-trigger creation, not assumed to be the controller.
+    /// player" (its owner, CR 400.3) is resolved from the parent target, or
+    /// else the object the parent moved, at delayed-trigger creation, not
+    /// assumed to be the controller.
     ParentTargetOwner,
 }
 
@@ -7046,9 +7047,16 @@ pub enum CombatRelationSubject {
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
-/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`) and
-/// the player referent (`Player`) resolve through separate authorities in
-/// `game::filter`; only the relation is shared.
+/// attached to. Object referents (`Source`, `Recipient`, `DeclaredTarget`,
+/// `Host`) and the player referent (`Player`) resolve through separate
+/// authorities in `game::filter`; only the relation is shared.
+///
+/// The enum splits into two grammatical classes: referents BOUND to one object
+/// or player (`Source`, `Recipient`, `Player`, `DeclaredTarget`) and referents
+/// MATCHED against a filter (`Host`). A bound referent names one identity the
+/// resolver already owns; a matched referent names a set the resolver must
+/// evaluate ("attached to any creature", "attached to that creature" resolved
+/// from the event, "attached to the announced host").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttachmentReferent {
@@ -7072,11 +7080,38 @@ pub enum AttachmentReferent {
     /// else the chain root) and is read only through
     /// `targeting::declared_slot_referent`.
     DeclaredTarget { slot: usize },
+    /// CR 701.3a + CR 603.7c + CR 608.2h (+ CR 601.2c for an announced host):
+    /// the filter-matched host axis — "attached to any object in `filter`'s
+    /// referent set". Covers a mass object set defined by attachment to a
+    /// referenced permanent (the player axis lowers to
+    /// [`Self::Player`](AttachmentReferent::Player) or declines): "destroy all
+    /// Auras attached to that
+    /// creature" (Treefolk Mystic, Corrosive Ooze), "… attached to that
+    /// creature to ~" (Rhuk, Hexgold Nabber), "… attached to creatures" (End
+    /// Hostilities), "destroy all Auras and Equipment attached to target
+    /// creature" (Strip Bare). `filter` is the same `TargetFilter` algebra the
+    /// target-slot parser produces, so one variant spans every referent the
+    /// class needs; the at-resolution read is
+    /// `filter::attached_to_host_filter`.
+    ///
+    /// INVARIANT — no declared-slot host: a host phrase whose antecedent is a
+    /// numbered declared slot lowers to `DeclaredTarget` (the chain-wide
+    /// authority `oracle_effect::resolve_declared_slot_anaphor`), and a host
+    /// phrase the step-5 target parse resolves only against the
+    /// Choose-head-local `ctx.declared_target_slots` registry declines the
+    /// whole clause, so `Host { filter: ParentTargetSlot { .. } }` never
+    /// exists. `reads_declared_slot` therefore stays `false` for `Host`; the
+    /// `ParentTargetSlot` population leg of the mass set is handled by
+    /// `filter::concretize_mass_population_parent_legs` instead.
+    Host { filter: Box<TargetFilter> },
 }
 
 impl AttachmentReferent {
     /// Whether evaluating this referent reads a declared target slot of the
     /// resolving chain (and therefore needs a declared-slot view or carrier).
+    ///
+    /// `Host` is `false` by the variant's no-declared-slot invariant: a
+    /// slot-indexed host phrase maps to `DeclaredTarget`, never to `Host`.
     pub fn reads_declared_slot(&self) -> bool {
         matches!(self, AttachmentReferent::DeclaredTarget { .. })
     }
