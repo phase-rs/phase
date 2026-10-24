@@ -4130,12 +4130,21 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
 }
 
 /// CR 111.2 + CR 614.1a: "each token that would be created under <X> control
-/// this turn is created under <Y> control instead." Builds a self-installed
-/// CreateToken replacement with an opponent-token scope and a controller
-/// redirect, marked to expire at end of turn. Crafty Cutpurse is the
-/// canonical card; this also covers any future card with the same shape.
+/// this turn is created under <Y> control instead." Builds a CreateToken
+/// replacement with an opponent-token scope and a controller redirect, marked
+/// to expire at end of turn. Crafty Cutpurse is the canonical card; this also
+/// covers any future card with the same shape.
 /// CR 111.2: "The token enters the battlefield under that player's control"
 /// — the default this replacement overrides.
+///
+/// CR 113.7a + CR 611.2c: the redirect affects no object — it changes how
+/// tokens are created for the rest of the turn — so it exists independently
+/// of the ability's source and is installed floating
+/// (`TargetFilter::None`), exactly like Kaya, Geist Hunter's −2 token
+/// replacement, never hosted on the source: a source that left, or left and
+/// returned, before or after resolution does not end it. CR 109.5: "your" is
+/// the resolving ability's controller, which the floating installer latches
+/// as the replacement's `source_controller`.
 fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     // Match "each token that would be created under " (or "any token ...") then
     // a controller phrase, then "control this turn is created under " then a
@@ -4192,7 +4201,7 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::SelfRef,
+        target: TargetFilter::None,
     })
 }
 
@@ -22296,6 +22305,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
+    // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
+    // names the object the primary instruction acted on. When that object is the
+    // ability's source ("destroy it and all creatures it blocked this turn",
+    // Defiant Vanguard), pin the continuation's antecedent to `SelfRef`; the
+    // continuation context is otherwise blank, and a blank context is not evidence
+    // of any antecedent. Same pin the chunk loop applies when a continued
+    // instruction named the source (`parsed_clause_targets_self_ref`).
+    if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
     // "that player" in a MASS continuation names that object's controller

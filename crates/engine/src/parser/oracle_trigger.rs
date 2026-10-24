@@ -13538,7 +13538,30 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 509.3a + CR 608.2k + CR 603.7e: a self-subject block condition that names
+    // no other object ("~ blocks" / "~ attacks or blocks") introduces only the
+    // source, so a bare "it" in the body names it. Without the pin, `ParentTarget`
+    // resolves the BlockersDeclared event to the blocked ATTACKER — through
+    // `delayed_trigger::parent_target_snapshot` for "at end of combat" bodies and
+    // the parentless-ParentTarget event fallback for immediate bodies — so Cinder
+    // Wall destroyed, and Zephyr Spirit bounced, the creature it blocked.
+    if matches!(trigger_subject, TargetFilter::SelfRef)
+        && nom_primitives::scan_at_word_boundaries(after_keyword, parse_intransitive_blocks)
+            .is_some()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
+}
+
+/// CR 509.3a: a terminal intransitive "blocks" ("~ blocks", "~ attacks or
+/// blocks") — the condition names no object other than its subject. Rejects
+/// "blocks a creature", "blocks or becomes blocked" and every other form with a
+/// trailing object or qualifier, because only end of input (optionally after the
+/// condition's closing comma) may follow.
+fn parse_intransitive_blocks(input: &str) -> OracleResult<'_, ()> {
+    value((), terminated(tag("blocks"), (opt(tag(",")), eof))).parse(input)
 }
 
 /// CR 509.3c + CR 608.2k: the object a bare-pronoun pin names, where the pinned

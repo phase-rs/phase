@@ -35090,8 +35090,10 @@ pub struct ReplacementDefinition {
     /// Cutpurse ("each token that would be created under an opponent's control
     /// this turn is created under your control instead") — pair with
     /// `token_owner_scope: Some(Opponent)` so only the opponent-controlled
-    /// branch fires, and `Some(You)` here to redirect ownership to the source
-    /// controller. None = no redirect (existing replacements unaffected).
+    /// branch fires, and `Some(You)` here to redirect ownership to the
+    /// installing ability's controller (the floating definition's
+    /// `source_controller`). None = no redirect (existing replacements
+    /// unaffected).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_redirect: Option<ControllerRef>,
     /// CR 614.1a: Restricts which player this replacement applies to.
@@ -38948,28 +38950,40 @@ impl ResolvedAbility {
     /// that bind `SelfRef` (or an implicit-source filter) without going through
     /// `targeting::resolved_object_ids_for_filter`.
     ///
-    /// A non-triggered ability follows `self_ref_is_current`: a source that
-    /// left and returned before resolution is a new object, so the instruction
-    /// has no referent (Carrion Feeder sacrificed to its own ability and
-    /// returned by Supernatural Stamina; a creature blinked in response to its
-    /// own activation). A self-move made by the ability's own resolution stays
-    /// bound through `resolution_source_relatch`. A cost that moves the source
+    /// The source is bound only while this ability can find it
+    /// (`finds_source_successor`): it is still the object it was when the
+    /// ability was created, or it is the new object one of CR 400.7's
+    /// exceptions lets the ability find — the zone a zone-change trigger moved
+    /// it to (CR 400.7e), an Aura that went to the graveyard with the
+    /// permanent it enchanted (CR 400.7f), or the object the ability's own
+    /// resolution moved it to (CR 400.7j, read through
+    /// `resolution_source_relatch`: Bogardan Phoenix's dies trigger returns the
+    /// card and then puts the death counter "on it"). A source that left and
+    /// returned any other way is a new object, so the instruction has no
+    /// referent: Carrion Feeder sacrificed to its own ability and returned by
+    /// Supernatural Stamina; a creature blinked in response to its own
+    /// activation; Cinder Wall blinked after its blocks trigger created the
+    /// end-of-combat "destroy it" (CR 603.7c). A cost that moves the source
     /// (Suspend, Plot) is paid before the incarnation is captured, which is CR
-    /// 400.7j: the ability's effects can find an object its own cost moved to a
-    /// public zone — and only that object, not what it becomes after moving
-    /// again (Carrion Feeder's graveyard card, once Supernatural Stamina
-    /// returns it to the battlefield).
+    /// 400.7j as well — and only that object, not what it becomes after moving
+    /// again.
     ///
-    /// A triggered source keeps the raw source binding here. Its provenance
-    /// rules live in `self_ref_is_current`, and they do not yet follow every
-    /// self-move a trigger makes during its own resolution: Bogardan Phoenix's
-    /// dies trigger returns the card from the graveyard and then puts the death
-    /// counter "on it", which these resolvers must keep reaching.
+    /// A forward-result continuation whose `source_id` was rebound by
+    /// `rebind_child_to_forwarded_objects` to an object its producer moved
+    /// keeps that rebound binding unchanged here; its trigger provenance still
+    /// names the original source, so the provenance check cannot judge it. This
+    /// preserves the existing forward-result binding and is not a rules claim:
+    /// a rebound child whose SelfRef prints the source's own name (General Leo
+    /// Cristophe) is mis-bound upstream, and that is a separate defect.
     pub fn self_ref_binding(
         &self,
         state: &crate::types::game_state::GameState,
     ) -> Option<crate::types::identifiers::ObjectId> {
-        (self.trigger_source.is_some() || self.self_ref_is_current(state)).then_some(self.source_id)
+        let rebound_to_moved_object = self
+            .trigger_source
+            .as_ref()
+            .is_some_and(|source| source.identity.reference.object_id != self.source_id);
+        (rebound_to_moved_object || self.finds_source_successor(state)).then_some(self.source_id)
     }
 
     /// Returns whether a self-reference can resolve to the source's current
@@ -39043,6 +39057,18 @@ impl ResolvedAbility {
             return false;
         }
 
+        self.source_latest_move_is_latched_battlefield_to_graveyard(state, source)
+    }
+
+    /// CR 400.7: True when the source's most recent zone change this turn is
+    /// the battlefield-to-graveyard move of exactly the latched incarnation, so
+    /// the graveyard card is that departure's immediate successor. A same-id
+    /// blink or re-entry after that move is a newer object and fails.
+    fn source_latest_move_is_latched_battlefield_to_graveyard(
+        &self,
+        state: &crate::types::game_state::GameState,
+        source: &TriggerSourceContext,
+    ) -> bool {
         // CR 400.7e: Find the BF→GY departure whose captured identity matches
         // the ability's latched stamp, then require it is still the latest
         // same-id zone change this turn.
@@ -39069,6 +39095,58 @@ impl ResolvedAbility {
             .iter()
             .skip(departure_index + 1)
             .all(|later| later.object_id != self.source_id)
+    }
+
+    /// CR 400.7f: True when this ability triggered on the departure of a
+    /// permanent its source was attached to, and the source (an Aura latched
+    /// on the battlefield) is now the graveyard card it became by that same
+    /// departure or by the CR 704.5m state-based action that followed it. Such
+    /// an ability "can find the new object" the Aura became; no other move of
+    /// the source can be found (CR 400.7). The Aura fact is the host departure
+    /// record's attachment kind, captured as the source was attached when the
+    /// host left: CR 400.7f reaches "each Aura enchanting that permanent", so
+    /// an Equipment (CR 301.5) attached to it is not found.
+    fn finds_aura_after_its_host_left(&self, state: &crate::types::game_state::GameState) -> bool {
+        let Some(source) = self.trigger_source.as_ref() else {
+            return false;
+        };
+        if source.identity.expected_zone != Zone::Battlefield
+            || source.identity.reference.object_id != self.source_id
+            || !state
+                .objects
+                .get(&self.source_id)
+                .is_some_and(|object| object.zone == Zone::Graveyard)
+        {
+            return false;
+        }
+        let Some(crate::types::GameEvent::ZoneChanged {
+            object_id, record, ..
+        }) = state.current_trigger_event.as_ref()
+        else {
+            return false;
+        };
+        *object_id != self.source_id
+            && record.from_zone == Some(Zone::Battlefield)
+            && record.attachments.iter().any(|attachment| {
+                attachment.kind == AttachmentKind::Aura
+                    && attachment.identity == Some(source.identity.reference)
+            })
+            && self.source_latest_move_is_latched_battlefield_to_graveyard(state, source)
+    }
+
+    /// CR 400.7e + CR 400.7f + CR 400.7j: True when this ability can find the
+    /// new object its source became after the source changed zones since the
+    /// ability was created — the exceptions to CR 400.7's rule that a moved
+    /// object is a new object with no relation to its previous existence. A
+    /// source that has not moved is trivially found. A delayed triggered
+    /// ability this ability creates has the same source (CR 603.7e), so this
+    /// is also whether that delayed ability's source binding may follow the
+    /// source to its current zone.
+    pub(crate) fn finds_source_successor(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> bool {
+        self.self_ref_is_current(state) || self.finds_aura_after_its_host_left(state)
     }
 
     /// True when this ability (or a nested sub) is a `ChangeZone` of `SelfRef`
@@ -45117,6 +45195,51 @@ mod tests {
             );
         }
 
+        /// CR 400.7 + CR 603.7c: `self_ref_binding` binds a triggered source
+        /// only while the ability can still find it. A blinked source is a new
+        /// object and is not bound. A forward-result continuation whose
+        /// `source_id` was rebound to an object its producer moved keeps that
+        /// rebound binding unchanged; that row pins preserved behavior and makes
+        /// no rules claim.
+        #[test]
+        fn self_ref_binding_binds_a_triggered_source_only_while_it_can_be_found() {
+            let mut scenario = GameScenario::new();
+            let source = scenario.add_vanilla(P0, 2, 2);
+            let moved = scenario.add_vanilla(P0, 1, 1);
+            let mut runner = scenario.build();
+            let mut events = Vec::new();
+
+            let incarnation = runner.state().objects[&source].incarnation;
+            let ability = ability_with_mislatch(source, Zone::Battlefield, incarnation);
+            assert_eq!(
+                ability.self_ref_binding(runner.state()),
+                Some(source),
+                "reach: the unmoved triggered source is bound"
+            );
+
+            // The forward-result producer moved `moved`; its continuation is
+            // rebound to it.
+            move_to_zone(runner.state_mut(), moved, Zone::Exile, &mut events);
+            move_to_zone(runner.state_mut(), moved, Zone::Battlefield, &mut events);
+            let mut rebound = ability.clone();
+            rebound.source_id = moved;
+
+            // The source itself is blinked.
+            move_to_zone(runner.state_mut(), source, Zone::Exile, &mut events);
+            move_to_zone(runner.state_mut(), source, Zone::Battlefield, &mut events);
+            assert_ne!(runner.state().objects[&source].incarnation, incarnation);
+            assert_eq!(
+                ability.self_ref_binding(runner.state()),
+                None,
+                "CR 400.7: the permanent that returned is a new object"
+            );
+            assert_eq!(
+                rebound.self_ref_binding(runner.state()),
+                Some(moved),
+                "the rebound forward-result binding is preserved unchanged"
+            );
+        }
+
         /// Draw (non-zone-change) trigger from graveyard: zone-match SelfRef must
         /// stay valid without own-departure successor proof.
         #[test]
@@ -45466,6 +45589,78 @@ mod tests {
                 !ability.self_ref_is_current(runner.state()),
                 "second same-id zone change must reject post-SBA SelfRef return"
             );
+        }
+
+        /// CR 400.7f + CR 301.5: a host-departure trigger finds the graveyard
+        /// card its attached source became only when that source was an Aura
+        /// enchanting the host. Each fixture is the same co-departure — the
+        /// source's own BF→GY move carries the latched identity and the host's
+        /// departure record lists it as an attachment — differing only in the
+        /// recorded attachment kind, so the Equipment row fails on the Aura
+        /// requirement alone.
+        #[test]
+        fn host_departure_finds_only_an_aura_source_in_the_graveyard() {
+            use crate::types::game_state::AttachmentSnapshot;
+
+            for (kind, finds) in [
+                (AttachmentKind::Aura, true),
+                (AttachmentKind::Equipment, false),
+            ] {
+                let mut scenario = GameScenario::new();
+                let host = scenario.add_vanilla(P0, 2, 2);
+                let source = scenario.add_vanilla(P0, 1, 1);
+                let mut runner = scenario.build();
+
+                let source_context = {
+                    let obj = runner.state().objects.get(&source).unwrap();
+                    crate::game::triggers::trigger_source_context_for_latch(runner.state(), obj)
+                };
+                let mut events = Vec::new();
+                move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+                move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+
+                let mut host_record =
+                    ZoneChangeRecord::test_minimal(host, Some(Zone::Battlefield), Zone::Graveyard);
+                host_record.turn_zone_change_index = 0;
+                host_record.attachments = vec![AttachmentSnapshot {
+                    object_id: source,
+                    identity: Some(source_context.identity.reference),
+                    controller: P0,
+                    kind: kind.clone(),
+                }];
+                let mut source_record = ZoneChangeRecord::test_minimal(
+                    source,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                );
+                source_record.trigger_source_context = Some(source_context.clone());
+                source_record.turn_zone_change_index = 1;
+                runner.state_mut().zone_changes_this_turn =
+                    vec![host_record.clone(), source_record].into();
+                runner.state_mut().current_trigger_event = Some(GameEvent::ZoneChanged {
+                    object_id: host,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    record: Box::new(host_record),
+                });
+
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source,
+                    P0,
+                );
+                ability.trigger_source = Some(source_context);
+
+                assert_eq!(
+                    ability.finds_source_successor(runner.state()),
+                    finds,
+                    "a {kind:?} source whose host left must be found only if it is an Aura"
+                );
+            }
         }
     }
 

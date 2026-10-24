@@ -40098,6 +40098,259 @@ fn prepared_gate_rejects_nonsource_grammar_matrix() {
     }
 }
 
+// ── #9179: combat-history relative clauses and the self-blocker anaphor ──
+
+const CATHEDRAL_MEMBRANE_ORACLE: &str = "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.";
+const DEFIANT_VANGUARD_ORACLE: &str = "When this creature blocks, at end of combat, destroy it and all creatures it blocked this turn.\n{5}, {T}: Search your library for a Rebel permanent card with mana value 4 or less, put it onto the battlefield, then shuffle.";
+
+fn parse_card(
+    text: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    parse_oracle_text(
+        text,
+        name,
+        &owned(keywords),
+        &owned(types),
+        &owned(subtypes),
+    )
+}
+
+fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockedBySubject { scope },
+            subject: CombatRelationSubject::Source,
+        }]),
+    )
+}
+
+/// The target of the first effect in `def`'s chain that `select` accepts,
+/// descending through sub-abilities and delayed-trigger bodies.
+fn find_chain_target(
+    def: &AbilityDefinition,
+    select: fn(&Effect) -> Option<&TargetFilter>,
+) -> Option<&TargetFilter> {
+    if let Some(target) = select(&def.effect) {
+        return Some(target);
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if let Some(target) = find_chain_target(effect, select) {
+            return Some(target);
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(|sub| find_chain_target(sub, select))
+}
+
+fn destroy_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+fn return_to_hand_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// P5 — CR 509.1g + CR 608.2i + CR 611.2a: Cathedral Membrane, verbatim. The
+/// mass damage is restricted to the creatures the source blocked this combat,
+/// and "this combat" is not amputated into an effect duration.
+#[test]
+fn cathedral_membrane_damage_is_restricted_to_what_it_blocked_this_combat() {
+    let parsed = parse_card(
+        CATHEDRAL_MEMBRANE_ORACLE,
+        "Cathedral Membrane",
+        &["Defender"],
+        &["Artifact", "Creature"],
+        &["Phyrexian", "Wall"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .expect("the dies trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    match &*execute.effect {
+        Effect::DamageAll { amount, target, .. } => {
+            assert_eq!(*amount, QuantityExpr::Fixed { value: 6 });
+            assert_eq!(
+                *target,
+                blocked_by_source_creatures(CombatHistoryScope::ThisCombat)
+            );
+        }
+        other => panic!("expected DamageAll, got {other:?}"),
+    }
+    assert_eq!(
+        execute.duration, None,
+        "\"this combat\" belongs to the relative clause, not to the effect"
+    );
+}
+
+/// P5 + P7 — Defiant Vanguard, verbatim. "destroy it" names the Vanguard (the
+/// self-blocker pin), and the anaphoric continuation "all creatures it blocked
+/// this turn" binds its "it" to the source through the continuation pin — the
+/// continuation is otherwise parsed under a blank context, which the pronoun
+/// gate refuses. No duration anywhere in the chain.
+#[test]
+fn defiant_vanguard_destroys_itself_and_creatures_it_blocked_this_turn() {
+    let parsed = parse_card(
+        DEFIANT_VANGUARD_ORACLE,
+        "Defiant Vanguard",
+        &[],
+        &["Creature"],
+        &["Human", "Rebel"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Blocks)
+        .expect("the block trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(execute.duration, None);
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*execute.effect
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::EndCombat
+        }
+    );
+    // Reach guard: the compound split ran, and its primary acted on the source.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Destroy {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "\"destroy it\" must name the Vanguard itself, got {:?}",
+        effect.effect
+    );
+    assert_eq!(effect.duration, None);
+    let sub = effect
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the continuation must be chained");
+    match &*sub.effect {
+        Effect::DestroyAll { target, .. } => assert_eq!(
+            *target,
+            blocked_by_source_creatures(CombatHistoryScope::ThisTurn),
+            "the continuation's \"it\" must name the source"
+        ),
+        other => panic!("expected DestroyAll, got {other:?}"),
+    }
+    assert_eq!(sub.duration, None);
+}
+
+/// P6 — CR 509.3a + CR 608.2k: the self-subject intransitive block condition
+/// pins a bare "it" to the source. Conditions that name another object, fuse
+/// "becomes blocked", have a typed subject, or are not block conditions do not.
+#[test]
+fn self_subject_intransitive_block_condition_pins_it_to_source() {
+    for condition in ["When ~ blocks", "Whenever ~ attacks or blocks"] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &TargetFilter::SelfRef),
+            Some(TargetFilter::SelfRef),
+            "{condition}"
+        );
+    }
+    for (condition, subject) in [
+        ("Whenever ~ blocks a creature", TargetFilter::SelfRef),
+        (
+            "Whenever ~ blocks or becomes blocked",
+            TargetFilter::SelfRef,
+        ),
+        ("Whenever ~ attacks", TargetFilter::SelfRef),
+        (
+            "Whenever a creature you control blocks",
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        ),
+    ] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &subject),
+            None,
+            "{condition}"
+        );
+    }
+}
+
+/// P6 — the pin reaches printed trigger bodies through the real parse path:
+/// Cinder Wall and Wall of Junk act on themselves at end of combat, and Zephyr
+/// Spirit returns itself immediately. A chain-declared target still outranks
+/// the pin (CR 608.2c).
+#[test]
+fn self_blocker_trigger_bodies_act_on_the_source() {
+    for (name, text, keywords, types, select) in [
+        (
+            "Cinder Wall",
+            "Defender\nWhen this creature blocks, destroy it at end of combat.",
+            &["Defender"][..],
+            &["Creature"][..],
+            destroy_target as fn(&Effect) -> Option<&TargetFilter>,
+        ),
+        (
+            "Wall of Junk",
+            "Defender (This creature can't attack.)\nWhen this creature blocks, return it to its owner's hand at end of combat. (Return it only if it's on the battlefield.)",
+            &["Defender"][..],
+            &["Artifact", "Creature"][..],
+            return_to_hand_target,
+        ),
+        (
+            "Ceremonial Guard",
+            "When this creature attacks or blocks, destroy it at end of combat.",
+            &[][..],
+            &["Creature"][..],
+            destroy_target,
+        ),
+        (
+            "Zephyr Spirit",
+            "When this creature blocks, return it to its owner's hand.",
+            &[][..],
+            &["Creature"][..],
+            return_to_hand_target,
+        ),
+    ] {
+        let parsed = parse_card(text, name, keywords, types, &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Blocks | TriggerMode::AttacksOrBlocks))
+            .unwrap_or_else(|| panic!("{name}: the block trigger must parse"));
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert_eq!(
+            find_chain_target(execute, select),
+            Some(&TargetFilter::SelfRef),
+            "{name}: \"it\" must name the blocker itself"
+        );
+    }
+
+    let def = parse_trigger_line(
+        "Whenever Test Wall blocks, tap target creature. Destroy it at end of combat.",
+        "Test Wall",
+    );
+    let execute = def.execute.as_deref().expect("trigger body");
+    assert_eq!(
+        find_chain_target(execute, destroy_target),
+        Some(&TargetFilter::ParentTarget),
+        "a chain-declared target outranks the self-blocker pin"
+    );
+}
+
 // --- #9179 (A): the "during <window>" qualifier of an event-trigger head ---
 
 fn combat_window() -> TriggerCondition {

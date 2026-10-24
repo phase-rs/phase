@@ -1606,7 +1606,7 @@ fn cast_redirect_fan_out(paused: bool, round_trip_at_generated_leg: bool) -> Red
     let mut runner = scenario.build();
 
     // Crafty Cutpurse's resolved trigger body, with P1's noncreature host as
-    // its source, so the redirect survives the cast.
+    // its source, so P1 is the redirect's "you".
     let parsed = parse_oracle_text(
         CRAFTY_CUTPURSE,
         "Crafty Cutpurse",
@@ -1623,9 +1623,14 @@ fn cast_redirect_fan_out(paused: bool, round_trip_at_generated_leg: bool) -> Red
     resolve_ability_chain(runner.state_mut(), &redirect, &mut Vec::new(), 0)
         .expect("the redirect installs");
     assert_eq!(
-        runner.state().objects[&host].replacement_definitions.len(),
+        runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .filter(|def| def.token_owner_redirect.is_some() && def.source_controller == Some(P1))
+            .count(),
         1,
-        "reach guard: the host carries the redirect"
+        "reach guard: P1's floating redirect is installed"
     );
 
     runner.cast(spell).commit();

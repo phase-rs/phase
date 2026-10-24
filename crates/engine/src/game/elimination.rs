@@ -897,6 +897,30 @@ fn end_control_effects_for_leaving_players(
                 .any(|m| matches!(m, ContinuousModification::ChangeController)))
     });
 
+    // CR 800.4a: a floating token-controller redirect ("each token that would be
+    // created under an opponent's control this turn is created under your control
+    // instead" — Crafty Cutpurse) is an effect that gives its latched
+    // `source_controller` control of objects, so it ends when that player leaves.
+    // Key on the redirect value `create_token_applier` resolves to the source's
+    // controller (`ControllerRef::You`); every other floating definition — damage
+    // shields, token doubling (Kaya, Geist Hunter) — gives nobody control and
+    // stays. The effect is ended in place (`is_consumed`, which every floating
+    // candidate scan skips outside a combat-damage batch) rather than removed:
+    // floating definitions are addressed by position (`ReplacementId { source:
+    // ObjectId(0), index }`), so removing one would shift every later floating
+    // id a pending choice or applied set still holds. The cleanup-step expiry
+    // prune removes it with the turn.
+    for def in state.pending_damage_replacements.iter_mut().filter(|def| {
+        matches!(
+            def.token_owner_redirect,
+            Some(crate::types::ability::ControllerRef::You)
+        ) && def
+            .source_controller
+            .is_some_and(|controller| leaving_set.contains(&controller))
+    }) {
+        def.is_consumed = true;
+    }
+
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
     // every object whose control TCE was pruned. evaluate_layers is pure (no events).
     super::layers::mark_layers_full(state);
