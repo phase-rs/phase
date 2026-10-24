@@ -5680,12 +5680,14 @@ fn parse_normalized_oracle_ir(
             // are parsed as IR and each is lowered purely to *ask* the question,
             // while whichever IR won is what gets emitted.
             //
-            // Three properties make this the same computation as the original:
+            // The root and nested entries share lowering machinery, with one
+            // intentional damage-target permission difference:
             //
-            // 1. `parse_effect_chain_with_context(t,k,cx)` IS
-            //    `lower_ability_ir(&parse_ability_ir_with_context(t,k,cx))`, so
-            //    each `has_unimplemented` argument is bit-for-bit the definition
-            //    the original tested.
+            // 1. `parse_effect_chain_with_context` withholds parent-target
+            //    population permission, while `parse_ability_ir_with_context`
+            //    enters an ability root that can authorize it. Converting a
+            //    caller can change that binding; the entries otherwise share
+            //    the WithContext recognizers and `lower_ability_ir` pipeline.
             // 2. The `ctx` sequencing is preserved exactly. The retry's parse
             //    receives the SAME, already-mutated `ctx` as the first parse —
             //    not a fresh one — and interposing the lowering between the two
@@ -7523,8 +7525,11 @@ fn parse_normalized_oracle_ir(
             ctx.subject = None;
             ctx.actor = None;
             // Routed through `parse_ability_ir_with_context` + `ability_ir_at`,
-            // i.e. `lower_ability_ir`, which is what `parse_effect_chain_with_context`
-            // has always been. #6123 converted this site to the raw pair
+            // hence `lower_ability_ir`. The nested `parse_effect_chain_with_context`
+            // entry shares this lowering and recognizer set, but withholds the
+            // damage-target population permission that an ability root may grant.
+            // Converting between the entries changes that permission default.
+            // #6123 converted this site to the raw pair
             // `parse_effect_chain_ir` + `lower_effect_chain_ir` while hoisting the
             // Class-H replacement producers, which silently dropped three things the
             // entry point had been supplying: `finalize_effect_chain`, the

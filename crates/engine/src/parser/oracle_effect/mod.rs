@@ -23554,7 +23554,14 @@ fn try_parse_multi_target_damage_chain_inner(
         })
         .is_none()
     });
-    let recipient_has_target_keyword = head_spans.is_some_and(|(_, span)| {
+    // Keep amount references ("equal to target creature's power") out of this scan.
+    let recipient_span = head_spans.and_then(|(_, span)| {
+        nom_primitives::scan_last_at_word_boundaries(span, |input| {
+            tag::<_, _, OracleError<'_>>("to ").parse(input)
+        })
+        .map(|(_, recipient)| recipient)
+    });
+    let recipient_has_target_keyword = recipient_span.is_some_and(|span| {
         nom_primitives::scan_at_word_boundaries(span, |input| {
             super::oracle_target::parse_word_bounded(input, "target")
         })
@@ -40903,12 +40910,13 @@ pub(crate) enum ChainLoweringMode {
 /// **chain → die results → finalize → anchor → `sub_link` → envelope stamps →
 /// stages → root transforms.**
 ///
-/// It is not an aesthetic choice: it reproduces what the whole-body recognizers
-/// in `oracle.rs` do by hand. Every one of them stamps its root fields *after*
-/// `parse_effect_chain_with_context` returns (which is itself this function) and
-/// runs the `extract_*` folds last. Reordering — in particular running a stage
-/// before the stamps — changes output, because both stages write root fields
-/// that a stamp may also write. Do not reorder for elegance.
+/// It preserves the whole-body producers' post-parse ordering: root stamps precede
+/// the `extract_*` folds. The nested `parse_effect_chain_with_context` entry and
+/// ability-root IR both reach this lowerer, but differ in their damage-target
+/// default: nested parsing withholds population permission; an ability root can
+/// authorize it. Converting between those entries can change that binding even
+/// with identical lowering order. Reordering stages can also overwrite root
+/// stamps; do not reorder for elegance.
 ///
 /// CR 706.3b: the die-result table is part of the *same* ability as the roll, so
 /// it is attached before `finalize_effect_chain` rather than after — finalize and
@@ -41334,13 +41342,14 @@ pub(crate) fn parse_ability_ir_standalone(text: &str, kind: AbilityKind) -> Abil
     )
 }
 
-/// Parse an ability body in `WithContext` mode — the mode-pinned wrapper for
-/// every site whose original body called [`parse_effect_chain_with_context`].
+/// Parse an explicit ability root in `WithContext` mode.
 ///
-/// Same argument list as the function it replaces, for the same reason as
-/// [`parse_ability_ir_standalone`]. **Never** substitute one wrapper for the
-/// other while converting a site: the two modes run different whole-body
-/// recognizer sets, and crossing them silently moves ~113 die-roll cards.
+/// Shares the whole-body recognizers and lowering pipeline with
+/// [`parse_effect_chain_with_context`], but not its damage-target default: this
+/// root permits fresh chunks to authorize parent-target population binding,
+/// whereas the nested wrapper withholds it. Converting a caller changes that
+/// permission default. Preserve `Standalone` versus `WithContext` mode separately:
+/// crossing those recognizer sets silently moves ~113 die-roll cards.
 pub(crate) fn parse_ability_ir_with_context(
     text: &str,
     kind: AbilityKind,
@@ -53779,5 +53788,26 @@ mod parent_controller_population_tests {
         assert!(!has_parent_population_binding(population_filter(
             &parsed.abilities[0]
         )));
+    }
+
+    #[test]
+    fn target_in_amount_does_not_bind_enchanted_population() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals damage equal to target creature's power to enchanted creature",
+        );
+    }
+
+    #[test]
+    fn target_in_amount_does_not_bind_equipped_population() {
+        assert_population_boundary_through_both_parsers(
+            "~ deals damage equal to target creature's power to equipped creature",
+        );
+    }
+
+    #[test]
+    fn source_power_amount_preserves_target_recipient_population() {
+        assert_public_population_permission(
+            "~ deals damage equal to ~'s power to target creature and 1 damage to each other creature with the same controller.",
+        );
     }
 }
