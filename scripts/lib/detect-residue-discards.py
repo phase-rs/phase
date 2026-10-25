@@ -483,6 +483,9 @@ def find_discards(relpath, lines):
                         start -= 2
             else:
                 continue
+            # An unabsorbed method receiver cannot be a free helper call.
+            if start > 0 and v[start - 1] == ".":
+                continue
             origin = ex.origin(start, i)
             if origin and (v[i + 1] == "0" or origin[1] == "parse_target_with_syntax"):
                 add(origin, "projection")

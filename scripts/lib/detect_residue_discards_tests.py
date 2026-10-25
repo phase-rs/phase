@@ -338,6 +338,58 @@ class DiscardTests(unittest.TestCase):
                     with self.subTest(postfix=postfix, pattern=pattern, expr=expr):
                         self.assertEqual(hits(f"let {pattern} = {expr}{postfix};"), [])
 
+    def test_method_projections_do_not_resolve_helper_aliases_or_names(self):
+        for receiver in ("reader", "(reader)", "factory()", "readers[0]",
+                         "a.b().c", "self.x"):
+            for callee, imports in (
+                ("read", "use crate::target::parse_target as read; "),
+                ("parse_target", ""),
+            ):
+                for projection in ("0", "2", "1"):
+                    with self.subTest(receiver=receiver, callee=callee,
+                                      projection=projection):
+                        self.assertEqual(hits(
+                            imports + f"let rest = {receiver}.{callee}(i).{projection}; "
+                            "consume(rest);"), [])
+
+    def test_free_helper_projections_keep_discard_obligations(self):
+        for call, helper, projection, imports in (
+            ("read(i)", "parse_target", "0",
+             "use crate::target::parse_target as read; "),
+            ("parse_target(i)", "parse_target", "0", ""),
+            ("crate::target::parse_target(i)", "parse_target", "0", ""),
+            ("parse_target_with_syntax(i, c)", "parse_target_with_syntax", "2", ""),
+        ):
+            block = "{ let i = i.trim(); " + call + " }"
+            for expr in (call, f"({call})", block, f"({block})"):
+                for template in ("let value = EXPR; consume(value);",
+                                 "fn f() -> T { return EXPR; }",
+                                 "fn f() -> T { loop { break EXPR; } }"):
+                    with self.subTest(call=call, expr=expr, template=template):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(
+                                imports + template.replace("EXPR", f"{expr}.{projection}"))],
+                            [("projection", helper)])
+                        self.assertEqual(hits(
+                            imports + template.replace("EXPR", f"{expr}.1")), [])
+
+    def test_registered_wrapper_projections_keep_discard_obligations(self):
+        for wrapper in ("ctx.with_player_antecedents(|s| CALL)",
+                        "ctx.with_player_scope(scope, |s| { CALL })"):
+            for call, helper, projection in (
+                ("parse_target(i)", "parse_target", "0"),
+                ("parse_target_with_syntax(i, c)", "parse_target_with_syntax", "2"),
+            ):
+                wrapped = wrapper.replace("CALL", call)
+                for expr in (wrapped, f"({wrapped})"):
+                    with self.subTest(wrapper=wrapper, call=call, expr=expr):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(
+                                f"let value = {expr}.{projection}; consume(value);")],
+                            [("projection", helper)])
+                        self.assertEqual(hits(
+                            f"let rest = {expr}.1; consume(rest);"), [])
+
     def test_bare_block_projections_match_parenthesized_and_call_forms(self):
         for helper, projection in (("parse_target", "0"),
                                    ("parse_target_with_syntax", "0"),
