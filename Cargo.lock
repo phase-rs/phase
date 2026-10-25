@@ -2023,6 +2023,7 @@ dependencies = [
  "serde_json",
  "server-core",
  "sha2",
+ "state-codec",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

@@ -44,6 +44,7 @@ ngrok = { version = "0.18", optional = true }
 ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
+state-codec = { path = "../state-codec" }
 tokio-tungstenite = "0.29"
 tokio = { version = "1", features = ["test-util"] }
 # GameScenario/GameRunner (bandwidth_budget_tests) sit behind the engine's `test-support` feature.
