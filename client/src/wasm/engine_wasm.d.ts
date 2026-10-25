@@ -27,6 +27,15 @@ export class StateCodecHandle {
      * Return the exact retained JSON bytes, without parsing through JavaScript.
      */
     json_bytes(): Uint8Array;
+    /**
+     * Return the publication revision, if supplied, as a JavaScript bigint.
+     */
+    revision(): bigint | undefined;
+    /**
+     * Share immutable JSON with publication metadata, without changing its bytes or hash.
+     * Revisions are supplied by the publisher, not inferred from JSON.
+     */
+    with_revision(revision: bigint): StateCodecHandle;
 }
 
 /**
@@ -710,12 +719,14 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * Decode frame bytes into exact JSON, never through the engine's state decoder.
  *
  * FULL ignores every baseline. Passing a baseline consumes that handle; call
- * `clone_handle` before transfer to retain it. Malformed frames return errors.
+ * `clone_handle` before transfer to retain it. Malformed frames and DELTA
+ * revision/hash mismatches return errors without changing retained clones.
  */
 export function state_codec_decode(bytes: Uint8Array, baseline?: StateCodecHandle | null): StateCodecHandle;
 
 /**
- * Encode a FULL frame. FULL ignores every baseline, including another audience's.
+ * Encode exact JSON as FULL or, with a compatible revisioned baseline, DELTA.
+ * Pass no baseline to force FULL for initial delivery or stream recovery.
  *
  * Passing a baseline consumes that handle; call `clone_handle` before transfer
  * to retain it. The state argument is borrowed and remains usable.
@@ -871,6 +882,8 @@ export interface InitOutput {
     readonly statecodechandle_hash: (a: number) => [number, number];
     readonly statecodechandle_json: (a: number) => [number, number];
     readonly statecodechandle_json_bytes: (a: number) => [number, number];
+    readonly statecodechandle_revision: (a: number) => [number, bigint];
+    readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;

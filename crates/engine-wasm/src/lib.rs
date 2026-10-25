@@ -2567,6 +2567,16 @@ impl StateCodecHandle {
             state: self.state.clone(),
         }
     }
+
+    fn with_revision_inner(&self, revision: u64) -> Self {
+        Self {
+            state: self.state.clone().with_revision(revision),
+        }
+    }
+
+    fn revision_inner(&self) -> Option<u64> {
+        self.state.revision()
+    }
 }
 
 #[wasm_bindgen]
@@ -2589,6 +2599,17 @@ impl StateCodecHandle {
     /// Cheaply share immutable state before transferring a baseline handle.
     pub fn clone_handle(&self) -> StateCodecHandle {
         self.clone_handle_inner()
+    }
+
+    /// Share immutable JSON with publication metadata, without changing its bytes or hash.
+    /// Revisions are supplied by the publisher, not inferred from JSON.
+    pub fn with_revision(&self, revision: u64) -> StateCodecHandle {
+        self.with_revision_inner(revision)
+    }
+
+    /// Return the publication revision, if supplied, as a JavaScript bigint.
+    pub fn revision(&self) -> Option<u64> {
+        self.revision_inner()
     }
 }
 
@@ -2637,7 +2658,8 @@ fn state_codec_encode_inner(
     state_codec::encode(baseline.as_ref().map(|handle| &handle.state), &state.state)?.to_bytes()
 }
 
-/// Encode a FULL frame. FULL ignores every baseline, including another audience's.
+/// Encode exact JSON as FULL or, with a compatible revisioned baseline, DELTA.
+/// Pass no baseline to force FULL for initial delivery or stream recovery.
 ///
 /// Passing a baseline consumes that handle; call `clone_handle` before transfer
 /// to retain it. The state argument is borrowed and remains usable.
@@ -2661,7 +2683,8 @@ fn state_codec_decode_inner(
 /// Decode frame bytes into exact JSON, never through the engine's state decoder.
 ///
 /// FULL ignores every baseline. Passing a baseline consumes that handle; call
-/// `clone_handle` before transfer to retain it. Malformed frames return errors.
+/// `clone_handle` before transfer to retain it. Malformed frames and DELTA
+/// revision/hash mismatches return errors without changing retained clones.
 #[wasm_bindgen]
 pub fn state_codec_decode(
     bytes: &[u8],
@@ -2679,6 +2702,7 @@ mod codec_bridge_tests {
     fn install_hidden_state() -> (GameState, [ObjectId; 2]) {
         clear_game_state();
         let mut state = GameState::new_two_player(88);
+        state.state_revision = 9_007_199_254_740_993;
         let private = [PlayerId(0), PlayerId(1)].map(|owner| {
             engine::game::zones::create_object(
                 &mut state,
@@ -2705,6 +2729,26 @@ mod codec_bridge_tests {
             .expect("installed game")
     }
 
+    fn revisioned_handle(life: i32, revision: u64) -> StateCodecHandle {
+        let json = format!(
+            r#"{{"objects":{{"7":{{"name":"Shared permanent","text":"{}","lexical":1e0}}}},"life":{life},"opaque":{{ "n":1e9999,"n":-0 }}}}"#,
+            "Unchanged object text. ".repeat(64)
+        );
+        StateCodecHandle::from_json_inner(json.as_bytes())
+            .unwrap()
+            .with_revision_inner(revision)
+    }
+
+    fn assert_frame_kind(bytes: &[u8], expected: &str) {
+        #[derive(serde::Deserialize)]
+        struct FrameTag {
+            #[serde(rename = "type")]
+            kind: String,
+        }
+        let frame: FrameTag = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(frame.kind, expected);
+    }
+
     #[test]
     fn codec_viewer_selection_matches_engine_filters_without_mutating_game() {
         let (state, private) = install_hidden_state();
@@ -2720,6 +2764,7 @@ mod codec_bridge_tests {
             let handle = live_handle(viewer);
             assert_eq!(handle.json_bytes_inner(), expected, "audience {viewer:?}");
             assert_eq!(handle.json_inner().as_bytes(), expected);
+            assert_eq!(handle.revision_inner(), Some(state.state_revision));
             assert_eq!(
                 handle.hash_inner(),
                 state_codec::state_hash(
@@ -2773,19 +2818,15 @@ mod codec_bridge_tests {
         let unrelated = StateCodecHandle::from_json_inner(br#"{"unrelated":[1,null]}"#).unwrap();
         let other_audience = live_handle(None);
         let full = state_codec_encode_inner(&current, None).unwrap();
+        assert_frame_kind(&full, "Full");
         for baseline in [None, Some(prior), Some(unrelated), Some(other_audience)] {
             if let Some(baseline) = &baseline {
                 assert_ne!(baseline.state.as_bytes(), current.state.as_bytes());
             }
-            let encoded = state_codec_encode_inner(
-                &current,
-                baseline.as_ref().map(StateCodecHandle::clone_handle_inner),
-            )
-            .unwrap();
-            assert_eq!(encoded, full);
-            let decoded = state_codec_decode_inner(&encoded, baseline).unwrap();
+            let decoded = state_codec_decode_inner(&full, baseline).unwrap();
             assert_eq!(decoded.json_bytes_inner(), current.json_bytes_inner());
             assert_eq!(decoded.hash_inner(), current.hash_inner());
+            assert_eq!(decoded.revision_inner(), current.revision_inner());
         }
         clear_game_state();
     }
@@ -2801,6 +2842,20 @@ mod codec_bridge_tests {
             state_codec::state_hash(&state_codec::WireState::from_json(json.as_bytes()).unwrap())
                 .to_string()
         );
+        assert_eq!(handle.revision_inner(), None);
+        let revisioned = handle.with_revision_inner(9_007_199_254_740_993);
+        assert_eq!(revisioned.revision_inner(), Some(9_007_199_254_740_993));
+        assert_eq!(handle.revision_inner(), None);
+        assert_eq!(revisioned.json_bytes_inner(), handle.json_bytes_inner());
+        assert_eq!(revisioned.hash_inner(), handle.hash_inner());
+        let reassigned = revisioned.with_revision_inner(u64::MAX);
+        assert_eq!(reassigned.revision_inner(), Some(u64::MAX));
+        assert_eq!(revisioned.revision_inner(), Some(9_007_199_254_740_993));
+        let revisioned_frame = state_codec_encode_inner(&reassigned, None).unwrap();
+        let decoded = state_codec_decode_inner(&revisioned_frame, None).unwrap();
+        assert_eq!(decoded.json_bytes_inner(), json.as_bytes());
+        assert_eq!(decoded.hash_inner(), handle.hash_inner());
+        assert_eq!(decoded.revision_inner(), Some(u64::MAX));
         let frame = state_codec_encode_inner(&handle, None).unwrap();
         assert_eq!(
             state_codec_decode_inner(&frame, None)
@@ -2812,21 +2867,122 @@ mod codec_bridge_tests {
 
     #[test]
     fn codec_cloned_baseline_survives_owned_transfer() {
-        let retained = StateCodecHandle::from_json_inner(br#"{"old":[1,2,3]}"#).unwrap();
-        let current = StateCodecHandle::from_json_inner(br#"{"new":[4,5,6]}"#).unwrap();
+        let retained = revisioned_handle(20, 9_007_199_254_740_993);
+        let current = revisioned_handle(19, 9_007_199_254_740_994);
         let original = retained.json_bytes_inner();
         let original_hash = retained.hash_inner();
         let frame =
             state_codec_encode_inner(&current, Some(retained.clone_handle_inner())).unwrap();
+        assert_frame_kind(&frame, "Delta");
         let decoded =
             state_codec_decode_inner(&frame, Some(retained.clone_handle_inner())).unwrap();
         assert_eq!(retained.json_bytes_inner(), original);
         assert_eq!(retained.hash_inner(), original_hash);
         assert_eq!(decoded.json_bytes_inner(), current.json_bytes_inner());
+        assert_eq!(retained.revision_inner(), Some(9_007_199_254_740_993));
+        assert_eq!(decoded.hash_inner(), current.hash_inner());
+        assert_eq!(decoded.revision_inner(), current.revision_inner());
+    }
+
+    #[test]
+    fn codec_revisioned_delta_chain_preserves_exact_bytes_hash_and_revision() {
+        let first_revision = 9_007_199_254_740_993;
+        let mut sender = revisioned_handle(20, first_revision);
+        let full = state_codec_encode_inner(&sender, None).unwrap();
+        assert_frame_kind(&full, "Full");
+        let mut receiver = state_codec_decode_inner(&full, None).unwrap();
+        assert_eq!(receiver.json_bytes_inner(), sender.json_bytes_inner());
+        assert_eq!(receiver.hash_inner(), sender.hash_inner());
+        assert_eq!(receiver.revision_inner(), Some(first_revision));
+
+        for (life, revision) in [(19, first_revision + 1), (18, first_revision + 1)] {
+            let current = revisioned_handle(life, revision);
+            assert_ne!(sender.json_bytes_inner(), current.json_bytes_inner());
+            let delta =
+                state_codec_encode_inner(&current, Some(sender.clone_handle_inner())).unwrap();
+            assert_frame_kind(&delta, "Delta");
+            assert!(delta.len() < state_codec_encode_inner(&current, None).unwrap().len());
+            receiver = state_codec_decode_inner(&delta, Some(receiver)).unwrap();
+            assert_eq!(receiver.json_bytes_inner(), current.json_bytes_inner());
+            assert_eq!(receiver.hash_inner(), current.hash_inner());
+            assert_eq!(receiver.revision_inner(), Some(revision));
+            sender = current;
+        }
+    }
+
+    #[test]
+    fn codec_hash_mismatches_preserve_retained_baselines_and_recover_with_full_then_delta() {
+        let baseline = revisioned_handle(20, 41);
+        let current = revisioned_handle(19, 42);
+        let full = state_codec_encode_inner(&baseline, None).unwrap();
+        let receiver = state_codec_decode_inner(&full, None).unwrap();
+        let delta =
+            state_codec_encode_inner(&current, Some(baseline.clone_handle_inner())).unwrap();
+        assert_frame_kind(&delta, "Delta");
+        let decoded =
+            state_codec_decode_inner(&delta, Some(receiver.clone_handle_inner())).unwrap();
+        assert_eq!(decoded.json_bytes_inner(), current.json_bytes_inner());
+        assert_eq!(decoded.hash_inner(), current.hash_inner());
+        assert_eq!(decoded.revision_inner(), Some(42));
+
+        let wrong = revisioned_handle(21, 41);
+        assert_ne!(wrong.hash_inner(), receiver.hash_inner());
+        assert!(matches!(
+            state_codec_decode_inner(&delta, Some(wrong.clone_handle_inner())),
+            Err(state_codec::CodecError::BaseHashMismatch { .. })
+        ));
+        assert_eq!(
+            wrong.json_bytes_inner(),
+            revisioned_handle(21, 41).json_bytes_inner()
+        );
+        assert_eq!(wrong.revision_inner(), Some(41));
+
+        let mut corrupted: serde_json::Value = serde_json::from_slice(&delta).unwrap();
+        assert_eq!(corrupted["data"]["patch"]["state"]["set"]["life"], 19);
+        corrupted["data"]["patch"]["state"]["set"]["life"] = serde_json::json!(18);
+        let corrupted = serde_json::to_vec(&corrupted).unwrap();
+        assert!(matches!(
+            state_codec_decode_inner(&corrupted, Some(receiver.clone_handle_inner())),
+            Err(state_codec::CodecError::ResultHashMismatch { .. })
+        ));
+        assert_eq!(receiver.json_bytes_inner(), baseline.json_bytes_inner());
+        assert_eq!(receiver.hash_inner(), baseline.hash_inner());
+        assert_eq!(receiver.revision_inner(), Some(41));
+
+        let recovery = state_codec_encode_inner(&current, None).unwrap();
+        assert_frame_kind(&recovery, "Full");
+        let recovered = state_codec_decode_inner(&recovery, None).unwrap();
+        assert_eq!(recovered.json_bytes_inner(), current.json_bytes_inner());
+        assert_eq!(recovered.hash_inner(), current.hash_inner());
+        assert_eq!(recovered.revision_inner(), Some(42));
+        let next = revisioned_handle(18, 43);
+        let resumed = state_codec_encode_inner(&next, Some(current.clone_handle_inner())).unwrap();
+        assert_frame_kind(&resumed, "Delta");
+        let decoded = state_codec_decode_inner(&resumed, Some(recovered)).unwrap();
+        assert_eq!(decoded.json_bytes_inner(), next.json_bytes_inner());
+        assert_eq!(decoded.hash_inner(), next.hash_inner());
+        assert_eq!(decoded.revision_inner(), Some(43));
     }
 
     #[test]
     fn codec_malformed_json_and_frames_return_errors() {
+        let valid = StateCodecHandle::from_json_inner(b"null").unwrap();
+        let full = state_codec_encode_inner(&valid, None).unwrap();
+        assert_eq!(
+            state_codec_decode_inner(&full, None).unwrap().json_inner(),
+            "null"
+        );
+        let baseline = revisioned_handle(20, 1);
+        let current = revisioned_handle(19, 2);
+        let delta =
+            state_codec_encode_inner(&current, Some(baseline.clone_handle_inner())).unwrap();
+        assert_frame_kind(&delta, "Delta");
+        assert_eq!(
+            state_codec_decode_inner(&delta, Some(baseline))
+                .unwrap()
+                .json_bytes_inner(),
+            current.json_bytes_inner()
+        );
         for bytes in [b"{".as_slice(), b"null garbage", b"\"\xff\""] {
             assert!(StateCodecHandle::from_json_inner(bytes).is_err());
         }
@@ -2847,6 +3003,20 @@ mod codec_bridge_tests {
         assert!(state_codec_for_viewer_inner(None).unwrap().is_none());
         assert!(state_codec_for_viewer_inner(Some(0)).unwrap().is_none());
         assert!(GAME_STATE.with(|cell| cell.take().is_none()));
+        let (installed, _) = install_hidden_state();
+        for viewer in [None, Some(0)] {
+            let handle = state_codec_for_viewer_inner(viewer).unwrap().unwrap();
+            assert_eq!(handle.revision_inner(), Some(installed.state_revision));
+            let filtered = match viewer {
+                Some(viewer) => filter_state_for_viewer(&installed, PlayerId(viewer)),
+                None => engine::game::visibility::filter_state_for_unseated_viewer(&installed),
+            };
+            assert_eq!(
+                handle.json_bytes_inner(),
+                serde_json::to_vec(&filtered).unwrap()
+            );
+        }
+        clear_game_state();
     }
 }
 
