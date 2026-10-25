@@ -287,7 +287,11 @@ class Expressions:
                 arm = self.end(body, {","}, end)
 
     def origin(self, start, end):
-        """Return (helper token index, symbol) only for a helper RESULT."""
+        """Return (helper token index, symbol) only for a helper RESULT.
+
+        Registered context wrappers forward closure tails, including blocks
+        preceded by an explicit return type.
+        """
         v = self.values
         while start < end and v[end - 1] == "?":
             end -= 1
@@ -319,13 +323,22 @@ class Expressions:
             a, b = args[0]
             if a < b and v[a] not in ("|", "move"):
                 return self.origin(a, b)
-        if "." in path and len(args) == RESULT_WRAPPERS.get(name):
-            a, b = args[-1]
+        wrapper_args = RESULT_WRAPPERS.get(name)
+        if "." in path and wrapper_args is not None and len(args) >= wrapper_args:
+            # Return-type commas can split the last closure into several ranges.
+            a, b = args[wrapper_args - 1][0], args[-1][1]
             closure = a + (a < b and v[a] == "move")
             if closure < b and v[closure] == "|":
                 close = self.end(closure + 1, {"|"}, b)
                 if close < b:
-                    return self.origin(close + 1, b)
+                    body = close + 1
+                    if v[body:body + 2] == ["-", ">"]:
+                        # Stop at the balanced body, not at generic/function arrows.
+                        body = self.end(body + 2, {"{"}, b)
+                        if body < b and self.pairs[body] == b - 1:
+                            return self.origin(body, b)
+                    elif len(args) == wrapper_args:
+                        return self.origin(body, b)
         return None
 
     def ignored_binding(self, start, end):

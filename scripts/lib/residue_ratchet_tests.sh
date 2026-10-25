@@ -100,6 +100,20 @@ printf 'fn nom() { let (rest, _) = parse_target_demonstrative_subject(input)?; }
 run_gate
 expect_rc 'nom second-component unit discard passes' 0
 
+# Explicit closure return types must not hide a helper-result discard.
+new_fixture
+printf "fn added() { let (filter, _) = ctx.with_player_antecedents(|s| -> (TargetFilter, &'a str) { parse_target_with_ctx(input, s) },); }\n" >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'annotated closure discard fails' 1
+expect_out 'annotated closure growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'annotated closure growth exceeds ceiling' 'actual 2, ceiling 1'
+printf 'SMOKE annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'removing annotated closure discard passes' 0
+expect_out 'annotated closure removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+printf 'SMOKE removed annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
+
 # Per-file ceilings and strict ledger parsing, including disappeared files.
 ledger <<'EOF'
 crates/engine/src/parser/probe.rs 3

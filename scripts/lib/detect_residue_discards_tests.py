@@ -420,6 +420,29 @@ class DiscardTests(unittest.TestCase):
         self.assertEqual([(h.family, h.symbol) for h in hits(src)],
                          [("binding", "parse_target_with_ctx")])
 
+    def test_scope_wrapper_closure_return_annotations(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for annotation in ("", " -> (TargetFilter, &'a str)",
+                               " -> (TargetFilter, &str)",
+                               " -> Result<(TargetFilter, &'a str), E>",
+                               " -> Option<Vec<(TargetFilter, &'a str)>>",
+                               " -> Result<fn() -> (TargetFilter, &'a str), E>"):
+                for capture in ("", "move "):
+                    for statement in ("", "let input = prepare(input); observe(); "):
+                        expr = (f"ctx.{wrapper}({prefix}{capture}|s|{annotation} {{ "
+                                f"{statement}parse_target_with_ctx(input, s) }},)")
+                        with self.subTest(wrapper=wrapper, annotation=annotation,
+                                          capture=capture, statement=statement):
+                            self.assertEqual(
+                                [(h.family, h.symbol) for h in hits(f"let (filter, _) = {expr};")],
+                                [("binding", "parse_target_with_ctx")])
+                            self.assertEqual(
+                                hits(f"let (filter, rest) = {expr}; consume(rest);"), [])
+            expr = f"ctx.{wrapper}({prefix}|s| -> u8 {{ 0 }})"
+            with self.subTest(wrapper=wrapper, result="not a helper"):
+                self.assertEqual(hits(f"let (filter, _) = {expr};"), [])
+
     def test_typed_binding_discards_residue(self):
         found = hits("let (filter, _): (TargetFilter, &str) = parse_target(input);")
         self.assertEqual([(h.family, h.symbol) for h in found], [("binding", "parse_target")])
