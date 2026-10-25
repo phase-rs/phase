@@ -226,6 +226,10 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
+    // CR 611.2e + CR 608.2c: Carry the parser-stamped onset through so the
+    // entry-observation boundary knows whether this instruction's continuous
+    // effect applies simultaneously with an entry of this resolution.
+    resolved.entry_onset = def.entry_onset;
     // CR 702.1c ("the same is true") + CR 608.2c (written order): Carry the
     // replication marker through so `resolve_chain_body` evaluates a
     // `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
@@ -265,7 +269,7 @@ pub fn build_resolved_from_def_with_targets(
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
 /// target_constraints, target_choice_timing, description, repeat_for,
 /// min_x_value, forward_result, unless_pay, distribution, distribute,
-/// target_selection_mode.
+/// target_selection_mode, entry_onset.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, chosen_x, cost_paid_object,
@@ -325,6 +329,8 @@ pub(crate) fn apply_instead_swap(
     overridden.distribute = sub.distribute.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
     overridden.target_chooser = sub.target_chooser.clone();
+    // CR 611.2e: the onset is a property of the swapped-in instruction's wording.
+    overridden.entry_onset = sub.entry_onset;
     // CR 608.2b + CR 601.2c: a swapped-in effect with its own declared target
     // resolves against its OWN resolution-validated targets. The parent may
     // retain a subset that still meets its narrower filter while dropping other
@@ -5358,6 +5364,13 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::PtComparison { value, .. } => {
             crate::game::quantity::quantity_expr_contains_scope(value, scope)
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), exactly as it does for `CanEnchant`, so this
+        // per-prop classifier answers only for the node it is called on.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| filter_prop_contains_quantity_scope(p, scope)),
@@ -5525,6 +5538,13 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         FilterProp::SharesQuality { reference, .. } => {
             matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
         FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
         // Every remaining prop enumerated explicitly (no `_ =>`) — see
@@ -6058,7 +6078,10 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 /// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
 /// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
 /// mass-placement `target`) satisfies `pred`.
-fn effect_bound_filter_matches(effect: &Effect, pred: fn(&TargetFilter) -> bool) -> bool {
+pub(crate) fn effect_bound_filter_matches(
+    effect: &Effect,
+    pred: fn(&TargetFilter) -> bool,
+) -> bool {
     if let Effect::Attach {
         attachment, target, ..
     }
@@ -6654,35 +6677,105 @@ fn attach_object_binding(
     ))
 }
 
+/// Which player relation of a `TypedFilter` a player-binding walk reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlayerBindingAxis {
+    /// Only a `FilterProp::Owned` property ("cards target player owns").
+    Owner,
+    /// The filter's `controller` or a `FilterProp::Owned` property.
+    ControllerOrOwner,
+}
+
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
-/// carries a `controller` (or `Owned` property) satisfying `pred`. Shared walker
-/// behind `filter_references_target_player` / `filter_references_target_opponent`.
-fn filter_binds_controller(filter: &TargetFilter, pred: fn(&ControllerRef) -> bool) -> bool {
+/// binds a player through `axis` to a `ControllerRef` satisfying `pred`.
+fn filter_binds_player(
+    filter: &TargetFilter,
+    axis: PlayerBindingAxis,
+    pred: fn(&ControllerRef) -> bool,
+) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter {
             controller,
             properties,
             ..
         }) => {
-            controller.as_ref().is_some_and(pred)
+            let controlled = match axis {
+                PlayerBindingAxis::Owner => false,
+                PlayerBindingAxis::ControllerOrOwner => controller.as_ref().is_some_and(pred),
+            };
+            controlled
                 || properties.iter().any(
                     |prop| matches!(prop, FilterProp::Owned { controller } if pred(controller)),
                 )
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_binds_controller(f, pred))
+            filters.iter().any(|f| filter_binds_player(f, axis, pred))
         }
-        TargetFilter::Not { filter } => filter_binds_controller(filter, pred),
-        _ => false,
+        TargetFilter::Not { filter } => filter_binds_player(filter, axis, pred),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
-/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds to a
-/// declared-target player scope — `TargetPlayer` (any player) or `TargetOpponent`
-/// (opponent-only). Both surface a companion player slot; they differ only in that
-/// slot's legal targets, so slot *detection* treats them alike.
-pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
-    filter_binds_controller(filter, |c| {
+/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds, through
+/// `axis`, to a declared-target player scope — `TargetPlayer` (any player) or
+/// `TargetOpponent` (opponent-only). Both surface a companion player slot; they
+/// differ only in that slot's legal targets, so slot *detection* treats them alike.
+pub(crate) fn filter_binds_target_player(filter: &TargetFilter, axis: PlayerBindingAxis) -> bool {
+    filter_binds_player(filter, axis, |c| {
         matches!(
             c,
             ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
@@ -6690,11 +6783,18 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     })
 }
 
+/// CR 109.4 + CR 115.1: a filter whose controller or owner is a declared target player.
+pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
+    filter_binds_target_player(filter, PlayerBindingAxis::ControllerOrOwner)
+}
+
 /// CR 109.4 + CR 102.2 / CR 102.3: Opponent-constrained mirror — true only for
 /// `TargetOpponent`. Drives the companion-slot legal-target discriminator
 /// (opponent-only vs. any player).
 fn filter_references_target_opponent(filter: &TargetFilter) -> bool {
-    filter_binds_controller(filter, |c| matches!(c, ControllerRef::TargetOpponent))
+    filter_binds_player(filter, PlayerBindingAxis::ControllerOrOwner, |c| {
+        matches!(c, ControllerRef::TargetOpponent)
+    })
 }
 
 /// CR 115.1 + CR 118.12a: True when an `UnlessPayModifier` payer was DECLARED as a

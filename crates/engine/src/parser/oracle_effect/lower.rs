@@ -3,9 +3,9 @@ use std::ops::ControlFlow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -26,9 +26,9 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_bare_was_dealt_damage_suffix, parse_source_blocked_history_clause, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -39,13 +39,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
-    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
-    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
+    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -4569,11 +4569,16 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attachable: bool) {
-    if let Some(new_effect) =
-        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    if let Some((new_effect, onset)) =
+        rewrite_token_anaphor_with_onset(&def.effect, def.duration.clone())
     {
         *def.effect = new_effect;
         def.duration = None;
+        // CR 611.2e + CR 111.3: the rewritten node is an instruction of this chain, so it
+        // carries the onset its verb phrase states — "The tokens have \"…\"" defines the
+        // tokens as they enter; "The token gains haste" applies after they are on the
+        // battlefield.
+        def.entry_onset = onset;
         return;
     }
 
@@ -4737,6 +4742,16 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
     effect: &Effect,
     clause_duration: Option<Duration>,
 ) -> Option<Effect> {
+    rewrite_token_anaphor_with_onset(effect, clause_duration).map(|(effect, _)| effect)
+}
+
+/// [`rewrite_token_created_this_way_unimplemented`], also returning the CR 611.2e onset the
+/// anaphor's verb phrase states, read by the subject-predicate authority
+/// [`subject::predicate_onset`].
+fn rewrite_token_anaphor_with_onset(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<(Effect, ContinuousEffectOnset)> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -4765,12 +4780,13 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .affected(TargetFilter::LastCreated)
         .modifications(mods)
         .description(text.to_string());
-    Some(Effect::GenericEffect {
+    let effect = Effect::GenericEffect {
         static_abilities: vec![static_def],
         duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
         end_cost: None,
-    })
+    };
+    Some((effect, subject::predicate_onset(rest.trim())))
 }
 
 /// CR 608.2c + CR 701.20: True when this effect publishes a revealed or
@@ -7359,6 +7375,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
         || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
+        || combat_history_relative_clause_owns_suffix(lower.as_str())
     {
         return (text, None);
     }
@@ -7675,6 +7692,32 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 608.2i + CR 611.2a: a combat-history relative clause ("each creature it
+/// blocked this combat", "all creatures it blocked this turn") owns its trailing
+/// window; it is a look-back restriction, not an effect duration (#9179:
+/// Cathedral Membrane, Defiant Vanguard). Context-free on purpose: when the
+/// target parser declines to bind a bare "it" (no `SelfRef` antecedent), the
+/// window still belongs to the clause, so no spurious duration appears and the
+/// swallow audit reports the unrepresented clause. Recognition is delegated to
+/// `parse_source_blocked_history_clause`, the clause's single authority, and the
+/// clause must run to end of input, so a genuine OUTER duration after it leaves
+/// a non-empty remainder and still strips.
+fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(input, |i| {
+        terminated(
+            parse_source_blocked_history_clause,
+            (
+                multispace0,
+                opt(alt((tag("."), tag(",")))),
+                multispace0,
+                eof,
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
 fn target_relative_clause_owns_suffix(input: &str) -> bool {
     let Ok((relative_clause, _)) = take_until::<_, _, OracleError<'_>>(" that ").parse(input)
     else {
@@ -7742,6 +7785,67 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 603.7a + CR 500.1: clause-final "at the beginning of {your next <step> |
+/// that player's next <step> | the <step> on your next turn}" for one named step.
+/// The player is a placeholder rewritten from `binding` at delayed-trigger
+/// creation; "on your next turn" skips the creation turn's step, and
+/// CR 608.2c: "that player" is the owner of the object the parent moved.
+fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+    use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
+    // A grouped name ("main phase") is two steps, so it is left to the table.
+    let step = || {
+        map_opt(
+            super::conditions::parse_phase_name_set,
+            |phases| match phases.as_slice() {
+                [phase] => Some(*phase),
+                _ => None,
+            },
+        )
+    };
+    let (rest, (binding, gate, phase)) = terminated(
+        preceded(
+            tag("at the beginning of "),
+            alt((
+                map(preceded(tag("your next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::Controller,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(preceded(tag("that player's next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::ParentTargetOwner,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(
+                    delimited(tag("the "), step(), tag(" on your next turn")),
+                    |phase| {
+                        (
+                            DelayedTriggerPlayerBinding::Controller,
+                            TurnGate::AfterCreationTurn,
+                            phase,
+                        )
+                    },
+                ),
+            )),
+        ),
+        eof,
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player: crate::types::player::PlayerId(0),
+            gate,
+            binding,
+        },
+    ))
+}
+
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
@@ -7754,6 +7858,15 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
+    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
+        &lower,
+        parse_player_next_step_suffix,
+    )
+    .filter(|(offset, ..)| *offset > 0)
+    {
+        let end = text.len() - (lower.len() - offset);
+        return (text[..end].trim_end_matches(',').trim(), Some(condition));
+    }
     for (suffix, condition) in [
         (
             " at the beginning of the next end step",
@@ -7791,54 +7904,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
-        // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
-        // at the beginning of your next end step" uses this suffix shape; the
-        // player placeholder is rewritten to `ability.controller` at resolve
-        // time alongside the main-phase and upkeep variants.
-        (
-            " at the beginning of your next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        // CR 608.2c: anaphoric "that player's next end step" — "that player"
-        // refers to a chained effect's target's OWNER, not the ability's
-        // controller (The Eternal Wanderer's +1: "Return that card to the
-        // battlefield under its owner's control at the beginning of that
-        // player's next end step"; Faramir, Prince of Ithilien uses the same
-        // surface phrase for a DIFFERENT referent — a chosen player — and
-        // remains its own unimplemented gap, not covered by this arm). Must
-        // precede the bare "your next end step" arm textually distinct
-        // (neither is a suffix of the other), so ordering here is not
-        // load-bearing, but is kept adjacent for readability.
-        (
-            " at the beginning of that player's next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
-            },
-        ),
-        // CR 513.2 + CR 603.7a: reordered "…, sacrifice that token at the
-        // beginning of the end step on your next turn" (Kav Landseeker). Suffix
-        // companion of the prefix arm. Skip-current via `AfterCreationTurn`
-        // (rewritten to `After(creation_turn)` at resolve). Diverges from the
-        // Greasefang "your next end step" suffix above ("the end step on" vs
-        // "your next end step"); neither suffix is a tail of the other.
-        (
-            " at the beginning of the end step on your next turn",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::AfterCreationTurn,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
         // turn granted by the parent clause (the controller's next turn), so
         // the controller's next end step. Suffix companion of the prefix arm
@@ -7848,15 +7913,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             " at the beginning of that turn's end step",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        (
-            " at the beginning of your next upkeep",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
@@ -9800,6 +9856,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9886,6 +9943,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9961,6 +10019,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -10072,6 +10131,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -16200,6 +16260,44 @@ mod where_x_tests {
         // The guard preserves the full clause (trailing period retained, as for
         // the other `preserves_*` guard tests).
         assert_eq!(stripped, text.trim());
+    }
+
+    /// CR 608.2i + CR 611.2a (#9179): the window closing a combat-history
+    /// relative clause ("each creature it blocked this combat", "all creatures it
+    /// blocked this turn") belongs to the clause, not to the effect — no duration
+    /// is stripped and the clause text survives intact for the target parser.
+    #[test]
+    fn strip_trailing_duration_preserves_combat_history_relative_clause() {
+        use super::strip_trailing_duration;
+
+        for text in [
+            "it deals 6 damage to each creature it blocked this combat.",
+            "destroy it and all creatures it blocked this turn.",
+        ] {
+            let (stripped, duration) = strip_trailing_duration(text);
+            assert_eq!(duration, None, "{text}");
+            assert_eq!(stripped, text, "{text}");
+        }
+    }
+
+    /// Hostile fixtures for the combat-history guard: a GENUINE outer duration
+    /// after the clause still strips (the guard requires the clause to run to end
+    /// of input), and a bare "this combat" effect duration with no blocked-history
+    /// clause keeps its `UntilEndOfCombat` (CR 511.2).
+    #[test]
+    fn strip_trailing_duration_combat_history_guard_does_not_over_suppress() {
+        use super::strip_trailing_duration;
+
+        let (stripped, duration) = strip_trailing_duration(
+            "creatures it blocked this turn gain flying until end of turn.",
+        );
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(stripped, "creatures it blocked this turn gain flying");
+
+        let (stripped, duration) =
+            strip_trailing_duration("creatures you control can't block this combat.");
+        assert_eq!(duration, Some(Duration::UntilEndOfCombat));
+        assert_eq!(stripped, "creatures you control can't block");
     }
 
     /// Hostile fixture (review requirement): a `who`-introduced look-back

@@ -926,6 +926,8 @@ fn per_player_order_chooser(
         ZoneChoiceChooser::Opponent => None,
         // A single-pool reciprocal consumer, never a per-player population.
         ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => None,
+        // No per-player producer announces a player for its choice.
+        ZoneChoiceChooser::DeclaredPlayer { .. } => None,
     }
 }
 
@@ -1117,6 +1119,7 @@ fn advance_per_player_iteration(
         ZoneChoiceChooser::Opponent => Some(base_maker),
         // A single-pool reciprocal consumer, never a per-player population.
         ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => Some(base_maker),
+        ZoneChoiceChooser::DeclaredPlayer { .. } => Some(base_maker),
     };
     let cursor = PerPlayerCursor {
         remaining,
@@ -2050,6 +2053,16 @@ fn resolve_chooser(
                 "reciprocal ChooseFromZone consumer has no bound card owner".to_string(),
             )
         }),
+        // CR 608.2b: an announced player who is no longer a legal target names nobody.
+        ZoneChoiceChooser::DeclaredPlayer { group } => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group).ok_or_else(
+                || {
+                    EffectError::MissingParam(
+                        "ChooseFromZone declared-player chooser names no player".to_string(),
+                    )
+                },
+            )
+        }
     }
 }
 

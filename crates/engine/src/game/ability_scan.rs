@@ -316,6 +316,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         replacement_applied: _,          // replacement provenance set, no dynamic read
         sub_link: _,                     // SubAbilityLink kind tag
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
+        entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         sibling_condition: _, // SiblingCondition replication marker, no dynamic read
         distribute: _,   // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
@@ -4991,6 +4992,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         FilterProp::PtComparison { value, .. } => scan_quantity_expr(value, mode),
 
         // --- Box<TargetFilter>-bearing: recurse (a nested Typed could be projected).
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // any player-resource read it carries is reached by the same recursion.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::CanEnchant { target } => scan_target_filter(target, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DifferentNameFrom { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::DistinctFrom { reference } => scan_target_filter(reference, FilterReadContext::LiveBoardCensus, mode),
@@ -5634,6 +5640,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_selection_mode: _,
         sub_link: _,
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
+        entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         iteration_kind_binding: _,
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every

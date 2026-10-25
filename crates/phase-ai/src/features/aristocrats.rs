@@ -30,8 +30,8 @@ use std::collections::BTreeSet;
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, ControllerRef, CostCategory, Effect, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCost, AbilityDefinition, ControllerRef, CostCategory, Effect, FilterProp, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -307,6 +307,19 @@ pub(crate) fn typed_filter_is_creature_you_control_or_any(typed: &TypedFilter) -
     // Reject opponent-scoped filters — those don't benefit from sacrificing your
     // own creatures.
     if matches!(typed.controller, Some(ControllerRef::Opponent)) {
+        return false;
+    }
+    // CR 400.3: "put into an opponent's graveyard" scopes the dying card's OWNER
+    // (`FilterProp::Owned`), not its controller — an opponent-owned creature goes to
+    // the opponent's graveyard, so the AI sacrificing its own creatures never feeds it.
+    if typed.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent
+            }
+        )
+    }) {
         return false;
     }
     typed.type_filters.iter().any(type_filter_is_creature)
@@ -818,6 +831,61 @@ mod tests {
         let feature = detect(&deck);
         assert_eq!(feature.death_trigger_count, 0);
         assert!(feature.death_trigger_names.is_empty());
+    }
+
+    /// The single `ChangesZone` trigger parsed from verbatim `oracle` text through the
+    /// public production parser (`engine::parser::oracle`).
+    fn parsed_zone_change_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let mut zone_changes = parsed
+            .triggers
+            .into_iter()
+            .filter(|trigger| trigger.mode == TriggerMode::ChangesZone);
+        let trigger = zone_changes
+            .next()
+            .unwrap_or_else(|| panic!("{name} must parse a ChangesZone trigger"));
+        assert!(
+            zone_changes.next().is_none(),
+            "{name} has exactly one ChangesZone trigger"
+        );
+        trigger
+    }
+
+    /// CR 400.3: "put into [your | an opponent's] graveyard" scopes the dying card's owner.
+    /// Grim Feast's "a creature is put into an opponent's graveyard from the battlefield"
+    /// stays out of the "creature dies" payoff axis (an opponent-owned creature dying never
+    /// feeds off the AI's own sacrifices), while Mortuary's "your graveyard" trigger stays in.
+    #[test]
+    fn graveyard_possessive_triggers_keep_their_dies_axis_verdict() {
+        let grim_feast = parsed_zone_change_trigger(
+            "Grim Feast",
+            "At the beginning of your upkeep, this enchantment deals 1 damage to you.\nWhenever a creature is put into an opponent's graveyard from the battlefield, you gain life equal to its toughness.",
+        );
+        // Reach guard: it is a battlefield -> graveyard creature trigger, so the opponent
+        // rejection below is the possessive guard and not an upstream short-circuit.
+        assert_eq!(grim_feast.origin, Some(Zone::Battlefield));
+        assert_eq!(grim_feast.destination, Some(Zone::Graveyard));
+        let Some(TargetFilter::Typed(feast_filter)) = grim_feast.valid_card.as_ref() else {
+            panic!("Grim Feast scopes a typed creature filter");
+        };
+        assert!(feast_filter
+            .type_filters
+            .iter()
+            .any(type_filter_is_creature));
+        assert!(!is_creature_dies_trigger(&grim_feast));
+
+        let mortuary = parsed_zone_change_trigger(
+            "Mortuary",
+            "Whenever a creature is put into your graveyard from the battlefield, put that card on top of your library.",
+        );
+        assert!(is_creature_dies_trigger(&mortuary));
+        assert!(is_creature_dies_trigger(&dies_trigger_yours()));
     }
 
     #[test]

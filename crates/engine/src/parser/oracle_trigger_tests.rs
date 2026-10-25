@@ -11165,20 +11165,98 @@ fn trigger_murktide_leaves_your_graveyard() {
     );
 }
 
-/// CR 603.2 + CR 613.3 + #1522: "When you lose control of ~" — Sigil of
-/// Corruption ability on Khârn the Betrayer. Maps to ChangesController with
-/// valid_card = SelfRef so the trigger fires only when this specific permanent
-/// changes controller. Execute draws 2 for the previous controller (the trigger
-/// fires before layer re-evaluation, so the previous controller still holds Khârn
-/// at trigger-scan time).
+/// CR 603.2 + CR 603.10d + #1522: "When you lose control of ~" — Sigil of
+/// Corruption ability on Khârn the Betrayer. Maps to ChangesController
+/// `{ side: Loses }` with valid_card = SelfRef so the trigger fires only when
+/// this specific permanent changes controller. Execute draws 2 for the previous
+/// controller (CR 603.10d: the ability looks back in time to the pre-change
+/// controller, who controls the trigger).
 #[test]
 fn trigger_when_you_lose_control_maps_to_changes_controller() {
     let def = parse_trigger_line(
         "When you lose control of ~, draw two cards.",
         "Khârn the Betrayer",
     );
-    assert_eq!(def.mode, TriggerMode::ChangesController);
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move's second ability, verbatim.
+/// "When you gain control of ~ from another player" maps to ChangesController
+/// `{ side: Gains }` with valid_card = SelfRef; "from another player" adds no
+/// constraint (CR 110.2: a control change always comes from the prior
+/// controller) so `valid_target` stays empty. The body is the shared
+/// choose-creature-and-opponent coin-flip chain and must not leak
+/// `Unimplemented` (the reach guard for
+/// `trigger_gain_control_hostile_shapes_stay_unknown`).
+#[test]
+fn trigger_when_you_gain_control_from_another_player_maps_to_gains() {
+    let def = parse_trigger_line(
+        "When you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        "Risky Move",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(def.valid_target, None);
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert!(
+        !has_unimplemented(execute),
+        "Risky Move's body leaked Unimplemented: {execute:?}"
+    );
+}
+
+/// CR 603.2 + CR 603.10: the bare "Whenever you gain control of ~" class — no
+/// "from another player" suffix — is rules-identical and maps to `Gains`.
+#[test]
+fn trigger_whenever_you_gain_control_bare_maps_to_gains() {
+    let def = parse_trigger_line("Whenever you gain control of ~, draw a card.", "Example");
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// Hostile shapes stay `Unknown` (honest coverage gaps): a counterparty other
+/// than "another player" and a lose-side line with a "from" suffix are not the
+/// recognised grammar. Paired with a positive in the same test so the negatives
+/// are not vacuous.
+#[test]
+fn trigger_gain_control_hostile_shapes_stay_unknown() {
+    let positive = parse_trigger_line(
+        "When you gain control of ~ from another player, draw a card.",
+        "Example",
+    );
+    assert_eq!(
+        positive.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        },
+        "reach guard: the recognised grammar parses"
+    );
+    for text in [
+        "When you gain control of ~ from an opponent, draw a card.",
+        "When you lose control of ~ from another player, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Example");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text:?} must stay Unknown, got {:?}",
+            def.mode
+        );
+    }
 }
 
 /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
@@ -24146,6 +24224,243 @@ fn trigger_oversold_cemetery_upkeep_creature_graveyard_gate() {
     assert!(def.optional);
 }
 
+/// CR 400.3 + CR 109.5: a "put into [your | an opponent's] graveyard" possessive
+/// scopes the moving card's OWNER (`FilterProp::Owned`) and leaves
+/// `TypedFilter.controller` unset (no "you control" in the subject). Returns the
+/// typed filter for further checks.
+fn assert_owner_scoped(valid_card: &Option<TargetFilter>, owner: ControllerRef) -> &TypedFilter {
+    let Some(TargetFilter::Typed(tf)) = valid_card else {
+        panic!("Expected Typed valid_card owned by {owner:?}, got {valid_card:?}");
+    };
+    assert_eq!(
+        tf.controller, None,
+        "the possessive must not scope the controller-at-death, got {tf:?}"
+    );
+    assert!(
+        tf.properties
+            .contains(&FilterProp::Owned { controller: owner }),
+        "Expected FilterProp::Owned in {tf:?}"
+    );
+    tf
+}
+
+/// CR 400.3 + CR 109.5 + CR 700.4: Daretti, Scrap Savant's emblem — "an artifact
+/// is put into your graveyard from the battlefield" scopes the artifact's owner,
+/// not the controller it had when it died.
+#[test]
+fn trigger_put_into_your_graveyard_from_battlefield_scopes_owner() {
+    let def = parse_trigger_line(
+        "Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.",
+        "Daretti, Scrap Savant",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You
+            }])
+        ))
+    );
+    let execute = def.execute.as_deref().expect("emblem trigger has a body");
+    assert!(!has_unimplemented(execute), "{execute:?}");
+}
+
+/// A subject's own "you control" stays on the controller axis (CR 603.10a look-back)
+/// while the destination possessive adds the owner scope: Volrath's ability.
+#[test]
+fn trigger_subject_you_control_put_into_your_graveyard_keeps_both_axes() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control is put into your graveyard from the battlefield, you may put it on top of your library.",
+        "Volrath",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("Expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "subject: you control"
+    );
+    assert!(tf.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You
+    }));
+}
+
+/// The root effect of a trigger body, as a `LoseLife` target.
+fn lose_life_target(def: &TriggerDefinition) -> Option<TargetFilter> {
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(!has_unimplemented(execute), "{execute:?}");
+    let Effect::LoseLife { target, .. } = &*execute.effect else {
+        panic!("expected a LoseLife root effect, got {:?}", execute.effect);
+    };
+    target.clone()
+}
+
+/// CR 400.3 + CR 608.2c (loop card #41): "that player" after a head that names a
+/// third-person graveyard possessive ("put into an opponent's / a player's graveyard")
+/// is the graveyard's owner, i.e. the moving card's OWNER -- never the controller the
+/// card had when it moved. Patron of the Nezumi, Bloodchief Ascension, Liability and
+/// The Dark Barony.
+#[test]
+fn trigger_that_player_after_owner_scoped_graveyard_head_is_the_card_owner() {
+    for (text, name) in [
+        (
+            "Whenever a permanent is put into an opponent's graveyard, that player loses 1 life.",
+            "Patron of the Nezumi",
+        ),
+        (
+            "Whenever a nontoken permanent is put into a player's graveyard from the battlefield, that player loses 1 life.",
+            "Liability",
+        ),
+        (
+            "Whenever a nonblack card is put into a player's graveyard from anywhere, that player loses 1 life.",
+            "The Dark Barony",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::ChangesZone, "{name}");
+        assert_eq!(
+            lose_life_target(&def),
+            Some(TargetFilter::ParentTargetOwner),
+            "{name}: \"that player\" is the card's owner"
+        );
+    }
+}
+
+/// Bloodchief Ascension keeps its optional "you may have that player lose 2 life" and
+/// the "If you do, you gain 2 life" rider; only the antecedent of "that player" moves.
+#[test]
+fn trigger_bloodchief_that_player_is_the_card_owner() {
+    let def = parse_trigger_line(
+        "Whenever a card is put into an opponent's graveyard from anywhere, if ~ has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.",
+        "Bloodchief Ascension",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
+    assert_eq!(
+        lose_life_target(&def),
+        Some(TargetFilter::ParentTargetOwner)
+    );
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(execute.optional, "\"you may have that player lose 2 life\"");
+    assert_eq!(execute.optional_player, None);
+    let rider = execute.sub_ability.as_deref().expect("gain-life rider");
+    assert!(
+        matches!(&*rider.effect, Effect::GainLife { .. }),
+        "{:?}",
+        rider.effect
+    );
+}
+
+/// Duskmantle Guildmage: the delayed "whenever ... this turn" split shares the scope
+/// authority, so its inner "that player" is the owner too.
+#[test]
+fn trigger_duskmantle_delayed_that_player_is_the_card_owner() {
+    let parsed = parse_oracle_text(
+        "{1}{U}{B}: Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.\n{2}{U}{B}: Target player mills two cards.",
+        "Duskmantle Guildmage",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("a delayed trigger ability");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected WheneverEvent, got {:?}", ability.effect);
+    };
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_owner_scoped(&trigger.valid_card, ControllerRef::Opponent);
+    assert!(!has_unimplemented(effect), "{effect:?}");
+    let Effect::LoseLife { target, .. } = &*effect.effect else {
+        panic!("expected LoseLife, got {:?}", effect.effect);
+    };
+    assert_eq!(target, &Some(TargetFilter::ParentTargetOwner));
+}
+
+/// Controls: a head that names no graveyard player ("a creature an opponent controls
+/// dies", "an artifact an opponent controls is put into a graveyard") keeps "that
+/// player" on the controller read from the zone-change record (CR 603.10a look-back).
+#[test]
+fn trigger_that_player_controller_heads_stay_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever a creature an opponent controls dies, that player loses 2 life.",
+        "Massacre Wurm",
+    );
+    assert_eq!(
+        lose_life_target(&def),
+        Some(TargetFilter::TriggeringPlayer),
+        "Massacre Wurm"
+    );
+    for (text, name) in [
+        (
+            "Whenever a creature an opponent controls dies, ~ deals 1 damage to that player.",
+            "Shriek, Treblemaker",
+        ),
+        (
+            "Whenever an artifact an opponent controls is put into a graveyard from the battlefield, ~ deals 1 damage to that player.",
+            "Pain Distributor",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        let execute = def.execute.as_deref().expect("trigger has a body");
+        let Effect::DealDamage { target, .. } = &*execute.effect else {
+            panic!("{name}: expected DealDamage, got {:?}", execute.effect);
+        };
+        assert_eq!(target, &TargetFilter::TriggeringPlayer, "{name}");
+    }
+}
+
+/// Building block: `relative_player_scope_for_condition` binds "that player" to the
+/// card's owner exactly for a head naming a third-person graveyard possessive
+/// ("an opponent's", "a player's", "their"), for the trigger and the delayed ("this
+/// turn", no keyword) forms alike; "your graveyard" and "a graveyard" name no
+/// third-person player and keep no scope.
+#[test]
+fn relative_player_scope_binds_owner_scoped_graveyard_head_to_the_card_owner() {
+    for cond in [
+        "whenever a permanent is put into an opponent's graveyard",
+        // The delayed form: keyword and "this turn" window removed.
+        "a card is put into an opponent's graveyard from anywhere",
+        "whenever a nontoken permanent is put into a player's graveyard from the battlefield",
+        "whenever a creature card is put into an opponent's graveyard from their library",
+        // "their graveyard" is the opponent named earlier in the clause.
+        "whenever a creature card is put into their graveyard from the battlefield",
+        // Batched form (no printed witness).
+        "whenever one or more cards are put into an opponent's graveyard",
+    ] {
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::ParentTargetOwner),
+            "\"that player\" in {cond:?} is the graveyard's owner"
+        );
+    }
+    for cond in [
+        "whenever an artifact is put into your graveyard from the battlefield",
+        "whenever an artifact an opponent controls is put into a graveyard from the battlefield",
+        "whenever a creature an opponent controls dies",
+        "when ~ is put into your graveyard from the battlefield",
+    ] {
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            None,
+            "{cond:?} names no third-person graveyard player"
+        );
+    }
+}
+
 #[test]
 fn trigger_put_into_your_graveyard_from_library() {
     let def = parse_trigger_line(
@@ -24155,16 +24470,9 @@ fn trigger_put_into_your_graveyard_from_library() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, Some(Zone::Library));
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: "your graveyard" narrows valid_card.controller (the field
+    // CR 400.3 + CR 109.5: "your graveyard" scopes valid_card ownership (the field
     // match_changes_zone actually consults) — not just valid_target.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::You));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=You, got {:?}",
-            def.valid_card
-        );
-    }
+    assert_owner_scoped(&def.valid_card, ControllerRef::You);
     assert_eq!(
         def.valid_target,
         Some(TargetFilter::Typed(
@@ -24186,15 +24494,8 @@ fn trigger_put_into_your_graveyard_from_library_or_hand_union() {
     assert_eq!(def.origin, None);
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::You));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=You, got {:?}",
-            def.valid_card
-        );
-    }
+    // CR 400.3 + CR 109.5: the union must not disturb the graveyard-possessive scope.
+    assert_owner_scoped(&def.valid_card, ControllerRef::You);
 }
 
 /// The full-form union ("from your library or your hand") lowers to the same
@@ -24420,15 +24721,8 @@ fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
     assert_eq!(def.origin, None);
     assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    // CR 109.5: the union must not disturb the graveyard-possessive narrowing.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    // CR 400.3 + CR 109.5: the union must not disturb the graveyard-possessive scope.
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
 }
 
 /// CR 109.5 + CR 400.3 (fail-closed): an opponent-qualified union against an
@@ -24571,10 +24865,12 @@ fn trigger_dreadhound_dies_or_library_to_graveyard_two_clauses() {
 
 /// Regression for issue #311: Undead Alchemist class. "Whenever a creature
 /// card is put into an opponent's graveyard from their library" must:
-///   - set origin = Library (CR 603.6c: from-library zone constraint)
-///   - set valid_card.controller = Opponent (CR 109.5: "their" anaphor
-///     binds back to the previously named opponent; valid_card is the field
-///     match_changes_zone consults).
+///   - set origin = Library (the from-library zone constraint)
+///   - scope valid_card to cards an opponent OWNS
+///     (`FilterProp::Owned { controller: Opponent }`, CR 400.3: a card goes
+///     only to its owner's graveyard; CR 608.2c: "their" binds back to that
+///     opponent), leaving `valid_card.controller` unset; valid_card is the
+///     field match_changes_zone consults.
 ///     Without these, the trigger fires when the controller's own creatures go
 ///     from battlefield to graveyard — the user-reported softlock chain.
 #[test]
@@ -24586,24 +24882,14 @@ fn trigger_put_into_opponent_graveyard_from_their_library() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, Some(Zone::Library));
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(
-            tf.controller,
-            Some(ControllerRef::Opponent),
-            "valid_card.controller must be Opponent so the trigger does not \
-                 fire on the source's own death"
-        );
-        assert!(
-            tf.type_filters.contains(&TypeFilter::Creature),
-            "Expected Creature type filter, got {:?}",
-            tf.type_filters
-        );
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    // valid_card must be owned by an opponent so the trigger does not fire on the
+    // source's own death.
+    let tf = assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Expected Creature type filter, got {:?}",
+        tf.type_filters
+    );
     assert_eq!(
         def.valid_target,
         Some(TargetFilter::Typed(
@@ -24612,10 +24898,11 @@ fn trigger_put_into_opponent_graveyard_from_their_library() {
     );
 }
 
-/// CR 109.5 + CR 700.4: Bloodchief Ascension class — "an opponent's
+/// CR 400.3 + CR 700.4: Bloodchief Ascension class — "an opponent's
 /// graveyard from anywhere". `origin = None` (no zone restriction) but
-/// `valid_card.controller = Opponent` so the trigger only fires for cards
-/// owned by an opponent.
+/// `valid_card` carries `FilterProp::Owned { controller: Opponent }`
+/// (CR 400.3) so the trigger only fires for cards an opponent owns, whoever
+/// controlled them.
 #[test]
 fn trigger_put_into_opponent_graveyard_from_anywhere() {
     let def = parse_trigger_line(
@@ -24625,14 +24912,7 @@ fn trigger_put_into_opponent_graveyard_from_anywhere() {
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert_eq!(def.origin, None);
     assert_eq!(def.destination, Some(Zone::Graveyard));
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
-    } else {
-        panic!(
-            "Expected Typed valid_card with controller=Opponent, got {:?}",
-            def.valid_card
-        );
-    }
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
 }
 
 /// CR 109.5: "a player's graveyard from any library" — owner-unscoped form.
@@ -24680,24 +24960,15 @@ fn trigger_one_or_more_creature_cards_put_into_graveyard_from_library() {
             TypedFilter::default().controller(ControllerRef::You)
         ))
     );
-    // CR 109.5: Subject filter must carry both the creature type AND the
-    // owner-narrowed controller scope so the matcher fires only for the
+    // CR 400.3 + CR 109.5: Subject filter must carry both the creature type AND the
+    // owner scope from "your graveyard" so the matcher fires only for the
     // controller's cards.
-    if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
-        assert!(
-            tf.type_filters.contains(&TypeFilter::Creature),
-            "Expected Creature in type_filters, got {:?}",
-            tf.type_filters
-        );
-        assert_eq!(
-            tf.controller,
-            Some(ControllerRef::You),
-            "Expected controller=You merged from 'your graveyard', got {:?}",
-            tf.controller
-        );
-    } else {
-        panic!("Expected Typed creature filter, got {:?}", def.valid_card);
-    }
+    let tf = assert_owner_scoped(&def.valid_card, ControllerRef::You);
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Expected Creature in type_filters, got {:?}",
+        tf.type_filters
+    );
 }
 
 #[test]
@@ -24809,13 +25080,15 @@ fn trigger_one_or_more_cards_put_into_graveyard_from_anywhere() {
     assert_eq!(def.origin, None);
     assert_eq!(def.destination, Some(Zone::Graveyard));
     assert!(def.batched);
-    // "your graveyard" scopes the affected cards to the controller even
-    // when "cards" carries no additional type restriction.
+    // CR 400.3 + CR 109.5: "your graveyard" scopes the affected cards to the ones
+    // the controller owns even when "cards" carries no additional type restriction.
     assert_eq!(
         def.valid_card,
-        Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You)
-        ))
+        Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        ])))
     );
 }
 
@@ -40096,6 +40369,259 @@ fn prepared_gate_rejects_nonsource_grammar_matrix() {
             "the trigger body must still parse for {text:?}"
         );
     }
+}
+
+// ── #9179: combat-history relative clauses and the self-blocker anaphor ──
+
+const CATHEDRAL_MEMBRANE_ORACLE: &str = "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.";
+const DEFIANT_VANGUARD_ORACLE: &str = "When this creature blocks, at end of combat, destroy it and all creatures it blocked this turn.\n{5}, {T}: Search your library for a Rebel permanent card with mana value 4 or less, put it onto the battlefield, then shuffle.";
+
+fn parse_card(
+    text: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    parse_oracle_text(
+        text,
+        name,
+        &owned(keywords),
+        &owned(types),
+        &owned(subtypes),
+    )
+}
+
+fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockedBySubject { scope },
+            subject: CombatRelationSubject::Source,
+        }]),
+    )
+}
+
+/// The target of the first effect in `def`'s chain that `select` accepts,
+/// descending through sub-abilities and delayed-trigger bodies.
+fn find_chain_target(
+    def: &AbilityDefinition,
+    select: fn(&Effect) -> Option<&TargetFilter>,
+) -> Option<&TargetFilter> {
+    if let Some(target) = select(&def.effect) {
+        return Some(target);
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if let Some(target) = find_chain_target(effect, select) {
+            return Some(target);
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(|sub| find_chain_target(sub, select))
+}
+
+fn destroy_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+fn return_to_hand_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// P5 — CR 509.1g + CR 608.2i + CR 611.2a: Cathedral Membrane, verbatim. The
+/// mass damage is restricted to the creatures the source blocked this combat,
+/// and "this combat" is not amputated into an effect duration.
+#[test]
+fn cathedral_membrane_damage_is_restricted_to_what_it_blocked_this_combat() {
+    let parsed = parse_card(
+        CATHEDRAL_MEMBRANE_ORACLE,
+        "Cathedral Membrane",
+        &["Defender"],
+        &["Artifact", "Creature"],
+        &["Phyrexian", "Wall"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .expect("the dies trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    match &*execute.effect {
+        Effect::DamageAll { amount, target, .. } => {
+            assert_eq!(*amount, QuantityExpr::Fixed { value: 6 });
+            assert_eq!(
+                *target,
+                blocked_by_source_creatures(CombatHistoryScope::ThisCombat)
+            );
+        }
+        other => panic!("expected DamageAll, got {other:?}"),
+    }
+    assert_eq!(
+        execute.duration, None,
+        "\"this combat\" belongs to the relative clause, not to the effect"
+    );
+}
+
+/// P5 + P7 — Defiant Vanguard, verbatim. "destroy it" names the Vanguard (the
+/// self-blocker pin), and the anaphoric continuation "all creatures it blocked
+/// this turn" binds its "it" to the source through the continuation pin — the
+/// continuation is otherwise parsed under a blank context, which the pronoun
+/// gate refuses. No duration anywhere in the chain.
+#[test]
+fn defiant_vanguard_destroys_itself_and_creatures_it_blocked_this_turn() {
+    let parsed = parse_card(
+        DEFIANT_VANGUARD_ORACLE,
+        "Defiant Vanguard",
+        &[],
+        &["Creature"],
+        &["Human", "Rebel"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Blocks)
+        .expect("the block trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(execute.duration, None);
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*execute.effect
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::EndCombat
+        }
+    );
+    // Reach guard: the compound split ran, and its primary acted on the source.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Destroy {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "\"destroy it\" must name the Vanguard itself, got {:?}",
+        effect.effect
+    );
+    assert_eq!(effect.duration, None);
+    let sub = effect
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the continuation must be chained");
+    match &*sub.effect {
+        Effect::DestroyAll { target, .. } => assert_eq!(
+            *target,
+            blocked_by_source_creatures(CombatHistoryScope::ThisTurn),
+            "the continuation's \"it\" must name the source"
+        ),
+        other => panic!("expected DestroyAll, got {other:?}"),
+    }
+    assert_eq!(sub.duration, None);
+}
+
+/// P6 — CR 509.3a + CR 608.2k: the self-subject intransitive block condition
+/// pins a bare "it" to the source. Conditions that name another object, fuse
+/// "becomes blocked", have a typed subject, or are not block conditions do not.
+#[test]
+fn self_subject_intransitive_block_condition_pins_it_to_source() {
+    for condition in ["When ~ blocks", "Whenever ~ attacks or blocks"] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &TargetFilter::SelfRef),
+            Some(TargetFilter::SelfRef),
+            "{condition}"
+        );
+    }
+    for (condition, subject) in [
+        ("Whenever ~ blocks a creature", TargetFilter::SelfRef),
+        (
+            "Whenever ~ blocks or becomes blocked",
+            TargetFilter::SelfRef,
+        ),
+        ("Whenever ~ attacks", TargetFilter::SelfRef),
+        (
+            "Whenever a creature you control blocks",
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        ),
+    ] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &subject),
+            None,
+            "{condition}"
+        );
+    }
+}
+
+/// P6 — the pin reaches printed trigger bodies through the real parse path:
+/// Cinder Wall and Wall of Junk act on themselves at end of combat, and Zephyr
+/// Spirit returns itself immediately. A chain-declared target still outranks
+/// the pin (CR 608.2c).
+#[test]
+fn self_blocker_trigger_bodies_act_on_the_source() {
+    for (name, text, keywords, types, select) in [
+        (
+            "Cinder Wall",
+            "Defender\nWhen this creature blocks, destroy it at end of combat.",
+            &["Defender"][..],
+            &["Creature"][..],
+            destroy_target as fn(&Effect) -> Option<&TargetFilter>,
+        ),
+        (
+            "Wall of Junk",
+            "Defender (This creature can't attack.)\nWhen this creature blocks, return it to its owner's hand at end of combat. (Return it only if it's on the battlefield.)",
+            &["Defender"][..],
+            &["Artifact", "Creature"][..],
+            return_to_hand_target,
+        ),
+        (
+            "Ceremonial Guard",
+            "When this creature attacks or blocks, destroy it at end of combat.",
+            &[][..],
+            &["Creature"][..],
+            destroy_target,
+        ),
+        (
+            "Zephyr Spirit",
+            "When this creature blocks, return it to its owner's hand.",
+            &[][..],
+            &["Creature"][..],
+            return_to_hand_target,
+        ),
+    ] {
+        let parsed = parse_card(text, name, keywords, types, &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Blocks | TriggerMode::AttacksOrBlocks))
+            .unwrap_or_else(|| panic!("{name}: the block trigger must parse"));
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert_eq!(
+            find_chain_target(execute, select),
+            Some(&TargetFilter::SelfRef),
+            "{name}: \"it\" must name the blocker itself"
+        );
+    }
+
+    let def = parse_trigger_line(
+        "Whenever Test Wall blocks, tap target creature. Destroy it at end of combat.",
+        "Test Wall",
+    );
+    let execute = def.execute.as_deref().expect("trigger body");
+    assert_eq!(
+        find_chain_target(execute, destroy_target),
+        Some(&TargetFilter::ParentTarget),
+        "a chain-declared target outranks the self-blocker pin"
+    );
 }
 
 // --- #9179 (A): the "during <window>" qualifier of an event-trigger head ---

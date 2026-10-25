@@ -14602,8 +14602,10 @@ mod tests {
         flate2::read::GzDecoder::new(&gz[..])
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )

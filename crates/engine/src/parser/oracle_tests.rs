@@ -16287,16 +16287,19 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
     let choose = chain
         .sub_ability
         .as_ref()
-        .and_then(|search_move| search_move.sub_ability.as_ref())
-        .expect("search move should chain to ChooseFromZone");
-    assert!(matches!(
-        &*choose.effect,
-        Effect::ChooseFromZone {
-            count: 2,
-            chooser: ZoneChoiceChooser::Opponent,
-            ..
-        }
-    ));
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "{:?}",
+        choose.effect
+    );
     let chosen_move = choose
         .sub_ability
         .as_ref()
@@ -16321,6 +16324,62 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
             ..
         }
     ));
+}
+
+#[test]
+fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+            "Search your library for up to four creature cards with different powers and reveal them. An opponent chooses two of those cards. Shuffle the chosen cards into your library and put the rest into your hand.",
+            AbilityKind::Spell,
+        );
+    let choose = chain
+        .sub_ability
+        .as_ref()
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(&*choose.effect, Effect::ChooseFromZone { .. }),
+        "{:?}",
+        choose.effect
+    );
+    let chosen_move = choose
+        .sub_ability
+        .as_ref()
+        .expect("choice should route chosen cards first");
+    assert!(matches!(
+        &*chosen_move.effect,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn search_without_choice_partition_keeps_its_put_step() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+        "Search your library for a card, put that card into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+    let put = chain.sub_ability.as_ref().expect("search put step");
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "{:?}",
+        put.effect
+    );
 }
 
 #[test]
@@ -24193,45 +24252,42 @@ fn fatal_push_full_composition() {
         other => panic!("expected TargetMatchesFilter on base, got: {other:?}"),
     }
 
-    // Sub-ability: ConditionInstead with And([Revolt, CmcLE(4)])
+    // CR 614.6 + CR 608.2c: Revolt selects the replacement; "if it has mana value
+    // 4 or less" stays on the replacement's own Destroy beneath the carrier.
     let sub = ability
         .sub_ability
         .as_ref()
         .expect("should have sub_ability");
-    match &sub.condition {
-        Some(AbilityCondition::ConditionInstead { inner }) => match inner.as_ref() {
-            AbilityCondition::And { conditions } => {
-                assert_eq!(conditions.len(), 2, "And should have 2 conditions");
-                // First: Revolt (QuantityCheck on zone-change count)
-                assert!(
-                    matches!(&conditions[0], AbilityCondition::QuantityCheck { .. }),
-                    "first condition should be QuantityCheck (revolt)"
-                );
-                // Second: CmcLE(4)
-                match &conditions[1] {
-                    AbilityCondition::TargetMatchesFilter { filter, .. } => {
-                        if let TargetFilter::Typed(tf) = filter {
-                            assert!(
-                                tf.properties.iter().any(|p| matches!(
-                                    p,
-                                    FilterProp::Cmc {
-                                        comparator: Comparator::LE,
-                                        value: QuantityExpr::Fixed { value: 4 }
-                                    }
-                                )),
-                                "revolt sub should have CmcLE(4), got: {:?}",
-                                tf.properties
-                            );
-                        } else {
-                            panic!("expected Typed filter on revolt sub");
-                        }
-                    }
-                    other => panic!("expected TargetMatchesFilter in And[1], got: {other:?}"),
+    assert!(
+        matches!(
+            &sub.condition,
+            Some(AbilityCondition::ConditionInstead { inner })
+                if matches!(inner.as_ref(), AbilityCondition::QuantityCheck { .. })
+        ),
+        "the override is selected by Revolt alone, got: {:?}",
+        sub.condition
+    );
+    let body = sub
+        .sub_ability
+        .as_ref()
+        .expect("the guarded replacement sits beneath the selector");
+    assert!(matches!(*body.effect, Effect::Destroy { .. }));
+    match &body.condition {
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) => assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 4 }
                 }
-            }
-            other => panic!("expected And inside ConditionInstead, got: {other:?}"),
-        },
-        other => panic!("expected ConditionInstead on sub, got: {other:?}"),
+            )),
+            "revolt body should have CmcLE(4), got: {:?}",
+            tf.properties
+        ),
+        other => panic!("expected TargetMatchesFilter on the revolt body, got: {other:?}"),
     }
 }
 
@@ -34887,4 +34943,50 @@ fn ir_facade_demotes_a_refused_granter_name() {
         &*def.effect,
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.3a + CR 613.1b: Risky Move, verbatim, parses
+/// to the right shape: the second ability ("When you gain control of this
+/// enchantment from another player, ...") is the gain-side
+/// `ChangesController`, and the first is the upkeep `GiveControl` of the
+/// enchantment to the scoped (active) player. The card nevertheless stays
+/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
+/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
+/// reports exactly the gain-side trigger until that emitter lands.
+#[test]
+fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
+    use crate::types::triggers::{ControlChangeSide, TriggerMode};
+    let face = oracle_face_for(
+        "Risky Move",
+        "At the beginning of each player's upkeep, that player gains control of this enchantment.\nWhen you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        &["Enchantment"],
+        &[],
+    );
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert_eq!(
+        gaps,
+        vec![String::from("Trigger:ChangesController { side: Gains }")]
+    );
+    assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
+    let upkeep = &face.triggers[0];
+    assert_eq!(upkeep.mode, TriggerMode::Phase);
+    assert_eq!(upkeep.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep
+            .execute
+            .as_ref()
+            .expect("upkeep body")
+            .effect
+            .as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(
+        face.triggers[1].mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
 }
