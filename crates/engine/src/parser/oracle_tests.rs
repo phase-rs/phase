@@ -34944,3 +34944,49 @@ fn ir_facade_demotes_a_refused_granter_name() {
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
 }
+
+/// CR 603.2 + CR 603.10 + CR 603.3a + CR 613.1b: Risky Move, verbatim, parses
+/// to the right shape: the second ability ("When you gain control of this
+/// enchantment from another player, ...") is the gain-side
+/// `ChangesController`, and the first is the upkeep `GiveControl` of the
+/// enchantment to the scoped (active) player. The card nevertheless stays
+/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
+/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
+/// reports exactly the gain-side trigger until that emitter lands.
+#[test]
+fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
+    use crate::types::triggers::{ControlChangeSide, TriggerMode};
+    let face = oracle_face_for(
+        "Risky Move",
+        "At the beginning of each player's upkeep, that player gains control of this enchantment.\nWhen you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        &["Enchantment"],
+        &[],
+    );
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert_eq!(
+        gaps,
+        vec![String::from("Trigger:ChangesController { side: Gains }")]
+    );
+    assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
+    let upkeep = &face.triggers[0];
+    assert_eq!(upkeep.mode, TriggerMode::Phase);
+    assert_eq!(upkeep.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep
+            .execute
+            .as_ref()
+            .expect("upkeep body")
+            .effect
+            .as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(
+        face.triggers[1].mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+}
