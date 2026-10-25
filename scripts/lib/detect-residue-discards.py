@@ -11,12 +11,16 @@ inherit them); precise-capture use<...> bounds are not imports. Bare closures
 are not helper results: only established result-forwarding methods unwrap them.
 Local bindings shadowing imported aliases are not tracked; helper import aliases
 do not occur in the current production parser tree.
-Binding annotations and ref/mut modifiers do not hide ignored remainders.
+Binding annotations and ref/mut modifiers do not hide ignored remainders or
+whole results: a single `_`/`_name` pattern counts one whole-result obligation,
+even if later used, consistently with conservative residue-binding policy.
 Let-else initializers stop before the top-level else, not its diverging block.
 Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
 Argument and wrapper-pattern splitting accepts an optional trailing comma.
+Discovery excludes exactly tests.rs and *_tests.rs, snapshots, and modules
+proven test-only; a filename merely containing `tests` remains production.
 
 --list reports each path:line family symbol and scan totals; --baseline prints
 sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
@@ -263,6 +267,12 @@ class Expressions:
                     return self.origin(close + 1, b)
         return None
 
+    def ignored_binding(self, start, end):
+        """Conservative wildcard/_name policy, irrespective of later uses."""
+        while start < end and self.values[start] in ("ref", "mut"):
+            start += 1
+        return end == start + 1 and self.values[start].startswith("_")
+
     def residue_pattern(self, start, end, arity=2):
         v = self.values
         while start < end:
@@ -279,9 +289,7 @@ class Expressions:
                         residue = rest + 1 + residue - (arity - suffix)
                 if len(parts) > residue:
                     a, b = parts[residue]
-                    while a < b and v[a] in ("ref", "mut"):
-                        a += 1
-                    return b == a + 1 and v[a].startswith("_")
+                    return self.ignored_binding(a, b)
                 start += 1
                 end -= 1
             elif (end > start + 2 and v[start] in ("Some", "Ok")
@@ -302,8 +310,11 @@ class Expressions:
                 if a < b:  # A leading `|` is an empty prefix, not an obligation.
                     yield from self.discard_patterns(a, b, arity)
             return
+        if self.ignored_binding(start, end):
+            yield start, "whole-result"
+            return
         if self.residue_pattern(start, end, arity):
-            yield start
+            yield start, "binding"
             return
         v = self.values
         if (start + 1 < end and v[start] in ("Some", "Ok")
@@ -346,18 +357,16 @@ def find_discards(relpath, lines):
             arity = 3 if origin and origin[1] == "parse_target_with_syntax" else 2
             pattern_end = ex.end(i + 1, {":"}, equals)
             patterns = list(ex.discard_patterns(i + 1, pattern_end, arity))
-            for site in patterns:
-                add(origin, "binding", site if len(patterns) > 1 else None)
-            if not patterns and v[i + 1:pattern_end] == ["_"]:
-                add(origin, "whole-result")
+            for site, family in patterns:
+                add(origin, family, site if len(patterns) > 1 else None)
         if value == "match":
             end = ex.end(i + 1, {"{"})
             origin = ex.origin(i + 1, end)
             if origin and end < len(v):
                 arity = 3 if origin[1] == "parse_target_with_syntax" else 2
                 for a, b in ex.match_patterns(end + 1, ex.pairs[end]):
-                    for site in ex.discard_patterns(a, b, arity):
-                        add(origin, "binding", site)
+                    for site, family in ex.discard_patterns(a, b, arity):
+                        add(origin, family, site)
         if value == "." and i + 1 < len(v) and v[i + 1] in ("0", "2"):
             # Walk backward over the receiver's balanced call/parentheses and
             # qualified/method name. Do not absorb an enclosing assignment.
@@ -489,9 +498,13 @@ def production_sources(root, index):
         if not scope.is_dir():
             raise ValueError(f"missing parser root: {scope}")
         paths = [p.relative_to(root).as_posix() for p in scope.rglob("*.rs")]
+    def is_test_file(path):
+        name = PurePosixPath(path).name
+        return name == "tests.rs" or name.endswith("_tests.rs")
+
     sources = {p: read_snapshot(root, p, index) for p in sorted(paths)
                if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts
-               and "tests" not in PurePosixPath(p).name}
+               and not is_test_file(p)}
     if not sources:
         raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
     edges = {}

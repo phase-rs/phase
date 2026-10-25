@@ -31,6 +31,13 @@
 # let-else / or-pattern recognition still measures 128; no ceiling increased.
 # Revalidated at source revision 5c4bfcbcb1e8c25e572e42fb518c05cebcc3c145:
 # optional trailing argument/pattern commas still measure 128; no increases.
+# Revalidated at source revision ac65b48581d229bc7c83e5b2f92071ce50bb1835:
+# `_`/`_name` whole-result bindings (including ref/mut/types and match-arm
+# alternatives) each count one conservative obligation, even if later used.
+# Discovery excludes exactly tests.rs / *_tests.rs, snapshots, and proven
+# test-only modules, not production filenames merely containing `tests`.
+# --baseline still measures 128 obligations across 22 nonzero rows / 89 scanned
+# files; no new real sites or ceiling increases.
 # Gate H opts into item exclusion; other censuses retain their legacy population.
 # Format: <repository-relative-path> <nonnegative decimal ceiling>.
 # Tightening rule: every burn-down change must lower its ceiling in the same

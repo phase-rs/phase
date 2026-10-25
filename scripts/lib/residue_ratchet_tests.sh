@@ -240,9 +240,19 @@ expect_out 'precise capture indexed growth names source' 'probe.rs:3: binding pa
 
 # Refutable let-else, or-patterns and rustfmt trailing commas must grow the real
 # H census in both snapshots; consumed/unrelated replacements remove the growth.
-for form in let-else or-pattern trailing-comma-drop qualified-drop any-default selfref-default wrapped-pattern; do
+for form in let-else or-pattern trailing-comma-drop qualified-drop any-default selfref-default wrapped-pattern whole-binding whole-match; do
     new_fixture
     case "$form" in
+        whole-binding)
+            discarded='fn probe(input: &str) { let ref mut _r: (TargetFilter, &str) = parse_target(input); }'
+            consumed='fn probe(input: &str) { let ref mut r: (TargetFilter, &str) = parse_target(input); consume(r); }'
+            actual=2
+            ;;
+        whole-match)
+            discarded='fn probe(input: &str) { match parse_target(input) { _unused | _unused if keep() => {}, } }'
+            consumed='fn probe(input: &str) { match parse_target(input) { result | result if keep() => { consume(result); }, } }'
+            actual=3
+            ;;
         let-else)
             discarded='fn probe(input: &str) -> Option<TargetFilter> { let (TargetFilter::Typed(typed), _) = parse_target(input) else { return None; }; Some(TargetFilter::Typed(typed)) }'
             consumed='fn probe(input: &str) -> Option<TargetFilter> { let (TargetFilter::Typed(typed), rest) = parse_target(input) else { return None; }; consume(rest); Some(TargetFilter::Typed(typed)) }'
@@ -336,6 +346,40 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
     expect_out "$form consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
     expect_out "$form consumed snapshot is index" 'snapshot index)'
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
+done
+
+# Production names containing `tests` remain scanned in both snapshots; exact
+# test filenames and a test-only outlined child remain negative controls.
+for name in contests.rs latest_tests_helper.rs; do
+    new_fixture
+    printf '#[cfg(test)]\nmod support;\n' > "$FIXTURE/crates/engine/src/parser/mod.rs"
+    for excluded in tests.rs foo_tests.rs support.rs; do
+        printf 'fn hidden() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$excluded"
+    done
+    consumed='fn f() { let (v, rest) = parse_target(input); consume(rest); }'
+    discarded='fn f() { let (v, _) = parse_target(input); }'
+    printf '%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/$name"
+    run_gate
+    expect_rc "$name consumed result and test-file controls pass worktree" 0
+    printf '%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/$name"
+    run_gate
+    expect_rc "$name production discard fails worktree" 1
+    expect_out "$name unledgered production growth is named" "$name: actual 1, ceiling 0 (no ledger entry)"
+    printf 'SMOKE %s worktree added: exit %s\n%s\n' "$name" "$RC" "$OUT"
+    git -C "$FIXTURE" add crates/engine/src/parser
+    printf '%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/$name"
+    run_cached
+    expect_rc "$name indexed discard fails despite consumed worktree" 1
+    expect_out "$name indexed production growth is named" "$name: actual 1, ceiling 0 (no ledger entry)"
+    printf 'SMOKE %s staged-index added: exit %s\n%s\n' "$name" "$RC" "$OUT"
+    run_gate
+    expect_rc "$name removing discard passes worktree" 0
+    git -C "$FIXTURE" add "crates/engine/src/parser/$name"
+    run_cached
+    expect_rc "$name removing indexed discard passes" 0
+    expect_out "$name consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$name consumed snapshot is index" 'snapshot index)'
+    printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$name" "$RC" "$OUT"
 done
 
 # Availability failures are loud, including the inline seam suite.

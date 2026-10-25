@@ -21,6 +21,63 @@ def hits(src):
 
 
 class DiscardTests(unittest.TestCase):
+    def test_s_named_whole_result_bindings(self):
+        forms = (
+            "let PATTERN = EXPR; consume(NAME);",
+            "let PATTERN: (TargetFilter, &str) = EXPR; consume(NAME);",
+            "let PATTERN = EXPR else { return; }; consume(NAME);",
+            "if let PATTERN = EXPR { consume(NAME); } else {}",
+        )
+        for modifier in ("", "ref ", "mut ", "ref mut "):
+            for template in forms:
+                for expr in (
+                    "parse_target(i)",
+                    "parse_target(\n    i,\n)",
+                    "ctx.with_player_antecedents(|s| parse_target(i, s))",
+                    "ctx.with_player_scope(scope, |s| { parse_target(i, s) })",
+                ):
+                    for name, expected in (("_r", ["whole-result"]), ("r", [])):
+                        source = template.replace("PATTERN", modifier + name).replace(
+                            "EXPR", expr).replace("NAME", name)
+                        with self.subTest(modifier=modifier, template=template,
+                                          expr=expr, name=name):
+                            self.assertEqual([h.family for h in hits(source)], expected)
+                    for expr_control in (
+                        f"consume({expr})", f"|s| {expr}", f"move |s| {{ {expr} }}",
+                    ):
+                        source = template.replace("PATTERN", modifier + "_r").replace(
+                            "EXPR", expr_control).replace("NAME", "_r")
+                        with self.subTest(control=source):
+                            self.assertEqual(hits(source), [])
+
+    def test_s_whole_result_match_alternatives(self):
+        patterns = (
+            ("NAME", 1),
+            ("ref NAME", 1),
+            ("mut NAME", 1),
+            ("ref mut NAME", 1),
+            ("NAME | NAME", 2),
+            ("| NAME | NAME", 2),
+            ("(NAME | NAME)", 2),
+            ("(NAME) | (NAME)", 2),
+        )
+        for pattern, count in patterns:
+            for guard in ("", " if keep(&NAME)"):
+                for name in ("_", "_unused", "result"):
+                    source = ("match parse_target(\n    i,\n) {\n    "
+                              + pattern + guard + " => { consume(NAME); },\n}")
+                    source = source.replace("NAME", name)
+                    with self.subTest(pattern=pattern, guard=guard, name=name):
+                        self.assertEqual([h.family for h in hits(source)],
+                                         ["whole-result"] * (0 if name == "result" else count))
+                    self.assertEqual(hits(source.replace(
+                        "parse_target(\n    i,\n)", "consume(parse_target(i))")), [])
+        for pattern in ("_unused | (v, _rest)", "(v, _rest) | _unused"):
+            with self.subTest(mixed=pattern):
+                self.assertCountEqual([h.family for h in hits(
+                    f"match parse_target(i) {{ {pattern} if keep() => {{}}, }}")],
+                    ["whole-result", "binding"])
+
     def test_q_trailing_comma_drop_arguments(self):
         for drop in ("drop", "std::mem::drop"):
             with self.subTest(drop=drop):
@@ -481,6 +538,26 @@ class DiscardTests(unittest.TestCase):
             return [(Path(h.path).relative_to(rd.SCOPE).as_posix(), h.family)
                     for path, text in rd.production_sources(root, False).items()
                     for h in rd.find_discards(path, text.splitlines())]
+
+    def test_t_exact_test_filenames_preserve_production_sources(self):
+        discard = "fn f() { let (v, _) = parse_target(i); }"
+        found = self.discovery_hits({
+            "mod.rs": "mod contests;\nmod latest_tests_helper;\n"
+                      "#[cfg(test)]\nmod support;",
+            "contests.rs": discard,
+            "latest_tests_helper.rs": discard,
+            "tests.rs": discard,
+            "foo_tests.rs": discard,
+            "support.rs": discard,
+            "inner.rs": "#![cfg(test)]\n" + discard,
+            "snapshots/fake.rs": discard,
+            "production.rs": discard,
+        })
+        self.assertEqual(sorted(found), [
+            ("contests.rs", "binding"),
+            ("latest_tests_helper.rs", "binding"),
+            ("production.rs", "binding"),
+        ])
 
     def test_production_module_reference_wins_over_test_path_alias(self):
         found = self.discovery_hits({
