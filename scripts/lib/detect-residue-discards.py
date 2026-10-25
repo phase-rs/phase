@@ -17,6 +17,8 @@ even if later used, consistently with conservative residue-binding policy.
 Let-else initializers stop before the top-level else, not its diverging block.
 Block initializers include postfixes before result classification; trailing `?`
 preserves helper origin, but arbitrary methods and tuple projections do not.
+Projection receivers include standalone bare blocks, not keyword/header bodies
+or struct literals; the helper origin is resolved through the block's tail.
 Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
@@ -446,16 +448,24 @@ def find_discards(relpath, lines):
                     for site, family in ex.discard_patterns(a, b, arity):
                         add(origin, family, site)
         if value == "." and i + 1 < len(v) and v[i + 1] in ("0", "2"):
-            # Walk backward over the receiver's balanced call/parentheses and
-            # qualified/method name. Do not absorb an enclosing assignment.
+            # Walk backward over a standalone block or balanced call/parentheses.
+            # Do not absorb an enclosing assignment or a keyword/header body.
             start = i - 1
-            if start < 0 or v[start] != ")":
+            if start < 0:
                 continue
-            start = ex.pairs[start]
-            if start > 0 and re.fullmatch(r"\w+", v[start - 1]) and v[start - 1] != "return":
-                start -= 1
-                while start >= 2 and v[start - 1] in ("::", ".") and re.fullmatch(r"\w+", v[start - 2]):
-                    start -= 2
+            if v[start] == "}":
+                start = ex.pairs[start]
+                if start > 0 and (re.fullmatch(r"\w+", v[start - 1])
+                                  or v[start - 1] in (")", "]", ">")):
+                    continue
+            elif v[start] == ")":
+                start = ex.pairs[start]
+                if start > 0 and re.fullmatch(r"\w+", v[start - 1]) and v[start - 1] != "return":
+                    start -= 1
+                    while start >= 2 and v[start - 1] in ("::", ".") and re.fullmatch(r"\w+", v[start - 2]):
+                        start -= 2
+            else:
+                continue
             origin = ex.origin(start, i)
             if origin and (v[i + 1] == "0" or origin[1] == "parse_target_with_syntax"):
                 add(origin, "projection")
