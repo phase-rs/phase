@@ -77,6 +77,14 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// Whether generic keyword removal strips this candidate.
+/// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
+/// abilities. Other removal operands keep their existing same-variant scope.
+pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
+    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
+}
+
 /// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
 /// about an object's keywords. The door declares it; the authority never
 /// infers liveness from an address.
@@ -1384,6 +1392,72 @@ mod tests {
             "Test".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    #[test]
+    fn lose_hexproof_removal_matches_every_quality() {
+        use crate::types::keywords::HexproofFilter;
+
+        // CR 702.11d/e: losing hexproof removes every qualified hexproof ability.
+        for candidate in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+            Keyword::HexproofFrom(HexproofFilter::CardType("Artifact".into())),
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".into())),
+            Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+        ] {
+            assert!(
+                keyword_matches_removal(&candidate, &Keyword::Hexproof),
+                "lose hexproof must remove {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_unrelated_and_reverse_boundary() {
+        use crate::types::keywords::{HexproofFilter, WardCost};
+
+        let qualified = Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black));
+        assert!(keyword_matches_removal(
+            &Keyword::Hexproof,
+            &Keyword::Hexproof
+        ));
+        assert!(keyword_matches_removal(&qualified, &qualified));
+        assert!(!keyword_matches_removal(&Keyword::Hexproof, &qualified));
+        for candidate in [
+            Keyword::Shroud,
+            Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            Keyword::Indestructible,
+            Keyword::Flying,
+        ] {
+            assert!(!keyword_matches_removal(&candidate, &Keyword::Hexproof));
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_existing_variant_scope() {
+        use crate::types::keywords::WardCost;
+
+        assert!(keyword_matches_removal(
+            &Keyword::Ward(WardCost::PayLife(3)),
+            &Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+        ));
+        assert_eq!(Keyword::Banding.kind(), KeywordKind::Unknown);
+        assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
+        assert!(keyword_matches_removal(
+            &Keyword::Toxic(2),
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Banding,
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Toxic(1),
+            &Keyword::Banding
+        ));
     }
 
     #[test]

@@ -336,6 +336,14 @@ fn has_conditional_search_result_destination(lower: &str) -> bool {
         .is_some()
 }
 
+/// CR 608.2c: a later "put/shuffle the chosen … and the rest …" instruction owns where the found cards go.
+fn has_choice_partition_destinations(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        map_opt(rest, parse_choice_partition_destinations).parse(input)
+    })
+    .is_some()
+}
+
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
 /// Handles all chooser prefix forms: "choose ", "you choose ", "an opponent chooses ",
 /// "target opponent chooses ".
@@ -758,30 +766,23 @@ pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
     alt((
-        value(
-            Zone::Graveyard,
+        preceded(
+            (
+                tag::<_, _, OracleError<'_>>(" into "),
+                parse_partition_owner_possessive,
+            ),
             alt((
-                tag::<_, _, OracleError<'_>>(" into your graveyard"),
-                tag(" into their graveyard"),
-                tag(" into its owner's graveyard"),
-            )),
-        ),
-        value(
-            Zone::Hand,
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your hand"),
-                tag(" into their hand"),
+                value(Zone::Graveyard, tag("graveyard")),
+                value(Zone::Hand, tag("hand")),
+                value(Zone::Library, tag("library")),
             )),
         ),
         value(
             Zone::Library,
-            alt((
-                tag::<_, _, OracleError<'_>>(" into your library"),
-                tag(" into their library"),
-                tag(" into its owner's library"),
-                tag(" on the bottom of your library"),
-                tag(" on the bottom of their library"),
-            )),
+            preceded(
+                (tag(" on the bottom of "), parse_partition_owner_possessive),
+                tag("library"),
+            ),
         ),
         value(
             Zone::Exile,
@@ -791,6 +792,21 @@ pub(super) fn parse_choice_partition_destination(
             )),
         ),
     ))
+    .parse(input)
+}
+
+/// CR 400.3: these zones are always the owner's, so the possessive selects no player.
+fn parse_partition_owner_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("your "),
+            tag("their "),
+            tag("its owner's "),
+            tag("the player's "),
+            tag("that player's "),
+        )),
+    )
     .parse(input)
 }
 
@@ -3445,6 +3461,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("transform ")),
     ))
     .or(value((), tag("cast ")))
+    // CR 608.2c: "<instruction> and repeat this process" — split only the
+    // terminal bare directive (anchored to the end of the segment) so
+    // "... and repeat this process for first strike" and the counted / "any
+    // number of times" shapes are not newly split.
+    .or(value(
+        (),
+        terminated(tag("repeat this process"), (opt(tag(".")), eof)),
+    ))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
     // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
@@ -7149,6 +7173,10 @@ pub(super) fn parse_intrinsic_continuation_ast(
             if has_positional_put {
                 return None;
             }
+            // CR 701.24b: the found cards stay in the library until that partition moves them.
+            if has_choice_partition_destinations(&full_lower) {
+                return None;
+            }
             let lower = text.to_lowercase();
             let attach_host = if nom_primitives::scan_contains(&full_lower, "attached to")
                 || nom_primitives::scan_contains(&lower, "attached to")
@@ -9325,12 +9353,13 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                     .map(|position| ContinuationAst::PutChosenCardsAtLibraryPosition { position })
             }),
         // CR 608.2d: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
-        // of them/those" after ChangeZone, ExileTop, RevealTop, or RevealHand →
-        // ChooseFromZone building block
+        // of them/those" after ChangeZone, ExileTop, RevealTop, RevealHand, or a search
+        // whose found cards wait in the library → ChooseFromZone building block
         Effect::ChangeZone { .. }
         | Effect::ExileTop { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealHand { .. }
+        | Effect::SearchLibrary { .. }
             if (nom_primitives::scan_contains(&lower, "of them")
                 || nom_primitives::scan_contains(&lower, "of those"))
                 && alt((
@@ -10440,6 +10469,45 @@ mod tests {
     use super::super::parse_effect_chain;
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    #[test]
+    fn choice_partition_destination_accepts_every_owner_possessive() {
+        for possessive in [
+            "your",
+            "their",
+            "its owner's",
+            "the player's",
+            "that player's",
+        ] {
+            for (word, zone) in [
+                ("graveyard", Zone::Graveyard),
+                ("hand", Zone::Hand),
+                ("library", Zone::Library),
+            ] {
+                let text = format!(" into {possessive} {word}");
+                assert_eq!(
+                    parse_choice_partition_destination(&text).ok(),
+                    Some(("", zone)),
+                    "{text}"
+                );
+            }
+            let bottom = format!(" on the bottom of {possessive} library");
+            assert_eq!(
+                parse_choice_partition_destination(&bottom).ok(),
+                Some(("", Zone::Library)),
+                "{bottom}"
+            );
+        }
+        assert_eq!(
+            parse_choice_partition_destination(" into exile").ok(),
+            Some(("", Zone::Exile))
+        );
+        assert!(parse_choice_partition_destination(" into a player's graveyard").is_err());
+        assert_eq!(
+            parse_choice_partition_destination(" into the player's graveyard").ok(),
+            Some(("", Zone::Graveyard))
+        );
+    }
 
     /// SHAPE — CR 608.2c: a conditional destination owns movement; this
     /// detector suppresses only the earlier search's synthesized default.

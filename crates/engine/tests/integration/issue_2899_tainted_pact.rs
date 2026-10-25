@@ -30,8 +30,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, LibraryPosition,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, FilterProp, LibraryPosition,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -255,12 +255,12 @@ fn assert_parses_to_opponent_graveyard_trigger(
         .filter(|def| {
             matches!(def.mode, TriggerMode::ChangesZone)
                 && def.destination == Some(Zone::Graveyard)
+                // CR 400.3: "an opponent's graveyard" scopes the card's owner.
                 && matches!(
-                    def.valid_card,
-                    Some(TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::Opponent),
-                        ..
-                    }))
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(typed)) if typed.properties.contains(
+                        &FilterProp::Owned { controller: ControllerRef::Opponent }
+                    )
                 )
         })
         .collect();

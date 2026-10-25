@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::engine_replacement::CopyEntryResumption;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
@@ -518,8 +519,44 @@ fn park_counter_completion_outside_active_direct_choice(
     }
 }
 
+/// CR 614.1c + CR 122.6 + CR 614.5: all entry contributions of one kind
+/// form one placement, so a counter replacement gets one opportunity.
+pub(crate) fn coalesce_entry_counters(
+    counters: impl IntoIterator<Item = (CounterType, u32)>,
+) -> Vec<(CounterType, u32)> {
+    let mut merged: Vec<(CounterType, u32)> = Vec::new();
+    for (counter_type, count) in counters {
+        if count == 0 {
+            continue;
+        }
+        if let Some((_, total)) = merged.iter_mut().find(|(kind, _)| *kind == counter_type) {
+            *total = total.saturating_add(count);
+        } else {
+            merged.push((counter_type, count));
+        }
+    }
+    merged
+}
+
+fn ready_copy_entry_completion(
+    queue: &PendingCounterAdditionQueue,
+) -> Option<ObjectIncarnationRef> {
+    if !queue.remaining.is_empty() {
+        return None;
+    }
+    match queue.completion.as_ref()?.post_actions.first()? {
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => Some(*entrant),
+        _ => None,
+    }
+}
+
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.active_counter_additions().cloned() {
+    // Leave a ready fallible action resident without cloning or re-parking it.
+    while let Some(mut queue) = state
+        .active_counter_additions()
+        .filter(|queue| ready_copy_entry_completion(queue).is_none())
+        .cloned()
+    {
         let Some(next) = queue.remaining.first().cloned() else {
             state
                 .take_active_counter_additions()
@@ -534,6 +571,27 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             }) = queue.completion.take()
             {
                 while let Some(action) = post_actions.first().cloned() {
+                    // The boolean effects layer cannot propagate entry replay's
+                    // EngineError. Leave this action at the head for the
+                    // result-aware engine boundary, including when earlier
+                    // post-actions ran before it.
+                    if matches!(
+                        action,
+                        PendingCounterPostAction::FinishCopyTargetChoiceEntry { .. }
+                    ) {
+                        stash_pending_counter_additions(
+                            state,
+                            Vec::new(),
+                            PendingEffectResolved {
+                                kind,
+                                source_id,
+                                resolution_event,
+                                post_actions,
+                                player_action,
+                            },
+                        );
+                        return;
+                    }
                     post_actions.remove(0);
                     if !apply_pending_counter_post_action(state, action, events) {
                         merge_pending_counter_completion_after_nested_pause(
@@ -607,6 +665,90 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             return;
         }
     }
+}
+
+/// CR 614.12 + CR 616.1: whether the active counter frame has settled every
+/// addition and owes only a fallible copy-entry tail for the engine boundary.
+pub(crate) fn copy_entry_completion_is_ready(state: &GameState) -> bool {
+    state
+        .active_counter_additions()
+        .and_then(ready_copy_entry_completion)
+        .is_some()
+}
+
+/// CR 614.12 + CR 616.1: consume fallible copy-entry tails at the engine boundary.
+/// Each iteration consumes a head action. Ordinary drains stop before it;
+/// popping the frame before replay exposes its real parent and prevents repeats.
+pub(crate) fn resume_copy_target_entry_completions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::game::engine::EngineError> {
+    // Nothing is drained until this function has consumed a tail. Once it has,
+    // `drain_pending_counter_additions` runs over whatever counter frame is on
+    // top: the remainder the tail left behind, or an exposed parent counter
+    // frame. The latter is benign because the due-root check above runs first
+    // and the ordinary drains would take the same frame anyway. A frame this
+    // function never reached belongs to the ordinary drains, which also defer to
+    // a due counter-cost root; draining it first would reorder the boundary for
+    // every card, not just copy entries.
+    let mut consumed_tail = false;
+    while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if state.counter_cost_root_is_due() {
+            return Ok(());
+        }
+        if consumed_tail {
+            drain_pending_counter_additions(state, events);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(());
+            }
+        }
+        let Some(entrant) = state
+            .active_counter_additions()
+            .and_then(ready_copy_entry_completion)
+        else {
+            return Ok(());
+        };
+        let mut completion = state
+            .take_active_counter_additions()
+            .ok()
+            .flatten()
+            .and_then(|mut queue| queue.completion.take())
+            .ok_or_else(|| {
+                crate::game::engine::EngineError::InvalidAction(
+                    "Copy entry completion lost its counter frame".to_string(),
+                )
+            })?;
+        completion.post_actions.remove(0);
+        match crate::game::engine_replacement::resume_copy_target_choice_entry(
+            state, entrant, events,
+        )? {
+            CopyEntryResumption::Paused => {
+                if !completion.is_noop() {
+                    merge_pending_counter_completion_after_nested_pause(state, completion);
+                }
+                return Ok(());
+            }
+            CopyEntryResumption::Completed => {}
+        }
+        consumed_tail = true;
+        // Emit the completion event only AFTER its post-actions. A non-noop
+        // remainder is drained on the next iteration; no empty frame survives.
+        if completion.is_noop() {
+            continue;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            stash_pending_counter_additions(state, Vec::new(), completion);
+        } else {
+            // CR 608.2c + CR 616.1: the tail's deferred-event replay can raise a
+            // parent continuation's prompt and still return `Completed`. A plain
+            // push would bury a direct-choice owner under this remainder, so
+            // park it the way the paused branch does and stop; the remainder
+            // runs once the prompt is consumed.
+            merge_pending_counter_completion_after_nested_pause(state, completion);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn apply_pending_counter_post_action(
@@ -972,6 +1114,26 @@ fn apply_pending_counter_post_action(
                 pending.created_ids = created_ids;
             }
             true
+        }
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
+            // The drain parks this fallible action for the result-aware engine
+            // boundary (`resume_copy_target_entry_completions`) and never
+            // dispatches it here. Should a caller reach this arm anyway, re-park
+            // the action rather than dropping the entry it still owes.
+            debug_assert!(
+                false,
+                "fallible copy entry action must be consumed at the engine boundary"
+            );
+            stash_pending_counter_additions(
+                state,
+                Vec::new(),
+                PendingEffectResolved::with_post_actions_without_effect(
+                    EffectKind::BecomeCopy,
+                    entrant.object_id,
+                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }],
+                ),
+            );
+            false
         }
         PendingCounterPostAction::FinishMeldEntry { context } => {
             crate::game::meld::finish_deferred_meld_entry(state, context, events);
@@ -9335,5 +9497,21 @@ mod tests {
             "CR 608.2k: an undeparted cost-paid referent is still the counter \
              subject, and the inherited parent target does not displace it"
         );
+    }
+
+    #[test]
+    fn entry_counter_contributions_coalesce_by_kind_in_first_occurrence_order() {
+        let counters = coalesce_entry_counters([
+            (CounterType::Loyalty, 3),
+            (CounterType::Plus1Plus1, 3),
+            (CounterType::Loyalty, 1),
+            (CounterType::Plus1Plus1, 1),
+            (CounterType::Loyalty, 0),
+        ]);
+        assert_eq!(
+            counters,
+            vec![(CounterType::Loyalty, 4), (CounterType::Plus1Plus1, 4),]
+        );
+        assert!(coalesce_entry_counters([(CounterType::Loyalty, 0)]).is_empty());
     }
 }

@@ -194,6 +194,7 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
             owner: record.owner,
             rebound_from: None,
             entry_timestamp: None,
+            retained_sticker_timestamps: None,
             turn_zone_change_index: record.turn_zone_change_index,
             zone_change_record: record.clone(),
             cause,
