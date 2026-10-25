@@ -78,7 +78,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context, parse_phase_name_set,
+    parse_effect_chain, parse_effect_chain_with_context,
+    parse_effect_chain_with_context_ability_root, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -3790,6 +3791,8 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
+    // A classification probe, not an ability-body producer. Keep the nested
+    // default: the line may continue a spell with earlier target declarations.
     let snapshot = ctx.diagnostics.len();
     let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
     ctx.diagnostics.truncate(snapshot);
@@ -6850,7 +6853,9 @@ fn parse_normalized_oracle_ir(
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                trigger = trigger.execute(parse_effect_chain_with_context(
+                // CR 603.12: "When you do" starts a separate reflexive ability,
+                // not a continuation of the optional attack-cost instruction.
+                trigger = trigger.execute(parse_effect_chain_with_context_ability_root(
                     effect_rest.trim(),
                     AbilityKind::Spell,
                     &mut ctx,

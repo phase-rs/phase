@@ -41504,7 +41504,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 /// Parse a nested compound body with subject context for pronoun resolution.
 ///
 /// CR 608.2c: context-less nested parsing cannot authorize a recipient-relative
-/// population. Ability-root producers use `parse_ability_ir_with_context`;
+/// population. Independent ability bodies use `parse_effect_chain_with_context_ability_root`;
 /// callers that retain clause provenance use the explicit-context sibling.
 /// Withheld permission leaves the pre-existing unbound population fallback;
 /// this entry does not turn that fallback into a strict failure.
@@ -41519,6 +41519,26 @@ pub(crate) fn parse_effect_chain_with_context(
         ctx,
         DamageTargetContext::InheritedTargets,
     )
+}
+
+/// Parse the first instruction of an independent ability, retaining subject context.
+///
+/// CR 602.1 + CR 603.12: a granted activated ability or reflexive trigger has
+/// its own effect body. `None` permits fresh clauses; antecedent, quantity, and
+/// earlier-target guards still apply. Vote outcomes, replacement follow-ups,
+/// and per-pile effects continue their enclosing ability and must not use this entry.
+pub(crate) fn parse_effect_chain_with_context_ability_root(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> AbilityDefinition {
+    lower_ability_ir(&parse_ability_ir_with_damage_context(
+        text,
+        kind,
+        ChainLoweringMode::WithContext,
+        ctx,
+        None,
+    ))
 }
 
 fn parse_nested_effect_chain_with_damage_context(
@@ -54107,5 +54127,135 @@ mod parent_controller_population_tests {
         assert_public_population_permission(
             "~ deals 3 damage to target creature with power 3 or less and 1 damage to each other creature with the same controller.",
         );
+    }
+
+    fn assert_bound_population(definition: &AbilityDefinition) {
+        let filter = population_filter(definition);
+        assert_eq!(
+            filter.controller,
+            Some(ControllerRef::ParentTargetController)
+        );
+        assert_eq!(
+            filter.properties,
+            vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }]
+        );
+    }
+
+    fn parse_granted_population(text: &str) -> AbilityDefinition {
+        let parsed = parse_oracle_text(text, "Boundary Probe", &[], &["Creature".into()], &[]);
+        parsed
+            .statics
+            .iter()
+            .flat_map(|s| &s.modifications)
+            .find_map(|m| match m {
+                ContinuousModification::GrantAbility { definition } => Some(*definition.clone()),
+                ContinuousModification::GrantTrigger { trigger } => {
+                    trigger.execute.as_deref().cloned()
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must reach the granted ability body: {parsed:?}"))
+    }
+
+    #[test]
+    fn granted_activated_parent_controller_population_binds() {
+        let text = "Creatures you control have \"{T}: ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.\"";
+        let definition = parse_granted_population(text);
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        assert_bound_population(&definition);
+    }
+
+    #[test]
+    fn equipped_granted_parent_controller_population_binds() {
+        let text = "Equipped creature has \"{T}: ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.\"";
+        assert_bound_population(&parse_granted_population(text));
+    }
+
+    #[test]
+    fn exert_reflexive_parent_controller_population_binds() {
+        let definition = parse_population_trigger("You may exert ~ as it attacks. When you do, ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.");
+        assert_bound_population(&definition);
+    }
+
+    #[test]
+    fn granted_parent_controller_population_keeps_antecedent_and_quantity_guards() {
+        for (prefix, head, suffix) in [
+            (
+                "{T}: ",
+                "~ deals X damage to target creature",
+                ", where X is the number of cards in target player's hand",
+            ),
+            (
+                "{T}: ",
+                "~ deals damage equal to ~'s power to target creature",
+                "",
+            ),
+            (
+                "Whenever a creature you control dies, ",
+                "~ deals 2 damage to target creature",
+                "",
+            ),
+            (
+                "{T}: ",
+                "Tap target creature and ~ deals 2 damage to target creature",
+                "",
+            ),
+        ] {
+            let ordinary = format!("Creatures you control have \"{prefix}{head} and 1 damage to each creature{suffix}.\"");
+            population_filter(&parse_granted_population(&ordinary));
+            let qualified = format!("Creatures you control have \"{prefix}{head} and 1 damage to each other creature with the same controller{suffix}.\"");
+            assert!(
+                !has_parent_population_binding(population_filter(&parse_granted_population(
+                    &qualified
+                ))),
+                "{qualified}"
+            );
+        }
+    }
+
+    #[test]
+    fn exert_parent_controller_population_keeps_quantity_and_inherited_target_guards() {
+        for (head, suffix) in [
+            (
+                "~ deals X damage to target creature",
+                ", where X is the number of cards in target player's hand",
+            ),
+            ("~ deals damage equal to ~'s power to target creature", ""),
+            (
+                "Tap target creature and ~ deals 2 damage to target creature",
+                "",
+            ),
+        ] {
+            assert_trigger_population_boundary(
+                &format!("You may exert ~ as it attacks. When you do, {head}"),
+                suffix,
+            );
+        }
+    }
+
+    #[test]
+    fn ability_root_parent_controller_population_keeps_event_antecedent_guards() {
+        for antecedent in [TargetFilter::EventTarget, TargetFilter::TriggeringSource] {
+            let context = ParseContext {
+                object_pronoun_ref: Some(antecedent),
+                ..Default::default()
+            };
+            let ordinary = parse_effect_chain_with_context_ability_root(
+                "~ deals 2 damage to target creature and 1 damage to each creature.",
+                AbilityKind::Activated,
+                &mut context.clone(),
+            );
+            population_filter(&ordinary);
+            let qualified = parse_effect_chain_with_context_ability_root(
+                "~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.",
+                AbilityKind::Activated,
+                &mut context.clone(),
+            );
+            assert!(!has_parent_population_binding(population_filter(
+                &qualified
+            )));
+        }
     }
 }

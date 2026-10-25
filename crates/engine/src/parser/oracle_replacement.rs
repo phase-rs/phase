@@ -13964,6 +13964,8 @@ fn parse_damage_to_self_instead_followup(
         in_replacement: true,
         ..ParseContext::default()
     };
+    // CR 614.1a: this substitutes the affected event inside the same ability;
+    // it is not a new activated/triggered ability body.
     let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
@@ -15027,6 +15029,8 @@ fn parse_damage_prevention_replacement(
             in_replacement: true,
             ..ParseContext::default()
         };
+        // CR 615.5: the additional effect continues this prevention effect.
+        // In particular, a spell-driven shield may already declare a target.
         let mut followup_def =
             parse_effect_chain_with_context(&followup, AbilityKind::Spell, &mut followup_ctx);
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
@@ -36355,5 +36359,53 @@ mod damage_source_union {
             vec![TypeFilter::Subtype("Giant".to_string())]
         );
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+}
+
+#[cfg(test)]
+mod parent_controller_population_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_followups_keep_parent_controller_population_permission_disabled() {
+        for population in [
+            "each creature",
+            "each other creature with the same controller",
+        ] {
+            let body = format!("~ deals 2 damage to target creature and 1 damage to {population}");
+            let instead = format!("If damage would be dealt to ~, {body} instead.");
+            let prevention =
+                format!("If damage would be dealt to ~, prevent that damage and {body}.");
+            let instead_lower = instead.to_lowercase();
+            let prevention_lower = prevention.to_lowercase();
+            // Call the dedicated recognizers, not the document's sentence splitter.
+            let definitions = [
+                parse_damage_to_self_instead_followup(&instead_lower, &instead, &instead)
+                    .expect("self-instead body entry"),
+                parse_damage_prevention_replacement(&prevention_lower, &prevention)
+                    .expect("prevention follow-up body entry"),
+            ];
+            for definition in definitions {
+                let head = definition.execute.expect("replacement follow-up");
+                assert!(matches!(head.effect.as_ref(), Effect::DealDamage { .. }));
+                let tail = head.sub_ability.expect("ordinary or qualified population");
+                let Effect::DamageAll {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                } = tail.effect.as_ref()
+                else {
+                    panic!("must reach a population: {tail:?}");
+                };
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert_ne!(
+                    filter.controller,
+                    Some(ControllerRef::ParentTargetController)
+                );
+                assert!(!filter.properties.iter().any(|property| matches!(
+                    property, FilterProp::DistinctFrom { reference }
+                        if reference.as_ref() == &TargetFilter::ParentTarget
+                )));
+            }
+        }
     }
 }
