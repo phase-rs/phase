@@ -15,6 +15,8 @@ Binding annotations and ref/mut modifiers do not hide ignored remainders or
 whole results: a single `_`/`_name` pattern counts one whole-result obligation,
 even if later used, consistently with conservative residue-binding policy.
 Let-else initializers stop before the top-level else, not its diverging block.
+Block initializers include postfixes before result classification; trailing `?`
+preserves helper origin, but arbitrary methods and tuple projections do not.
 Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
@@ -427,6 +429,8 @@ def find_discards(relpath, lines):
             # A closure/block RHS needs its opening brace, unlike if-let's body.
             if end < len(v) and v[end] == "{" and end == equals + 1:
                 end = ex.pairs[end] + 1
+                # Classify the whole initializer, including postfixes after the block.
+                end = ex.end(end, {";", "{", "}", "else"})
             origin = ex.origin(equals + 1, end)
             arity = 3 if origin and origin[1] == "parse_target_with_syntax" else 2
             pattern_end = ex.end(i + 1, {":"}, equals)

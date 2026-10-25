@@ -327,6 +327,42 @@ class DiscardTests(unittest.TestCase):
             "match parse_target(input) { (TargetFilter::Any, rest) => a < b, "
             "(v, _) => use_it(v), }")], ["binding"])
 
+    def test_block_initializer_postfix_is_not_a_bare_helper_result(self):
+        # Only registered result-preserving wrappers are followed. Projections
+        # and arbitrary methods (even clone) must agree with the non-block form.
+        for postfix in (".1.is_empty()", ".1.clone()", ".clone()",
+                        ".map(|x| { x })"):
+            for pattern in ("_rest_is_empty", "(filter, _)"):
+                for expr in ("parse_target(input)",
+                             "{ let input = input.trim(); parse_target(input) }"):
+                    with self.subTest(postfix=postfix, pattern=pattern, expr=expr):
+                        self.assertEqual(hits(f"let {pattern} = {expr}{postfix};"), [])
+
+    def test_block_initializer_bare_and_question_mark_keep_discard_obligations(self):
+        for expr in ("{ let input = input.trim(); parse_target(input) }",
+                     "{ let input = input.trim(); parse_target(input) }?"):
+            for pattern, expected in (("(filter, _)", ["binding"]),
+                                      ("_result", ["whole-result"]),
+                                      ("(filter, rest)", [])):
+                with self.subTest(expr=expr, pattern=pattern):
+                    self.assertEqual(
+                        [h.family for h in hits(f"let {pattern} = {expr};")], expected)
+
+    def test_block_initializer_postfix_stops_before_if_let_body_and_let_else(self):
+        for template in (
+            "if let PATTERN = EXPR { observe(); } else { observe(); }",
+            "let PATTERN = EXPR else { return; }; observe();",
+        ):
+            for expr, expected in (
+                ("{ let input = input.trim(); parse_target(input) }", ["binding"]),
+                ("{ let input = input.trim(); parse_target(input) }?", ["binding"]),
+                ("{ let input = input.trim(); parse_target(input) }.1.clone()", []),
+                ("{ let input = input.trim(); parse_target(input) }.map(|x| { x })", []),
+            ):
+                source = template.replace("PATTERN", "(Typed(filter), _)").replace("EXPR", expr)
+                with self.subTest(template=template, expr=expr):
+                    self.assertEqual([h.family for h in hits(source)], expected)
+
     def test_j_aliases_are_scoped_to_lexical_modules(self):
         src = ("mod a { use crate::target::parse_target_with_syntax as read; "
                "fn f(i: &str) { let s = read(i, ctx).2; } }\n"
