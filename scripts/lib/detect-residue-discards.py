@@ -17,8 +17,10 @@ even if later used, consistently with conservative residue-binding policy.
 Let-else initializers stop before the top-level else, not its diverging block.
 Block initializers include postfixes before result classification; trailing `?`
 preserves helper origin, but arbitrary methods and tuple projections do not.
-Projection receivers include standalone bare blocks, not keyword/header bodies
-or struct literals; the helper origin is resolved through the block's tail.
+Projection receivers include standalone bare blocks, including return/break
+operands, not keyword/header bodies or struct literals; origin follows the tail.
+Not modelled: a bare-block projection receiver after `&mut`, `>` or `>>`, or as
+an if/while/match scrutinee (none occurs in the parser tree); parenthesize it.
 Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
@@ -57,6 +59,7 @@ HELPERS = frozenset(("parse_target", "parse_target_with_ctx", "parse_target_with
 # ParseContext methods verified to return `f(...)` unchanged (context.rs).
 # Values are total argument counts; only the last argument is the closure.
 RESULT_WRAPPERS = {"with_player_antecedents": 1, "with_player_scope": 2}
+EXPRESSION_PREFIXES = frozenset(("return", "break"))
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|=>|[^\s]")
 
 
@@ -72,6 +75,15 @@ def production_stream(relpath, lines):
     for i, _raw, code, _fn in iter_production_lines(relpath, lines, skip_cfg_test_items=True):
         codes[i] = code
     return "\n".join(codes)
+
+
+def follows_expression_prefix(values, start):
+    """Return/break take operands; a break label is not a block owner or callee."""
+    if start > 0 and values[start - 1] in EXPRESSION_PREFIXES:
+        return True
+    return (start >= 3 and values[start - 3] == "break"
+            and values[start - 2] == "'"
+            and re.fullmatch(r"\w+", values[start - 1]) is not None)
 
 
 class Expressions:
@@ -455,12 +467,14 @@ def find_discards(relpath, lines):
                 continue
             if v[start] == "}":
                 start = ex.pairs[start]
-                if start > 0 and (re.fullmatch(r"\w+", v[start - 1])
-                                  or v[start - 1] in (")", "]", ">")):
+                if (start > 0 and not follows_expression_prefix(v, start)
+                        and (re.fullmatch(r"\w+", v[start - 1])
+                             or v[start - 1] in (")", "]", ">"))):
                     continue
             elif v[start] == ")":
                 start = ex.pairs[start]
-                if start > 0 and re.fullmatch(r"\w+", v[start - 1]) and v[start - 1] != "return":
+                if (start > 0 and re.fullmatch(r"\w+", v[start - 1])
+                        and not follows_expression_prefix(v, start)):
                     start -= 1
                     while start >= 2 and v[start - 1] in ("::", ".") and re.fullmatch(r"\w+", v[start - 2]):
                         start -= 2

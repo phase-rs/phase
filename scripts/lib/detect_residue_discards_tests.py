@@ -354,6 +354,46 @@ class DiscardTests(unittest.TestCase):
                                 f"let {name} = {expr}.{projection};")],
                             [("projection", helper)])
 
+    def test_block_projections_in_return_and_break_operands(self):
+        contexts = (
+            "fn f(i: &str, e: bool) -> T { if e { return EXPR; } T::Any }",
+            "fn f(i: &str) -> T { loop { break EXPR; } }",
+            "fn f(i: &str) -> T { 'a: loop { break 'a EXPR; } }",
+        )
+        for helper, projection in (("parse_target", "0"),
+                                   ("parse_target_with_syntax", "2")):
+            args = "i, ctx" if helper == "parse_target_with_syntax" else "i"
+            call = f"{helper}({args})"
+            block = "{ let i = i.trim(); " + call + " }"
+            for context in contexts:
+                for expr in (block, f"({block})", call):
+                    with self.subTest(helper=helper, context=context, expr=expr):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(
+                                context.replace("EXPR", f"{expr}.{projection}"))],
+                            [("projection", helper)])
+
+    def test_return_and_break_operands_preserve_remainder_controls(self):
+        for prefix in ("return", "break", "break 'a"):
+            for helper in ("parse_target", "parse_target_with_syntax"):
+                args = "i, ctx" if helper == "parse_target_with_syntax" else "i"
+                call = f"{helper}({args})"
+                block = "{ let i = i.trim(); " + call + " }"
+                for expr in (block, f"({block})", call):
+                    for postfix in (".1", ".1.len()"):
+                        with self.subTest(prefix=prefix, helper=helper,
+                                          expr=expr, postfix=postfix):
+                            self.assertEqual(hits(
+                                "fn f(i: &str) { 'a: loop { "
+                                f"{prefix} {expr}{postfix};"
+                                " } }"), [])
+                with self.subTest(prefix=prefix, helper=helper):
+                    self.assertEqual(hits(
+                        "fn f(i: &str) { 'a: loop { "
+                        f"let (filter, rest) = {block}; consume(rest); "
+                        f"{prefix} filter;"
+                        " } }"), [])
+
     def test_bare_block_non_discard_postfixes_and_consumed_remainder(self):
         for helper in ("parse_target", "parse_target_with_syntax"):
             args = "i, ctx" if helper == "parse_target_with_syntax" else "i"
@@ -369,15 +409,18 @@ class DiscardTests(unittest.TestCase):
     def test_projection_does_not_treat_keyword_bodies_as_standalone_blocks(self):
         # These expression bodies were not helper-result receivers before bare
         # block projections were supported; the closing brace alone is not enough.
-        for expr in ("if c { parse_target(i) } else { parse_target(i) }",
-                     "match x { _ => parse_target(i) }",
-                     "unsafe { parse_target(i) }",
-                     "loop { parse_target(i) }",
-                     "|i| -> (TargetFilter, &str) { parse_target(i) }",
-                     "Foo { value: parse_target(i) }"):
-            for name in ("_filter", "filter"):
-                with self.subTest(expr=expr, name=name):
-                    self.assertEqual(hits(f"let {name} = {expr}.0;"), [])
+        for call, projection in (("parse_target(i)", "0"),
+                                 ("parse_target_with_syntax(i, ctx)", "2")):
+            for expr in ("if c { CALL } else { CALL }",
+                         "match x { _ => CALL }",
+                         "unsafe { CALL }",
+                         "loop { CALL }",
+                         "|i| -> (TargetFilter, &str) { CALL }",
+                         "Foo { value: CALL }"):
+                for name in ("_filter", "filter"):
+                    with self.subTest(call=call, expr=expr, name=name):
+                        self.assertEqual(hits(
+                            f"let {name} = {expr.replace('CALL', call)}.{projection};"), [])
 
     def test_block_initializer_bare_and_question_mark_keep_discard_obligations(self):
         for expr in ("{ let input = input.trim(); parse_target(input) }",
