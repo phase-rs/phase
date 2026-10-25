@@ -219,7 +219,7 @@ class Expressions:
                 # requires comma termination rather than the block shortcut.
                 next_pattern = (arm < end and v[arm] in ("(", "[")
                                 and self.pairs[arm] + 1 < end
-                                and v[self.pairs[arm] + 1] in ("if", "=>"))
+                                and v[self.pairs[arm] + 1] in ("if", "=>", "|"))
                 if not next_pattern and arm < end and v[arm] in (".", "?", "(", "[", "+", "-", "*", "/", "%", "as"):
                     arm = self.end(arm, {","}, end)
             else:

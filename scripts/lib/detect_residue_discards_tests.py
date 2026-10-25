@@ -476,6 +476,20 @@ class DiscardTests(unittest.TestCase):
             with self.subTest(src=src):
                 self.assertEqual([h.family for h in hits(src)], ["binding"] * expected)
 
+    def test_block_arm_followed_by_or_pattern_starting_with_a_tuple(self):
+        for src, expected in (
+            ("match parse_target(i) { (Typed(_), rest) => { consume(rest); } "
+             "(Any, _) | (SelfRef, _) => {} (_, rest) => { consume(rest); } }", 2),
+            ("match parse_target(i) { (Typed(_), rest) => { consume(rest); } "
+             "(Any, _) | (SelfRef, _) if keep() => {} (_, rest) => { consume(rest); } }", 2),
+            ("match parse_target(i) { (Typed(_), rest) => { consume(rest); } "
+             "[Any, _] | [SelfRef, _] => {} }", 0),
+            ("match parse_target(i) { (Typed(_), rest) => { consume(rest); } "
+             "(Any, r) | (SelfRef, r) => { consume(r); } }", 0),
+        ):
+            with self.subTest(src=src):
+                self.assertEqual([h.family for h in hits(src)], ["binding"] * expected)
+
     def test_each_match_arm_discard_is_a_distinct_syntactic_occurrence(self):
         self.assertEqual(len(hits("match parse_target(i) { (Typed(t), _) => t, (other, _) => other, }")), 2)
 
