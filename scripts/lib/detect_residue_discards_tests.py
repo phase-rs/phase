@@ -26,12 +26,43 @@ class DiscardTests(unittest.TestCase):
                     found = hits(f"let (value, {rest}{syntax}) = crate::target::{helper}(input, ctx);")
                     self.assertEqual([(h.family, h.symbol) for h in found], [("binding", helper)])
 
+    def test_unknown_closure_consumers_do_not_forward_helper_results(self):
+        for consumer in ("into_nom(|| parse_target(input))",
+                         "ctx.into_nom(|s| parse_target(input))"):
+            src = ("fn into_nom(f: impl FnOnce() -> (TargetFilter, &str)) -> (&str, ()) "
+                   "{ let (_, rest) = f(); (rest, ()) }\n"
+                   f"let (rest, _) = {consumer};\n"
+                   "let (value, _) = parse_target(witness);")
+            self.assertEqual([(h.line, h.family) for h in hits(src)], [(3, "binding")])
+
+    def test_established_scope_wrapper_forwards_last_closure_result(self):
+        src = "let (value, _) = ctx.with_player_scope(scope, |s| parse_target_with_ctx(input, s));"
+        self.assertEqual([(h.family, h.symbol) for h in hits(src)],
+                         [("binding", "parse_target_with_ctx")])
+
+    def test_typed_binding_discards_residue(self):
+        found = hits("let (filter, _): (TargetFilter, &str) = parse_target(input);")
+        self.assertEqual([(h.family, h.symbol) for h in found], [("binding", "parse_target")])
+        self.assertEqual(hits("let (filter, rest): (TargetFilter, &str) = parse_target(input); consume(rest);"), [])
+
+    def test_tuple_rest_patterns_discard_only_when_covering_residue(self):
+        for pattern, helper in (("(filter, ..)", "parse_target"),
+                                ("(..)", "parse_target"),
+                                ("(filter, ..)", "parse_target_with_syntax"),
+                                ("(.., syntax)", "parse_target_with_syntax")):
+            with self.subTest(pattern=pattern, helper=helper):
+                self.assertEqual([h.family for h in hits(f"let {pattern} = {helper}(input);")], ["binding"])
+        for pattern, helper in (("(.., rest)", "parse_target"),
+                                ("(filter, rest, ..)", "parse_target_with_syntax")):
+            with self.subTest(pattern=pattern, helper=helper):
+                self.assertEqual(hits(f"let {pattern} = {helper}(input); consume(rest);"), [])
+
     def test_multiline_unbounded_and_wrapped_closures(self):
         for expr in (
             "parse_target_with_ctx(\n" + "input,\n" * 400 + "ctx)",
             "ctx.with_player_antecedents(|s| parse_target_with_ctx(input, s))",
             "ctx.with_player_antecedents(|s| { let x = input; parse_target_with_ctx(x, s) })",
-            "ctx.with_scope(move |s| { parse_target_with_ctx(input, s) })",
+            "ctx.with_player_scope(scope, move |s| { parse_target_with_ctx(input, s) })",
             "(parse_target_with_ctx(input, ctx))",
         ):
             self.assertEqual(len(hits(f"let (value, _) = {expr};")), 1)
@@ -49,7 +80,7 @@ class DiscardTests(unittest.TestCase):
     def test_whole_result_drops(self):
         for expr in ("let _ = parse_target(i);", "drop(parse_target(i));", "parse_target(i);",
                      "std::mem::drop((parse_target(i)));", "let _ = (parse_target(i));",
-                     "(parse_target(i));", "ctx.with_scope(|s| parse_target(i, s));"):
+                     "(parse_target(i));", "ctx.with_player_antecedents(|s| parse_target(i, s));"):
             self.assertEqual([h.family for h in hits(expr)], ["whole-result"])
 
     def test_alias_imports(self):
@@ -75,10 +106,25 @@ class DiscardTests(unittest.TestCase):
         for src in ("fn f() { return parse_target(i); }",
                     "fn f() { parse_target(i) }",
                     "let result = parse_target(i);",
-                    "let (v, rest) = ctx.with_scope(|s| { parse_target(i) });"):
+                    "let (v, rest) = ctx.with_player_antecedents(|s| { parse_target(i) });"):
             self.assertEqual(hits(src), [])
         self.assertEqual([h.family for h in hits("fn f() { return parse_target(i).0; }")],
                          ["projection"])
+
+    def test_guarded_match_arm_discards_are_counted(self):
+        src = ("match parse_target(i) { (v, _) if keep(&v) => use_it(v), "
+               "(v, rest) => consume(rest), }")
+        self.assertEqual([h.family for h in hits(src)], ["binding"])
+
+    def test_block_match_arms_need_no_trailing_comma(self):
+        for src, expected in (
+            ("match parse_target(i) { (Typed(v), rest) => { consume(rest); } "
+             "(v, _) => { use_it(v); } }", 1),
+            ("match parse_target(i) { (Typed(v), _) => { use_it(v); } "
+             "(v, _) if keep(&v) => { use_it(v); } }", 2),
+        ):
+            with self.subTest(src=src):
+                self.assertEqual([h.family for h in hits(src)], ["binding"] * expected)
 
     def test_each_match_arm_discard_is_a_distinct_syntactic_occurrence(self):
         self.assertEqual(len(hits("match parse_target(i) { (Typed(t), _) => t, (other, _) => other, }")), 2)
@@ -115,6 +161,50 @@ class DiscardTests(unittest.TestCase):
             with self.subTest(src=src):
                 found = hits(src + "\nfn witness<'a>(i: &'a str) { let (v, _) = parse_target(i); }")
                 self.assertEqual([(h.line, h.family) for h in found], [(len(src.splitlines()) + 1, "binding")])
+
+    def test_attributed_non_items_preserve_gate_witness(self):
+        for container in (
+            "struct S { #[cfg(all(test, unix))] hidden: (), }",
+            "enum E { #[cfg(all(test, unix))] Hidden, Visible }",
+            "fn f() { match x { #[cfg(all(test, unix))] Hidden => (), Visible => () } }",
+            "fn f() { #[cfg(all(test, unix))] let hidden = (); }",
+        ):
+            with self.subTest(container=container):
+                found = hits(container + "\nfn witness() { let (v, _) = parse_target(i); }")
+                self.assertEqual([(h.line, h.family) for h in found], [(2, "binding")])
+
+    def test_const_generic_test_impl_excludes_helper_discards(self):
+        src = ("#[cfg(test)] impl Foo<{ 1 }> { fn hidden(i: &str) { let (v, _) = parse_target(i); } }\n"
+               "fn witness(i: &str) { let (v, _) = parse_target(i); }")
+        self.assertEqual([(h.line, h.family) for h in hits(src)], [(2, "binding")])
+
+    def discovery_hits(self, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, text in files.items():
+                path = root / rd.SCOPE / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            return [(Path(h.path).relative_to(rd.SCOPE).as_posix(), h.family)
+                    for path, text in rd.production_sources(root, False).items()
+                    for h in rd.find_discards(path, text.splitlines())]
+
+    def test_production_module_reference_wins_over_test_path_alias(self):
+        found = self.discovery_hits({
+            "mod.rs": 'mod x;\n#[cfg(test)]\n#[path = "x.rs"]\nmod y;\nmod witness;',
+            "x.rs": "let (v, _) = parse_target(input);",
+            "witness.rs": "let (v, _) = parse_target(input);",
+        })
+        self.assertEqual(sorted(found), [("witness.rs", "binding"), ("x.rs", "binding")])
+
+    def test_outlined_test_child_uses_enclosing_inline_module_directory(self):
+        found = self.discovery_hits({
+            "mod.rs": "mod outer { #[cfg(test)] mod support; }\nmod witness;",
+            "outer/support.rs": "let (v, _) = parse_target(hidden);",
+            "support.rs": "let (v, _) = parse_target(production);",
+            "witness.rs": "let (v, _) = parse_target(production);",
+        })
+        self.assertEqual(sorted(found), [("support.rs", "binding"), ("witness.rs", "binding")])
 
     def test_discovery_excludes_test_files_not_production_witness(self):
         with tempfile.TemporaryDirectory() as tmp:

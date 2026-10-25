@@ -6,13 +6,19 @@
 # Counted helpers: parse_target, parse_target_with_ctx, parse_target_with_syntax,
 # parse_target_disjunction, parse_target_with_disjunctive_restriction,
 # parse_fight_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx.
-# Also counted: whole-result drops (zero at baseline), closure result wrappers,
+# Also counted: whole-result drops (zero at baseline), reviewed context wrappers,
 # qualified/aliased calls, and syntax-helper .2 projections. Nom (rest, ())
 # helpers are NOT this helper family; their second-component drops are excluded.
 # _name bindings include debug-asserted remainders: conservative syntax risks,
 # not claims that every site loses text. Defaults likewise freeze syntax only.
 # Distinct match-arm discard patterns count separately; overlapping recognizers
 # of the same occurrence do not. All baseline sites were reviewed in source.
+# Bindings include optional types and tuple `..`; match arms include guards and
+# comma-free block bodies. Closure propagation is limited to ParseContext's
+# with_player_antecedents / with_player_scope methods, which return f(...) intact.
+# Revalidated at source revision 1a02596722fa122040542716e0af8a982b84a49a:
+# --baseline still measures these same 128 obligations; no ceiling increased.
+# Gate H opts into item exclusion; other censuses retain their legacy population.
 # Format: <repository-relative-path> <nonnegative decimal ceiling>.
 # Tightening rule: every burn-down change must lower its ceiling in the same
 # commit; remove zero-count rows. Equal/lower passes; never auto-refresh upward.

@@ -71,9 +71,17 @@ add_discard() {
 printf 'driving real Gate H under %s (%s)\n' "$BASH_BIN" "$("$BASH_BIN" -c 'echo "$BASH_VERSION"')"
 
 new_fixture
+OUT="$(git -C "$FIXTURE" status --porcelain)"
+if [ -z "$OUT" ]; then ok 'CI fixture starts from a clean checkout'; else fail 'CI fixture must be clean'; fi
+if git -C "$FIXTURE" merge-base --is-ancestor "$BASE" HEAD; then
+    ok 'CI base ref is an ancestor of fixture HEAD'
+else
+    fail 'CI fixture base must be an ancestor'
+fi
 run_gate
 expect_rc 'baseline ceiling passes' 0
 expect_out 'real worktree snapshot is named' 'Gate H PASS (residue: 1 legacy obligations, ceiling 1; files scanned 2; snapshot worktree)'
+printf 'CI clean-checkout gate: exit %s\n%s\n' "$RC" "$OUT"
 OUT="$(cd "$FIXTURE" && "$BASH_BIN" scripts/check-parser-combinators.sh "$(git rev-parse HEAD)" 2>&1)"; RC=$?
 expect_rc 'clean same-head window retains cannot-answer exit' 3
 expect_out 'H runs before A cannot-answer exit' 'Gate H PASS'
@@ -195,6 +203,7 @@ printf 'crates/engine/src/parser/new.rs 1\n' >> "$FIXTURE/scripts/residue-ratche
 git -C "$FIXTURE" add scripts/residue-ratchet.txt
 run_cached
 expect_rc 'indexed source and indexed ledger addition pass' 0
+printf 'PRE-COMMIT staged source and ledger gate: exit %s\n%s\n' "$RC" "$OUT"
 rm "$FIXTURE/crates/engine/src/parser/new.rs"
 git -C "$FIXTURE" add -u crates/engine/src/parser/new.rs
 run_cached

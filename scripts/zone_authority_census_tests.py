@@ -31,18 +31,20 @@ from zone_authority_census import (
 )
 
 
-def scan(src: str) -> list[tuple[int, str, str, str]]:
-    """Every production line of `src`, as the censuses see it."""
+def scan(src: str, *, skip_cfg_test_items: bool = False) -> list[tuple[int, str, str, str]]:
+    """Every production line of `src`, as the selected scanner sees it."""
+    if skip_cfg_test_items:
+        return list(iter_production_lines("t.rs", src.splitlines(), skip_cfg_test_items=True))
     return list(iter_production_lines("t.rs", src.splitlines()))
 
 
-def code_of(src: str) -> str:
+def code_of(src: str, *, skip_cfg_test_items: bool = False) -> str:
     """The scanned code of `src`, one line per source line, comments/strings gone.
 
     Non-production (skipped `#[cfg(test)]`) lines are absent -- that is the
     point: what is not here cannot be classified.
     """
-    return "\n".join(code for _i, _raw, code, _fn in scan(src))
+    return "\n".join(code for _i, _raw, code, _fn in scan(src, skip_cfg_test_items=skip_cfg_test_items))
 
 
 class RawStringTests(unittest.TestCase):
@@ -575,6 +577,20 @@ class HardGateTests(unittest.TestCase):
         self.assertEqual(unannotated_hits(hit), {})
 
 
+class LegacyDefaultTests(unittest.TestCase):
+    def test_default_retains_test_attributed_function_for_existing_censuses(self):
+        src = "#[cfg(test)]\nfn hidden() { add_to_zone(test_field); }\nfn witness() { add_to_zone(production); }"
+        code = code_of(src)
+        self.assertIn("add_to_zone(test_field)", code)
+        self.assertIn("add_to_zone(production)", code)
+
+    def test_opt_in_skips_test_function_without_changing_default(self):
+        src = "#[cfg(test)]\nfn hidden() { add_to_zone(test_field); }\nfn witness() { add_to_zone(production); }"
+        code = code_of(src, skip_cfg_test_items=True)
+        self.assertNotIn("add_to_zone(test_field)", code)
+        self.assertIn("add_to_zone(production)", code)
+
+
 class AttributedItemTests(unittest.TestCase):
     """Only cfg predicates requiring test may hide an entire item."""
 
@@ -599,7 +615,7 @@ class AttributedItemTests(unittest.TestCase):
                 with self.subTest(predicate=predicate, item=item):
                     src = (f"#[cfg({predicate})]\n#[allow(dead_code)]\n"
                            f"{item}\nfn witness() {{ add_to_zone(production); }}")
-                    code = code_of(src)
+                    code = code_of(src, skip_cfg_test_items=True)
                     self.assertNotIn("hidden", code)
                     self.assertNotIn("Hidden", code)
                     self.assertIn("add_to_zone(production)", code)
@@ -610,8 +626,35 @@ class AttributedItemTests(unittest.TestCase):
             with self.subTest(predicate=predicate):
                 code = code_of(f"#[cfg({predicate})]\n"
                                "mod retained { fn f() { add_to_zone(retained); } }\n"
-                               "fn witness() { add_to_zone(production); }")
+                               "fn witness() { add_to_zone(production); }", skip_cfg_test_items=True)
                 self.assertIn("add_to_zone(retained)", code)
+                self.assertIn("add_to_zone(production)", code)
+
+    def test_non_item_attributes_do_not_erase_following_production_function(self):
+        containers = (
+            "struct S { #[cfg(all(test, unix))] hidden: (), }",
+            "struct S(#[cfg(all(test, unix))] ());",
+            "enum E { #[cfg(all(test, unix))] Hidden, Visible }",
+            "fn f() { match x { #[cfg(all(test, unix))] Hidden => (), Visible => () } }",
+            "fn f() { #[cfg(all(test, unix))] let hidden = (); }",
+            "fn f() { #[cfg(all(test, unix))] unsafe { hidden(); } }",
+        )
+        for container in containers:
+            with self.subTest(container=container):
+                code = code_of(container + "\nfn witness() { add_to_zone(production); }",
+                               skip_cfg_test_items=True)
+                self.assertIn("add_to_zone(production)", code)
+                for opener, closer in (("(", ")"), ("[", "]"), ("{", "}")):
+                    self.assertEqual(code.count(opener), code.count(closer))
+
+    def test_const_generic_header_braces_are_not_the_test_item_body(self):
+        for header in ("impl Foo<{ 1 }>", "impl Foo<Bar<{ 1 }>>",
+                       "impl<const N: usize> Foo<{ N }> where Bar<{ N }>: Trait"):
+            with self.subTest(header=header):
+                src = (f"#[cfg(test)]\n{header} {{ fn hidden() {{ add_to_zone(hidden); }} }}\n"
+                       "fn witness() { add_to_zone(production); }")
+                code = code_of(src, skip_cfg_test_items=True)
+                self.assertNotIn("add_to_zone(hidden)", code)
                 self.assertIn("add_to_zone(production)", code)
 
     def test_multiline_attributes_and_item_delimiters(self):
@@ -624,7 +667,7 @@ class AttributedItemTests(unittest.TestCase):
 const HIDDEN: fn() = || { add_to_zone(hidden); };
 fn witness() { add_to_zone(production); }
 """
-        code = code_of(src)
+        code = code_of(src, skip_cfg_test_items=True)
         self.assertNotIn("add_to_zone(hidden)", code)
         self.assertIn("add_to_zone(production)", code)
 

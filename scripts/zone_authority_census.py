@@ -523,31 +523,48 @@ def non_test_code(rel: str, lines: list[str]) -> list[str]:
             continue
         if not required:
             continue
-        item_start = n
         # const fn is body-terminated; const/static/use/type items need ';'.
         head = n
         if head < len(tokens) and tokens[head].group() == "pub":
             head += 1
             if head < len(tokens) and tokens[head].group() == "(":
                 head = pairs[head] + 1
+        while head < len(tokens) and tokens[head].group() in ("async", "unsafe", "default", "auto"):
+            head += 1
         prefix = [t.group() for t in tokens[head:head + 3]]
-        semicolon_item = bool(prefix and prefix[0] in ("const", "static", "use", "type")
+        if not prefix or prefix[0] not in (
+            "fn", "impl", "struct", "enum", "union", "trait", "mod",
+            "const", "static", "use", "type", "extern",
+        ) or (prefix[0] == "const" and len(prefix) > 1 and prefix[1] == "{"):
+            # Fields, variants, arms and statements are not item headers. Keep
+            # unsupported positions as production rather than erasing siblings.
+            continue
+        semicolon_item = bool(prefix[0] in ("const", "static", "use", "type")
                               and not (prefix[0] == "const" and "fn" in prefix[:3]))
-        while n < len(tokens):
+        containing = [b for a, b in pairs.items() if a < start < b]
+        limit = min(containing) if containing else len(tokens)
+        terminated = False
+        angles = 0
+        while n < limit:
             value = tokens[n].group()
-            if value == ";":
+            if value == "<" and not semicolon_item:
+                angles += 1
+            elif value == ">" and angles and tokens[n - 1].group() not in ("-", "="):
+                angles -= 1
+            if value == ";" and angles == 0:
                 n += 1
+                terminated = True
                 break
             if value in ("(", "[", "{"):
                 end = pairs[n]
                 n = end + 1
-                if value == "{" and not semicolon_item:
+                if value == "{" and not semicolon_item and angles == 0:
+                    terminated = True
                     break
             else:
                 n += 1
-        if n == item_start:
-            raise CensusError(f"{rel}: test attribute has no item")
-        removed.append((tokens[start].start(), tokens[n - 1].end()))
+        if terminated:
+            removed.append((tokens[start].start(), tokens[n - 1].end()))
     chars = list(source)
     for start, end in removed:
         for i in range(start, end):
@@ -556,13 +573,63 @@ def non_test_code(rel: str, lines: list[str]) -> list[str]:
     return "".join(chars).split("\n")
 
 
-def iter_production_lines(rel: str, lines: list[str]):
-    """Yield `(index, raw, code, enclosing_fn)` for production code.
+def _iter_legacy_production_lines(rel: str, lines: list[str]):
+    """Frozen pre-residue population contract for the existing authority censuses.
 
-    Shared authority for literal/comment stripping and test-only item exclusion.
-    `code` omits literals: consumers matching literal content must use `raw`.
-    Original line indices are retained even across removed items.
+    Deliberately retains the original line-oriented predicate/module behavior.
+    Those consumers have committed census contracts; Gate H must opt in below.
+    Both paths share the unchanged literal/comment lexer.
     """
+    cfg_attr = re.compile(r"^\s*#\[cfg\((?P<pred>.*)\)\]\s*$")
+    bare_test = re.compile(r'(?<![\w"-])test(?![\w"-])')
+    inline_test_mod = re.compile(r"^\s*(?:pub\s+)?mod\s+\w+\s*\{")
+    current_fn = "<module>"
+    skip_until_depth = None
+    depth = 0
+    pending_cfg_test = False
+    state = ScanState()
+    for i, raw in enumerate(lines):
+        code, state = strip_noncode(raw, state)
+        if skip_until_depth is None:
+            attr = cfg_attr.match(code)
+            if attr and bare_test.search(attr.group("pred")) and "not(" not in attr.group("pred"):
+                pending_cfg_test = True
+            elif pending_cfg_test:
+                if inline_test_mod.match(code):
+                    skip_until_depth = depth
+                    depth += code.count("{") - code.count("}")
+                    continue
+                if code.strip():
+                    pending_cfg_test = False
+        opened = code.count("{")
+        closed = code.count("}")
+        if skip_until_depth is not None:
+            depth += opened - closed
+            if depth < skip_until_depth:
+                raise CensusError(
+                    f"{rel}:{i + 1}: brace tracking desynced leaving a "
+                    f"#[cfg(test)] mod (depth {depth} < {skip_until_depth})"
+                )
+            if depth == skip_until_depth:
+                skip_until_depth = None
+            continue
+        m = FN_DECL.match(code)
+        if m:
+            current_fn = m.group(1)
+        depth += opened - closed
+        yield i, raw, code, current_fn
+
+
+def iter_production_lines(rel: str, lines: list[str], *, skip_cfg_test_items: bool = False):
+    """Yield `(index, raw, code, enclosing_fn)` with original line indices.
+
+    Default preserves the pre-residue authority-census population exactly.
+    Gate H explicitly opts into conservative test-requiring item exclusion.
+    Both modes omit literals from `code`; literal-aware consumers use `raw`.
+    """
+    if not skip_cfg_test_items:
+        yield from _iter_legacy_production_lines(rel, lines)
+        return
     current_fn = "<module>"
     for i, (raw, code) in enumerate(zip(lines, non_test_code(rel, lines))):
         if not code.strip() and raw.strip():

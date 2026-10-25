@@ -16,13 +16,16 @@ import argparse
 from bisect import bisect_right
 from collections import Counter
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import subprocess
 import sys
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from zone_authority_census import CensusError, ScanState, strip_noncode, iter_production_lines
+from zone_authority_census import (
+    CensusError, ScanState, strip_noncode, iter_production_lines, non_test_code,
+)
 
 SCOPE = "crates/engine/src/parser"
 LEDGER = "scripts/residue-ratchet.txt"
@@ -30,6 +33,9 @@ HELPERS = frozenset(("parse_target", "parse_target_with_ctx", "parse_target_with
                      "parse_target_disjunction", "parse_target_with_disjunctive_restriction",
                      "parse_fight_target", "parse_type_phrase_folding",
                      "parse_type_phrase_folding_with_ctx"))
+# ParseContext methods verified to return `f(...)` unchanged (context.rs).
+# Values are total argument counts; only the last argument is the closure.
+RESULT_WRAPPERS = {"with_player_antecedents": 1, "with_player_scope": 2}
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|=>|[^\s]")
 
 
@@ -42,7 +48,7 @@ class Hit(NamedTuple):
 
 def production_stream(relpath, lines):
     codes = [""] * len(lines)
-    for i, _raw, code, _fn in iter_production_lines(relpath, lines):
+    for i, _raw, code, _fn in iter_production_lines(relpath, lines, skip_cfg_test_items=True):
         codes[i] = code
     return "\n".join(codes)
 
@@ -51,6 +57,7 @@ class Expressions:
     """Balanced token views; follow result-preserving wrappers, not nested args."""
     def __init__(self, source):
         matches = list(TOKEN.finditer(source))
+        self.offsets = [m.start() for m in matches]
         newlines = [m.start() for m in re.finditer("\n", source)]
         self.lines = [bisect_right(newlines, m.start()) + 1 for m in matches]
         self.values = [m.group() for m in matches]
@@ -93,9 +100,10 @@ class Expressions:
             out.append((part, end))
         return out
 
-    def end(self, start, stops):
+    def end(self, start, stops, limit=None):
         i = start
-        while i < len(self.values):
+        limit = len(self.values) if limit is None else limit
+        while i < limit:
             if self.values[i] in stops:
                 break
             if self.values[i] in ("(", "[", "{"):
@@ -103,6 +111,32 @@ class Expressions:
             else:
                 i += 1
         return i
+
+    def match_patterns(self, start, end):
+        """Arm patterns without guards; a block body needs no trailing comma."""
+        v = self.values
+        arm = start
+        while arm < end:
+            if v[arm] == ",":
+                arm += 1
+                continue
+            arrow = self.end(arm, {"=>"}, end)
+            if arrow == end:
+                return
+            pattern_end = self.end(arm, {"if"}, arrow)
+            yield arm, pattern_end
+            body = arrow + 1
+            if body < end and v[body] == "{":
+                arm = self.pairs[body] + 1
+                # A postfix/operator makes this a larger expression, which
+                # requires comma termination rather than the block shortcut.
+                next_pattern = (arm < end and v[arm] in ("(", "[")
+                                and self.pairs[arm] + 1 < end
+                                and v[self.pairs[arm] + 1] in ("if", "=>"))
+                if not next_pattern and arm < end and v[arm] in (".", "?", "(", "[", "+", "-", "*", "/", "%", "as"):
+                    arm = self.end(arm, {","}, end)
+            else:
+                arm = self.end(body, {","}, end)
 
     def origin(self, start, end):
         """Return (helper token index, symbol) only for a helper RESULT."""
@@ -144,19 +178,34 @@ class Expressions:
         if name in self.aliases and "." not in path:
             return opened - 1, self.aliases[name]
         args = self.split(opened + 1, end - 1)
-        if len(args) == 1:
+        if name in ("Some", "Ok") and len(args) == 1:
             a, b = args[0]
-            if name in ("Some", "Ok") or (a < b and v[a] in ("|", "move")):
+            if a < b and v[a] not in ("|", "move"):
+                return self.origin(a, b)
+        if "." in path and len(args) == RESULT_WRAPPERS.get(name):
+            a, b = args[-1]
+            if a < b and v[a] in ("|", "move"):
                 return self.origin(a, b)
         return None
 
-    def residue_pattern(self, start, end):
+    def residue_pattern(self, start, end, arity=2):
         v = self.values
+        # A type annotation belongs to the binding, not its tuple pattern.
+        end = self.end(start, {":"}, end)
         while start < end:
             if v[start] == "(" and self.pairs[start] == end - 1:
                 parts = self.split(start + 1, end - 1)
-                if len(parts) >= 2:
-                    a, b = parts[1]
+                rest = next((j for j, (a, b) in enumerate(parts)
+                             if v[a:b] == [".", "."]), None)
+                residue = 1
+                if rest is not None:
+                    suffix = len(parts) - rest - 1
+                    if rest <= residue < arity - suffix:
+                        return True
+                    if residue >= arity - suffix:
+                        residue = rest + 1 + residue - (arity - suffix)
+                if len(parts) > residue:
+                    a, b = parts[residue]
                     return b == a + 1 and v[a].startswith("_")
                 start += 1
                 end -= 1
@@ -191,7 +240,8 @@ def find_discards(relpath, lines):
             if end < len(v) and v[end] == "{" and end == equals + 1:
                 end = ex.pairs[end] + 1
             origin = ex.origin(equals + 1, end)
-            if ex.residue_pattern(i + 1, equals):
+            arity = 3 if origin and origin[1] == "parse_target_with_syntax" else 2
+            if ex.residue_pattern(i + 1, equals, arity):
                 add(origin, "binding")
             elif v[i + 1:equals] == ["_"]:
                 add(origin, "whole-result")
@@ -199,9 +249,9 @@ def find_discards(relpath, lines):
             end = ex.end(i + 1, {"{"})
             origin = ex.origin(i + 1, end)
             if origin and end < len(v):
-                for a, b in ex.split(end + 1, ex.pairs[end]):
-                    arrow = ex.end(a, {"=>"})
-                    if arrow < b and ex.residue_pattern(a, arrow):
+                arity = 3 if origin[1] == "parse_target_with_syntax" else 2
+                for a, b in ex.match_patterns(end + 1, ex.pairs[end]):
+                    if ex.residue_pattern(a, b, arity):
                         add(origin, "binding", a)
         if value == "." and i + 1 < len(v) and v[i + 1] in ("0", "2"):
             # Walk backward over the receiver's balanced call/parentheses and
@@ -244,6 +294,75 @@ def read_snapshot(root, path, index):
     return (root / path).read_text(encoding="utf-8")
 
 
+def module_edges(path, lines):
+    """Outlined edges with physical paths and local production availability.
+
+    Compare declarations at the same code offsets, not by module name. Inline
+    modules contribute their directory. Attribute literals are inspected only
+    after the shared lexer identifies a real `path` attribute.
+    """
+    state = ScanState()
+    codes = []
+    for line in lines:
+        code, state = strip_noncode(line, state)
+        codes.append(code)
+    source = "\n".join(codes)
+    production = "\n".join(non_test_code(path, lines))
+    live_modules = {m.start() for m in re.finditer(r"\bmod\s+\w+\s*[;{]", production)}
+    inner_test = bool(re.search(r"#\s*!\s*\[\s*cfg\s*\(", source) and not production.strip())
+    ex = Expressions(source)
+    v = ex.values
+    parent = PurePosixPath(path)
+    directory = parent.parent if parent.name in ("mod.rs", "lib.rs", "main.rs") else parent.with_suffix("")
+
+    def path_attribute(mod):
+        before = mod
+        if before and v[before - 1] == ")":
+            opened = ex.pairs[before - 1]
+            if opened and v[opened - 1] == "pub":
+                before = opened - 1
+        elif before and v[before - 1] == "pub":
+            before -= 1
+        while before and v[before - 1] == "]":
+            end = before - 1
+            opened = ex.pairs[end]
+            if not opened or v[opened - 1] != "#":
+                break
+            if v[opened + 1:opened + 3] == ["path", "="]:
+                raw = "\n".join(lines[ex.lines[opened - 1] - 1:ex.lines[end]])
+                paths = re.findall(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', raw)
+                # Ambiguous same-line path attributes stay conservative: do not
+                # infer a test-only physical target from an uncertain literal.
+                return paths[0] if len(paths) == 1 else None
+            before = opened - 1
+        return None
+
+    edges = []
+
+    def walk(start, end, module_dir, attr_dir, parent_live):
+        n = start
+        while n + 2 < end:
+            if v[n] != "mod" or not re.fullmatch(r"\w+", v[n + 1]) or v[n + 2] not in (";", "{"):
+                n += 1
+                continue
+            name = v[n + 1]
+            live = parent_live and ex.offsets[n] in live_modules
+            attr = path_attribute(n)
+            if v[n + 2] == "{":
+                close = ex.pairs[n + 2]
+                child_dir = attr_dir / attr if attr is not None else module_dir / name
+                walk(n + 3, close, child_dir, child_dir, live)
+                n = close + 1
+            else:
+                targets = ([attr_dir / attr] if attr is not None else
+                           [module_dir / (name + ".rs"), module_dir / name / "mod.rs"])
+                edges.extend((posixpath.normpath(target.as_posix()), live) for target in targets)
+                n += 3
+
+    walk(0, len(v), directory, parent.parent, not inner_test)
+    return edges, inner_test
+
+
 def production_sources(root, index):
     if index:
         paths = [p.decode() for p in git(root, "ls-files", "-z", "--", SCOPE).split(b"\0") if p]
@@ -257,46 +376,34 @@ def production_sources(root, index):
                and "tests" not in PurePosixPath(p).name}
     if not sources:
         raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
-    excluded = set()
+    edges = {}
+    test_files = set()
     for path, text in sources.items():
-        lines = text.splitlines()
-        prod = production_stream(path, lines)
-        state = ScanState()
-        all_codes = []
-        for line in lines:
-            code, state = strip_noncode(line, state)
-            all_codes.append(code)
-        all_code = "\n".join(all_codes)
-        if re.search(r"#\s*!\s*\[\s*cfg\s*\(", all_code) and not prod.strip():
-            excluded.add(path)
-        # A test-only outlined declaration vanishes from the production view.
-        # A production declaration of the same module keeps its file in scope.
-        declarations = list(re.finditer(r"\bmod\s+(\w+)\s*;", all_code))
-        live_names = set(re.findall(r"\bmod\s+(\w+)\s*;", prod))
-        for decl in declarations:
-            name = decl.group(1)
-            if name in live_names:
-                continue
-            line = all_code.count("\n", 0, decl.start())
-            parent = PurePosixPath(path)
-            directory = parent.parent if parent.name in ("mod.rs", "lib.rs", "main.rs") else parent.with_suffix("")
-            targets = [directory / (name + ".rs"), directory / name / "mod.rs"]
-            # Path attributes are string data, read only from the already
-            # identified excluded item's contiguous attribute block.
-            before = []
-            j = line - 1
-            while j >= 0 and (lines[j].lstrip().startswith("#") or not lines[j].strip()):
-                before.append(lines[j])
-                j -= 1
-            attr = re.search(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', "\n".join(reversed(before)))
-            if attr:
-                targets = [parent.parent / attr.group(1)]
-            for target in targets:
-                target = target.as_posix()
-                if target in sources:
-                    excluded.add(target)
-                    directory_prefix = target[:-6] if target.endswith("mod.rs") else target[:-3] + "/"
-                    excluded.update(p for p in sources if p.startswith(directory_prefix))
+        declared, inner_test = module_edges(path, text.splitlines())
+        edges[path] = [(target, live) for target, live in declared if target in sources]
+        if inner_test:
+            test_files.add(path)
+
+    def reachable(seeds, production_only):
+        seen = set(seeds)
+        pending = list(seen)
+        while pending:
+            for target, live in edges.get(pending.pop(), ()):
+                if production_only and (not live or target in test_files):
+                    continue
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
+        return seen
+
+    test_targets = test_files | {target for declared in edges.values() for target, live in declared if not live}
+    test_reachable = reachable(test_targets, False)
+    all_targets = {target for declared in edges.values() for target, _live in declared}
+    # Orphan files are conservatively production. A production path to a shared
+    # physical file wins over every test-only alias, including descendant edges.
+    roots = (sources.keys() - test_reachable) | (sources.keys() - all_targets - test_files)
+    production = reachable(roots, True)
+    excluded = test_reachable - production
     return {p: text for p, text in sources.items() if p not in excluded}
 
 
