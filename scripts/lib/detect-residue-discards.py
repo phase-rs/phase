@@ -7,8 +7,9 @@ loss. Same-file deletion/addition can fit under a ceiling. No arbitrary dataflow
 unwrap_or_else, future Parsed API, or waiver enforcement is claimed here.
 Expression-with-block statement boundaries are shared by closure tails and
 comma-free match arms. Import aliases are lexical (module boundaries do not
-inherit them); precise-capture use<...> bounds are not imports. Bare closures
-are not helper results: only established result-forwarding methods unwrap them.
+inherit them) and apply only to unqualified calls; qualified calls use the final
+identifier's own name. Precise-capture use<...> bounds are not imports. Bare
+closures are not helper results: only established result-forwarding methods unwrap them.
 Local bindings shadowing imported aliases are not tracked; helper import aliases
 do not occur in the current production parser tree.
 Binding annotations and ref/mut modifiers do not hide ignored remainders or
@@ -145,6 +146,8 @@ class Expressions:
 
     def helper_name(self, token):
         name = self.values[token]
+        if token > 0 and self.values[token - 1] == "::":
+            return name if name in HELPERS else None
         scope = self.scopes[token]
         while scope is not None:
             if name in self.aliases[scope]:

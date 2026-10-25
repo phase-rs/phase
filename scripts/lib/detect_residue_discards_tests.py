@@ -458,6 +458,49 @@ class DiscardTests(unittest.TestCase):
                          [(1, "projection", "parse_target_with_syntax")])
         self.assertEqual(hits(src.replace("read(i, ctx).2", "read(i, ctx).1")), [])
 
+    def test_j_aliases_only_resolve_unqualified_calls(self):
+        cases = (
+            ("use crate::target::parse_target as read; "
+             "fn f(input: &str) { let (rest, _) = other::read(input); consume(rest); }",
+             []),
+            ("use other::read as parse_target; "
+             "fn f(input: &str) { let (filter, _) = crate::target::parse_target(input); }",
+             [("binding", "parse_target")]),
+            ("use crate::target::parse_target as read; "
+             "fn f(input: &str) { let (filter, _) = read(input); }",
+             [("binding", "parse_target")]),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual([(h.family, h.symbol) for h in hits(source)], expected)
+                consumed = source.replace("(filter, _) =", "(filter, rest) =").replace(
+                    "input); }", "input); consume(rest); }")
+                self.assertEqual(hits(consumed), [])
+
+    def test_j_qualified_reexport_does_not_use_callers_alias(self):
+        src = ("mod a { pub use crate::target::parse_target as read; }\n"
+               "mod b { use crate::target::parse_target_with_syntax as read; "
+               "fn f(input: &str) { let (filter, _) = crate::a::read(input); } }")
+        self.assertEqual(hits(src), [])
+        self.assertEqual(hits(src.replace(
+            "(filter, _) = crate::a::read(input);",
+            "(filter, rest) = crate::a::read(input); consume(rest);")), [])
+
+    def test_j_qualified_helpers_ignore_alias_shadowing(self):
+        for helper in sorted(rd.HELPERS):
+            syntax = ", syntax" if helper == "parse_target_with_syntax" else ""
+            for qualifier in ("self::", "crate::", "super::", "a::b::", "::"):
+                with self.subTest(helper=helper, qualifier=qualifier):
+                    prefix = f"use other::read as {helper}; fn f(input: &str) {{ "
+                    call = f"{qualifier}{helper}(input, ctx);"
+                    self.assertEqual(
+                        [(h.family, h.symbol) for h in hits(
+                            prefix + f"let (filter, _{syntax}) = " + call + " }")],
+                        [("binding", helper)])
+                    self.assertEqual(hits(
+                        prefix + f"let (filter, rest{syntax}) = " + call
+                        + " consume(rest); }"), [])
+
     def test_k_binding_modifiers_preserve_ignored_remainder(self):
         for modifier in ("mut", "ref", "ref mut"):
             with self.subTest(modifier=modifier):
