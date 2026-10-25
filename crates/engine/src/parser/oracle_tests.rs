@@ -24252,45 +24252,42 @@ fn fatal_push_full_composition() {
         other => panic!("expected TargetMatchesFilter on base, got: {other:?}"),
     }
 
-    // Sub-ability: ConditionInstead with And([Revolt, CmcLE(4)])
+    // CR 614.6 + CR 608.2c: Revolt selects the replacement; "if it has mana value
+    // 4 or less" stays on the replacement's own Destroy beneath the carrier.
     let sub = ability
         .sub_ability
         .as_ref()
         .expect("should have sub_ability");
-    match &sub.condition {
-        Some(AbilityCondition::ConditionInstead { inner }) => match inner.as_ref() {
-            AbilityCondition::And { conditions } => {
-                assert_eq!(conditions.len(), 2, "And should have 2 conditions");
-                // First: Revolt (QuantityCheck on zone-change count)
-                assert!(
-                    matches!(&conditions[0], AbilityCondition::QuantityCheck { .. }),
-                    "first condition should be QuantityCheck (revolt)"
-                );
-                // Second: CmcLE(4)
-                match &conditions[1] {
-                    AbilityCondition::TargetMatchesFilter { filter, .. } => {
-                        if let TargetFilter::Typed(tf) = filter {
-                            assert!(
-                                tf.properties.iter().any(|p| matches!(
-                                    p,
-                                    FilterProp::Cmc {
-                                        comparator: Comparator::LE,
-                                        value: QuantityExpr::Fixed { value: 4 }
-                                    }
-                                )),
-                                "revolt sub should have CmcLE(4), got: {:?}",
-                                tf.properties
-                            );
-                        } else {
-                            panic!("expected Typed filter on revolt sub");
-                        }
-                    }
-                    other => panic!("expected TargetMatchesFilter in And[1], got: {other:?}"),
+    assert!(
+        matches!(
+            &sub.condition,
+            Some(AbilityCondition::ConditionInstead { inner })
+                if matches!(inner.as_ref(), AbilityCondition::QuantityCheck { .. })
+        ),
+        "the override is selected by Revolt alone, got: {:?}",
+        sub.condition
+    );
+    let body = sub
+        .sub_ability
+        .as_ref()
+        .expect("the guarded replacement sits beneath the selector");
+    assert!(matches!(*body.effect, Effect::Destroy { .. }));
+    match &body.condition {
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) => assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 4 }
                 }
-            }
-            other => panic!("expected And inside ConditionInstead, got: {other:?}"),
-        },
-        other => panic!("expected ConditionInstead on sub, got: {other:?}"),
+            )),
+            "revolt body should have CmcLE(4), got: {:?}",
+            tf.properties
+        ),
+        other => panic!("expected TargetMatchesFilter on the revolt body, got: {other:?}"),
     }
 }
 
