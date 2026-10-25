@@ -295,6 +295,7 @@ fn round_trip_isolated_context(empty_result_only: bool) {
         FlipBranchContext {
             chosen_players: vec![],
             parent_occurrences: Default::default(),
+            parent_target_missing_reason: None,
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 game.runner.state(),
                 &[],

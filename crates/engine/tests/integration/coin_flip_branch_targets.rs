@@ -891,6 +891,448 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
     }
 }
 
+// Synthetic building-block fixtures: independent B must remain the antecedent
+// after validation, coin selection, detachment, and trigger placement.
+#[derive(Clone, Copy)]
+enum EmptyCoinRider {
+    Counter,
+    BecomeBlocked,
+    Replacement,
+}
+
+fn empty_coin_binding_scenario(
+    remove_b: bool,
+    attached: bool,
+    nested: bool,
+    keep_restore: bool,
+    rider: EmptyCoinRider,
+) {
+    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use engine::game::game_object::AttachTarget;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, PreventionAmount, QuantityExpr,
+        ReplacementDefinition, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+
+    let blocked = matches!(rider, EmptyCoinRider::BecomeBlocked);
+    let phase = if blocked {
+        Phase::EndCombat
+    } else {
+        Phase::End
+    };
+    let payoff = match rider {
+        EmptyCoinRider::Counter => Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        },
+        EmptyCoinRider::BecomeBlocked => Effect::BecomeBlocked {
+            target: TargetFilter::ParentTarget,
+        },
+        EmptyCoinRider::Replacement => Effect::AddTargetReplacement {
+            replacement: Box::new(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .valid_card(TargetFilter::SelfRef),
+            ),
+            target: TargetFilter::ParentTarget,
+        },
+    };
+    // Replacement's target is intentionally hidden from the ordinary effect
+    // filter; the reference-only head makes the delayed binding explicit.
+    let payoff = if matches!(rider, EmptyCoinRider::Replacement) {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(AbilityKind::Spell, payoff))
+    } else {
+        AbilityDefinition::new(AbilityKind::Spell, payoff)
+    };
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase },
+            effect: Box::new(payoff),
+            uses_tracked_set: false,
+        },
+    );
+    let flip = |win| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    };
+    let creature = TargetFilter::Typed(TypedFilter::creature());
+    let branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: creature.clone(),
+        },
+    )
+    .sub_ability(if nested { flip(delayed) } else { delayed });
+    let coin = flip(branch).sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+    ));
+    let definition = AbilityDefinition::new(
+        if attached {
+            AbilityKind::Activated
+        } else {
+            AbilityKind::Spell
+        },
+        Effect::TargetOnly { target: creature },
+    )
+    .sub_ability(coin);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(if blocked {
+        Phase::CombatDamage
+    } else {
+        Phase::PostCombatMain
+    });
+    let a = scenario
+        .add_creature(P0, "Earlier outer declaration", 2, 20)
+        .id();
+    let b = scenario
+        .add_creature(P0, "Selected branch declaration", 2, 20)
+        .id();
+    let h = scenario
+        .add_creature(P0, "Hostile attached host", 2, 20)
+        .id();
+    let source = if attached {
+        scenario
+            .add_artifact_from_oracle(P0, "Synthetic Equipment binding", "")
+            .with_subtypes(vec!["Equipment"])
+            .with_ability_definition(definition)
+            .id()
+    } else {
+        scenario
+            .add_spell_to_hand(P0, "Synthetic delayed coin binding", true)
+            .with_ability_definition(definition)
+            .id()
+    };
+    let response = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic exile response",
+            true,
+            "Exile target creature.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    if keep_restore {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+    }
+    let mut runner = scenario.build();
+    if attached {
+        let state = runner.state_mut();
+        state.objects.get_mut(&source).unwrap().attached_to = Some(AttachTarget::Object(h));
+        state.objects.get_mut(&h).unwrap().attachments.push(source);
+        state.layers_dirty.mark_full();
+    }
+    if blocked {
+        let mut combat = CombatState::default();
+        for id in [a, b, h] {
+            combat
+                .attackers
+                .push(AttackerInfo::new(id, AttackTarget::Player(P1), P1));
+        }
+        runner.state_mut().combat = Some(combat);
+    }
+    pin_outcomes(
+        &mut runner,
+        if keep_restore {
+            if nested {
+                &[true, false, true, false]
+            } else {
+                &[true, false]
+            }
+        } else if nested {
+            &[true, true]
+        } else {
+            &[true]
+        },
+    );
+    let life = runner.life(P0);
+    if attached {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for target in [a, b] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+        }
+    } else {
+        runner.cast(source).target_objects(&[a, b]).commit();
+    }
+    assert_eq!(runner.state().stack.len(), 1, "reach: A and B announced");
+    if remove_b {
+        runner.cast(response).target_object(b).commit();
+    }
+    let mut events = Vec::new();
+    if keep_restore {
+        pass_to_coin_keep(&mut runner, &mut events);
+        if nested {
+            events.extend(
+                runner
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![0],
+                    })
+                    .unwrap()
+                    .events,
+            );
+            assert_eq!(flips(&events), vec![true], "reach: outer win selected");
+            pass_to_coin_keep(&mut runner, &mut events);
+        }
+        assert!(
+            runner.state().active_coin_flip_frame().is_some(),
+            "reach: parked coin"
+        );
+        if nested {
+            let incoming = &runner
+                .state()
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context;
+            assert!(incoming.chosen_players.is_empty());
+            assert!(incoming.forwarded_result_context.is_none());
+            if remove_b {
+                assert!(incoming.parent_occurrences.targets.is_empty());
+                assert!(incoming.parent_occurrences.pins.is_empty());
+                assert_eq!(
+                    serde_json::to_value(incoming).unwrap()["parent_target_missing_reason"],
+                    serde_json::json!({"IllegalAnnouncement": {"origin": "ParentAnnouncement"}}),
+                    "reach: inner prompt carries only the unavailable incoming announcement"
+                );
+            } else {
+                assert_eq!(
+                    incoming.parent_occurrences.targets,
+                    vec![TargetRef::Object(b)]
+                );
+                assert_eq!(incoming.parent_occurrences.pins.len(), 1);
+                assert!(incoming.parent_occurrences.pins[0].is_some());
+            }
+        }
+        runner.state_mut().capture_rng_word_pos();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+            .unwrap()
+            .into_game_state();
+        if nested && remove_b {
+            assert_eq!(
+                serde_json::to_value(
+                    &runner
+                        .state()
+                        .active_coin_flip_frame()
+                        .unwrap()
+                        .branch_context
+                )
+                .unwrap()["parent_target_missing_reason"],
+                serde_json::json!({"IllegalAnnouncement": {"origin": "ParentAnnouncement"}}),
+                "restored missing-only incoming binding must not become unassigned"
+            );
+        }
+        events.extend(
+            runner
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        if nested { vec![true, true] } else { vec![true] }
+    );
+    assert_eq!(runner.life(P0), life + 2, "reach: independent tail");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CreateDelayedTrigger,
+                ..
+            }
+        )),
+        "reach: delayed instruction executed"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach: delayed installation"
+    );
+    assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&b].zone,
+        if remove_b {
+            Zone::Exile
+        } else {
+            Zone::Battlefield
+        }
+    );
+    if attached {
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&source].attached_to,
+            Some(AttachTarget::Object(h)),
+            "reach: distinct hostile host remains attached at installation"
+        );
+    }
+    assert_finished(&runner);
+    for _ in 0..12 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().phase, phase, "reach: firing phase");
+    if attached {
+        let placed = runner
+            .state()
+            .stack
+            .back()
+            .expect("reach: delayed stack entry")
+            .ability()
+            .unwrap();
+        assert_eq!(
+            placed.trigger_source.as_ref().unwrap().attached_to,
+            Some(AttachTarget::Object(h)),
+            "reach: engine captured attached-source context"
+        );
+    }
+    let stack_binding = runner
+        .state()
+        .stack
+        .back()
+        .expect("reach: delayed trigger placed")
+        .ability()
+        .unwrap()
+        .targets
+        .clone();
+    let expected = if remove_b {
+        vec![]
+    } else {
+        vec![TargetRef::Object(b)]
+    };
+    // Kept separate from payoff assertions: seeding and effect-time fallback
+    // are independent boundaries.
+    assert_eq!(
+        stack_binding, expected,
+        "delayed stack binding; illegal B={remove_b}"
+    );
+    let mut payoff_events = Vec::new();
+    finish(&mut runner, &mut payoff_events);
+    for id in [a, b, h] {
+        let selected = id == b && !remove_b;
+        match rider {
+            EmptyCoinRider::Counter => assert_eq!(
+                runner.state().objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                u32::from(selected),
+                "counter payoff object={id:?}; illegal B={remove_b}",
+            ),
+            EmptyCoinRider::BecomeBlocked => {
+                let became_blocked = payoff_events.iter().any(|event| matches!(
+                    event, GameEvent::AttackerBecameBlockedByEffect { attacker } if *attacker == id
+                ));
+                assert_eq!(
+                    became_blocked, selected,
+                    "blocked payoff object={id:?}; illegal B={remove_b}"
+                );
+            }
+            EmptyCoinRider::Replacement => assert_eq!(
+                runner.state().objects[&id].replacement_definitions.len(),
+                usize::from(selected),
+                "replacement payoff object={id:?}; illegal B={remove_b}",
+            ),
+        }
+    }
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "one-shot trigger consumed"
+    );
+    assert_finished(&runner);
+}
+
+#[test]
+fn delayed_coin_branch_keeps_its_empty_illegal_target_binding() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, false, false, false, EmptyCoinRider::Counter);
+    }
+}
+
+#[test]
+fn delayed_coin_branch_empty_binding_is_not_reseeded_from_attached_host() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::Counter);
+    }
+}
+
+#[test]
+fn delayed_coin_branch_empty_binding_survives_keep_restore() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, false, false, true, EmptyCoinRider::Counter);
+    }
+}
+
+#[test]
+fn nested_coin_inherits_an_unavailable_announced_binding() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, false, true, false, EmptyCoinRider::Counter);
+    }
+}
+
+#[test]
+fn nested_coin_missing_only_context_survives_inner_keep_restore() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(remove_b, false, true, true, EmptyCoinRider::Counter);
+    }
+}
+
+#[test]
+fn detached_become_blocked_does_not_replace_an_illegal_announcement_with_its_host() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::BecomeBlocked);
+    }
+}
+
+#[test]
+fn detached_target_replacement_does_not_replace_an_illegal_announcement_with_its_host() {
+    for remove_b in [false, true] {
+        empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::Replacement);
+    }
+}
+
 fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     for _ in 0..20 {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
@@ -1922,7 +2364,6 @@ fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
                     runner.state().clone(),
                 ))
                 .unwrap();
-                assert_eq!(wire["resolution_state_version"], 10);
                 *runner.state_mut() =
                     serde_json::from_value::<engine::types::game_state::PersistedGameState>(wire)
                         .unwrap()

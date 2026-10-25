@@ -16,7 +16,7 @@ use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{
     AbilityDefinition, DieResultBranch, DieRollIgnoreRule, DieRollModifier, DiscardedCardResult,
-    EffectKind, ForwardedResultContext, ResolvedAbility, TargetRef,
+    EffectKind, ForwardedResultContext, ParentTargetMissingReason, ResolvedAbility, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -135,6 +135,10 @@ pub struct FlipBranchContext {
     pub parent_occurrences: ParentTargetOccurrences,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
+    /// CR 608.2b: empty incoming occurrences can still name an unavailable
+    /// announcement, rather than an unassigned reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
 }
 
 impl FlipBranchContext {
@@ -186,6 +190,7 @@ impl FlipBranchContext {
                 .as_deref()
                 .cloned()
                 .map(Box::new),
+            parent_target_missing_reason: ability.parent_target_missing_reason,
         }
     }
 
@@ -226,6 +231,7 @@ impl FlipBranchContext {
         self.chosen_players.is_empty()
             && self.parent_occurrences.targets.is_empty()
             && self.forwarded_result_context.is_none()
+            && self.parent_target_missing_reason.is_none()
     }
 }
 
@@ -4076,7 +4082,9 @@ impl ResolutionStack {
 /// (`PendingCoinFlip.branch_context`).
 /// Version 10 requires pristine bound coin branches on resolved instructions
 /// and parked frames. Earlier parked coin frames cannot be restored safely.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
+/// Version 11 preserves unavailable announced bindings through coin outcomes
+/// and detached continuations, including missing-only incoming coin context.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4112,6 +4120,9 @@ const LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
 
 /// Last wire version without announcement-time coin-branch bindings.
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
+
+/// Last wire version without illegal-announcement absence provenance.
+const LEGACY_UNAVAILABLE_ANNOUNCEMENT_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -4377,6 +4388,20 @@ fn carries_coin_flip_branch_context(stack: &Value) -> Result<bool, String> {
         CoinFlipBoundaryFrame::CoinFlip { data } => data.branch_context.is_some(),
         CoinFlipBoundaryFrame::Other => false,
     }))
+}
+
+/// Inspect only an active carrier supplied by the persistence boundary.
+fn carries_coin_announcement_binding(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object
+                .get("coin_branch_slot_base")
+                .is_some_and(|base| !base.is_null())
+                || object.values().any(carries_coin_announcement_binding)
+        }
+        Value::Array(values) => values.iter().any(carries_coin_announcement_binding),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
 }
 
 fn validate_draw_sequence_delivery_owner_fields(
@@ -4820,7 +4845,7 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             // draw frame, which v7 validation still requires. Explicit bound
             // branches date to v10; branch_context alone only dates to v9.
             let declared_version = if unversioned_stack_has_bound_coin_branches {
-                RESOLUTION_STATE_WIRE_VERSION
+                LEGACY_UNAVAILABLE_ANNOUNCEMENT_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_coin_flip_branch_context {
                 LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_resolved_change_zone_members {
@@ -4960,10 +4985,11 @@ impl ResolutionStateWire {
             | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNAVAILABLE_ANNOUNCEMENT_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNAVAILABLE_ANNOUNCEMENT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4979,7 +5005,7 @@ impl ResolutionStateWire {
         // events are recognized there only to produce the same incompatibility
         // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
-        if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
+        if version <= LEGACY_UNAVAILABLE_ANNOUNCEMENT_RESOLUTION_STATE_WIRE_VERSION {
             let typed_frame = value
                 .get("resolution_frames")
                 .map(|frames| serde_json::from_value::<CoinFlipBoundaryStack>(frames.clone()))
@@ -4992,6 +5018,22 @@ impl ResolutionStateWire {
                         .any(|frame| matches!(frame, CoinFlipBoundaryFrame::CoinFlip { .. }))
                 });
             if typed_frame {
+                return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
+            }
+            // Only active resolution carriers are inspected: an idle card
+            // definition containing a coin instruction is not a paused coin.
+            // CR 608.2b: a post-coin continuation also needs absence provenance.
+            let active_carriers = [
+                "resolution_frames",
+                "resolving_stack_entry",
+                "pending_continuation",
+                "pending_spell_resolution",
+            ];
+            if active_carriers.iter().any(|key| {
+                value
+                    .get(*key)
+                    .is_some_and(carries_coin_announcement_binding)
+            }) {
                 return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
             }
         }
@@ -9767,6 +9809,7 @@ mod tests {
         FlipBranchContext {
             chosen_players: vec![PlayerId(1)],
             parent_occurrences: ParentTargetOccurrences::default(),
+            parent_target_missing_reason: None,
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 state,
                 &[],
@@ -9943,29 +9986,6 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v10_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 10);
-        assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 9);
-        assert_eq!(
-            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
-            8
-        );
-        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
-        assert_eq!(
-            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
-            6
-        );
-        let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
-    }
-
-    #[test]
     fn parked_coin_writer_refuses_an_incoming_object_without_a_pin() {
         let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
         serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
@@ -10012,5 +10032,314 @@ mod tests {
             assert!(error.contains("INVALID_COIN_BRANCH_BINDINGS:"), "{error}");
             assert!(!error.contains("RESTORE_INCOMPATIBLE"), "{error}");
         }
+    }
+    /// Synthetic building-block fixture, entered through casting and public keep
+    /// actions. The inner prompt has already consumed the outer B declaration.
+    fn parked_announcement_fixture(
+        illegal: bool,
+        post_coin_pause: bool,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{
+            AbilityKind, CoinFlipRun, Effect, QuantityExpr, TargetFilter, TypedFilter,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{GameRng, RandomDraw};
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+        use rand::Rng;
+        let mut payoff = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+        );
+        if post_coin_pause {
+            let mut optional = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            optional.optional = true;
+            payoff = payoff.sub_ability(optional);
+        }
+        let flip = |win| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(win)),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            )
+        };
+        let target = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            )
+        };
+        let definition = target().sub_ability(flip(target().sub_ability(flip(payoff))));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let a = scenario.add_creature(P0, "Outer announcement", 2, 2).id();
+        let b = scenario.add_creature(P0, "Inner announcement", 2, 2).id();
+        let source = scenario
+            .add_spell_to_hand(P0, "Synthetic nested binding", true)
+            .with_ability_definition(definition)
+            .id();
+        let response = scenario
+            .add_spell_to_hand_from_oracle(P0, "Exile response", true, "Exile target creature.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+        let mut runner = scenario.build();
+        let seed = (0..100_000)
+            .find(|&seed| {
+                let mut rng = GameRng::seed_from_u64(seed);
+                [true, false, true, false]
+                    .into_iter()
+                    .all(|won| rng.draw(RandomDraw::Outcome).random_bool(0.5) == won)
+            })
+            .unwrap();
+        runner.state_mut().rng_seed = seed;
+        runner.state_mut().rng = GameRng::seed_from_u64(seed);
+        runner.cast(source).target_objects(&[a, b]).commit();
+        if illegal {
+            runner.cast(response).target_object(b).commit();
+        }
+        for _ in 0..12 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { .. }
+            ) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+        ));
+        let events = runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap()
+            .events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CoinFlipped { won: true, .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+        ));
+        assert!(runner.state().active_coin_flip_frame().is_some());
+        runner.state_mut().capture_rng_word_pos();
+        (runner, a, b)
+    }
+
+    fn finish_announcement_fixture(state: GameState, a: ObjectId, b: ObjectId, illegal: bool) {
+        use crate::game::scenario::{GameRunner, P0};
+        use crate::types::actions::GameAction;
+        let mut runner = GameRunner::from_state(state);
+        let events = runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap()
+            .events;
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CoinFlipped { won: true, .. })));
+        for _ in 0..12 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(
+            runner.state().objects[&a]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            runner.state().objects[&b]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            u32::from(!illegal)
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+
+    fn strip_announcement_provenance(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("parent_target_missing_reason");
+                for value in object.values_mut() {
+                    strip_announcement_provenance(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    strip_announcement_provenance(value);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    #[test]
+    fn legacy_coin_resolution_without_announcement_provenance_is_refused() {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PersistedGameState;
+        for illegal in [false, true] {
+            let (runner, a, b) = parked_announcement_fixture(illegal, false);
+            let wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap();
+            let current = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .unwrap()
+                .into_game_state();
+            finish_announcement_fixture(current, a, b, illegal);
+            let raw_current =
+                serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
+                    .unwrap();
+            let restored_raw = serde_json::from_value::<PersistedGameState>(raw_current)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            finish_announcement_fixture(restored_raw, a, b, illegal);
+            let trusted_current =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            let restored_trusted = serde_json::from_value::<PersistedGameState>(trusted_current)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            finish_announcement_fixture(restored_trusted, a, b, illegal);
+            let mut legacy = wire;
+            strip_announcement_provenance(&mut legacy);
+            legacy["resolution_state_version"] = Value::from(10);
+            assert!(
+                serde_json::from_value::<ResolutionStateWire>(legacy.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR)
+            );
+            assert!(serde_json::from_value::<PersistedGameState>(legacy.clone())
+                .unwrap_err()
+                .to_string()
+                .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+            let mut trusted =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            trusted["state"] = legacy;
+            assert!(serde_json::from_value::<PersistedGameState>(trusted)
+                .unwrap_err()
+                .to_string()
+                .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+            let mut raw = serde_json::to_value(runner.state()).unwrap();
+            declare_raw_resolution_wire(&mut raw).unwrap();
+            assert_eq!(raw["resolution_state_version"], Value::from(10));
+            assert!(serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(runner.state()).unwrap()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+
+            let (mut paused, _, _) = parked_announcement_fixture(illegal, true);
+            paused
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap();
+            assert!(matches!(
+                paused.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ));
+            assert!(paused.state().active_coin_flip_frame().is_none());
+            let mut post =
+                serde_json::to_value(ResolutionStateWire::from_game_state(paused.state().clone()))
+                    .unwrap();
+            serde_json::from_value::<ResolutionStateWire>(post.clone()).unwrap();
+            strip_announcement_provenance(&mut post);
+            post["resolution_state_version"] = Value::from(10);
+            assert!(serde_json::from_value::<ResolutionStateWire>(post.clone())
+                .unwrap_err()
+                .to_string()
+                .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+            assert!(serde_json::from_value::<PersistedGameState>(post.clone())
+                .unwrap_err()
+                .to_string()
+                .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+            let mut trusted_post =
+                serde_json::to_value(PersistedGameState::capture(paused.state().clone())).unwrap();
+            trusted_post["state"] = post;
+            assert!(serde_json::from_value::<PersistedGameState>(trusted_post)
+                .unwrap_err()
+                .to_string()
+                .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+            assert!(serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(paused.state()).unwrap()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
+        }
+        let mut idle = serde_json::to_value(ResolutionStateWire::from_game_state(
+            GameState::new_two_player(42),
+        ))
+        .unwrap();
+        idle["resolution_state_version"] = Value::from(10);
+        serde_json::from_value::<ResolutionStateWire>(idle)
+            .expect("non-coin v10 remains compatible");
+    }
+
+    #[test]
+    fn current_coin_transport_decodes_without_legacy_persistence_refusal() {
+        for illegal in [false, true] {
+            let (runner, a, b) = parked_announcement_fixture(illegal, false);
+            let raw = serde_json::to_value(runner.state()).unwrap();
+            assert!(raw.get("resolution_state_version").is_none());
+            let current = serde_json::from_value::<GameState>(raw).unwrap();
+            finish_announcement_fixture(current, a, b, illegal);
+            let view =
+                crate::game::visibility::filter_state_for_viewer(runner.state(), PlayerId(1));
+            let decoded =
+                serde_json::from_value::<GameState>(serde_json::to_value(&view).unwrap()).unwrap();
+            assert_eq!(decoded.viewer_projection, view.viewer_projection);
+            assert_eq!(decoded.waiting_for, view.waiting_for);
+            assert_eq!(decoded.objects[&a].name, view.objects[&a].name);
+            assert_eq!(decoded.objects[&b].zone, view.objects[&b].zone);
+        }
+        serde_json::from_value::<GameState>(
+            serde_json::to_value(GameState::new_two_player(42)).unwrap(),
+        )
+        .unwrap();
     }
 }

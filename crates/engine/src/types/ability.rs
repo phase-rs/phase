@@ -36505,6 +36505,31 @@ pub enum ParentTargetMissingReason {
     /// `ParentTarget` falls back to the ability source, and an Archdruid's Charm
     /// that found nothing would put itself into its owner's hand.
     SearchLibrary,
+    /// CR 608.2b: legality validation emptied an announced binding. Its
+    /// inherited anaphors remain bound to that unavailable announcement.
+    IllegalAnnouncement { origin: TargetReadOrigin },
+}
+
+impl ParentTargetMissingReason {
+    /// CR 608.2c: an immediate continuation reads the preceding announcement.
+    pub(crate) fn inherited(self) -> Self {
+        match self {
+            Self::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            }
+            | Self::IllegalAnnouncement {
+                origin: TargetReadOrigin::ParentAnnouncement,
+            } => Self::IllegalAnnouncement {
+                origin: TargetReadOrigin::ParentAnnouncement,
+            },
+            Self::Dig => Self::Dig,
+            Self::ChooseFromZone => Self::ChooseFromZone,
+            Self::RevealHandChoice => Self::RevealHandChoice,
+            Self::ExileTop => Self::ExileTop,
+            Self::RevealUntil => Self::RevealUntil,
+            Self::SearchLibrary => Self::SearchLibrary,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -37551,6 +37576,9 @@ pub struct ResolvedAbility {
     /// onto the search's continuation (an empty delivered set; a non-empty one
     /// clears it). See [`ParentTargetMissingReason`] for what each variant
     /// gates and who consults it.
+    /// CR 608.2b: validation also latches an illegally emptied announcement;
+    /// inherited/detached continuations retain its origin rather than treating
+    /// the empty list as an unassigned reference.
     ///
     /// Serialized: a child parked on a paused continuation carries this across
     /// a `GameState` round trip (reconnect, persistence, P2P resume), where the
@@ -37860,6 +37888,17 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// CR 608.2b: an illegally emptied announcement supplies no referents.
+    /// A fresh populated binding supersedes absence; other producer reasons
+    /// retain their existing, operation-specific fallback policies.
+    pub(crate) fn has_authoritative_empty_binding(&self) -> bool {
+        self.targets.is_empty()
+            && matches!(
+                self.parent_target_missing_reason,
+                Some(ParentTargetMissingReason::IllegalAnnouncement { .. })
+            )
+    }
+
     /// Immediate live children in declaration order; no definition templates.
     pub fn child_links(
         &self,

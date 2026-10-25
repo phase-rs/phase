@@ -626,6 +626,13 @@ pub fn resolve(
         crate::game::targeting::live_declared_players(state, ability);
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
+    // on reference-only payloads so firing cannot invent a new antecedent.
+    if ability.has_authoritative_empty_binding()
+        && ability.context.forwarded_result_context.is_none()
+    {
+        super::inherit_missing_parent_referent(&mut delayed_ability, ability);
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.

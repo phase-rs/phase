@@ -1190,6 +1190,13 @@ pub fn resolved_targets(
     target_filter: &TargetFilter,
     state: &GameState,
 ) -> Vec<TargetRef> {
+    // CR 608.2b: an unavailable announcement is bound to the empty set,
+    // not an invitation to substitute an event, attached host, or source.
+    if matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.has_authoritative_empty_binding()
+    {
+        return Vec::new();
+    }
     // CR 201.5a + CR 400.7: the stamped granter incarnation, and nothing once it has left.
     if let TargetFilter::GrantingObject { bound } = target_filter {
         if let Some(granter) = bound.or(ability.context.granting_object) {
@@ -1421,8 +1428,9 @@ pub fn resolved_targets(
 /// Tiers, in order:
 ///   1. `context.forwarded_result_context` — a forward-result producer is the most recent
 ///      antecedent. `Some([])` there is a real zero-result and must not fall through.
-///   2. This node's propagated binding when the stack tree contains a coin
-///      boundary. Independently declared outcomes cannot publish into siblings.
+///   2. CR 608.2b: an illegally emptied announcement remains authoritative;
+///      otherwise this node's propagated binding at a coin boundary applies.
+///      Independently declared outcomes cannot publish into siblings.
 ///   3. The ordinary resolving-root lexical chain, excluding coin outcomes.
 ///   4. The node's OWN propagated `targets` when no declaration supplied a referent.
 ///      Optional empty declarations remain `Some([])` (CR 115.6).
@@ -1442,6 +1450,11 @@ pub(crate) fn parent_chain_referents(
 ) -> Option<Vec<TargetRef>> {
     if let Some(context) = &ability.context.forwarded_result_context {
         return Some(context.targets.clone());
+    }
+    // CR 608.2b: carried absence precedes lexical/root fallback. Forwarded
+    // results above remain the newer antecedent, including a completed empty one.
+    if ability.has_authoritative_empty_binding() {
+        return Some(Vec::new());
     }
     let root = resolving_root_ability(state, ability);
     if super::triggers::any_reachable_link(root, &|node| node.coin_branches.is_some())

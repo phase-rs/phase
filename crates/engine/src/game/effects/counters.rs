@@ -2521,6 +2521,13 @@ pub(super) fn resolve_defined_or_targets(
         | Effect::PutCounter { target, .. } => Some(target),
         _ => None,
     };
+    // CR 608.2b: do not replace an unavailable ParentTarget announcement
+    // with an attack batch, event subject, attached host, or source.
+    if matches!(target_spec, Some(TargetFilter::ParentTarget))
+        && ability.has_authoritative_empty_binding()
+    {
+        return Vec::new();
+    }
 
     // Whether the ability carries any chosen *object* target. The branch
     // resolver in `choose_one_of::resolve_branch` injects a bookkeeping
@@ -3101,6 +3108,12 @@ fn resolve_counter_transfer_sources(
     ability: &ResolvedAbility,
     source_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    // CR 608.2b: an unavailable source announcement supplies no information.
+    if matches!(source_filter, TargetFilter::ParentTarget)
+        && ability.has_authoritative_empty_binding()
+    {
+        return Vec::new();
+    }
     if matches!(source_filter, TargetFilter::SelfRef | TargetFilter::None) {
         return ability.self_ref_binding(state).into_iter().collect();
     }
@@ -3130,6 +3143,12 @@ fn resolve_counter_transfer_destinations(
     source_filter: &TargetFilter,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    // CR 608.2b: an unavailable destination cannot be replaced by event context.
+    if matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.has_authoritative_empty_binding()
+    {
+        return Vec::new();
+    }
     if matches!(target_filter, TargetFilter::SelfRef | TargetFilter::None) {
         return ability.self_ref_binding(state).into_iter().collect();
     }

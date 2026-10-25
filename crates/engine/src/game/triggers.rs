@@ -8772,6 +8772,10 @@ pub(crate) fn seed_batched_attack_parent_targets(
     if attacker_ids.is_empty() {
         return;
     }
+    // CR 608.2b: a validated-empty announcement cannot be reseeded by an event.
+    if ability.has_authoritative_empty_binding() {
+        return;
+    }
     if !effect_uses_parent_target(&ability.effect) || !ability.targets.is_empty() {
         return;
     }
@@ -8792,6 +8796,11 @@ pub(crate) fn seed_batched_attack_parent_targets(
 /// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
 /// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    // CR 608.2b: neither event subjects nor attached hosts replace an
+    // unavailable announcement, at stack placement or resolution fallback.
+    if ability.has_authoritative_empty_binding() {
+        return true;
+    }
     // CR 115.1: event-context seeding is not a spell or ability that may change
     // a chosen target, so it never overwrites one, even when the chosen target
     // is the trigger's own source.
@@ -19264,6 +19273,77 @@ pub mod tests {
             Some(state.waiting_for.clone()),
             "the orphaned trigger's prompt must be surfaced, not silently dropped"
         );
+    }
+
+    #[test]
+    fn unavailable_announcements_block_only_their_own_event_and_attack_reseeding() {
+        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
+        let state = GameState::default();
+        let event = GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(42),
+            to: Zone::Graveyard,
+        };
+        let attack = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(42)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![],
+        };
+        for reason in [
+            None,
+            Some(ParentTargetMissingReason::Dig),
+            Some(ParentTargetMissingReason::ChooseFromZone),
+            Some(ParentTargetMissingReason::RevealHandChoice),
+            Some(ParentTargetMissingReason::ExileTop),
+            Some(ParentTargetMissingReason::RevealUntil),
+            Some(ParentTargetMissingReason::SearchLibrary),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            }),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::ParentAnnouncement,
+            }),
+        ] {
+            for timing in [
+                EventContextSeedTiming::StackPush,
+                EventContextSeedTiming::ResolutionFallback,
+            ] {
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutCounter {
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                    vec![],
+                    ObjectId(99),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let blocked = ability.has_authoritative_empty_binding();
+                seed_event_context_parent_targets(&state, &mut ability, Some(&event), timing);
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "event reason={reason:?} timing={timing:?}"
+                );
+                ability.set_unpinned_targets(vec![]);
+                seed_batched_attack_parent_targets(&mut ability, Some(&attack));
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "attack reason={reason:?}"
+                );
+            }
+        }
     }
 
     /// V15 — CR 701.17c: the placement-time half of the "that card" anaphor.

@@ -71,6 +71,14 @@ fn resolve_forward_result_search_attach_host(
         // CR 303.4b + CR 109.4: "attached to you" (Lynde, Cheerful Tormentor)
         // binds the Aura host to the resolving ability's controller.
         TargetFilter::Controller => Some(AttachTarget::Player(ability.controller)),
+        // CR 608.2b: the attachment host names the same unavailable
+        // announcement, not the event subject or the source's existing host.
+        TargetFilter::ParentTarget
+            if sub.has_authoritative_empty_binding()
+                || ability.has_authoritative_empty_binding() =>
+        {
+            None
+        }
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
@@ -2696,6 +2704,54 @@ fn owner_scoped_nonbattlefield_mass_filter(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unavailable_attachment_host_does_not_use_an_unrelated_event_referent() {
+        use crate::types::ability::{AttachSelection, ParentTargetMissingReason, TargetReadOrigin};
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_event = Some(GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(42),
+            to: Zone::Graveyard,
+        });
+        let mut parent = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(99), PlayerId(0));
+        parent.forward_result = true;
+        parent.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        )));
+        assert_eq!(
+            resolve_forward_result_search_attach_host(&state, &parent),
+            Some(AttachTarget::Object(ObjectId(42))),
+            "unassigned reference retains event fallback"
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            for on_child in [false, true] {
+                let mut bound = parent.clone();
+                let node = if on_child {
+                    bound.sub_ability.as_deref_mut().unwrap()
+                } else {
+                    &mut bound
+                };
+                node.parent_target_missing_reason =
+                    Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+                assert_eq!(
+                    resolve_forward_result_search_attach_host(&state, &bound),
+                    None,
+                    "unavailable {origin:?}, on child={on_child}"
+                );
+            }
+        }
+    }
+
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;

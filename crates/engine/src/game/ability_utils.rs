@@ -6,9 +6,10 @@ use crate::types::ability::{
     CombatRelationSubject, ContinuousModification, ControllerRef, CountBinding,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+    MultiTargetSpec, ObjectScope, ParentTargetMissingReason, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
@@ -2984,6 +2985,14 @@ pub(crate) fn illegal_declared_target_slots(
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     ability.illegal_local_target_slots.clear();
+    if matches!(
+        ability.parent_target_missing_reason,
+        Some(ParentTargetMissingReason::IllegalAnnouncement {
+            origin: TargetReadOrigin::OwnAnnouncement,
+        })
+    ) {
+        ability.parent_target_missing_reason = None;
+    }
     for (_, child) in ability.child_links_mut() {
         clear_illegal_local_target_slots(child);
     }
@@ -3591,6 +3600,18 @@ fn validate_targets_in_chain_inner(
         TargetReadOrigin::OwnAnnouncement
     };
     let mut validated = ability.clone();
+    // CR 608.2b: recompute validation-owned absence for a fresh declaration,
+    // but retain a detached reference's latched parent announcement.
+    if node_has_stack_target_declaration(ability)
+        || matches!(
+            validated.parent_target_missing_reason,
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            })
+        )
+    {
+        validated.parent_target_missing_reason = None;
+    }
     // CR 608.2c: numbered anaphors count the selected outcome's declarations.
     // Its address names the pristine carrier, so illegal-target compaction
     // cannot renumber later references or lose the outer legality offset.
@@ -4341,6 +4362,20 @@ fn validate_targets_in_chain_inner(
         .unwrap_or_default();
     validated.illegal_local_target_slots =
         declared_illegal_local_positions(ability, publishes, &numbered, &verdicts);
+    // CR 608.2b: only an actual illegal verdict on this coin declaration
+    // produces absence provenance; an unchosen optional slot is not illegal.
+    if in_coin
+        && publishes
+        && target_origin == TargetReadOrigin::OwnAnnouncement
+        && node_has_stack_target_declaration(ability)
+        && validated.targets.is_empty()
+        && !validated.illegal_local_target_slots.is_empty()
+    {
+        validated.parent_target_missing_reason =
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            });
+    }
     // CR 608.2b: this node's declared positions join the view BEFORE its
     // continuations are validated, so a later node's dependent filter reads them.
     append_validated_declared_positions(ability, &verdicts, &numbered, view_out);
@@ -4485,8 +4520,24 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
         .target_occurrences()
         .into_iter()
         .find(|(target, _)| matches!(target, TargetRef::Object(_)));
+    let missing = parent
+        .has_authoritative_empty_binding()
+        .then(|| {
+            parent
+                .parent_target_missing_reason
+                .map(ParentTargetMissingReason::inherited)
+        })
+        .flatten();
     if let Some(sub) = parent.sub_ability.as_deref_mut() {
         sub.replace_target_occurrences(occurrence.into_iter().collect());
+        if missing.is_some()
+            || matches!(
+                sub.parent_target_missing_reason,
+                Some(ParentTargetMissingReason::IllegalAnnouncement { .. })
+            )
+        {
+            sub.parent_target_missing_reason = missing;
+        }
     }
 }
 

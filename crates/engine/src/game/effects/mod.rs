@@ -4472,11 +4472,63 @@ fn resolve_sub_with_missing_forward_result(
 // CR 608.2c + CR 609.3: A referent never produced stays absent through
 // targetless hops; a branch with its own targets has its own referent.
 fn inherit_missing_parent_referent(child: &mut ResolvedAbility, parent: &ResolvedAbility) {
+    use crate::types::ability::ParentTargetMissingReason;
+    // CR 608.2b: this declaration's own legality verdict outranks every
+    // incoming producer's missing-result reason.
+    if child.has_authoritative_empty_binding()
+        && matches!(
+            child.parent_target_missing_reason,
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            })
+        )
+    {
+        return;
+    }
+    if let Some(
+        reason @ (ParentTargetMissingReason::Dig
+        | ParentTargetMissingReason::ChooseFromZone
+        | ParentTargetMissingReason::RevealHandChoice
+        | ParentTargetMissingReason::ExileTop
+        | ParentTargetMissingReason::RevealUntil
+        | ParentTargetMissingReason::SearchLibrary),
+    ) = parent.parent_target_missing_reason
+    {
+        if child.targets.is_empty() {
+            child.parent_target_missing_reason = Some(reason);
+        }
+        return;
+    }
+    // CR 608.2b + CR 608.2c: independent declarations/choices replace the
+    // antecedent; targetless hops preserve its authoritative absence.
+    let owns_binding = crate::game::ability_utils::node_has_stack_target_declaration(child)
+        || awaits_resolution_object_choice(child);
+    if owns_binding || !child.targets.is_empty() {
+        if child.has_authoritative_empty_binding()
+            && matches!(
+                child.parent_target_missing_reason,
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::ParentAnnouncement,
+                })
+            )
+            || (!child.targets.is_empty()
+                && matches!(
+                    child.parent_target_missing_reason,
+                    Some(ParentTargetMissingReason::IllegalAnnouncement { .. })
+                ))
+        {
+            child.parent_target_missing_reason = None;
+        }
+        return;
+    }
+    if child.has_authoritative_empty_binding() {
+        return;
+    }
     if let Some(reason) = parent
         .parent_target_missing_reason
-        .filter(|_| child.targets.is_empty())
+        .filter(|_| parent.has_authoritative_empty_binding())
     {
-        child.parent_target_missing_reason = Some(reason);
+        child.parent_target_missing_reason = Some(reason.inherited());
     }
 }
 
@@ -4643,6 +4695,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.illegal_local_target_slots.is_empty()
+        && !sub.has_authoritative_empty_binding()
         && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
         && !has_resolution_owned_zone_choice(sub)
@@ -15750,6 +15803,7 @@ pub(crate) fn bind_detached_continuation_to_parent(
         continuation.set_target_incarnations_recursive(pins);
     }
     continuation.set_unpinned_targets(referents);
+    inherit_missing_parent_referent(continuation, parent);
 }
 
 /// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
@@ -17094,9 +17148,19 @@ fn hydrate_event_context_targets<'a>(
     ability: &'a ResolvedAbility,
 ) -> Cow<'a, ResolvedAbility> {
     let root_ref = if ability.targets.is_empty() {
-        extract_event_context_filter(&ability.effect).and_then(|filter| {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-        })
+        extract_event_context_filter(&ability.effect)
+            // CR 608.2b: hydration cannot reinterpret a bound empty announcement.
+            .filter(|filter| {
+                !matches!(filter, TargetFilter::ParentTarget)
+                    || !ability.has_authoritative_empty_binding()
+            })
+            .and_then(|filter| {
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    filter,
+                    ability.source_id,
+                )
+            })
     } else {
         None
     };
@@ -17140,6 +17204,11 @@ fn nested_forward_result_attach_parent_target_ref(
         return None;
     }
     let sub = ability.sub_ability.as_ref()?;
+    // CR 608.2b: neither the chain nor its host operand may invent an event
+    // referent for an unavailable announcement.
+    if ability.has_authoritative_empty_binding() || sub.has_authoritative_empty_binding() {
+        return None;
+    }
     if !sub.targets.is_empty() {
         return None;
     }
@@ -25477,7 +25546,9 @@ pub(super) fn inherited_parent_occurrences(
     TargetRef,
     Option<crate::types::identifiers::ObjectIncarnationRef>,
 )> {
-    if sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty() {
+    if sub.has_authoritative_empty_binding()
+        || (sub.targets.is_empty() && !sub.illegal_local_target_slots.is_empty())
+    {
         return Vec::new();
     }
     let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
