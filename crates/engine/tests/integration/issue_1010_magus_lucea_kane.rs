@@ -7,7 +7,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, ConvokeMode, PayCostKind, StackEntryKind, WaitingFor,
+    CastPaymentMode, ConvokeMode, PayCostKind, PayableResource, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -949,6 +949,21 @@ fn wizards_rockets_x_mana_ability_uses_up_magus_and_copies_nothing() {
             payment_mode: CastPaymentMode::Auto,
         },
     );
+    // CR 107.3a + CR 605.3: X in the mana ability's activation cost is announced first.
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::ManaGeneric { .. },
+                source_id,
+                pending_mana_ability: Some(_),
+                ..
+            } if *source_id == rockets
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    act(&mut runner, GameAction::SubmitPayAmount { amount: 0 });
     let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
         panic!(
             "CR 603.3b: Rockets' dies trigger and Magus's trigger wait together: {:?}",

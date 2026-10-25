@@ -99,7 +99,11 @@ impl DraftSession {
     ///
     /// All players start disconnected. `timer_task` is None — the caller
     /// should re-arm from `timer_remaining_ms` if needed.
-    pub fn from_persisted(ps: PersistedDraftSession) -> Self {
+    pub fn from_persisted(ps: PersistedDraftSession) -> Result<Self, String> {
+        Self::try_from_persisted(ps)
+    }
+
+    fn from_validated_persisted(ps: PersistedDraftSession) -> Self {
         let pod_size = ps.player_tokens.len();
         Self {
             draft_code: ps.draft_code,
@@ -142,7 +146,9 @@ impl DraftSession {
         }
         core.validate_persisted_snapshot()
             .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
-        Ok(Self::from_persisted(ps))
+        core.validate_legacy_admission()
+            .map_err(|_| draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string())?;
+        Ok(Self::from_validated_persisted(ps))
     }
 
     /// Inject server-side timer into the filtered view before serializing.
@@ -372,6 +378,7 @@ impl DraftSessionManager {
         // server-internal actions (auto-pick on timer expiry, GameOver
         // auto-report), so bot/auto picks are unaffected.
         let action = authorize_client_draft_action(seat, action)?;
+        admit_dormant_action(&session.session, &action)?;
 
         let clears_lobby = matches!(action, DraftAction::StartDraft);
 
@@ -405,6 +412,7 @@ impl DraftSessionManager {
             .sessions
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
+        admit_dormant_action(&session.session, &action)?;
 
         let clears_lobby = matches!(action, DraftAction::StartDraft);
 
@@ -497,16 +505,8 @@ impl DraftSessionManager {
     }
 
     /// Restore a previously persisted draft session, rebuilding the token_to_draft index.
-    pub fn restore_session(&mut self, ps: PersistedDraftSession) {
-        let session = DraftSession::from_persisted(ps);
-        let draft_code = session.draft_code.clone();
-        for token in &session.player_tokens {
-            if !token.is_empty() {
-                self.token_to_draft
-                    .insert(token.clone(), draft_code.clone());
-            }
-        }
-        self.sessions.insert(draft_code, session);
+    pub fn restore_session(&mut self, ps: PersistedDraftSession) -> Result<(), String> {
+        self.restore_persisted_session(ps)
     }
 
     /// Restore an untrusted persisted snapshot only after its wrapper and core
@@ -587,6 +587,7 @@ impl DraftSessionManager {
                 | DraftStatus::MatchInProgress
                 | DraftStatus::RoundComplete
                 | DraftStatus::Paused
+                | DraftStatus::Review
                 | DraftStatus::Complete
                 | DraftStatus::Abandoned => {}
             }
@@ -983,6 +984,19 @@ pub fn generate_draft_code() -> String {
 /// The draft host occupies seat 0 (`create_draft` assigns the creator seat 0).
 pub const DRAFT_HOST_SEAT: usize = 0;
 
+fn admit_dormant_action(
+    session: &draft_core::types::DraftSession,
+    action: &DraftAction,
+) -> Result<(), String> {
+    session
+        .validate_legacy_admission()
+        .map_err(|_| draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string())?;
+    if action.is_fifo_only() {
+        return Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
+    }
+    Ok(())
+}
+
 /// Authorize a client-originated draft action against the authenticated seat.
 ///
 /// The client controls the action's payload `seat`, but a player may only act
@@ -994,6 +1008,20 @@ pub const DRAFT_HOST_SEAT: usize = 0;
 /// earlier gate that blocks actions never permitted from any client.
 fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<DraftAction, String> {
     match action {
+        DraftAction::Select {
+            prompt_id,
+            picked_card_instance_ids,
+            burned_card_instance_ids,
+            effect_card_instance_ids,
+            ..
+        } => Ok(DraftAction::Select {
+            seat: u8::try_from(seat).map_err(|_| "Invalid authenticated seat".to_string())?,
+            prompt_id,
+            picked_card_instance_ids,
+            burned_card_instance_ids,
+            effect_card_instance_ids,
+        }),
+        DraftAction::AdvanceClock => Err("AdvanceClock is server-internal".to_string()),
         // Seat-scoped: overwrite the client-supplied seat with the authenticated
         // seat so a player cannot pick from or submit a deck for another seat.
         DraftAction::Pick {
@@ -1037,7 +1065,8 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
         }
         // Table authority: only the host may start the draft, advance rounds,
         // generate pairings, report results, or replace a seat with a bot.
-        DraftAction::StartDraft
+        DraftAction::Control { .. }
+        | DraftAction::StartDraft
         | DraftAction::AdvanceRound
         | DraftAction::GeneratePairings
         | DraftAction::ReportMatchResult { .. }
@@ -1065,6 +1094,9 @@ mod tests {
 
     fn test_config() -> DraftConfig {
         DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -1292,6 +1324,229 @@ mod tests {
         // Paired positive: a host-only action from seat 1 is still refused, so
         // this arm did not land in the host-only group.
         assert!(authorize_client_draft_action(1, DraftAction::StartDraft).is_err());
+    }
+
+    /// The native Winston decision route: the WebSocket `SharedStackDecision`
+    /// frame reaches `handle_draft_action`, whose dormant-flow admission gate
+    /// runs before `session::apply`. A legacy Winston decision must pass that
+    /// gate; refusing it would refuse every native Winston turn while the
+    /// shared-stack reducer and timeout tests, which bypass the gate, stay green.
+    #[test]
+    fn native_winston_decision_is_admitted_through_handle_draft_action() {
+        let mut mgr = DraftSessionManager::new();
+        let code = start_pod(&mut mgr, winston_test_config());
+        let (token, action, before) = {
+            let managed = &mgr.sessions[&code];
+            let state = managed
+                .session
+                .shared_stack()
+                .expect("a started Winston pod deals a shared stack");
+            let seat = state.active_seat;
+            // The same legal (decision, cursor) pair the timeout path submits.
+            let decision = draft_core::shared_stack::forced_decision(state, seat)
+                .expect("the active seat has a legal decision");
+            let action = DraftAction::SharedStackDecision {
+                seat,
+                pile: state.cursor,
+                decision,
+            };
+            (
+                managed.player_tokens[usize::from(seat)].clone(),
+                action,
+                managed.session.shared_stack.clone(),
+            )
+        };
+
+        mgr.handle_draft_action(&code, &token, action, None)
+            .expect("the active seat's Winston decision is admitted and applied");
+
+        assert_ne!(
+            mgr.sessions[&code].session.shared_stack, before,
+            "the decision moved the shared stack"
+        );
+    }
+
+    #[test]
+    fn fifo_action_token_binding_preserves_nested_prompt_authority() {
+        use draft_core::types::{DraftControl, DraftPauseReason, DraftPromptId, DraftSessionId};
+        let action = DraftAction::Select {
+            seat: 1,
+            prompt_id: DraftPromptId {
+                session_id: DraftSessionId("authority".into()),
+                seat: 1,
+                generation: 19,
+            },
+            picked_card_instance_ids: vec!["z".into(), "a".into()],
+            burned_card_instance_ids: vec!["b".into(), "y".into()],
+            effect_card_instance_ids: vec!["effect-b".into(), "effect-a".into()],
+        };
+        let mut expected = action.clone();
+        if let DraftAction::Select { seat, .. } = &mut expected {
+            *seat = 2;
+        }
+        assert_eq!(
+            authorize_client_draft_action(2, action.clone()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            authorize_client_draft_action(256, action),
+            Err("Invalid authenticated seat".into())
+        );
+        for control in [
+            DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+            DraftControl::Resume,
+        ] {
+            let action = DraftAction::Control { control };
+            assert_eq!(
+                authorize_client_draft_action(0, action.clone()),
+                Ok(action.clone())
+            );
+            assert_eq!(
+                authorize_client_draft_action(1, action),
+                Err("Only the draft host can perform this action".into())
+            );
+        }
+        assert_eq!(
+            authorize_client_draft_action(0, DraftAction::AdvanceClock),
+            Err("AdvanceClock is server-internal".into())
+        );
+        assert_eq!(
+            authorize_client_draft_action(2, DraftAction::AdvanceClock),
+            Err("AdvanceClock is server-internal".into())
+        );
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let token = manager.sessions[&code].player_tokens[2].clone();
+        let before = serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap();
+        assert_eq!(
+            manager
+                .handle_draft_action(&code, "wrong-token", expected.clone(), None)
+                .unwrap_err(),
+            "Invalid player token"
+        );
+        assert_eq!(
+            manager
+                .handle_draft_action(&code, &token, expected, None)
+                .unwrap_err(),
+            "FIFO drafting is not supported by this runtime"
+        );
+        assert_eq!(
+            serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(),
+            before
+        );
+        manager
+            .handle_draft_action(
+                &code,
+                &token,
+                DraftAction::Pick {
+                    seat: 7,
+                    card_instance_ids: vec!["TST-2-0-0".into()],
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(manager.sessions[&code].session.pools[2].len(), 1);
+        assert!(manager.sessions[&code].session.pools[7].is_empty());
+    }
+
+    #[test]
+    fn dormant_native_restore_rejects_valid_fifo_before_any_install() {
+        use draft_core::types::{
+            DraftClockPolicy, DraftControl, DraftFlow, DraftPauseReason, DraftSessionId,
+            PickClockPolicy,
+        };
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let legacy = manager.sessions[&code].to_persisted();
+        let mut config = legacy.config.clone();
+        config.flow = DraftFlow::FifoAsync;
+        config.cards_per_pack = 2;
+        config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+            review_duration_ms: 1000,
+        };
+        let mut fifo = draft_core::types::DraftSession::new_fifo(
+            config.clone(),
+            legacy.session.seats.clone(),
+            code.clone(),
+            DraftSessionId("native-restore".into()),
+        )
+        .unwrap();
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".into(),
+            cards_per_pack: 2,
+        };
+        draft_core::session::apply_at(&mut fifo, DraftAction::StartDraft, Some(&source), 1000)
+            .unwrap();
+        let active = fifo.clone();
+        let legal = draft_core::pick_pass::legal_auto_selection(&fifo, 0).unwrap();
+        let mut positive = fifo.clone();
+        draft_core::session::apply_at(&mut positive, legal, None, 1100).unwrap();
+        assert_eq!(positive.pools[0].len(), 1);
+        for _ in 0..2 {
+            for seat in 0..8 {
+                let action = draft_core::pick_pass::legal_auto_selection(&fifo, seat).unwrap();
+                draft_core::session::apply_at(&mut fifo, action, None, 1100).unwrap();
+            }
+        }
+        assert_eq!(fifo.status, DraftStatus::Review);
+        let review = fifo.clone();
+        draft_core::session::apply_at(
+            &mut fifo,
+            DraftAction::Control {
+                control: DraftControl::Pause {
+                    reason: DraftPauseReason::PausedByHost,
+                },
+            },
+            None,
+            1500,
+        )
+        .unwrap();
+        for core in [active, review, fifo] {
+            core.validate_persisted_snapshot().unwrap();
+            let mut payload = legacy.clone();
+            payload.config = config.clone();
+            payload.session = core;
+            let before = serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap();
+            let tokens = manager.token_to_draft.clone();
+            assert_eq!(
+                DraftSession::from_persisted(payload.clone()).err().unwrap(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(
+                manager.restore_session(payload.clone()),
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(
+                manager.restore_persisted_session(payload),
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(manager.sessions.len(), 1);
+            assert_eq!(manager.token_to_draft, tokens);
+            assert_eq!(
+                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(),
+                before
+            );
+        }
+        let restored = DraftSession::from_persisted(legacy.clone()).unwrap();
+        assert_eq!(restored.session, legacy.session);
+        let mut fresh = DraftSessionManager::new();
+        fresh.restore_session(legacy).unwrap();
+        let token = fresh.sessions[&code].player_tokens[0].clone();
+        fresh
+            .handle_draft_action(
+                &code,
+                &token,
+                DraftAction::Pick {
+                    seat: 0,
+                    card_instance_ids: vec!["TST-0-0-0".into()],
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(fresh.sessions[&code].session.pools[0].len(), 1);
     }
 
     /// CR 903.13b: the disconnected-seat auto-pick takes the kind's WHOLE pick
@@ -1759,7 +2014,7 @@ mod tests {
         let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
 
         let persisted = mgr.sessions[&code].to_persisted();
-        let restored = DraftSession::from_persisted(persisted);
+        let restored = DraftSession::from_persisted(persisted).unwrap();
 
         assert!(restored.connected.iter().all(|&c| !c));
         assert!(restored.timer_task.is_none());
@@ -1778,7 +2033,7 @@ mod tests {
 
         // Create a fresh manager and restore into it
         let mut mgr2 = DraftSessionManager::new();
-        mgr2.restore_session(persisted);
+        mgr2.restore_session(persisted).unwrap();
 
         // All tokens should resolve to the same draft code
         for t in &tokens {
@@ -2129,6 +2384,9 @@ mod tests {
         use engine::types::player::PlayerId;
 
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,

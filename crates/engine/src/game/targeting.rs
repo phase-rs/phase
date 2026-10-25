@@ -3207,7 +3207,14 @@ pub(crate) fn extract_player_from_event(
         // controller after the object has transferred or left play. Without
         // this arm, ETB and dies-trigger sub-effects with `target:
         // TriggeringPlayer` fell back to the ability controller, hitting the
-        // wrong player (Suture Priest #560, Bloodchief Ascension #546).
+        // wrong player (Suture Priest #560).
+        //
+        // An owner-keyed head ("put into an opponent's / a player's graveyard ...
+        // that player") names the graveyard's owner instead; the parser binds that
+        // anaphor to `ParentTargetOwner` (`relative_player_scope_for_condition`), so
+        // the subject ("that player loses ...") and "have that player ..." forms never
+        // reach this controller reading (CR 400.3 + CR 608.2c). The object-position
+        // "deals N damage to that player" form still does (known gap).
         GameEvent::ZoneChanged { record, .. } => Some(record.arrival.controller),
         // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
         // counter-placement trigger is the player who put the counters.
@@ -6720,10 +6727,10 @@ mod tests {
     /// (ETB, dies, discard, return-to-hand), `TriggeringPlayer` must
     /// resolve to the moving object's controller as captured in the
     /// `ZoneChangeRecord` snapshot — NOT the ability controller and
-    /// NOT `None`. Regression discriminator for #546 (Bloodchief
-    /// Ascension) and #560 (Suture Priest), where the wildcard arm's
+    /// NOT `None`. Regression discriminator for #546 (the original
+    /// report) and #560 (Suture Priest), where the wildcard arm's
     /// `None` fallback caused `LoseLife { target: TriggeringPlayer }`
-    /// to revert to the Suture Priest / Bloodchief controller via
+    /// to revert to the ability controller (Suture Priest's controller) via
     /// `resolve_player_for_context_ref`'s ability-controller fallback,
     /// damaging the wrong player.
     ///
@@ -6746,12 +6753,12 @@ mod tests {
                 Zone::Battlefield,
             ),
             (
-                "Dies (Bloodchief Ascension #546 battlefield→graveyard)",
+                "Dies (Massacre Wurm class battlefield→graveyard)",
                 Some(Zone::Battlefield),
                 Zone::Graveyard,
             ),
             (
-                "Discard (Bloodchief Ascension #546 hand→graveyard)",
+                "Discard (hand→graveyard)",
                 Some(Zone::Hand),
                 Zone::Graveyard,
             ),

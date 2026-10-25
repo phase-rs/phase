@@ -22,19 +22,19 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
     AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
-    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification,
-    ControllerRef, CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
-    LetterQuery, LibraryPosition, ManaProduction, MassLibraryShuffleMode, NameStickerSet,
-    NumberQuality, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, Parity, ParsedCondition, PerpetualModification, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
+    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
@@ -4584,6 +4584,13 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     // "from" would hide this on precisely the abilities it exists to watch.
     if let Some(zone) = &def.activation_zone {
         d.push(("activates from".into(), fmt_zone(zone)));
+    }
+    // CR 611.2e: the parse-time onset is semantic (it decides when enter observers read an
+    // entrant), so a stamped `WithEntry` must be visible in the parse-diff signature.
+    // `WhenFollowed` is the default and emits nothing, so existing signatures stay byte-identical.
+    match def.entry_onset {
+        ContinuousEffectOnset::WithEntry => d.push(("entry onset".into(), "with entry".into())),
+        ContinuousEffectOnset::WhenFollowed => {}
     }
     d
 }
@@ -15469,6 +15476,51 @@ mod tests {
             details(Some(Zone::Exile)),
             "two activation zones on the same effect are different parses and \
              must not collapse to the same sticky signature"
+        );
+    }
+
+    /// CR 611.2e: a stamped `WithEntry` onset reaches the parse-diff signature under its own
+    /// key; the `WhenFollowed` default emits nothing, so existing signatures stay byte-identical.
+    /// Reverting the `ability_details` push fails the first assertion.
+    #[test]
+    fn entry_onset_reaches_parse_details_only_when_with_entry() {
+        use crate::types::ability::{AbilityKind, ContinuousEffectOnset, Duration};
+
+        let details = |onset: ContinuousEffectOnset| -> Vec<(String, String)> {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            );
+            def.duration = Some(Duration::UntilEndOfTurn);
+            def.entry_onset = onset;
+            build_test_ability_item(&def).details
+        };
+
+        let with_entry = details(ContinuousEffectOnset::WithEntry);
+        assert!(
+            with_entry
+                .iter()
+                .any(|(k, v)| k == "entry onset" && v == "with entry"),
+            "a WithEntry onset must render in the parse details: {with_entry:?}"
+        );
+        assert!(
+            with_entry.iter().any(|(k, _)| k == "duration"),
+            "the onset key must not collide with the duration key under the dedup: {with_entry:?}"
+        );
+
+        let when_followed = details(ContinuousEffectOnset::WhenFollowed);
+        assert!(
+            !when_followed.iter().any(|(k, _)| k == "entry onset"),
+            "the WhenFollowed default must emit no onset key: {when_followed:?}"
+        );
+        assert!(
+            when_followed.iter().any(|(k, _)| k == "duration"),
+            "reach guard: the default def still renders its duration: {when_followed:?}"
         );
     }
 
