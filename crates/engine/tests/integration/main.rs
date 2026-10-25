@@ -480,6 +480,7 @@ mod fumiko_the_lowblood_5952;
 mod fury_sliver_double_strike_grant;
 mod fuse_runtime;
 mod gaeas_anthem_team_pump;
+mod gaeas_liege;
 mod gain_control_multi_target_6205;
 mod galactus_forced_attack_most_life;
 mod galion_elvenkings_butler_attack_pt_set;
