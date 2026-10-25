@@ -149,7 +149,6 @@ fn run_flip_branch(
             && super::can_inherit_parent_targets(&sub)
             && !super::awaits_resolution_object_choice(&sub)
             && (super::ability_refs_parent_target(&sub)
-                || super::effect_chain_refs_parent_target(&sub.effect)
                 || matches!(sub.effect, Effect::FlipCoins { .. }))
         {
             if let Some(reason) = branch_context.parent_target_missing_reason {

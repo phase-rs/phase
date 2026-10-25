@@ -15885,12 +15885,11 @@ fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
 }
 
 /// True when any effect in the ability chain references `ParentTarget`
-/// (including nested sub/else abilities). Used by delayed-trigger snapshotting
-/// so an Attach host on a ChangeZone sub-chain (Gift of Immortality #4956) still
-/// freezes the parent referent at creation time, and by a search-selection
-/// continuation to preserve its pre-search player referent for a later tail.
+/// (including nested sub/else abilities and delayed-trigger payloads). Used by
+/// delayed-trigger snapshotting and coin entry so a targetless instruction
+/// cannot hide a later detached dependency on the incoming parent referent.
 pub(crate) fn ability_refs_parent_target(ability: &ResolvedAbility) -> bool {
-    effect_refs_parent_target(&ability.effect)
+    effect_chain_refs_parent_target(&ability.effect)
         || ability
             .child_links()
             .any(|(_, child)| ability_refs_parent_target(child))
@@ -16975,16 +16974,19 @@ pub(crate) fn controller_for_relative_filter(
 /// 4. Fall back to `ability.controller` (preserves prior semantics for context
 ///    refs whose state slots are empty in the current resolution window).
 ///
-/// CR 608.2b: `None` for a [`TargetFilter::DeclaredPlayer`] whose target was
-/// illegal (or never announced), and for a filter that declares its own slot on
-/// a resolving carrier while no player was announced into it; the effect then
-/// affects no one. Every other filter resolves to some player.
+/// CR 608.2b: `None` for an unavailable parent announcement, a
+/// [`TargetFilter::DeclaredPlayer`] whose target was illegal (or never
+/// announced), or a filter declaring its own slot when no player was announced
+/// into it. The effect then affects no one; other filters retain their fallback.
 pub(crate) fn resolve_player_for_context_ref(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Option<PlayerId> {
     match target_filter {
+        // CR 608.2b: do not manufacture a player from event/source context
+        // when the parent announcement is authoritatively empty.
+        TargetFilter::ParentTarget if ability.has_authoritative_empty_binding() => None,
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
         }
@@ -17309,6 +17311,9 @@ fn ability_with_event_context_targets(
             if filter.is_context_ref() {
                 // CR 201.5a: only the ability carries the stamp that names its granter.
                 let target = match filter {
+                    // CR 608.2b: a parked optional effect retains its empty
+                    // announcement, not the event subject or attached host.
+                    TargetFilter::ParentTarget if pending.has_authoritative_empty_binding() => None,
                     TargetFilter::GrantingObject { .. } => {
                         crate::game::targeting::resolved_targets(&pending, filter, state)
                             .into_iter()

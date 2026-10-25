@@ -896,6 +896,10 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
 #[derive(Clone, Copy)]
 enum EmptyCoinRider {
     Counter,
+    CounterAfterGainLife,
+    OptionalCounter,
+    Saddle,
+    Sacrifice,
     BecomeBlocked,
     Replacement,
 }
@@ -924,7 +928,9 @@ fn empty_coin_binding_scenario(
         Phase::End
     };
     let payoff = match rider {
-        EmptyCoinRider::Counter => Effect::PutCounter {
+        EmptyCoinRider::Counter
+        | EmptyCoinRider::CounterAfterGainLife
+        | EmptyCoinRider::OptionalCounter => Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::ParentTarget,
@@ -940,6 +946,14 @@ fn empty_coin_binding_scenario(
             ),
             target: TargetFilter::ParentTarget,
         },
+        EmptyCoinRider::Saddle => Effect::BecomeSaddled {
+            target: TargetFilter::ParentTarget,
+        },
+        EmptyCoinRider::Sacrifice => Effect::Sacrifice {
+            target: TargetFilter::ParentTarget,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
     };
     // Replacement's target is intentionally hidden from the ordinary effect
     // filter; the reference-only head makes the delayed binding explicit.
@@ -954,6 +968,11 @@ fn empty_coin_binding_scenario(
     } else {
         AbilityDefinition::new(AbilityKind::Spell, payoff)
     };
+    let payoff = if matches!(rider, EmptyCoinRider::OptionalCounter) {
+        payoff.optional()
+    } else {
+        payoff
+    };
     let delayed = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::CreateDelayedTrigger {
@@ -962,6 +981,18 @@ fn empty_coin_binding_scenario(
             uses_tracked_set: false,
         },
     );
+    let delayed = if matches!(rider, EmptyCoinRider::CounterAfterGainLife) {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(delayed)
+    } else {
+        delayed
+    };
     let flip = |win| {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -1172,7 +1203,15 @@ fn empty_coin_binding_scenario(
         flips(&events),
         if nested { vec![true, true] } else { vec![true] }
     );
-    assert_eq!(runner.life(P0), life + 2, "reach: independent tail");
+    assert_eq!(
+        runner.life(P0),
+        life + if matches!(rider, EmptyCoinRider::CounterAfterGainLife) {
+            3
+        } else {
+            2
+        },
+        "reach: targetless head and independent tail execute"
+    );
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -1248,11 +1287,34 @@ fn empty_coin_binding_scenario(
         "delayed stack binding; illegal B={remove_b}"
     );
     let mut payoff_events = Vec::new();
+    if matches!(rider, EmptyCoinRider::OptionalCounter) {
+        for _ in 0..12 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            payoff_events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ),
+            "reach: optional delayed counter prompt"
+        );
+        payoff_events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap()
+                .events,
+        );
+    }
     finish(&mut runner, &mut payoff_events);
     for id in [a, b, h] {
         let selected = id == b && !remove_b;
         match rider {
-            EmptyCoinRider::Counter => assert_eq!(
+            EmptyCoinRider::Counter
+            | EmptyCoinRider::CounterAfterGainLife
+            | EmptyCoinRider::OptionalCounter => assert_eq!(
                 runner.state().objects[&id]
                     .counters
                     .get(&CounterType::Plus1Plus1)
@@ -1274,6 +1336,22 @@ fn empty_coin_binding_scenario(
                 runner.state().objects[&id].replacement_definitions.len(),
                 usize::from(selected),
                 "replacement payoff object={id:?}; illegal B={remove_b}",
+            ),
+            EmptyCoinRider::Saddle => assert_eq!(
+                runner.state().objects[&id].is_saddled,
+                selected,
+                "saddle payoff object={id:?}; illegal B={remove_b}",
+            ),
+            EmptyCoinRider::Sacrifice => assert_eq!(
+                runner.state().objects[&id].zone,
+                if selected {
+                    Zone::Graveyard
+                } else if id == b && remove_b {
+                    Zone::Exile
+                } else {
+                    Zone::Battlefield
+                },
+                "sacrifice payoff object={id:?}; illegal B={remove_b}",
             ),
         }
     }
@@ -1330,6 +1408,59 @@ fn detached_become_blocked_does_not_replace_an_illegal_announcement_with_its_hos
 fn detached_target_replacement_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [false, true] {
         empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::Replacement);
+    }
+}
+
+#[test]
+fn nested_coin_targetless_head_preserves_delayed_binding() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(
+            remove_b,
+            false,
+            true,
+            false,
+            EmptyCoinRider::CounterAfterGainLife,
+        );
+    }
+}
+
+#[test]
+fn nested_coin_targetless_head_preserves_delayed_binding_after_inner_keep_restore() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(
+            remove_b,
+            false,
+            true,
+            true,
+            EmptyCoinRider::CounterAfterGainLife,
+        );
+    }
+}
+
+#[test]
+fn detached_saddle_does_not_replace_an_illegal_announcement_with_its_host() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::Saddle);
+    }
+}
+
+#[test]
+fn detached_sacrifice_does_not_replace_an_illegal_announcement_with_its_host() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(remove_b, true, false, false, EmptyCoinRider::Sacrifice);
+    }
+}
+
+#[test]
+fn optional_detached_counter_does_not_replace_an_illegal_announcement_with_its_host() {
+    for remove_b in [true, false] {
+        empty_coin_binding_scenario(
+            remove_b,
+            true,
+            false,
+            false,
+            EmptyCoinRider::OptionalCounter,
+        );
     }
 }
 

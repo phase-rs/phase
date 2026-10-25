@@ -2710,6 +2710,11 @@ pub fn resolve_effect_player_ref(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<PlayerId> {
+    // CR 608.2b: an unavailable parent announcement names no player;
+    // event/attached-host resolution cannot supply a replacement controller.
+    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+        return None;
+    }
     match filter {
         // CR 109.5: "you" in an ability is its controller, independent of any
         // resolution-scoped player. Player-scope iteration rebinds
@@ -7972,6 +7977,44 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    #[test]
+    fn unavailable_parent_player_does_not_fall_back_to_the_firing_event() {
+        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
+
+        let (mut state, source, host) = setup_with_creatures();
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(source, host)],
+        });
+        let mut ability = make_resolved_with_targets(vec![], source);
+        let resolve = |ability: &crate::types::ability::ResolvedAbility| {
+            (
+                resolve_effect_player_ref(&state, ability, &TargetFilter::ParentTarget),
+                crate::game::effects::resolve_player_for_context_ref(
+                    &state,
+                    ability,
+                    &TargetFilter::ParentTarget,
+                ),
+            )
+        };
+        let host_controller = state.objects[&host].controller;
+        assert_eq!(
+            resolve(&ability),
+            (Some(host_controller), Some(host_controller))
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason =
+                Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            assert_eq!(
+                resolve(&ability),
+                (None, None),
+                "unavailable player reference: {origin:?}"
+            );
+        }
     }
 
     /// CR 509.3d + CR 608.2k: the disambiguated per-blocker event carries both
