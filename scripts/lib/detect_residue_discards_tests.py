@@ -78,6 +78,28 @@ class DiscardTests(unittest.TestCase):
                     f"match parse_target(i) {{ {pattern} if keep() => {{}}, }}")],
                     ["whole-result", "binding"])
 
+    def test_drop_turbofish_preserves_whole_result_classification(self):
+        for drop in ("drop", "std::mem::drop"):
+            for generic in ("", "::<_>", "::<(T, &str)>"):
+                for comma in ("", ","):
+                    call = drop + generic
+                    with self.subTest(call=call, comma=comma):
+                        self.assertEqual([(h.family, h.symbol) for h in hits(
+                            f"fn f(i: &str) {{ {call}(parse_target(i){comma}); }}")],
+                            [("whole-result", "parse_target")])
+                        for arg in ("consume(parse_target(i))", "unrelated(i)",
+                                    "parse_target(i), unrelated(i)"):
+                            self.assertEqual(hits(
+                                f"fn f(i: &str) {{ {call}({arg}{comma}); }}"), [])
+        for source in ("let value = object.drop;", "let value = mem::drop;",
+                       "let value = std::mem::drop::<_>;",
+                       "object.drop::<_>(parse_target(i));",
+                       "(object).drop::<(T, &str)>(parse_target(i));",
+                       "object.drop(consume(parse_target(i)));",
+                       "object.drop::<_>(consume(parse_target(i)));"):
+            with self.subTest(source=source):
+                self.assertEqual(hits(source), [])
+
     def test_q_trailing_comma_drop_arguments(self):
         for drop in ("drop", "std::mem::drop"):
             with self.subTest(drop=drop):
@@ -351,6 +373,23 @@ class DiscardTests(unittest.TestCase):
                         self.assertEqual(hits(
                             imports + f"let rest = {receiver}.{callee}(i).{projection}; "
                             "consume(rest);"), [])
+
+    def test_range_endpoint_projections_keep_discard_obligations(self):
+        for helper, projection in (("parse_target", "0"),
+                                   ("parse_target_with_syntax", "0"),
+                                   ("parse_target_with_syntax", "2")):
+            args = "i, ctx" if helper == "parse_target_with_syntax" else "i"
+            call = f"{helper}({args})"
+            for receiver in (call, f"crate::target::{call}", f"({call})",
+                             f"{{ {call} }}"):
+                for prefix in ("..", "a..", "..="):
+                    with self.subTest(helper=helper, projection=projection,
+                                      receiver=receiver, prefix=prefix):
+                        self.assertEqual([(h.family, h.symbol) for h in hits(
+                            f"let value = {prefix}{receiver}.{projection};")],
+                            [("projection", helper)])
+                        self.assertEqual(hits(
+                            f"let rest = {prefix}{receiver}.1; consume(rest);"), [])
 
     def test_free_helper_projections_keep_discard_obligations(self):
         for call, helper, projection, imports in (

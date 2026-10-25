@@ -26,6 +26,8 @@ Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
 Argument and wrapper-pattern splitting accepts an optional trailing comma.
+Range-endpoint projections count; free `drop` calls accept explicit generic
+arguments without extending the existing classification of `.drop` methods.
 Discovery excludes exactly tests.rs and *_tests.rs, snapshots, and modules
 proven test-only; a filename merely containing `tests` remains production.
 
@@ -483,16 +485,25 @@ def find_discards(relpath, lines):
                         start -= 2
             else:
                 continue
-            # An unabsorbed method receiver cannot be a free helper call.
-            if start > 0 and v[start - 1] == ".":
+            # A single dot leaves a method receiver; doubled dots are a range.
+            if (start > 0 and v[start - 1] == "."
+                    and not (start > 1 and v[start - 2] == ".")):
                 continue
             origin = ex.origin(start, i)
             if origin and (v[i + 1] == "0" or origin[1] == "parse_target_with_syntax"):
                 add(origin, "projection")
-        if value == "drop" and i + 1 < len(v) and v[i + 1] == "(":
-            args = ex.split(i + 2, ex.pairs[i + 1])
-            if len(args) == 1:
-                add(ex.origin(*args[0]), "whole-result")
+        if value == "drop" and i + 1 < len(v):
+            opened = ex.turbofish_end(i + 1)
+            # Extend free calls, not methods; doubled dots are range punctuation.
+            if (opened is not None and i > 0 and v[i - 1] == "."
+                    and not (i > 1 and v[i - 2] == ".")):
+                continue
+            if opened is None:
+                opened = i + 1
+            if opened < len(v) and v[opened] == "(":
+                args = ex.split(opened + 1, ex.pairs[opened])
+                if len(args) == 1:
+                    add(ex.origin(*args[0]), "whole-result")
         if value == ";":
             start = i - 1
             while start >= 0 and v[start] not in (";", "{", "}"):
