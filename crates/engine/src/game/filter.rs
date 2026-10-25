@@ -28036,6 +28036,59 @@ mod attached_set_host_filter_tests {
         }
     }
 
+    #[test]
+    fn unavailable_parent_possessor_matches_no_players_objects() {
+        use crate::types::ability::{ControllerRef, ParentTargetMissingReason, TargetReadOrigin};
+
+        let mut state = state();
+        let candidate = creature(&mut state, PlayerId(1), "Event player's creature");
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped {
+            object_id: candidate,
+        });
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::creature().controller(controller));
+            let mut ability = ability(destroyed(), vec![]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "unassigned projection retains event fallback"
+            );
+            for origin in [
+                TargetReadOrigin::OwnAnnouncement,
+                TargetReadOrigin::ParentAnnouncement,
+            ] {
+                ability.parent_target_missing_reason =
+                    Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+                assert!(
+                    !matches_target_filter(
+                        &state,
+                        candidate,
+                        &filter,
+                        &FilterContext::from_ability(&ability),
+                    ),
+                    "unavailable projection cannot select another player's objects"
+                );
+            }
+            ability.set_unpinned_targets(vec![TargetRef::Object(candidate)]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "a populated binding still supplies its controller/owner"
+            );
+        }
+    }
+
     fn destroyed() -> Effect {
         Effect::DestroyAll {
             target: TargetFilter::Any,

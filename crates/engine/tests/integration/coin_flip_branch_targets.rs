@@ -898,6 +898,13 @@ enum EmptyCoinRider {
     Counter,
     CounterAfterGainLife,
     OptionalCounter,
+    DrawController,
+    DrawOwner,
+    GainLifeController,
+    GainLifeOwner,
+    OptionalDrawController,
+    OptionalDrawOwner,
+    NestedCoinCounter,
     Saddle,
     Sacrifice,
     BecomeBlocked,
@@ -921,6 +928,21 @@ fn empty_coin_binding_scenario(
     use engine::types::replacements::ReplacementEvent;
     use engine::types::resolution::ResolutionStateWire;
 
+    let player_rider = matches!(
+        rider,
+        EmptyCoinRider::DrawController
+            | EmptyCoinRider::DrawOwner
+            | EmptyCoinRider::GainLifeController
+            | EmptyCoinRider::GainLifeOwner
+            | EmptyCoinRider::OptionalDrawController
+            | EmptyCoinRider::OptionalDrawOwner
+    );
+    let parent_player = match rider {
+        EmptyCoinRider::DrawOwner
+        | EmptyCoinRider::GainLifeOwner
+        | EmptyCoinRider::OptionalDrawOwner => TargetFilter::ParentTargetOwner,
+        _ => TargetFilter::ParentTargetController,
+    };
     let blocked = matches!(rider, EmptyCoinRider::BecomeBlocked);
     let phase = if blocked {
         Phase::EndCombat
@@ -928,9 +950,21 @@ fn empty_coin_binding_scenario(
         Phase::End
     };
     let payoff = match rider {
+        EmptyCoinRider::DrawController
+        | EmptyCoinRider::DrawOwner
+        | EmptyCoinRider::OptionalDrawController
+        | EmptyCoinRider::OptionalDrawOwner => Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: parent_player,
+        },
+        EmptyCoinRider::GainLifeController | EmptyCoinRider::GainLifeOwner => Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: parent_player,
+        },
         EmptyCoinRider::Counter
         | EmptyCoinRider::CounterAfterGainLife
-        | EmptyCoinRider::OptionalCounter => Effect::PutCounter {
+        | EmptyCoinRider::OptionalCounter
+        | EmptyCoinRider::NestedCoinCounter => Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::ParentTarget,
@@ -968,7 +1002,25 @@ fn empty_coin_binding_scenario(
     } else {
         AbilityDefinition::new(AbilityKind::Spell, payoff)
     };
-    let payoff = if matches!(rider, EmptyCoinRider::OptionalCounter) {
+    let payoff = if matches!(rider, EmptyCoinRider::NestedCoinCounter) {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(payoff)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    } else {
+        payoff
+    };
+    let payoff = if matches!(
+        rider,
+        EmptyCoinRider::OptionalCounter
+            | EmptyCoinRider::OptionalDrawController
+            | EmptyCoinRider::OptionalDrawOwner
+    ) {
         payoff.optional()
     } else {
         payoff
@@ -981,7 +1033,10 @@ fn empty_coin_binding_scenario(
             uses_tracked_set: false,
         },
     );
-    let delayed = if matches!(rider, EmptyCoinRider::CounterAfterGainLife) {
+    let delayed = if matches!(
+        rider,
+        EmptyCoinRider::CounterAfterGainLife | EmptyCoinRider::NestedCoinCounter
+    ) {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GainLife {
@@ -1028,7 +1083,17 @@ fn empty_coin_binding_scenario(
         Effect::TargetOnly { target: creature },
     )
     .sub_ability(coin);
-    let mut scenario = GameScenario::new();
+    let mut scenario = if player_rider {
+        GameScenario::new_n_player(3, 7)
+    } else {
+        GameScenario::new()
+    };
+    let p2 = engine::types::player::PlayerId(2);
+    if player_rider {
+        for player in [P0, P1, p2] {
+            scenario.with_library_top(player, &["Draw payoff sentinel", "Library reserve"]);
+        }
+    }
     scenario.at_phase(if blocked {
         Phase::CombatDamage
     } else {
@@ -1038,10 +1103,20 @@ fn empty_coin_binding_scenario(
         .add_creature(P0, "Earlier outer declaration", 2, 20)
         .id();
     let b = scenario
-        .add_creature(P0, "Selected branch declaration", 2, 20)
+        .add_creature(
+            if player_rider { P1 } else { P0 },
+            "Selected branch declaration",
+            2,
+            20,
+        )
         .id();
     let h = scenario
-        .add_creature(P0, "Hostile attached host", 2, 20)
+        .add_creature(
+            if player_rider { p2 } else { P0 },
+            "Hostile attached host",
+            2,
+            20,
+        )
         .id();
     let source = if attached {
         scenario
@@ -1087,20 +1162,26 @@ fn empty_coin_binding_scenario(
         }
         runner.state_mut().combat = Some(combat);
     }
-    pin_outcomes(
-        &mut runner,
-        if keep_restore {
-            if nested {
-                &[true, false, true, false]
-            } else {
-                &[true, false]
-            }
-        } else if nested {
-            &[true, true]
+    let outcomes = if keep_restore {
+        if nested {
+            vec![true, false, true, false]
         } else {
-            &[true]
-        },
-    );
+            vec![true, false]
+        }
+    } else if nested {
+        vec![true, true]
+    } else {
+        vec![true]
+    };
+    let mut outcomes = outcomes;
+    if matches!(rider, EmptyCoinRider::NestedCoinCounter) {
+        outcomes.extend(if keep_restore {
+            vec![true, false]
+        } else {
+            vec![true]
+        });
+    }
+    pin_outcomes(&mut runner, &outcomes);
     let life = runner.life(P0);
     if attached {
         runner
@@ -1205,7 +1286,10 @@ fn empty_coin_binding_scenario(
     );
     assert_eq!(
         runner.life(P0),
-        life + if matches!(rider, EmptyCoinRider::CounterAfterGainLife) {
+        life + if matches!(
+            rider,
+            EmptyCoinRider::CounterAfterGainLife | EmptyCoinRider::NestedCoinCounter
+        ) {
             3
         } else {
             2
@@ -1226,6 +1310,16 @@ fn empty_coin_binding_scenario(
         runner.state().delayed_triggers.len(),
         1,
         "reach: delayed installation"
+    );
+    let snapshot = &runner.state().delayed_triggers[0].ability;
+    assert_eq!(
+        snapshot.targets,
+        if remove_b {
+            vec![]
+        } else {
+            vec![TargetRef::Object(b)]
+        },
+        "delayed snapshot identity; illegal B={remove_b}"
     );
     assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
     assert_eq!(
@@ -1287,7 +1381,18 @@ fn empty_coin_binding_scenario(
         "delayed stack binding; illegal B={remove_b}"
     );
     let mut payoff_events = Vec::new();
-    if matches!(rider, EmptyCoinRider::OptionalCounter) {
+    let player_before: Vec<_> = runner
+        .state()
+        .players
+        .iter()
+        .map(|player| (player.id, player.life, player.hand.clone()))
+        .collect();
+    if matches!(
+        rider,
+        EmptyCoinRider::OptionalCounter
+            | EmptyCoinRider::OptionalDrawController
+            | EmptyCoinRider::OptionalDrawOwner
+    ) {
         for _ in 0..12 {
             if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
                 break;
@@ -1301,6 +1406,13 @@ fn empty_coin_binding_scenario(
             ),
             "reach: optional delayed counter prompt"
         );
+        if player_rider {
+            let pending = runner.state().active_optional_effect_frame().unwrap();
+            assert_eq!(
+                pending.ability.targets, expected,
+                "optional capture retains the original recipient binding"
+            );
+        }
         payoff_events.extend(
             runner
                 .act(GameAction::DecideOptionalEffect { accept: true })
@@ -1308,13 +1420,65 @@ fn empty_coin_binding_scenario(
                 .events,
         );
     }
+    if matches!(rider, EmptyCoinRider::NestedCoinCounter) && keep_restore {
+        pass_to_coin_keep(&mut runner, &mut payoff_events);
+        payoff_events.extend(
+            runner
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap()
+                .events,
+        );
+    }
     finish(&mut runner, &mut payoff_events);
+    if matches!(rider, EmptyCoinRider::NestedCoinCounter) {
+        assert_eq!(
+            flips(&payoff_events),
+            vec![true],
+            "reach: delayed payload win"
+        );
+    }
+    if player_rider {
+        for (player, life, hand) in player_before {
+            let selected = player == P1 && !remove_b;
+            assert_eq!(
+                runner.life(player),
+                life + if selected
+                    && matches!(
+                        rider,
+                        EmptyCoinRider::GainLifeController | EmptyCoinRider::GainLifeOwner
+                    ) {
+                    3
+                } else {
+                    0
+                },
+                "life payoff player={player:?}; illegal B={remove_b}",
+            );
+            let expected_draw = selected
+                && !matches!(
+                    rider,
+                    EmptyCoinRider::GainLifeController | EmptyCoinRider::GainLifeOwner
+                );
+            let current = &runner.state().players[player.0 as usize].hand;
+            if expected_draw {
+                assert_eq!(current.len(), hand.len() + 1);
+                assert_eq!(
+                    runner.state().objects[current.last().unwrap()].name,
+                    "Draw payoff sentinel"
+                );
+            } else {
+                assert_eq!(*current, hand, "no substitute recipient player={player:?}");
+            }
+        }
+    }
     for id in [a, b, h] {
         let selected = id == b && !remove_b;
         match rider {
             EmptyCoinRider::Counter
             | EmptyCoinRider::CounterAfterGainLife
-            | EmptyCoinRider::OptionalCounter => assert_eq!(
+            | EmptyCoinRider::OptionalCounter
+            | EmptyCoinRider::NestedCoinCounter => assert_eq!(
                 runner.state().objects[&id]
                     .counters
                     .get(&CounterType::Plus1Plus1)
@@ -1353,6 +1517,12 @@ fn empty_coin_binding_scenario(
                 },
                 "sacrifice payoff object={id:?}; illegal B={remove_b}",
             ),
+            EmptyCoinRider::DrawController
+            | EmptyCoinRider::DrawOwner
+            | EmptyCoinRider::GainLifeController
+            | EmptyCoinRider::GainLifeOwner
+            | EmptyCoinRider::OptionalDrawController
+            | EmptyCoinRider::OptionalDrawOwner => {}
         }
     }
     assert!(
@@ -1434,6 +1604,47 @@ fn nested_coin_targetless_head_preserves_delayed_binding_after_inner_keep_restor
             true,
             EmptyCoinRider::CounterAfterGainLife,
         );
+    }
+}
+
+#[test]
+fn delayed_parent_player_projections_do_not_substitute_other_players() {
+    for rider in [
+        EmptyCoinRider::DrawController,
+        EmptyCoinRider::DrawOwner,
+        EmptyCoinRider::GainLifeController,
+        EmptyCoinRider::GainLifeOwner,
+    ] {
+        for remove_b in [true, false] {
+            empty_coin_binding_scenario(remove_b, true, false, false, rider);
+        }
+    }
+}
+
+#[test]
+fn optional_delayed_parent_player_projections_capture_no_substitute_recipient() {
+    for rider in [
+        EmptyCoinRider::OptionalDrawController,
+        EmptyCoinRider::OptionalDrawOwner,
+    ] {
+        for remove_b in [true, false] {
+            empty_coin_binding_scenario(remove_b, true, false, false, rider);
+        }
+    }
+}
+
+#[test]
+fn nested_coin_payload_preserves_delayed_snapshot_identity() {
+    for keep_restore in [false, true] {
+        for remove_b in [true, false] {
+            empty_coin_binding_scenario(
+                remove_b,
+                true,
+                true,
+                keep_restore,
+                EmptyCoinRider::NestedCoinCounter,
+            );
+        }
     }
 }
 

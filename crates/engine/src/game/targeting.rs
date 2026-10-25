@@ -1192,8 +1192,12 @@ pub fn resolved_targets(
 ) -> Vec<TargetRef> {
     // CR 608.2b: an unavailable announcement is bound to the empty set,
     // not an invitation to substitute an event, attached host, or source.
-    if matches!(target_filter, TargetFilter::ParentTarget)
-        && ability.has_authoritative_empty_binding()
+    if matches!(
+        target_filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    ) && ability.has_authoritative_empty_binding()
     {
         return Vec::new();
     }
@@ -2712,7 +2716,13 @@ pub fn resolve_effect_player_ref(
 ) -> Option<PlayerId> {
     // CR 608.2b: an unavailable parent announcement names no player;
     // event/attached-host resolution cannot supply a replacement controller.
-    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+    if matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    ) && ability.has_authoritative_empty_binding()
+    {
         return None;
     }
     match filter {
@@ -7984,23 +7994,17 @@ mod tests {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
 
         let (mut state, source, host) = setup_with_creatures();
-        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
-            assignments: vec![(source, host)],
-        });
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped { object_id: host });
         let mut ability = make_resolved_with_targets(vec![], source);
-        let resolve = |ability: &crate::types::ability::ResolvedAbility| {
+        let resolve = |ability: &crate::types::ability::ResolvedAbility, filter: &TargetFilter| {
             (
-                resolve_effect_player_ref(&state, ability, &TargetFilter::ParentTarget),
-                crate::game::effects::resolve_player_for_context_ref(
-                    &state,
-                    ability,
-                    &TargetFilter::ParentTarget,
-                ),
+                resolve_effect_player_ref(&state, ability, filter),
+                crate::game::effects::resolve_player_for_context_ref(&state, ability, filter),
             )
         };
         let host_controller = state.objects[&host].controller;
         assert_eq!(
-            resolve(&ability),
+            resolve(&ability, &TargetFilter::ParentTarget),
             (Some(host_controller), Some(host_controller))
         );
         for origin in [
@@ -8009,10 +8013,30 @@ mod tests {
         ] {
             ability.parent_target_missing_reason =
                 Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            for filter in [
+                TargetFilter::ParentTarget,
+                TargetFilter::ParentTargetController,
+                TargetFilter::ParentTargetOwner,
+            ] {
+                assert_eq!(
+                    resolve(&ability, &filter),
+                    (None, None),
+                    "unavailable player reference: {origin:?}, {filter:?}"
+                );
+                assert!(
+                    resolved_targets(&ability, &filter, &state).is_empty(),
+                    "shared target resolution cannot refill an unavailable projection"
+                );
+            }
             assert_eq!(
-                resolve(&ability),
-                (None, None),
-                "unavailable player reference: {origin:?}"
+                resolve(&ability, &TargetFilter::Controller),
+                (Some(ability.controller), Some(ability.controller)),
+                "ordinary controller is independent of the missing announcement"
+            );
+            assert_eq!(
+                resolve(&ability, &TargetFilter::TriggeringSourceController),
+                (Some(host_controller), Some(host_controller)),
+                "a genuine event reference retains its own authority"
             );
         }
     }

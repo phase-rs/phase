@@ -1041,8 +1041,14 @@ pub(crate) fn incarnation_controller(
 /// "its controller" / "that creature's controller" relative to a previously
 /// chosen target. Returns the player target directly, or the controller of an
 /// object target (CR 109.4 — controller of an object), in target-list order.
-/// Returns `None` if the ability has no targets.
+/// CR 608.2b: an authoritatively unavailable announcement returns `None` before
+/// any snapshot fallback; an unassigned reference may still read its snapshot.
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    // CR 608.2b: an illegal announcement cannot provide controller information,
+    // including through a different instruction's effect-context snapshot.
+    if ability.has_authoritative_empty_binding() {
+        return None;
+    }
     if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): If the parent target has left the
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
@@ -1075,10 +1081,15 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 /// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
 /// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
 /// parent-target slot has been bound. Falls back to last-known information (CR
-/// 608.2h) when the object has ceased to exist. Returns `None` only if the
-/// ability has no targets, or an object target is absent from both the live
-/// object map and the LKI cache.
+/// 608.2h) when the object has ceased to exist. CR 608.2b: an authoritatively
+/// unavailable announcement returns `None` before any snapshot fallback.
+/// Otherwise, an unassigned reference may still read its effect-context snapshot.
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    // CR 608.2b: unavailable target information cannot be recovered from an
+    // unrelated effect-context snapshot.
+    if ability.has_authoritative_empty_binding() {
+        return None;
+    }
     if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): Mirror the controller lookup — fall back to
         // last-known information so "its owner" still resolves after the
@@ -26658,6 +26669,15 @@ mod tests {
             Some(PlayerId(1)),
             "effect_context_object must supply the parent owner when targets are empty"
         );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason =
+                Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            assert_eq!(parent_target_controller(&ability, &state), None);
+            assert_eq!(parent_target_owner(&ability, &state), None);
+        }
     }
 
     fn creature_filter() -> TargetFilter {

@@ -16986,7 +16986,13 @@ pub(crate) fn resolve_player_for_context_ref(
     match target_filter {
         // CR 608.2b: do not manufacture a player from event/source context
         // when the parent announcement is authoritatively empty.
-        TargetFilter::ParentTarget if ability.has_authoritative_empty_binding() => None,
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+            if ability.has_authoritative_empty_binding() =>
+        {
+            None
+        }
         TargetFilter::DeclaredPlayer { group } => {
             crate::game::targeting::resolve_live_declared_player(state, ability, *group)
         }
@@ -17313,7 +17319,13 @@ fn ability_with_event_context_targets(
                 let target = match filter {
                     // CR 608.2b: a parked optional effect retains its empty
                     // announcement, not the event subject or attached host.
-                    TargetFilter::ParentTarget if pending.has_authoritative_empty_binding() => None,
+                    TargetFilter::ParentTarget
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::ParentTargetOwner
+                        if pending.has_authoritative_empty_binding() =>
+                    {
+                        None
+                    }
                     TargetFilter::GrantingObject { .. } => {
                         crate::game::targeting::resolved_targets(&pending, filter, state)
                             .into_iter()
@@ -17380,8 +17392,12 @@ fn hydrate_event_context_targets<'a>(
         extract_event_context_filter(&ability.effect)
             // CR 608.2b: hydration cannot reinterpret a bound empty announcement.
             .filter(|filter| {
-                !matches!(filter, TargetFilter::ParentTarget)
-                    || !ability.has_authoritative_empty_binding()
+                !matches!(
+                    filter,
+                    TargetFilter::ParentTarget
+                        | TargetFilter::ParentTargetController
+                        | TargetFilter::ParentTargetOwner
+                ) || !ability.has_authoritative_empty_binding()
             })
             .and_then(|filter| {
                 crate::game::targeting::resolve_event_context_target(
@@ -25833,15 +25849,17 @@ fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -
             .is_some_and(ability_definition_chain_refs_parent_target)
 }
 
-/// Delayed-trigger payloads preserve their original source, so their recursive
-/// dependency scan remains limited to ParentTarget anaphora.
+/// Executable definition payloads preserve their original source, so their
+/// recursive dependency scan remains limited to ParentTarget anaphora.
 fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
-    effect_refs_parent_target(effect)
-        || matches!(
-            effect,
-            Effect::CreateDelayedTrigger { effect: definition, .. }
-                if ability_definition_chain_refs_parent_target(definition)
-        )
+    if effect_refs_parent_target(effect) {
+        return true;
+    }
+    let mut references_parent = false;
+    effect.for_each_nested_definition(&mut |_, definition| {
+        references_parent |= ability_definition_chain_refs_parent_target(definition);
+    });
+    references_parent
 }
 
 fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {

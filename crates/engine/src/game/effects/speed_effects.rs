@@ -1,7 +1,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
 use crate::types::ability::{
-    Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta, TargetFilter, TargetRef,
+    Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -412,17 +412,11 @@ fn parent_object_target_owner_anchor(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<PlayerId> {
-    crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
-        crate::game::targeting::resolve_event_context_target(
-            state,
-            &TargetFilter::ParentTargetOwner,
-            ability.source_id,
-        )
-        .and_then(|target| match target {
-            TargetRef::Player(player) => Some(player),
-            TargetRef::Object(object_id) => state.objects.get(&object_id).map(|obj| obj.owner),
-        })
-    })
+    crate::game::targeting::resolve_effect_player_ref(
+        state,
+        ability,
+        &TargetFilter::ParentTargetOwner,
+    )
 }
 
 fn players_except_required_owner_anchor(
@@ -789,7 +783,7 @@ mod tests {
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
         };
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::StartYourEngines {
                 player_scope: PlayerFilter::Controller,
             },
@@ -805,6 +799,18 @@ mod tests {
             vec![PlayerId(1), PlayerId(2)],
             "owner P0 is excluded; controller P1 and third player P2 remain"
         );
+        for origin in [
+            crate::types::ability::TargetReadOrigin::OwnAnnouncement,
+            crate::types::ability::TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason = Some(
+                crate::types::ability::ParentTargetMissingReason::IllegalAnnouncement { origin },
+            );
+            assert!(
+                players_for_filter(&state, &filter, &ability).is_empty(),
+                "an unavailable owner anchor cannot be replaced by the zone-change event"
+            );
+        }
     }
 
     /// CR 108.3 + CR 608.2c: `AllExcept { ParentObjectTargetOwner }` is an
