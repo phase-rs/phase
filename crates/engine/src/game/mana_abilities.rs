@@ -6098,6 +6098,7 @@ mod tests {
 
     #[test]
     fn instruction_actor_scoped_mana_activation_binds_before_production_and_keeps_recipients() {
+        use crate::types::ability::InstructionActorRef;
         for actor in [
             None,
             Some(ControllerRef::You),
@@ -6105,7 +6106,14 @@ mod tests {
             Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
             Some(ControllerRef::ChosenPlayer { index: 0 }),
             Some(ControllerRef::Opponent),
-        ] {
+        ]
+        .map(|actor| actor.map(InstructionActorRef::from))
+        .into_iter()
+        .chain(
+            crate::types::ability::instruction_actor_test_refs()
+                .into_iter()
+                .map(Some),
+        ) {
             let mut scenario = GameScenario::new_n_player(3, 42);
             scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
             let mut definition = make_mana_ability(ManaProduction::Fixed {
@@ -6113,17 +6121,24 @@ mod tests {
                 contribution: ManaContribution::Base,
             })
             .player_scope(PlayerFilter::Opponent);
-            definition.instruction_actor = (actor.clone()).map(Into::into);
+            definition.instruction_actor = actor.clone();
             let source = scenario
                 .add_creature(P0, "Synthetic Actor Mana Source", 1, 2)
                 .with_ability_definition(definition)
                 .id();
             let mut runner = scenario.build();
             let events = runner.activate(source, 0).resolve().events().to_vec();
-            let missing = matches!(
-                actor,
-                Some(ControllerRef::ChosenPlayer { .. } | ControllerRef::Opponent)
-            );
+            let missing = actor.as_ref().is_some_and(|actor| {
+                !matches!(
+                    actor.as_controller(),
+                    Some(
+                        ControllerRef::You
+                            | ControllerRef::ScopedPlayer
+                            | ControllerRef::SpecificPlayer { .. }
+                            | ControllerRef::ActivePlayer
+                    )
+                )
+            });
             assert_eq!(runner.state().players[0].mana_pool.total(), 0);
             for player in [PlayerId(1), PlayerId(2)] {
                 assert_eq!(
@@ -6147,7 +6162,7 @@ mod tests {
             assert!(runner.state().stack.is_empty());
             assert_eq!(
                 runner.state().objects[&source].abilities[0].instruction_actor,
-                actor.map(Into::into),
+                actor,
                 "the printed template remains unconsumed"
             );
         }

@@ -29,7 +29,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::game_state::{
-    DrainStatus, GameState, PostReplacementDrain, ResidentDrainPolicy,
+    DrainStatus, GameState, PersistedGameState, PostReplacementDrain, ResidentDrainPolicy,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -275,7 +275,10 @@ fn real_twincast_birth_binds_the_new_spell_source_before_saved_retarget_and_swan
             .unwrap()
             .into_game_state()
             .unwrap();
-        assert_eq!(restored, canonical);
+        let prepared = PersistedGameState::capture(canonical)
+            .into_game_state()
+            .unwrap();
+        assert_eq!(restored, prepared);
         runner = GameRunner::from_state(restored);
         events.extend(
             runner
@@ -470,7 +473,10 @@ fn real_lithoform_ability_copy_keeps_the_sacrificed_moggs_exact_source_at_saved_
         .unwrap()
         .into_game_state()
         .unwrap();
-    assert_eq!(restored, *runner.state());
+    let prepared = PersistedGameState::capture(runner.state().clone())
+        .into_game_state()
+        .unwrap();
+    assert_eq!(restored, prepared);
     runner = GameRunner::from_state(restored);
     events.extend(runner.act(GameAction::KeepAllCopyTargets).unwrap().events);
     for _ in 0..40 {
@@ -511,7 +517,8 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
     use engine::types::mana::ManaCost;
     let p2 = PlayerId(2);
     let p3 = PlayerId(3);
-    for parked_move in [false, true] {
+    for (parked_move, performs_move) in [(false, true), (true, true), (true, false), (false, false)]
+    {
         let mut scenario = GameScenario::new_n_player(4, 42);
         scenario.at_phase(Phase::PreCombatMain);
         let returned = scenario
@@ -548,7 +555,11 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
         let mut root = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
-                origin: Some(Zone::Graveyard),
+                origin: Some(if !parked_move && !performs_move {
+                    Zone::Exile
+                } else {
+                    Zone::Graveyard
+                }),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: returned },
                 owner_library: false,
@@ -589,10 +600,48 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
             assert_eq!(runner.state().objects[&returned].zone, Zone::Graveyard);
             events.extend(
                 runner
-                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .act(GameAction::DecideOptionalEffect {
+                        accept: performs_move,
+                    })
                     .unwrap()
                     .events,
             );
+        }
+        if !performs_move {
+            for _ in 0..20 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "empty/declined producer cannot offer its dependent damage: {:?}",
+                    runner.state().waiting_for
+                );
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert_eq!(runner.state().objects[&returned].zone, Zone::Graveyard);
+            assert_eq!(
+                ObjectIncarnationRef::from_object(&runner.state().objects[&returned]),
+                old
+            );
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                GameEvent::DamagePrevented { .. } | GameEvent::DamageDealt { .. }
+            )));
+            for player in [P0, P1, p2, p3] {
+                assert!(runner.state().players[player.0 as usize].hand.is_empty());
+            }
+            assert_eq!(runner.life(P0), 22);
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), 1);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            continue;
         }
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == p3)
@@ -630,7 +679,10 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
             .unwrap()
             .into_game_state()
             .unwrap();
-        assert_eq!(restored, *runner.state());
+        let prepared = PersistedGameState::capture(runner.state().clone())
+            .into_game_state()
+            .unwrap();
+        assert_eq!(restored, prepared);
         runner = GameRunner::from_state(restored);
         events.extend(
             runner
@@ -802,7 +854,10 @@ fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_s
                 .unwrap()
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, *runner.state());
+            let prepared = PersistedGameState::capture(runner.state().clone())
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, prepared);
             runner = GameRunner::from_state(restored);
             events.extend(
                 runner
@@ -1396,9 +1451,16 @@ fn combat_lifelink_saved_choice_keeps_the_chosen_source_for_the_fresh_aggregate_
             runner.state().players[1].hand.is_empty(),
             "the prevention rider has not fired before the lifelink answer"
         );
-        let saved = serde_json::to_string(runner.state()).unwrap();
-        let restored: GameState = serde_json::from_str(&saved).unwrap();
-        assert_eq!(restored, *runner.state());
+        let saved =
+            serde_json::to_string(&PersistedGameState::capture(runner.state().clone())).unwrap();
+        let restored = serde_json::from_str::<PersistedGameState>(&saved)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        let prepared = PersistedGameState::capture(runner.state().clone())
+            .into_game_state()
+            .unwrap();
+        assert_eq!(restored, prepared);
         for viewer in [P0, P1, PlayerId(2), p3] {
             let view = engine::game::visibility::filter_state_for_viewer(&restored, viewer);
             assert!(
@@ -1698,9 +1760,17 @@ fn owned_missing_damage_recipients_skip_nonempty_decoys_after_nested_saved_dispa
                         .source_identity,
                     if missing { None } else { Some(pin) }
                 );
-                let saved = serde_json::to_string(runner.state()).unwrap();
-                let restored: GameState = serde_json::from_str(&saved).unwrap();
-                assert_eq!(restored, *runner.state());
+                let saved =
+                    serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                        .unwrap();
+                let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                let prepared = PersistedGameState::capture(runner.state().clone())
+                    .into_game_state()
+                    .unwrap();
+                assert_eq!(restored, prepared);
                 runner = GameRunner::from_state(restored);
                 let mut events = outcome.events().to_vec();
                 events.extend(
@@ -1909,9 +1979,16 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
                     .proposed,
                 engine::types::proposed_event::ProposedEvent::Draw { player_id: P1, .. }
             ));
-            let saved = serde_json::to_string(runner.state()).unwrap();
-            let restored: GameState = serde_json::from_str(&saved).unwrap();
-            assert_eq!(restored, *runner.state());
+            let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .unwrap();
+            let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            let prepared = PersistedGameState::capture(runner.state().clone())
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, prepared);
             runner = GameRunner::from_state(restored);
             let mut events = outcome.events().to_vec();
             events.extend(
@@ -2285,9 +2362,17 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                     owned.source_identity,
                     if missing_outer { None } else { Some(original) }
                 );
-                let saved = serde_json::to_string(runner.state()).unwrap();
-                let restored: GameState = serde_json::from_str(&saved).unwrap();
-                assert_eq!(restored, *runner.state());
+                let saved =
+                    serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                        .unwrap();
+                let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                let prepared = PersistedGameState::capture(runner.state().clone())
+                    .into_game_state()
+                    .unwrap();
+                assert_eq!(restored, prepared);
                 runner = GameRunner::from_state(restored);
                 let mut events = outcome.events().to_vec();
                 events.extend(
@@ -2647,9 +2732,16 @@ fn template_and_fresh_resolved_source_followups_keep_the_outer_event_after_neste
             assert_eq!(owned.source_id, Some(source));
             assert_eq!(owned.source_identity, Some(original));
             assert_eq!(owned.event_target, Some(TargetRef::Object(swans)));
-            let saved = serde_json::to_string(runner.state()).unwrap();
-            let restored: GameState = serde_json::from_str(&saved).unwrap();
-            assert_eq!(restored, *runner.state());
+            let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .unwrap();
+            let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            let prepared = PersistedGameState::capture(runner.state().clone())
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, prepared);
             runner = GameRunner::from_state(restored);
             let mut events = outcome.events().to_vec();
             events.extend(

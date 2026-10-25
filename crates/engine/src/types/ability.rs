@@ -36718,9 +36718,10 @@ impl ResolvedAbility {
     }
 
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
-    /// over this entire ability chain. Writes `source_id` ONLY — controller,
-    /// `original_controller`, `trigger_source`, incarnation pins untouched, so
-    /// creation provenance (matchers, display) survives. Single call site:
+    /// over this entire ability chain. Retains controller, `original_controller`,
+    /// `trigger_source` and the historical creator incarnation for matchers/display.
+    /// An own-source identity naming a different gameplay source is discarded.
+    /// Single call site:
     /// boon install (`create_boon.rs`), whose release note ("a one-time boon
     /// is a single-use triggered ability with no source") makes the built
     /// ability gameplay-source-less while the `DelayedTrigger` entry keeps the
@@ -38504,6 +38505,78 @@ mod tests {
                 assert_eq!(rebound.sub_ability, original.sub_ability);
                 assert_eq!(rebound.else_ability, original.else_ability);
             }
+        }
+    }
+
+    /// CR 400.7 + CR 608.2h: removing gameplay source identity or clearing a
+    /// comparison clone cannot remove the independent actor/owning-event authority.
+    #[test]
+    fn source_less_and_comparison_clear_lifecycles_keep_all_twenty_actor_events_exact() {
+        let event = ReplacementEventContext {
+            source_id: Some(ObjectId(92)),
+            source_identity: Some(ObjectIdentityBinding::new(
+                ObjectIncarnationRef::of(ObjectId(92), 4),
+                Zone::Stack,
+            )),
+            event_target: Some(TargetRef::Player(PlayerId(2))),
+        };
+        for actor in instruction_actor_test_refs() {
+            let mut original = ResolvedAbility::new(
+                Effect::NoOp,
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(91),
+                PlayerId(0),
+            );
+            original.set_test_trigger_source_recursive(7, CardId(91));
+            original.instruction_actor = Some(actor);
+            original.capture_replacement_event_recursive(&event);
+            original.chosen_x = Some(6);
+            original.sub_ability = Some(Box::new(original.clone()));
+            original.else_ability = Some(Box::new(original.clone()));
+            let canonical = original.clone();
+            let mut source_less = original.clone();
+            source_less.set_gameplay_source_recursive(ObjectId(0));
+            let mut comparison = original.clone();
+            comparison.clear_trigger_identity_recursive();
+            for node in [
+                &source_less,
+                source_less.sub_ability.as_deref().unwrap(),
+                source_less.else_ability.as_deref().unwrap(),
+            ] {
+                assert_eq!(node.source_id, ObjectId(0));
+                assert_eq!(node.context.source_identity, None);
+                assert_eq!(
+                    node.source_incarnation,
+                    Some(7),
+                    "historical creator occurrence is retained"
+                );
+                assert_eq!(node.trigger_source, original.trigger_source);
+                assert_eq!(node.instruction_actor, original.instruction_actor);
+                assert_eq!(node.context.replacement_event.as_ref(), Some(&event));
+                assert_eq!(node.targets, original.targets);
+                assert_eq!(node.chosen_x, Some(6));
+                let decoded: ResolvedAbility =
+                    serde_json::from_value(serde_json::to_value(node).unwrap()).unwrap();
+                assert_eq!(&decoded, node);
+            }
+            for node in [
+                &comparison,
+                comparison.sub_ability.as_deref().unwrap(),
+                comparison.else_ability.as_deref().unwrap(),
+            ] {
+                assert_eq!(node.source_id, ObjectId(0));
+                assert_eq!(node.context.source_identity, None);
+                assert_eq!(node.source_incarnation, None);
+                assert_eq!(node.trigger_source, None);
+                assert_eq!(node.instruction_actor, original.instruction_actor);
+                assert_eq!(node.context.replacement_event.as_ref(), Some(&event));
+                assert_eq!(node.targets, original.targets);
+                assert_eq!(node.chosen_x, Some(6));
+            }
+            assert_eq!(
+                original, canonical,
+                "canonical source authorities are never normalized"
+            );
         }
     }
 

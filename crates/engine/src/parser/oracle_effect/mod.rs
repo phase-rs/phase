@@ -10739,6 +10739,26 @@ fn parse_effect_clause_inner(
     ctx: &mut ParseContext,
     inherited_subject: Option<&SubjectPhraseAst>,
 ) -> ParsedEffectClause {
+    // CR 608.2c + CR 109.5: Early effect-family handlers retain the same
+    // grammatical performer as ordinary subject-predicate lowering. Capture
+    // the typed subject before those handlers materialize their owned bodies;
+    // an effect's patient alone does not identify its performer.
+    let actor = subject::parse_leading_subject_application(text, &mut ctx.clone_throwaway())
+        .and_then(|application| {
+            instruction_actor_for_subject(Some(&application.affected), application.target.as_ref())
+        });
+    let mut clause = parse_effect_clause_inner_body(text, ctx, inherited_subject);
+    if let Some(actor) = actor {
+        lower::default_clause_instruction_actor(&mut clause, actor);
+    }
+    clause
+}
+
+fn parse_effect_clause_inner_body(
+    text: &str,
+    ctx: &mut ParseContext,
+    inherited_subject: Option<&SubjectPhraseAst>,
+) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -27337,30 +27357,14 @@ fn target_announcer_from_subject(
     }
 }
 
-/// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
-/// antecedent of the predicate's "that player" / "they". The seed only fills an
-/// empty relative scope: a scope an enclosing trigger, mode or for-each already
-/// pinned is the nearer antecedent and is kept.
-///
-/// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
-/// the binder's declared rungs (`declared_player_scope` +
-/// `prior_player_declaration`); every other seed (an object subject's
-/// controller) is carried in `relative_player_scope`. Both are restored before
-/// returning, so the seed never leaks past this clause.
-fn lower_subject_predicate_ast(
-    subject: SubjectPhraseAst,
-    predicate: PredicateAst,
-    ctx: &mut ParseContext,
-    original_clause: &str,
-) -> ParsedEffectClause {
+fn instruction_actor_for_subject(
+    affected: Option<&TargetFilter>,
+    target: Option<&TargetFilter>,
+) -> Option<ControllerRef> {
     // CR 608.2c + CR 109.5: A player's printed subject owns this node's
     // actor. An object subject's controller qualifier is not a player subject.
-    let instruction_actor = subject.affected.as_ref().and_then(|affected| {
-        if subject
-            .target
-            .as_ref()
-            .is_some_and(|target| target == affected)
-        {
+    affected.and_then(|affected| {
+        if target.is_some_and(|target| target == affected) {
             if let Some(actor) = declared_player_controller_ref(affected) {
                 return Some(actor);
             }
@@ -27389,7 +27393,27 @@ fn lower_subject_predicate_ast(
             }
             _ => None,
         }
-    });
+    })
+}
+
+/// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
+/// antecedent of the predicate's "that player" / "they". The seed only fills an
+/// empty relative scope: a scope an enclosing trigger, mode or for-each already
+/// pinned is the nearer antecedent and is kept.
+///
+/// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
+/// the binder's declared rungs (`declared_player_scope` +
+/// `prior_player_declaration`); every other seed (an object subject's
+/// controller) is carried in `relative_player_scope`. Both are restored before
+/// returning, so the seed never leaks past this clause.
+fn lower_subject_predicate_ast(
+    subject: SubjectPhraseAst,
+    predicate: PredicateAst,
+    ctx: &mut ParseContext,
+    original_clause: &str,
+) -> ParsedEffectClause {
+    let instruction_actor =
+        instruction_actor_for_subject(subject.affected.as_ref(), subject.target.as_ref());
     let seed = if ctx.relative_player_scope.is_none() {
         subject::subject_player_antecedent(&subject)
     } else {

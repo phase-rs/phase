@@ -22592,6 +22592,282 @@ mod tests {
         }
     }
 
+    /// CR 608.2c + CR 109.5: the same closed actor domain is admitted before
+    /// random selection, simultaneous sacrifice, and aggregate payer polling.
+    #[test]
+    fn instruction_actor_all_twenty_cast_admissions_keep_reachable_positive_twins() {
+        use crate::types::ability::{CardSelectionMode, PlayerChoiceDistinctness};
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            for family in 0..4 {
+                let admitted = matches!(
+                    actor.as_controller(),
+                    Some(
+                        ControllerRef::You
+                            | ControllerRef::ScopedPlayer
+                            | ControllerRef::ActivePlayer
+                            | ControllerRef::SpecificPlayer { .. }
+                    )
+                );
+                let fixed_actor = match actor.as_controller() {
+                    Some(ControllerRef::SpecificPlayer { id }) => *id,
+                    _ => P0,
+                };
+                let scoped_actor = actor.as_controller() == Some(&ControllerRef::ScopedPlayer);
+                let mut scenario = GameScenario::new_n_player(4, 42);
+                scenario.at_phase(Phase::PreCombatMain);
+                let scope = marked_instruction_scope(&mut scenario, &[P1, p2]);
+                let mut pools = Vec::new();
+                let mut graveyards = Vec::new();
+                for player in [P0, P1, p2, p3] {
+                    pools.push([
+                        scenario
+                            .add_creature(player, "First payable creature", 1, 5)
+                            .id(),
+                        scenario
+                            .add_creature(player, "Second payable creature", 1, 5)
+                            .id(),
+                    ]);
+                    graveyards.push(
+                        scenario
+                            .add_creature_to_graveyard(player, "Random graveyard card", 1, 1)
+                            .id(),
+                    );
+                }
+                let mut definition = match family {
+                    0 => AbilityDefinition::new(AbilityKind::Spell, Effect::Choose {
+                        choice_type: ChoiceType::Opponent { restriction: Some(Box::new(scope.clone())), distinctness: PlayerChoiceDistinctness::Independent },
+                        persist: true, selection: TargetSelectionMode::Random,
+                    }),
+                    1 => AbilityDefinition::new(AbilityKind::Spell, Effect::ChooseFromZone {
+                        count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::Controller,
+                        filter: None, chooser: ZoneChoiceChooser::Controller, candidate_source: ZoneChoiceCandidateSource::Direct,
+                        reciprocal_role: None, up_to: false, constraint: None, selection: CardSelectionMode::Random,
+                    }),
+                    2 => AbilityDefinition::new(AbilityKind::Spell, Effect::Sacrifice {
+                        target: TargetFilter::Typed(TypedFilter::creature()), count: QuantityExpr::Fixed { value: 1 }, min_count: 1,
+                    }).player_scope(scope),
+                    3 => crate::parser::oracle_effect::parse_effect_chain(
+                        "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.", AbilityKind::Spell,
+                    ),
+                    _ => unreachable!(),
+                };
+                definition.instruction_actor = Some(actor.clone());
+                let mut tail = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::OriginalController,
+                    },
+                );
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                if family == 1 {
+                    let mut delivery = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Hand,
+                            target: TargetFilter::ParentTarget,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    );
+                    delivery.sub_ability = Some(Box::new(tail));
+                    definition.sub_ability = Some(Box::new(delivery));
+                } else {
+                    definition.sub_ability = Some(Box::new(tail));
+                }
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic full-domain admission", false)
+                    .with_ability_definition(definition)
+                    .id();
+                let mut runner = scenario.build();
+                let rng_before = runner.state().rng.outcome_draws();
+                let mut events = runner.cast(spell).resolve().events().to_vec();
+                if family == 2 && admitted {
+                    let pending = runner
+                        .state()
+                        .pending_player_scope_sacrifice_choice
+                        .as_ref()
+                        .expect("positive reaches actual coordinator");
+                    assert_eq!(
+                        pending.admitted_actors,
+                        Some(
+                            [
+                                (P1, if scoped_actor { P1 } else { fixed_actor }),
+                                (p2, if scoped_actor { p2 } else { fixed_actor }),
+                            ]
+                            .into_iter()
+                            .collect()
+                        )
+                    );
+                    assert!(pending.selections.is_empty());
+                    assert!(pools
+                        .iter()
+                        .flatten()
+                        .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+                    runner = restore_actor_prompt(runner);
+                    for _ in 0..4 {
+                        match runner.state().waiting_for.clone() {
+                            WaitingFor::ChooseFromZoneOpponentChooser { candidates, .. } => {
+                                events.extend(
+                                    runner
+                                        .act(GameAction::ChooseZoneOpponentChooser {
+                                            opponent: candidates[0],
+                                        })
+                                        .unwrap()
+                                        .events,
+                                );
+                            }
+                            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                                let selected = cards[0];
+                                assert!(pools[player.0 as usize].contains(&selected));
+                                events.extend(
+                                    runner
+                                        .act(GameAction::SelectCards {
+                                            cards: vec![selected],
+                                        })
+                                        .unwrap()
+                                        .events,
+                                );
+                            }
+                            WaitingFor::Priority { .. } => break,
+                            unexpected => {
+                                panic!("unexpected sacrifice admission prompt: {unexpected:?}")
+                            }
+                        }
+                    }
+                }
+                if family == 3 && admitted {
+                    for payer in [P1, p2, p3] {
+                        assert!(
+                            matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { player, .. } if player == payer)
+                        );
+                        let pending = runner
+                            .state()
+                            .pending_player_scope_unless_payment
+                            .as_ref()
+                            .unwrap();
+                        assert_eq!(pending.pending_effect.controller, fixed_actor);
+                        assert_eq!(pending.pending_effect.instruction_actor, None);
+                        assert!(!runner
+                            .state()
+                            .battlefield
+                            .iter()
+                            .any(|id| runner.state().objects[id].is_token));
+                        events.extend(
+                            runner
+                                .act(GameAction::PayUnlessCost { pay: false })
+                                .unwrap()
+                                .events,
+                        );
+                    }
+                }
+                for _ in 0..20 {
+                    if runner.state().stack.is_empty()
+                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    assert!(
+                        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                        "{actor:?}, family={family}: {:?}",
+                        runner.state().waiting_for
+                    );
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                if family == 0 {
+                    assert_eq!(
+                        runner.state().rng.outcome_draws() - rng_before,
+                        u64::from(admitted)
+                    );
+                    let choices: Vec<_> = [P1, p2]
+                        .into_iter()
+                        .filter(|player| *player != fixed_actor)
+                        .map(ChoiceValue::Player)
+                        .collect();
+                    assert_eq!(runner.state().last_named_choice.is_some(), admitted);
+                    if admitted {
+                        assert!(
+                            choices.contains(runner.state().last_named_choice.as_ref().unwrap())
+                        );
+                    }
+                }
+                if family == 1 {
+                    for (player, card) in graveyards.iter().enumerate() {
+                        assert_eq!(
+                            runner.state().objects[card].zone,
+                            if admitted && player == fixed_actor.0 as usize {
+                                Zone::Hand
+                            } else {
+                                Zone::Graveyard
+                            }
+                        );
+                    }
+                    assert_eq!(
+                        runner.state().rng.outcome_draws() - rng_before,
+                        u64::from(admitted)
+                    );
+                }
+                if family == 2 {
+                    let sacrificed: Vec<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed {
+                                player_id,
+                                object_id,
+                                ..
+                            } => Some((*player_id, *object_id)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(sacrificed.len(), if admitted { 2 } else { 0 });
+                    for (player, object) in sacrificed {
+                        assert!(pools[player.0 as usize].contains(&object));
+                        assert_eq!(runner.state().objects[&object].zone, Zone::Graveyard);
+                    }
+                }
+                if family == 3 {
+                    let tokens: Vec<_> = runner
+                        .state()
+                        .battlefield
+                        .iter()
+                        .map(|id| &runner.state().objects[id])
+                        .filter(|object| object.is_token)
+                        .collect();
+                    assert_eq!(tokens.len(), if admitted { 3 } else { 0 });
+                    assert!(tokens.iter().all(|object| object.owner == P0
+                        && object.controller == P0
+                        && object.name == "Zombie"));
+                }
+                assert_eq!(
+                    runner.life(P0),
+                    21,
+                    "independent tail once: {actor:?}, family={family}"
+                );
+                assert!(runner
+                    .state()
+                    .pending_player_scope_sacrifice_choice
+                    .is_none());
+                assert!(runner.state().pending_player_scope_unless_payment.is_none());
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+
     /// CR 608.2c + CR 615.5: an actual selected definition stays unbound in
     /// its prompt; materialization reads the prompt's owning replacement event.
     #[test]
@@ -22627,7 +22903,44 @@ mod tests {
                 InstructionActorRef::event(TargetFilter::TriggeringSpellController).unwrap(),
                 None,
             ),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            crate::types::ability::instruction_actor_test_refs()
+                .into_iter()
+                .map(|actor| {
+                    let expected = match actor.as_controller() {
+                        Some(
+                            ControllerRef::You
+                            | ControllerRef::ScopedPlayer
+                            | ControllerRef::TargetPlayer
+                            | ControllerRef::TargetOpponent
+                            | ControllerRef::ParentTargetController
+                            | ControllerRef::ParentTargetOwner
+                            | ControllerRef::ActivePlayer,
+                        ) => Some(P0),
+                        Some(ControllerRef::SpecificPlayer { id }) => Some(*id),
+                        Some(
+                            ControllerRef::Opponent
+                            | ControllerRef::DeclaredPlayer { .. }
+                            | ControllerRef::EventTargetController
+                            | ControllerRef::DefendingPlayer
+                            | ControllerRef::ChosenPlayer { .. }
+                            | ControllerRef::SourceChosenPlayer
+                            | ControllerRef::TriggeringPlayer
+                            | ControllerRef::EnchantedPlayer,
+                        ) => None,
+                        None => match actor.as_event().unwrap() {
+                            TargetFilter::PostReplacementSourceController => Some(P1),
+                            TargetFilter::PostReplacementDamageTarget
+                            | TargetFilter::PostReplacementDamageTargetOwner => Some(p2),
+                            TargetFilter::TriggeringSpellController => None,
+                            unexpected => panic!("closed actor fixture contains {unexpected:?}"),
+                        },
+                    };
+                    (actor, expected)
+                }),
+        ) {
             let mut scenario = GameScenario::new_n_player(4, 42);
             scenario.at_phase(Phase::PreCombatMain);
             let host = scenario
@@ -22734,7 +23047,10 @@ mod tests {
                 .unwrap()
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, *runner.state());
+            let prepared = PersistedGameState::capture(runner.state().clone())
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, prepared);
             runner = GameRunner::from_state(restored);
             events.extend(
                 runner
@@ -22782,6 +23098,130 @@ mod tests {
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
             ));
+        }
+    }
+
+    /// CR 608.2c + CR 109.5: ordinary triggered dispatch resolves the complete
+    /// actor domain independently at the root and at a future instruction.
+    #[test]
+    fn instruction_actor_all_twenty_references_reach_real_targeter_trigger_dispatch() {
+        let p3 = PlayerId(3);
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            for nested in [false, true] {
+                let expected = match actor.as_controller() {
+                    Some(
+                        ControllerRef::You
+                        | ControllerRef::ScopedPlayer
+                        | ControllerRef::ActivePlayer
+                        | ControllerRef::EventTargetController,
+                    ) => Some(P0),
+                    Some(
+                        ControllerRef::ParentTargetController
+                        | ControllerRef::ParentTargetOwner
+                        | ControllerRef::TriggeringPlayer,
+                    ) => Some(P1),
+                    Some(ControllerRef::SpecificPlayer { id }) => Some(*id),
+                    Some(
+                        ControllerRef::Opponent
+                        | ControllerRef::TargetPlayer
+                        | ControllerRef::TargetOpponent
+                        | ControllerRef::DeclaredPlayer { .. }
+                        | ControllerRef::DefendingPlayer
+                        | ControllerRef::ChosenPlayer { .. }
+                        | ControllerRef::SourceChosenPlayer
+                        | ControllerRef::EnchantedPlayer,
+                    ) => None,
+                    None => match actor.as_event().unwrap() {
+                        TargetFilter::TriggeringSpellController => Some(P1),
+                        TargetFilter::PostReplacementSourceController
+                        | TargetFilter::PostReplacementDamageTarget
+                        | TargetFilter::PostReplacementDamageTargetOwner => None,
+                        unexpected => panic!("closed actor fixture contains {unexpected:?}"),
+                    },
+                };
+                let parsed = crate::parser::parse_oracle_text(
+                    "Whenever this creature becomes the target of a spell or ability, put a +1/+1 counter on this creature.",
+                    "Synthetic targeter trigger", &[], &["Creature".into()], &[],
+                );
+                assert!(parsed.parse_warnings.is_empty());
+                assert_eq!(parsed.triggers.len(), 1);
+                let mut trigger = parsed.triggers[0].clone();
+                let mut instruction = *trigger.execute.take().unwrap();
+                assert!(matches!(
+                    *instruction.effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ));
+                instruction.instruction_actor = Some(actor.clone());
+                let mut tail = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::OriginalController,
+                    },
+                );
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                instruction.sub_ability = Some(Box::new(tail));
+                if nested {
+                    let mut head = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                    head.sub_ability = Some(Box::new(instruction));
+                    trigger.execute = Some(Box::new(head));
+                } else {
+                    trigger.execute = Some(Box::new(instruction));
+                }
+                let mut scenario = GameScenario::new_n_player(4, 42);
+                scenario.at_phase(Phase::PreCombatMain);
+                let host = scenario
+                    .add_creature(p3, "Synthetic targeter trigger", 2, 10)
+                    .controlled_by(P0)
+                    .with_trigger_definition(trigger)
+                    .id();
+                let spell = scenario
+                    .add_spell_to_hand_from_oracle(
+                        P1,
+                        "Synthetic targeter",
+                        true,
+                        "Tap target creature.",
+                    )
+                    .id();
+                let mut runner = scenario.build();
+                runner.act(GameAction::PassPriority).unwrap();
+                let outcome = runner.cast(spell).target_object(host).resolve();
+                assert!(outcome.events().iter().any(|event| matches!(event,
+                    GameEvent::BecomesTarget { target: TargetRef::Object(object), source_id, source_controller: P1, .. }
+                        if *object == host && *source_id == spell)));
+                let additions: Vec<_> = outcome
+                    .events()
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::CounterAdded {
+                            actor,
+                            object_id,
+                            counter_type: CounterType::Plus1Plus1,
+                            count: 1,
+                        } if *object_id == host => Some(*actor),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    additions,
+                    expected.into_iter().collect::<Vec<_>>(),
+                    "{actor:?}, nested={nested}"
+                );
+                assert_eq!(outcome.events().iter().filter(|event| matches!(event,
+                    GameEvent::EffectResolved { source_id, kind: EffectKind::PutCounter, .. } if *source_id == host)).count(), usize::from(expected.is_some()));
+                outcome.assert_life_delta(P0, 1);
+                assert_eq!(outcome.state().objects[&host].owner, p3);
+                assert_eq!(outcome.state().objects[&host].controller, P0);
+                assert!(outcome.state().objects[&host].tapped);
+                assert!(outcome.state().stack.is_empty());
+                assert!(matches!(
+                    outcome.final_waiting_for(),
+                    WaitingFor::Priority { .. }
+                ));
+            }
         }
     }
 
