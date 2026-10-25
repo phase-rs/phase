@@ -914,5 +914,6 @@ const UNCHANGED: &[Row] = &[
     ("h/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/Jack-o'-Lantern (2)#membergy", "Jack-o'-Lantern", "{1}, Exile this card from your graveyard: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", true, "ff/H"),
-    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/H"),
+    // Oracle-derived reading is "tt/BF" (X=1 from Wastes adds {G}); the end now matches it (BF), while "ff" pins the pre-existing castability gap for sources whose yield is sized by an announced amount.
+    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/BF"),
 ];

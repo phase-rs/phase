@@ -1,9 +1,9 @@
 use crate::types::ability::{
-    cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
-    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
-    TriggerCondition, TriggerDefinitionRef,
+    cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
+    CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
+    KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
+    TargetSelectionMode, TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4782,6 +4782,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4875,6 +4876,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -5036,6 +5038,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -5106,6 +5109,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -5269,6 +5273,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -5343,6 +5348,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -5615,6 +5621,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         replacement_applied: a_replacement_applied,
         sub_link: a_sub_link,
         target_reads: a_target_reads,
+        entry_onset: a_entry_onset,
         sibling_condition: a_sibling_condition,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
@@ -5704,6 +5711,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         replacement_applied: b_replacement_applied,
         sub_link: b_sub_link,
         target_reads: b_target_reads,
+        entry_onset: b_entry_onset,
         sibling_condition: b_sibling_condition,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
@@ -5815,6 +5823,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_replacement_applied == b_replacement_applied
         && a_sub_link == b_sub_link
         && a_target_reads == b_target_reads
+        && a_entry_onset == b_entry_onset
         && a_sibling_condition == b_sibling_condition
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities

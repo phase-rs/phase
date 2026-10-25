@@ -11,18 +11,18 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     AttachmentReferent, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, ChosenAttribute,
-    ChosenTargetSlots, CommanderOwnership, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, Duration,
-    EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
-    EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp, ForEachCategoryAction,
-    ForwardedResultContext, ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectScope,
-    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
-    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
-    TargetReadOrigin, TargetRef, ThisWayCause, TrackedAnaphorSource, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset, ContinuousModification,
+    ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain,
+    DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp,
+    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
+    NameStickerSet, ObjectScope, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter,
+    PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause,
+    TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -5005,65 +5005,272 @@ fn settle_entries_before_instruction(
 /// (`SubAbilityLink::ContinuationStep`)? The membership is that measured co-entry set, not every
 /// effect that can put a permanent onto the battlefield (for example `Seek`, `RevealUntil`,
 /// `Myriad` and `Encore` reach no such link today). `ChooseFromZone` selects cards and moves
-/// nothing itself, so it is not a member.
+/// nothing itself, so it is not a member. Exhaustive over `Effect`, so a new variant forces a
+/// decision here; a variant that should join the set is a membership change of its own.
 fn effect_enters_battlefield(effect: &Effect) -> bool {
-    matches!(
-        effect,
+    match effect {
         Effect::Token { .. }
-            | Effect::CopyTokenOf { .. }
-            | Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-            | Effect::ChangeZoneAll {
-                destination: Zone::Battlefield,
-                ..
-            }
-            | Effect::Dig {
-                destination: Some(Zone::Battlefield),
-                ..
-            }
-            | Effect::Conjure {
-                destination: Zone::Battlefield,
-                ..
-            }
-            | Effect::DraftFromSpellbook {
-                destination: Zone::Battlefield,
-                ..
-            }
-            | Effect::Investigate
-            | Effect::Amass { .. }
-            | Effect::Incubate { .. }
-            | Effect::Populate
-            | Effect::Manifest { .. }
-            | Effect::ManifestDread
-            | Effect::Cloak { .. }
-    )
+        | Effect::CopyTokenOf { .. }
+        | Effect::Investigate
+        | Effect::Amass { .. }
+        | Effect::Incubate { .. }
+        | Effect::Populate
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. } => true,
+        Effect::ChangeZone { destination, .. }
+        | Effect::ChangeZoneAll { destination, .. }
+        | Effect::Conjure { destination, .. }
+        | Effect::DraftFromSpellbook { destination, .. } => *destination == Zone::Battlefield,
+        Effect::Dig { destination, .. } => *destination == Some(Zone::Battlefield),
+        // not a co-entry ContinuationStep: these can put a permanent onto the battlefield, but
+        // no generated card links one to an earlier entry as a same-instruction resolution step.
+        Effect::Seek { .. } => false,
+        // not a co-entry ContinuationStep
+        Effect::RevealUntil { .. } => false,
+        // not a co-entry ContinuationStep
+        Effect::Myriad => false,
+        // not a co-entry ContinuationStep
+        Effect::Encore => false,
+        // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
+        Effect::ChooseFromZone { .. } => false,
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Clash
+        | Effect::ExileTopCardContest { .. }
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => false,
+    }
 }
 
-/// CR 611.2e: a resolving spell or ability that puts a nontoken permanent onto the battlefield
-/// and says it "is" or "has" a characteristic applies that effect as the permanent enters. These
-/// are the instruction kinds that can carry such a rider, as measured over the generated card
-/// data (`GenericEffect`, `Animate`, `ReturnAsAura`, `ApplyPerpetual`). The lowered
-/// AST does not carry the rider's onset ("is/has" vs "gains/becomes"; see the
-/// `parser/oracle_ir/ast.rs` / `parser/oracle_effect/imperative.rs` comments), so every member
-/// is treated as one that may apply with the entry.
-fn effect_may_apply_with_entry(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::GenericEffect { .. }
-            | Effect::Animate { .. }
-            | Effect::ReturnAsAura { .. }
-            | Effect::ApplyPerpetual { .. }
-    )
+/// CR 611.2e: does this instruction's continuous effect apply simultaneously with an entry of
+/// this resolution? The parser stamps the onset from the instruction's verb form ("is/has" ⇒
+/// `WithEntry`; "becomes", "gains", "gets" and every other wording ⇒ `WhenFollowed`, CR 608.2c).
+fn onset_applies_with_entry(onset: ContinuousEffectOnset) -> bool {
+    match onset {
+        ContinuousEffectOnset::WithEntry => true,
+        ContinuousEffectOnset::WhenFollowed => false,
+    }
 }
 
 /// CR 611.2e: does any node of this resolved chain (its `sub_ability` / `else_ability`
-/// subtree) carry an instruction kind that may apply with the entry?
+/// subtree) carry an instruction stamped to apply with the entry?
 fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if effect_may_apply_with_entry(&node.effect) {
+        if onset_applies_with_entry(node.entry_onset) {
             return true;
         }
         stack.extend(node.child_links().map(|(_, child)| child));
@@ -5076,7 +5283,7 @@ fn resolved_chain_may_apply_with_entry(root: &ResolvedAbility) -> bool {
 fn definition_chain_may_apply_with_entry(root: &AbilityDefinition) -> bool {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if effect_may_apply_with_entry(&node.effect) {
+        if onset_applies_with_entry(node.entry_onset) {
             return true;
         }
         stack.extend(node.sub_ability.as_deref());
@@ -5161,7 +5368,7 @@ fn batch_completion_may_apply_with_entry(
 }
 
 /// CR 611.2e: does a frame-held later instruction of this resolution (an outer continuation, a
-/// paused iteration's remainder, or any other parked chain) carry an instruction kind that may
+/// paused iteration's remainder, or any other parked chain) carry an instruction stamped to
 /// apply with the entry? Exhaustive over `ResolutionFrame` so a new frame kind forces a decision.
 fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
     use crate::types::ability::PostReplacementContinuation;
@@ -5272,16 +5479,29 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
 ///
 /// - **D1 (CR 611.2e):** any node of the remaining chain — `next`'s subtree plus every
 ///   frame-held later instruction on the resolution stack and a parked library-search resume —
-///   is an instruction kind that may apply with the entry.
+///   is stamped `ContinuousEffectOnset::WithEntry` (an "is/has" statement whose effect applies
+///   simultaneously with the entry). A "becomes"/"gains"/"gets" instruction is `WhenFollowed`
+///   and starts after the entrant is on the battlefield (CR 611.2e + CR 608.2c), so it does not
+///   defer: the boundary before it observes the entrant as it entered.
 /// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
 ///   following no known completed instruction.
 /// - **D3 (CR 603.6a + CR 101.4):** `next` is a `player_scope` seat leg; the seats may form one
 ///   simultaneous entry event.
 ///
 /// Carriers held only in chain-driver locals are measured over the generated card data, not
-/// walked: the `after_scope` tail is covered by D3 (every seat leg carries `scoped_player`); a
-/// multi-target-player fan-out's `after_fanout` tail reaches no entering leg; and no entering
-/// `repeat_for` / nested driver carries a later candidate outside its iterated subtree.
+/// walked (every `WithEntry` stamp site lowers to an instruction of a kind that measurement
+/// covered — `GenericEffect`, `Animate`, `ReturnAsAura`, `ApplyPerpetual` — so the set of
+/// candidates it considered only shrinks with the onset): the `after_scope` tail is covered by
+/// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
+/// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
+/// candidate outside its iterated subtree.
+///
+/// Known gap, older than the onset: a phase trigger ("at the beginning of …", CR 603.2b) has
+/// `scoped_player` stamped on every node of its chain (`set_scoped_player_recursive`), so D3
+/// holds at every boundary of its resolution, optional or not. No entry observation is recorded,
+/// and enter observers read the entrant after the whole resolution, "gains"/"gets" riders
+/// included. An accepted "you may …" instruction is not the cause: the optional-effect choice
+/// handler hands priority back before the chain resumes, so the pending-choice guard does not hold.
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
@@ -6834,7 +7054,8 @@ pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition)
 ///   on the mana spent to cast the spell that directly follows another such
 ///   clause (CR 601.2h + CR 608.2c: "A if {R} was spent …, and B if {G} was
 ///   spent …"), whose gate reads the spell's payment rather than the previous
-///   clause.
+///   clause, and on a suffix-guarded instruction that follows another across
+///   ", then" (CR 608.2c), whose guard governs only its own instruction.
 ///
 /// Two consumers, which is why this is factored out rather than spelled twice:
 /// `resolve_ability_chain` (below) on its condition-false path, and
@@ -7118,6 +7339,9 @@ fn instruction_outlives_declined_gate(
         sub_ability: _,
         sub_link: _,
         sibling_condition: _,
+        // CR 611.2e: when the instruction's continuous effect starts, not what
+        // it names.
+        entry_onset: _,
         // Printed, and naming no object or player: "up to N targets" only lets
         // the target list be empty (the targets are the effect's filters, audited
         // below); when the target is chosen; how the ability is labelled, which
@@ -59788,6 +60012,20 @@ mod entry_observation_settlement_tests {
         ResolvedAbility::new(effect, Vec::new(), ObjectId(100), PlayerId(0))
     }
 
+    /// A node the parser stamped as a CR 611.2e "is/has" statement.
+    fn with_entry(effect: Effect) -> ResolvedAbility {
+        let mut node = node(effect);
+        node.entry_onset = ContinuousEffectOnset::WithEntry;
+        node
+    }
+
+    /// The `AbilityDefinition` form of [`with_entry`] / the default onset, for template carriers.
+    fn definition(effect: Effect, onset: ContinuousEffectOnset) -> AbilityDefinition {
+        let mut definition = AbilityDefinition::new(AbilityKind::Spell, effect);
+        definition.entry_onset = onset;
+        definition
+    }
+
     fn put_counter() -> Effect {
         Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
@@ -59881,21 +60119,49 @@ mod entry_observation_settlement_tests {
         (id, events)
     }
 
+    /// CR 611.2e: D1 reads the instruction's onset, not its kind. Each of the four kinds that
+    /// can carry a rider defers only when stamped `WithEntry` ("is/has"); the same kind with the
+    /// default `WhenFollowed` onset ("becomes/gains/gets") does not.
+    ///
+    /// REVERT: restoring the kind classifier (`GenericEffect | Animate | ReturnAsAura |
+    /// ApplyPerpetual`) makes every default-onset row below defer.
     #[test]
     fn deferral_predicate_subtree_kinds() {
         let state = GameState::new_two_player(3);
         let completed = node(return_to_battlefield());
         assert!(!deferred(&state, &node(put_counter()), Some(&completed)));
-        assert!(deferred(&state, &node(generic()), Some(&completed)));
+        for effect in [generic(), animate(), return_as_aura(), apply_perpetual()] {
+            assert!(
+                deferred(&state, &with_entry(effect.clone()), Some(&completed)),
+                "WithEntry {effect:?}"
+            );
+            assert!(
+                !deferred(&state, &node(effect.clone()), Some(&completed)),
+                "WhenFollowed {effect:?}"
+            );
+            assert!(
+                deferred(
+                    &state,
+                    &node(put_counter()).sub_ability(with_entry(effect.clone())),
+                    Some(&completed)
+                ),
+                "WithEntry sub_ability {effect:?}"
+            );
+            assert!(
+                !deferred(
+                    &state,
+                    &node(put_counter()).sub_ability(node(effect.clone())),
+                    Some(&completed)
+                ),
+                "WhenFollowed sub_ability {effect:?}"
+            );
+        }
         assert!(deferred(
             &state,
-            &node(put_counter()).sub_ability(node(generic())),
+            &node(put_counter()).else_ability(with_entry(generic())),
             Some(&completed)
         ));
-        assert!(deferred(&state, &node(animate()), Some(&completed)));
-        assert!(deferred(&state, &node(return_as_aura()), Some(&completed)));
-        assert!(deferred(&state, &node(apply_perpetual()), Some(&completed)));
-        assert!(deferred(
+        assert!(!deferred(
             &state,
             &node(put_counter()).else_ability(node(generic())),
             Some(&completed)
@@ -59936,25 +60202,37 @@ mod entry_observation_settlement_tests {
         let completed = node(return_to_battlefield());
 
         // AbilityContinuation frame.
-        let mut state = GameState::new_two_player(3);
+        let state = GameState::new_two_player(3);
         assert!(!deferred(&state, &head, Some(&completed)), "no frame");
-        let pending = PendingContinuation::new(Box::new(node(generic())), &state);
-        state
-            .resolution_stack
-            .push_inner(ResolutionFrame::AbilityContinuation(
-                AbilityContinuationFrame {
-                    pending,
-                    choose_zone_trigger_context: None,
-                },
-            ));
+        let with_continuation = |chain: ResolvedAbility| {
+            let mut state = GameState::new_two_player(3);
+            let pending = PendingContinuation::new(Box::new(chain), &state);
+            state
+                .resolution_stack
+                .push_inner(ResolutionFrame::AbilityContinuation(
+                    AbilityContinuationFrame {
+                        pending,
+                        choose_zone_trigger_context: None,
+                    },
+                ));
+            state
+        };
         assert!(
-            deferred(&state, &head, Some(&completed)),
+            deferred(
+                &with_continuation(with_entry(generic())),
+                &head,
+                Some(&completed)
+            ),
             "continuation chain"
+        );
+        assert!(
+            !deferred(&with_continuation(node(generic())), &head, Some(&completed)),
+            "continuation chain, same kind with the default onset"
         );
 
         // RepeatFor frame.
-        let repeat = |effect: Effect| PendingRepeatIteration {
-            ability: Box::new(node(effect)),
+        let repeat = |ability: ResolvedAbility| PendingRepeatIteration {
+            ability: Box::new(ability),
             tracked_members: Vec::new(),
             iterated_counter_kinds: Vec::new(),
             next_iteration: 1,
@@ -59964,7 +60242,7 @@ mod entry_observation_settlement_tests {
         let mut state = GameState::new_two_player(3);
         state
             .resolution_stack
-            .push_inner(ResolutionFrame::RepeatFor(repeat(put_counter())));
+            .push_inner(ResolutionFrame::RepeatFor(repeat(node(generic()))));
         assert!(
             !deferred(&state, &head, Some(&completed)),
             "repeat positive pair"
@@ -59972,17 +60250,17 @@ mod entry_observation_settlement_tests {
         let mut state = GameState::new_two_player(3);
         state
             .resolution_stack
-            .push_inner(ResolutionFrame::RepeatFor(repeat(generic())));
+            .push_inner(ResolutionFrame::RepeatFor(repeat(with_entry(generic()))));
         assert!(
             deferred(&state, &head, Some(&completed)),
             "repeat remainder"
         );
 
         // ChooseOneOf frame whose branches hold an Animate.
-        let choose = |effect: Effect| PendingChooseOneOf {
+        let choose = |branch: AbilityDefinition| PendingChooseOneOf {
             controller: PlayerId(0),
             source_id: ObjectId(100),
-            branches: vec![AbilityDefinition::new(AbilityKind::Spell, effect)],
+            branches: vec![branch],
             parent_occurrences: Default::default(),
             context: Box::default(),
             continuation: None,
@@ -59993,7 +60271,10 @@ mod entry_observation_settlement_tests {
         let mut state = GameState::new_two_player(3);
         state
             .resolution_stack
-            .push_inner(ResolutionFrame::ChooseOneOf(choose(put_counter())));
+            .push_inner(ResolutionFrame::ChooseOneOf(choose(definition(
+                animate(),
+                ContinuousEffectOnset::WhenFollowed,
+            ))));
         assert!(
             !deferred(&state, &head, Some(&completed)),
             "branch positive pair"
@@ -60001,7 +60282,10 @@ mod entry_observation_settlement_tests {
         let mut state = GameState::new_two_player(3);
         state
             .resolution_stack
-            .push_inner(ResolutionFrame::ChooseOneOf(choose(animate())));
+            .push_inner(ResolutionFrame::ChooseOneOf(choose(definition(
+                animate(),
+                ContinuousEffectOnset::WithEntry,
+            ))));
         assert!(deferred(&state, &head, Some(&completed)), "branch template");
     }
 
@@ -60011,11 +60295,11 @@ mod entry_observation_settlement_tests {
         let completed = node(return_to_battlefield());
 
         // (a) attachment_remainder.producer
-        let with_remainder = |effect: Effect| {
+        let with_remainder = |producer: ResolvedAbility| {
             let mut state = GameState::new_two_player(3);
             let mut pending = PendingContinuation::new(Box::new(node(put_counter())), &state);
             pending.attachment_remainder = Some(PendingAttachmentRemainder {
-                producer: Box::new(node(effect)),
+                producer: Box::new(producer),
             });
             state
                 .resolution_stack
@@ -60028,18 +60312,18 @@ mod entry_observation_settlement_tests {
             state
         };
         assert!(deferred(
-            &with_remainder(return_as_aura()),
+            &with_remainder(with_entry(return_as_aura())),
             &head,
             Some(&completed)
         ));
         assert!(!deferred(
-            &with_remainder(put_counter()),
+            &with_remainder(node(return_as_aura())),
             &head,
             Some(&completed)
         ));
 
         // (b) DieRoll results_table
-        let with_die = |effect: Effect| {
+        let with_die = |branch: AbilityDefinition| {
             let mut state = GameState::new_two_player(3);
             state
                 .resolution_stack
@@ -60054,7 +60338,7 @@ mod entry_observation_settlement_tests {
                     results_table: vec![crate::types::ability::DieResultBranch {
                         min: 1,
                         max: 6,
-                        effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+                        effect: Box::new(branch),
                     }],
                     modifier: None,
                     die_result: None,
@@ -60067,14 +60351,24 @@ mod entry_observation_settlement_tests {
             state
         };
         assert!(deferred(
-            &with_die(apply_perpetual()),
+            &with_die(definition(
+                apply_perpetual(),
+                ContinuousEffectOnset::WithEntry
+            )),
             &head,
             Some(&completed)
         ));
-        assert!(!deferred(&with_die(put_counter()), &head, Some(&completed)));
+        assert!(!deferred(
+            &with_die(definition(
+                apply_perpetual(),
+                ContinuousEffectOnset::WhenFollowed
+            )),
+            &head,
+            Some(&completed)
+        ));
 
         // (c) BatchDelivery completion carrying a scoped library-search resume.
-        let with_batch = |effect: Effect| {
+        let with_batch = |after_scope: ResolvedAbility| {
             let mut state = GameState::new_two_player(3);
             let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
             logical_zone_change_group
@@ -60095,7 +60389,7 @@ mod entry_observation_settlement_tests {
                         source_id: ObjectId(100),
                         search_keys: Vec::new(),
                         grants: Vec::new(),
-                        after_scope: Some(Box::new(node(effect))),
+                        after_scope: Some(Box::new(after_scope)),
                     },
                 }),
                 replacement_applied: HashSet::new(),
@@ -60109,9 +60403,13 @@ mod entry_observation_settlement_tests {
                 .push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
             state
         };
-        assert!(deferred(&with_batch(generic()), &head, Some(&completed)));
+        assert!(deferred(
+            &with_batch(with_entry(generic())),
+            &head,
+            Some(&completed)
+        ));
         assert!(!deferred(
-            &with_batch(put_counter()),
+            &with_batch(node(generic())),
             &head,
             Some(&completed)
         ));
@@ -60206,7 +60504,8 @@ mod entry_observation_settlement_tests {
     }
 
     /// S-b: the resume call (`completed = None`) settles a completed entry before a resumed
-    /// chain that leaves the entrant alone, and defers before one carrying a D1 kind.
+    /// chain whose later instructions are `WhenFollowed`, and defers before one carrying a
+    /// `WithEntry` instruction (D1).
     #[test]
     fn resume_boundary_settles_completed_entry() {
         let mut state = GameState::new_two_player(3);
@@ -60220,6 +60519,20 @@ mod entry_observation_settlement_tests {
             &mut state,
             &events,
             &node(put_counter()).sub_ability(node(generic())),
+            None,
+        );
+        assert_eq!(
+            state.battlefield_entry_observations.len(),
+            1,
+            "S-b settles before a WhenFollowed rider"
+        );
+
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(
+            &mut state,
+            &events,
+            &node(put_counter()).sub_ability(with_entry(generic())),
             None,
         );
         assert!(

@@ -190,6 +190,7 @@ expression: "&lowered"
           ]
         }
       },
+      "declares_chosen_group": 2147483649,
       "cost": {
         "type": "Loyalty",
         "amount": -12
@@ -201,7 +202,8 @@ expression: "&lowered"
           "origin": "Hand",
           "destination": "Library",
           "target": {
-            "type": "ParentTargetController"
+            "type": "DeclaredPlayer",
+            "group": 2147483649
           },
           "library_shuffle": {
             "type": "TerminalShuffle"

@@ -42,6 +42,7 @@ const ABILITY_KEYS: &[&str] = &[
     "target_chooser",
     "repeat_until",
     "sub_link",
+    "entry_onset",
     "iteration_kind_binding",
     "sibling_condition",
     "consumes_source",

@@ -16925,15 +16925,16 @@ fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
         .sub_ability
         .as_deref()
         .expect("library exile should chain hand move");
-    assert!(matches!(
-        &*hand.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
-            destination: Zone::Library,
-            target: TargetFilter::ParentTargetController,
-            ..
-        }
-    ));
+    let Effect::ChangeZoneAll {
+        origin: Some(Zone::Hand),
+        destination: Zone::Library,
+        target: TargetFilter::DeclaredPlayer { group },
+        ..
+    } = &*hand.effect
+    else {
+        panic!("hand move must name the declared player: {hand:#?}");
+    };
+    assert_eq!(Some(*group), def.declares_chosen_group);
 
     let graveyard = hand
         .sub_ability
