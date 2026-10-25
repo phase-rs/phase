@@ -575,5 +575,59 @@ class HardGateTests(unittest.TestCase):
         self.assertEqual(unannotated_hits(hit), {})
 
 
+class AttributedItemTests(unittest.TestCase):
+    """Only cfg predicates requiring test may hide an entire item."""
+
+    def test_test_only_items_resume_at_production_witness(self):
+        items = [
+            "fn hidden() { add_to_zone(hidden); }",
+            "impl X { fn hidden() { add_to_zone(hidden); } }",
+            "pub const X: usize = { 1 } + add_to_zone(hidden);",
+            "pub(crate) const X: usize = { 1 } + add_to_zone(hidden);",
+            "pub const fn hidden() { add_to_zone(hidden); }",
+            "const X: () = { add_to_zone(hidden); };",
+            "static X: () = { add_to_zone(hidden); };",
+            "use hidden::add_to_zone;",
+            "mod hidden;",
+            "struct X { hidden: Hidden }",
+            "struct X(Hidden);",
+            "enum X { Hidden }",
+            "type X = Hidden;",
+        ]
+        for predicate in ("test", 'all(test, target_arch = "wasm32")'):
+            for item in items:
+                with self.subTest(predicate=predicate, item=item):
+                    src = (f"#[cfg({predicate})]\n#[allow(dead_code)]\n"
+                           f"{item}\nfn witness() {{ add_to_zone(production); }}")
+                    code = code_of(src)
+                    self.assertNotIn("hidden", code)
+                    self.assertNotIn("Hidden", code)
+                    self.assertIn("add_to_zone(production)", code)
+
+    def test_uncertain_cfg_predicates_remain_production(self):
+        for predicate in ("any(test, unix)", 'any(test, feature = "x")',
+                          "not(test)", "not (test)", "all(unix, any(test, windows))"):
+            with self.subTest(predicate=predicate):
+                code = code_of(f"#[cfg({predicate})]\n"
+                               "mod retained { fn f() { add_to_zone(retained); } }\n"
+                               "fn witness() { add_to_zone(production); }")
+                self.assertIn("add_to_zone(retained)", code)
+                self.assertIn("add_to_zone(production)", code)
+
+    def test_multiline_attributes_and_item_delimiters(self):
+        src = """#[cfg(
+    all(test, unix)
+)]
+#[allow(
+    dead_code
+)]
+const HIDDEN: fn() = || { add_to_zone(hidden); };
+fn witness() { add_to_zone(production); }
+"""
+        code = code_of(src)
+        self.assertNotIn("add_to_zone(hidden)", code)
+        self.assertIn("add_to_zone(production)", code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

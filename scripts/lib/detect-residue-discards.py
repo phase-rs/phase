@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Gate H: selected helper-result discard syntax, with reviewed per-file ceilings.
+
+This is not a proof that unread Oracle text cannot be dropped. Named ignored
+remainders are conservative obligations; defaults freeze syntax, not semantic
+loss. Same-file deletion/addition can fit under a ceiling. No arbitrary dataflow,
+unwrap_or_else, future Parsed API, or waiver enforcement is claimed here.
+
+--list reports each path:line family symbol and scan totals; --baseline prints
+sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
+--index reads SOURCE AND LEDGER from git's index, using this executing tool.
+"""
+from __future__ import annotations
+
+import argparse
+from bisect import bisect_right
+from collections import Counter
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+import sys
+from typing import NamedTuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from zone_authority_census import CensusError, ScanState, strip_noncode, iter_production_lines
+
+SCOPE = "crates/engine/src/parser"
+LEDGER = "scripts/residue-ratchet.txt"
+HELPERS = frozenset(("parse_target", "parse_target_with_ctx", "parse_target_with_syntax",
+                     "parse_target_disjunction", "parse_target_with_disjunctive_restriction",
+                     "parse_fight_target", "parse_type_phrase_folding",
+                     "parse_type_phrase_folding_with_ctx"))
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|[0-9]+|::|=>|[^\s]")
+
+
+class Hit(NamedTuple):
+    path: str
+    line: int
+    family: str
+    symbol: str
+
+
+def production_stream(relpath, lines):
+    codes = [""] * len(lines)
+    for i, _raw, code, _fn in iter_production_lines(relpath, lines):
+        codes[i] = code
+    return "\n".join(codes)
+
+
+class Expressions:
+    """Balanced token views; follow result-preserving wrappers, not nested args."""
+    def __init__(self, source):
+        matches = list(TOKEN.finditer(source))
+        newlines = [m.start() for m in re.finditer("\n", source)]
+        self.lines = [bisect_right(newlines, m.start()) + 1 for m in matches]
+        self.values = [m.group() for m in matches]
+        self.pairs = {}
+        stack = []
+        for i, value in enumerate(self.values):
+            if value in ("(", "[", "{"):
+                stack.append(i)
+            elif value in (")", "]", "}"):
+                if not stack or self.values[stack[-1]] != {")": "(", "]": "[", "}": "{"}[value]:
+                    raise CensusError("unbalanced expression delimiters")
+                opened = stack.pop()
+                self.pairs[opened] = i
+                self.pairs[i] = opened
+        if stack:
+            raise CensusError("unclosed expression delimiters")
+        self.aliases = {h: h for h in HELPERS}
+        # Imports are code tokens, including grouped imports. Recognize aliases
+        # by the explicit known helper, never by an arbitrary parse_* prefix.
+        for i, value in enumerate(self.values):
+            if value == "use":
+                end = self.values.index(";", i)
+                for j in range(i + 1, end - 1):
+                    if self.values[j] in HELPERS and self.values[j + 1] == "as":
+                        self.aliases[self.values[j + 2]] = self.values[j]
+
+    def split(self, start, end, separator=","):
+        out = []
+        part = start
+        i = start
+        while i < end:
+            if self.values[i] in ("(", "[", "{"):
+                i = self.pairs[i] + 1
+                continue
+            if self.values[i] == separator:
+                out.append((part, i))
+                part = i + 1
+            i += 1
+        if part < end:
+            out.append((part, end))
+        return out
+
+    def end(self, start, stops):
+        i = start
+        while i < len(self.values):
+            if self.values[i] in stops:
+                break
+            if self.values[i] in ("(", "[", "{"):
+                i = self.pairs[i] + 1
+            else:
+                i += 1
+        return i
+
+    def origin(self, start, end):
+        """Return (helper token index, symbol) only for a helper RESULT."""
+        v = self.values
+        while start < end and v[end - 1] == "?":
+            end -= 1
+        while start < end and v[start] == "(" and self.pairs[start] == end - 1:
+            start += 1
+            end -= 1
+        if start >= end:
+            return None
+        if v[start] == "{" and self.pairs[start] == end - 1:
+            if end > start + 1 and v[end - 2] == ";":
+                return None
+            parts = self.split(start + 1, end - 1, ";")
+            return self.origin(*parts[-1]) if parts else None
+        # Closure wrappers return their tail; arguments consumed by some other
+        # function are deliberately NOT followed.
+        closure_start = start + (v[start] == "move")
+        if closure_start < end and v[closure_start] == "|":
+            try:
+                close = v.index("|", closure_start + 1, end)
+            except ValueError:
+                return None
+            return self.origin(close + 1, end)
+        if v[end - 1] != ")":
+            return None
+        opened = self.pairs[end - 1]
+        if opened <= start:
+            return None
+        name = v[opened - 1]
+        path = v[start:opened]
+        if path and path[0] == "::":
+            path = path[1:]
+        if not (len(path) % 2 == 1
+                and all(re.fullmatch(r"\w+", x) for x in path[::2])
+                and all(x in ("::", ".") for x in path[1::2])):
+            return None
+        if name in self.aliases and "." not in path:
+            return opened - 1, self.aliases[name]
+        args = self.split(opened + 1, end - 1)
+        if len(args) == 1:
+            a, b = args[0]
+            if name in ("Some", "Ok") or (a < b and v[a] in ("|", "move")):
+                return self.origin(a, b)
+        return None
+
+    def residue_pattern(self, start, end):
+        v = self.values
+        while start < end:
+            if v[start] == "(" and self.pairs[start] == end - 1:
+                parts = self.split(start + 1, end - 1)
+                if len(parts) >= 2:
+                    a, b = parts[1]
+                    return b == a + 1 and v[a].startswith("_")
+                start += 1
+                end -= 1
+            elif end > start + 2 and v[start] in ("Some", "Ok") and v[start + 1] == "(":
+                start += 1
+            else:
+                return False
+        return False
+
+
+def find_discards(relpath, lines):
+    """Pure classification. No filesystem, git, baseline, or mutable global state."""
+    ex = Expressions(production_stream(relpath, lines))
+    v = ex.values
+    hits = {}
+
+    def add(origin, family, occurrence=None):
+        if origin:
+            i, symbol = origin
+            # Overlapping recognizers share a result occurrence. Distinct match
+            # arm patterns are distinct syntactic discards of that result.
+            site = i if occurrence is None else occurrence
+            hits.setdefault((i, site), Hit(relpath, ex.lines[site], family, symbol))
+
+    for i, value in enumerate(v):
+        if value == "let":
+            equals = ex.end(i + 1, {"=", ";", "}"})
+            if equals >= len(v) or v[equals] != "=":
+                continue
+            end = ex.end(equals + 1, {";", "{", "}"})
+            # A closure/block RHS needs its opening brace, unlike if-let's body.
+            if end < len(v) and v[end] == "{" and end == equals + 1:
+                end = ex.pairs[end] + 1
+            origin = ex.origin(equals + 1, end)
+            if ex.residue_pattern(i + 1, equals):
+                add(origin, "binding")
+            elif v[i + 1:equals] == ["_"]:
+                add(origin, "whole-result")
+        if value == "match":
+            end = ex.end(i + 1, {"{"})
+            origin = ex.origin(i + 1, end)
+            if origin and end < len(v):
+                for a, b in ex.split(end + 1, ex.pairs[end]):
+                    arrow = ex.end(a, {"=>"})
+                    if arrow < b and ex.residue_pattern(a, arrow):
+                        add(origin, "binding", a)
+        if value == "." and i + 1 < len(v) and v[i + 1] in ("0", "2"):
+            # Walk backward over the receiver's balanced call/parentheses and
+            # qualified/method name. Do not absorb an enclosing assignment.
+            start = i - 1
+            if start < 0 or v[start] != ")":
+                continue
+            start = ex.pairs[start]
+            if start > 0 and re.fullmatch(r"\w+", v[start - 1]) and v[start - 1] != "return":
+                start -= 1
+                while start >= 2 and v[start - 1] in ("::", ".") and re.fullmatch(r"\w+", v[start - 2]):
+                    start -= 2
+            origin = ex.origin(start, i)
+            if origin and (v[i + 1] == "0" or origin[1] == "parse_target_with_syntax"):
+                add(origin, "projection")
+        if value == "drop" and i + 1 < len(v) and v[i + 1] == "(":
+            add(ex.origin(i + 2, ex.pairs[i + 1]), "whole-result")
+        if value == ";":
+            start = i - 1
+            while start >= 0 and v[start] not in (";", "{", "}"):
+                if v[start] in (")", "]"):
+                    start = ex.pairs[start]
+                start -= 1
+            add(ex.origin(start + 1, i), "whole-result")
+        if value == "unwrap_or" and i > 0 and v[i - 1] == "." and i + 1 < len(v) and v[i + 1] == "(":
+            end = ex.pairs[i + 1]
+            arg = v[i + 2:end]
+            if len(arg) == 3 and arg[:2] == ["TargetFilter", "::"] and arg[2] in ("SelfRef", "Any"):
+                hits[i] = Hit(relpath, ex.lines[i], "default", "TargetFilter::" + arg[2])
+    return sorted(hits.values())
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args])
+
+
+def read_snapshot(root, path, index):
+    if index:
+        return git(root, "show", ":" + path).decode("utf-8")
+    return (root / path).read_text(encoding="utf-8")
+
+
+def production_sources(root, index):
+    if index:
+        paths = [p.decode() for p in git(root, "ls-files", "-z", "--", SCOPE).split(b"\0") if p]
+    else:
+        scope = root / SCOPE
+        if not scope.is_dir():
+            raise ValueError(f"missing parser root: {scope}")
+        paths = [p.relative_to(root).as_posix() for p in scope.rglob("*.rs")]
+    sources = {p: read_snapshot(root, p, index) for p in sorted(paths)
+               if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts
+               and "tests" not in PurePosixPath(p).name}
+    if not sources:
+        raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
+    excluded = set()
+    for path, text in sources.items():
+        lines = text.splitlines()
+        prod = production_stream(path, lines)
+        state = ScanState()
+        all_codes = []
+        for line in lines:
+            code, state = strip_noncode(line, state)
+            all_codes.append(code)
+        all_code = "\n".join(all_codes)
+        if re.search(r"#\s*!\s*\[\s*cfg\s*\(", all_code) and not prod.strip():
+            excluded.add(path)
+        # A test-only outlined declaration vanishes from the production view.
+        # A production declaration of the same module keeps its file in scope.
+        declarations = list(re.finditer(r"\bmod\s+(\w+)\s*;", all_code))
+        live_names = set(re.findall(r"\bmod\s+(\w+)\s*;", prod))
+        for decl in declarations:
+            name = decl.group(1)
+            if name in live_names:
+                continue
+            line = all_code.count("\n", 0, decl.start())
+            parent = PurePosixPath(path)
+            directory = parent.parent if parent.name in ("mod.rs", "lib.rs", "main.rs") else parent.with_suffix("")
+            targets = [directory / (name + ".rs"), directory / name / "mod.rs"]
+            # Path attributes are string data, read only from the already
+            # identified excluded item's contiguous attribute block.
+            before = []
+            j = line - 1
+            while j >= 0 and (lines[j].lstrip().startswith("#") or not lines[j].strip()):
+                before.append(lines[j])
+                j -= 1
+            attr = re.search(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', "\n".join(reversed(before)))
+            if attr:
+                targets = [parent.parent / attr.group(1)]
+            for target in targets:
+                target = target.as_posix()
+                if target in sources:
+                    excluded.add(target)
+                    directory_prefix = target[:-6] if target.endswith("mod.rs") else target[:-3] + "/"
+                    excluded.update(p for p in sources if p.startswith(directory_prefix))
+    return {p: text for p, text in sources.items() if p not in excluded}
+
+
+def parse_ledger(text):
+    ceilings = {}
+    for n, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        fields = raw.split()
+        if len(fields) != 2 or not re.fullmatch(r"[0-9]+", fields[1]):
+            raise ValueError(f"malformed ledger line {n}: {raw}")
+        path = fields[0].replace("\\", "/")
+        parts = path.split("/")
+        if (not path.startswith(SCOPE + "/") or not path.endswith(".rs")
+                or any(p in ("", ".", "..") for p in parts) or ":" in path):
+            raise ValueError(f"invalid ledger path at line {n}: {path}")
+        if path in ceilings:
+            raise ValueError(f"duplicate ledger entry for '{path}'")
+        ceilings[path] = int(fields[1])
+    return ceilings
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group(required=True)
+    for mode in ("check", "list", "baseline"):
+        modes.add_argument("--" + mode, action="store_true")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--index", action="store_true")
+    args = parser.parse_args()
+    try:
+        sources = production_sources(args.root, args.index)
+        if not sources:
+            raise ValueError("empty production parser scope")
+        found = [h for p, text in sources.items() for h in find_discards(p, text.splitlines())]
+        counts = Counter(h.path for h in found)
+        if args.baseline:
+            for path, count in sorted(counts.items()):
+                print(f"{path} {count}")
+        elif args.list:
+            for h in found:
+                print(f"{h.path}:{h.line}: {h.family} {h.symbol}")
+            print(f"TOTAL {len(found)} obligations; files scanned {len(sources)}; "
+                  f"snapshot {'index' if args.index else 'worktree'}")
+            for family, count in sorted(Counter(h.family for h in found).items()):
+                print(f"FAMILY {family} {count}")
+        else:
+            ceilings = parse_ledger(read_snapshot(args.root, LEDGER, args.index))
+            failed = False
+            for path in sorted(counts.keys() | ceilings.keys()):
+                actual, ceiling = counts[path], ceilings.get(path, 0)
+                if actual > ceiling:
+                    print(f"Gate H FAIL: {path}: actual {actual}, ceiling {ceiling}"
+                          + (" (no ledger entry)" if path not in ceilings else ""))
+                    for h in found:
+                        if h.path == path:
+                            print(f"  {h.path}:{h.line}: {h.family} {h.symbol}")
+                    failed = True
+                elif actual < ceiling:
+                    print(f"residue-ratchet: tighten {path} {ceiling} -> {actual}"
+                          + (" (entry can be deleted)" if actual == 0 else ""))
+            if failed:
+                return 1
+            print(f"Gate H PASS (residue: {len(found)} legacy obligations, ceiling {sum(ceilings.values())}; "
+                  f"files scanned {len(sources)}; snapshot {'index' if args.index else 'worktree'})")
+    except (ValueError, OSError, CensusError, subprocess.CalledProcessError) as error:
+        print(f"Gate H FAIL: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
