@@ -10,8 +10,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CoinFlipRun, Effect, ObjectScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, Effect, EffectOutcomeSignal,
+    ObjectScope, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SubAbilityLink, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
@@ -306,6 +307,15 @@ impl Run {
             .collect();
         assert_eq!(actual, vec![(player, 20, Some(result))]);
     }
+}
+
+/// CR 601.2c + CR 603.3d: both spell and trigger target announcements are
+/// answered through the same `ChooseTarget` action.
+fn target_prompt_open(state: &GameState) -> bool {
+    matches!(
+        state.waiting_for,
+        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+    )
 }
 
 fn moves(events: &[GameEvent], source: ObjectId) -> Vec<(Option<Zone>, Zone)> {
@@ -640,7 +650,7 @@ fn departed_token_rig_dies_win_deals_no_damage() {
     rig_dies_flip(true, true);
 }
 
-fn ral_flip(won: bool, accept: bool, blink: bool) {
+fn ral_flip(won: bool, accept: bool, blink: bool, targeted: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     fund(&mut scenario);
@@ -660,15 +670,22 @@ fn ral_flip(won: bool, accept: bool, blink: bool) {
         .with_color(vec![ManaColor::Blue, ManaColor::Red])
         .id();
     let witness = scenario.add_creature(P0, "Unchanged witness", 0, 10).id();
-    // A targeted triggering spell exposes the pre-existing ParentTarget hijack
-    // in targeting.rs: Ral's "return him" binds to that spell's committed target.
-    // Keep this identity regression isolated with a targetless instant on P0's turn.
     let draw = instant(
         &mut scenario,
         P0,
         "Targetless draw",
         "Draw a card.",
         cost(1, &[]),
+    );
+    // H1: a real targeted instant spends its target on the witness, so the
+    // accepted exile's own result must still be the only referent of "return
+    // him" — the cast-event target is a competing authority.
+    let growth = instant(
+        &mut scenario,
+        P0,
+        "Giant Growth",
+        GROWTH,
+        cost(0, &[ManaCostShard::Green]),
     );
     // Opponent's instant avoids creating a second Ral cast trigger while
     // blinking him in response to the first trigger.
@@ -689,7 +706,11 @@ fn ral_flip(won: bool, accept: bool, blink: bool) {
         .get_mut(&ral)
         .unwrap()
         .back_face = Some(face);
-    drop(run.runner.cast(draw).commit());
+    if targeted {
+        drop(run.runner.cast(growth).target_object(witness).commit());
+    } else {
+        drop(run.runner.cast(draw).commit());
+    }
     let hand_before_draw = run.runner.state().players[0].hand.len();
     assert_trigger(&run, ral, P0);
     if blink {
@@ -711,58 +732,51 @@ fn ral_flip(won: bool, accept: bool, blink: bool) {
         matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
             || (state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }))
     });
-    // CR 608.2d: a live winning source must offer the real optional instruction.
-    // A stale source may either suppress an impossible option or offer a no-op;
-    // accepting such an offered option must never exile the returned Ral.
-    if won && !blink {
-        assert!(matches!(
-            run.runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == ral
-        ));
+    // CR 608.2d: a winning flip must offer the printed optional instruction,
+    // including when the source has since left and returned. The offer is the
+    // existing no-op producer, not a claim that an impossible cost is payable.
+    if won {
+        assert!(
+            matches!(
+                run.runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == ral
+            ),
+            "winning flip must reach Ral's optional choice, got {:?}",
+            run.runner.state().waiting_for
+        );
         run.act(GameAction::DecideOptionalEffect { accept });
-    } else if blink
-        && matches!(
-            run.runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { .. }
-        )
-    {
-        assert!(matches!(
-            run.runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == ral
-        ));
-        run.act(GameAction::DecideOptionalEffect { accept: true });
     }
     run.finish();
     run.assert_flips(&[(P0, won)]);
     let object = &run.runner.state().objects[&ral];
     let transformed = won && accept && !blink;
+    let core_types: Vec<CoreType> = object.card_types.core_types.clone();
+    println!(
+        "T1 row won={won} accept={accept} blink={blink}: transformed={} name={:?} \
+         core_types={core_types:?} subtypes={:?} incarnation={} (pre={incarnation})",
+        object.transformed, object.name, object.card_types.subtypes, object.incarnation,
+    );
     assert_eq!(object.zone, Zone::Battlefield);
     assert_eq!(object.controller, P0);
-    if !blink {
-        // CR 712.14a + CR 400.7j: the accepted exile's own return finds the moved
-        // card and puts its printed planeswalker face onto the battlefield.
-        assert_eq!(object.transformed, transformed);
-        assert_eq!(
-            object.name,
-            if transformed {
-                "Ral, Leyline Prodigy"
-            } else {
-                "Ral, Monsoon Mage"
-            }
-        );
-        assert_eq!(
-            object
-                .card_types
-                .core_types
-                .contains(&CoreType::Planeswalker),
-            transformed
-        );
+    // CR 712.14a + CR 400.7j: the accepted exile's own return finds the moved
+    // card and puts its printed planeswalker face onto the battlefield. A stale
+    // source's completed exile moved nothing, so its dependent return has no
+    // referent and the returned permanent keeps its front face.
+    assert_eq!(object.transformed, transformed);
+    assert_eq!(
+        object.name,
+        if transformed {
+            "Ral, Leyline Prodigy"
+        } else {
+            "Ral, Monsoon Mage"
+        }
+    );
+    assert_eq!(core_types.contains(&CoreType::Planeswalker), transformed);
+    assert_eq!(core_types.contains(&CoreType::Creature), !transformed);
+    if !transformed {
+        assert!(object.card_types.subtypes.iter().any(|s| s == "Human"));
+        assert!(object.card_types.subtypes.iter().any(|s| s == "Wizard"));
     }
-    // The blinked Ral is observed to transform in place through an unrelated
-    // stale-optional continuation: effects/mod.rs:5290 marks acceptance performed,
-    // change_zone.rs:925-935 skips the stale exile, then targeting.rs:1289-1296
-    // falls back from bare ParentTarget to the raw source ID. This row deliberately
-    // does not assert the blinked object's face/name/type; U4 owns only its moves.
     if transformed {
         assert_ne!(object.incarnation, incarnation);
         assert_eq!(
@@ -781,31 +795,430 @@ fn ral_flip(won: bool, accept: bool, blink: bool) {
         if won { 40 } else { 39 }
     );
     assert_eq!(run.runner.state().players[1].life, 40);
-    assert_eq!(run.runner.state().objects[&witness].power, Some(0));
+    let witness_object = &run.runner.state().objects[&witness];
+    assert_eq!(witness_object.zone, Zone::Battlefield);
+    assert!(!witness_object.transformed);
+    assert_eq!(
+        witness_object.power,
+        Some(if targeted { 3 } else { 0 }),
+        "the triggering spell's own effect, and nothing else, affects its target"
+    );
+    assert_eq!(
+        witness_object.toughness,
+        Some(if targeted { 13 } else { 10 })
+    );
     assert_eq!(
         run.runner.state().players[0].hand.len(),
-        hand_before_draw + 1
+        hand_before_draw + usize::from(!targeted)
     );
 }
 
 #[test]
 fn ral_winning_accept_exiles_and_returns_transformed() {
-    ral_flip(true, true, false);
+    ral_flip(true, true, false, false);
 }
 
 #[test]
 fn ral_winning_decline_preserves_the_front_face() {
-    ral_flip(true, false, false);
+    ral_flip(true, false, false, false);
 }
 
 #[test]
 fn ral_losing_flip_damages_only_the_trigger_controller() {
-    ral_flip(false, false, false);
+    ral_flip(false, false, false, false);
+}
+
+#[test]
+fn ral_targeted_cast_return_uses_exile_result() {
+    ral_flip(true, true, false, true);
+    ral_flip(true, true, true, true);
 }
 
 #[test]
 fn ral_old_winning_flip_does_not_exile_returned_source() {
-    ral_flip(true, true, true);
+    ral_flip(true, true, true, false);
+}
+
+/// F3: a control change after the trigger is on the stack keeps the trigger's
+/// controller (CR 603.3a) and the printed owner's control on the return
+/// (CR 110.2a). No Krark's Thumb and no direct controller assignment.
+fn ral_control_change(won: bool, accept: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let ral = scenario
+        .add_creature_from_oracle(P0, "Ral, Monsoon Mage", 1, 3, RAL)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .with_mana_cost(cost(1, &[ManaCostShard::Red]))
+        .as_legendary()
+        .id();
+    let back = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ral, Leyline Prodigy", false, RAL_BACK)
+        .as_planeswalker_with_loyalty("Ral", 2)
+        .as_legendary()
+        .with_mana_cost(ManaCost::NoCost)
+        .with_color(vec![ManaColor::Blue, ManaColor::Red])
+        .id();
+    let draw = instant(
+        &mut scenario,
+        P0,
+        "Targetless draw",
+        "Draw a card.",
+        cost(1, &[]),
+    );
+    let steal = instant(
+        &mut scenario,
+        P1,
+        "Act of Aggression",
+        "Gain control of target creature until end of turn. Untap that creature. \
+         It gains haste until end of turn.",
+        cost(3, &[ManaCostShard::Red, ManaCostShard::Red]),
+    );
+    let mut run = Run::new(scenario);
+    let mut face = snapshot_object_face(&run.runner.state().objects[&back]);
+    face.is_swap_snapshot = false;
+    face.layout_kind = Some(LayoutKind::Transform);
+    run.runner
+        .state_mut()
+        .objects
+        .get_mut(&ral)
+        .unwrap()
+        .back_face = Some(face);
+    let seed = coin_seed(&[won]);
+    pin(&mut run.runner, seed);
+    drop(run.runner.cast(draw).commit());
+    assert_trigger(&run, ral, P0);
+    let incarnation = run.runner.state().objects[&ral].incarnation;
+    assert!(matches!(
+        run.runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    run.act(GameAction::PassPriority);
+    assert!(matches!(
+        run.runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    drop(run.runner.cast(steal).target_object(ral).commit());
+    run.until(|state| {
+        state.stack.len() == 2 && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    });
+    {
+        let object = &run.runner.state().objects[&ral];
+        assert_eq!(object.owner, P0);
+        assert_eq!(object.controller, P1);
+        assert_eq!(object.incarnation, incarnation);
+    }
+    run.until(|state| {
+        matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
+            || (state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }))
+    });
+    if won {
+        // CR 603.3a + CR 705.2: the old trigger keeps P0 as its controller.
+        assert!(
+            matches!(
+                run.runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == ral
+            ),
+            "the old trigger's optional choice belongs to P0, got {:?}",
+            run.runner.state().waiting_for
+        );
+        run.act(GameAction::DecideOptionalEffect { accept });
+    }
+    run.finish();
+    run.assert_flips(&[(P0, won)]);
+    let object = &run.runner.state().objects[&ral];
+    let transformed = won && accept;
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert_eq!(object.owner, P0);
+    assert_eq!(object.transformed, transformed);
+    assert_eq!(
+        object.name,
+        if transformed {
+            "Ral, Leyline Prodigy"
+        } else {
+            "Ral, Monsoon Mage"
+        }
+    );
+    // CR 110.2a: the return is under the owner's control; a declined option
+    // leaves the stolen creature under P1 until end of turn.
+    assert_eq!(object.controller, if transformed { P0 } else { P1 });
+    assert_eq!(
+        run.runner.state().players[0].life,
+        if won { 40 } else { 39 }
+    );
+    assert_eq!(run.runner.state().players[1].life, 40);
+}
+
+#[test]
+fn ral_trigger_controller_returns_transformed_under_owner_after_control_change() {
+    ral_control_change(true, true);
+}
+
+#[test]
+fn ral_declined_return_leaves_stolen_front_face_under_new_controller() {
+    ral_control_change(true, false);
+}
+
+#[test]
+fn ral_loss_after_control_change_damages_the_trigger_controller() {
+    ral_control_change(false, false);
+}
+
+/// Synthetic coverage for the accepted-optional-move result handoff. The
+/// resolving ability is an activated instruction that declares the witness in
+/// its root target slot, then flips a coin whose winning branch is the optional
+/// `SelfRef` move. Its stashed dependent is the `ParentTarget` return, followed
+/// by a separately printed tail. No printed-card claim is made for the
+/// synthetic witness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParkedMoveTail {
+    /// H2: an independent, object-free second instruction (+2 life).
+    GainTwoLife,
+    /// H4: an independent declared-slot instruction and its anaphoric tail,
+    /// both naming the witness the root slot announced.
+    SlotPumpAndDamage,
+}
+
+fn move_definition(
+    destination: Zone,
+    target: TargetFilter,
+    transformed: bool,
+) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination,
+            target,
+            owner_library: false,
+            enter_transformed: transformed,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+}
+
+/// H2/H4 synthetic: the resolving activated ability declares the witness in its
+/// root target slot, then flips one coin. Its winning branch is the optional
+/// `SelfRef` move; the stashed dependent is the `ParentTarget` return followed
+/// by a separately printed tail. The dependent node therefore inherits the
+/// witness as a stale referent — the accepted move's own result must supersede
+/// it. No printed-card claim is made for the synthetic witness.
+fn parked_optional_move(tail: ParkedMoveTail, live: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let witness = scenario
+        .add_creature(P0, "Declared slot witness", 0, 10)
+        .id();
+    let mut win = move_definition(Zone::Exile, TargetFilter::SelfRef, false);
+    win.optional = true;
+    let tail_definition = match tail {
+        ParkedMoveTail::GainTwoLife => {
+            let mut tail = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            tail
+        }
+        ParkedMoveTail::SlotPumpAndDamage => {
+            let mut anaphoric = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                    damage_source: None,
+                    excess: None,
+                },
+            );
+            anaphoric.sub_link = SubAbilityLink::SequentialSibling;
+            let mut pump = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(0),
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                },
+            );
+            pump.sub_link = SubAbilityLink::SequentialSibling;
+            pump.sub_ability = Some(Box::new(anaphoric));
+            pump
+        }
+    };
+    let mut dependent = move_definition(Zone::Battlefield, TargetFilter::ParentTarget, false);
+    dependent.sub_link = SubAbilityLink::SequentialSibling;
+    dependent.condition = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    dependent.sub_ability = Some(Box::new(tail_definition));
+    let mut flip = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            win_effect: Some(Box::new(win)),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    flip.sub_ability = Some(Box::new(dependent));
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    );
+    root.sub_ability = Some(Box::new(flip));
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(root);
+    let source = scenario
+        .add_creature(P0, "Synthetic optional move source", 1, 3)
+        .with_trigger_definition(trigger)
+        .id();
+    let response = cloudshift(&mut scenario);
+    let plains = scenario.add_basic_land(P0, ManaColor::White);
+
+    let mut run = Run::new(scenario);
+    let incarnation = run.runner.state().objects[&source].incarnation;
+    run.runner.advance_to_combat();
+    assert!(matches!(
+        run.runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    run.act(GameAction::DeclareAttackers {
+        attacks: vec![(source, AttackTarget::Player(P1))],
+        bands: vec![],
+    });
+    // The trigger's declared root slot is announced publicly before it reaches
+    // the stack; answer that prompt in whichever window the engine raises it.
+    let mut announced = false;
+    run.until(|state| {
+        if target_prompt_open(state) {
+            return true;
+        }
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.iter().any(|entry| entry.source_id == source)
+    });
+    if target_prompt_open(run.runner.state()) {
+        run.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(witness)),
+        });
+        announced = true;
+        run.until(|state| {
+            matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.stack.iter().any(|entry| entry.source_id == source)
+        });
+    }
+    let announced_targets: Vec<_> = run
+        .runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .and_then(|entry| entry.ability())
+        .map(|ability| ability.targets.clone())
+        .unwrap_or_default();
+    assert!(
+        announced_targets.contains(&TargetRef::Object(witness)),
+        "the trigger must name the witness in its declared root slot (announced={announced}), got {announced_targets:?}"
+    );
+    // Advancing phases emptied the setup pool; pay for the response with a real
+    // basic-land mana activation in this priority window.
+    let before = run.runner.state().players[0].mana_pool.total();
+    run.act(GameAction::ActivateAbility {
+        source_id: plains,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert_eq!(run.runner.state().players[0].mana_pool.total(), before + 1);
+    run.until(|state| {
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.iter().any(|entry| entry.source_id == source)
+    });
+    assert_trigger(&run, source, P0);
+    if !live {
+        run.blink(response, source);
+    }
+    // The accepted move must not move the returned permanent; its baseline is
+    // the incarnation after any test-setup blink.
+    let baseline_incarnation = run.runner.state().objects[&source].incarnation;
+    let start = run.events.len();
+    pin(&mut run.runner, coin_seed(&[true]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    assert!(matches!(
+        run.runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source
+    ));
+    run.act(GameAction::DecideOptionalEffect { accept: true });
+    run.finish();
+    run.assert_flips(&[(P0, true)]);
+
+    let object = &run.runner.state().objects[&source];
+    if live {
+        // CR 400.7j: the accepted exile's own return finds the card it moved.
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_ne!(object.incarnation, incarnation);
+        assert_eq!(
+            moves(&run.events[start..], source),
+            vec![
+                (Some(Zone::Battlefield), Zone::Exile),
+                (Some(Zone::Exile), Zone::Battlefield),
+            ]
+        );
+    } else {
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_eq!(object.incarnation, baseline_incarnation);
+        assert!(moves(&run.events[start..], source).is_empty());
+    }
+    let untouched = &run.runner.state().objects[&witness];
+    match tail {
+        ParkedMoveTail::GainTwoLife => {
+            assert_eq!(run.runner.state().players[0].life, 42);
+            assert_eq!(untouched.power, Some(0));
+            assert_eq!(untouched.damage_marked, 0);
+        }
+        ParkedMoveTail::SlotPumpAndDamage => {
+            // Exactly once: the dependent return consumed the move result and
+            // the declared-slot instruction kept its own authority.
+            assert_eq!(untouched.power, Some(1));
+            assert_eq!(untouched.damage_marked, 1);
+            assert_eq!(run.runner.state().players[0].life, 40);
+        }
+    }
+}
+
+#[test]
+fn synthetic_accepted_move_tail_resolves_for_live_source() {
+    parked_optional_move(ParkedMoveTail::GainTwoLife, true);
+}
+
+#[test]
+fn synthetic_accepted_empty_move_keeps_independent_tail() {
+    parked_optional_move(ParkedMoveTail::GainTwoLife, false);
+}
+
+#[test]
+fn synthetic_declared_slot_tail_survives_live_move_result() {
+    parked_optional_move(ParkedMoveTail::SlotPumpAndDamage, true);
+}
+
+#[test]
+fn synthetic_declared_slot_tail_survives_empty_move_result() {
+    parked_optional_move(ParkedMoveTail::SlotPumpAndDamage, false);
 }
 
 fn declare_attack(run: &mut Run, source: ObjectId, response_land: ObjectId) {
