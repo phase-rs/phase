@@ -10,8 +10,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones;
 use engine::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, ControllerRef, Effect,
-    EffectOutcomeSignal, MultiTargetSpec, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+    AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, ControllerRef, DieResultBranch,
+    Effect, EffectOutcomeSignal, MultiTargetSpec, ObjectScope, PtValue, QuantityExpr, QuantityRef,
     ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetFilter,
     TargetRef, TriggerDefinition, TypedFilter,
 };
@@ -20,7 +20,8 @@ use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameRng, GameState, RandomDraw, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, GameRng, GameState, PersistedGameState, RandomDraw, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
@@ -187,6 +188,8 @@ impl Run {
             state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. })
         });
         assert!(self.runner.state().resolution_stack.is_empty());
+        let state = self.runner.state();
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
     }
 
     fn activate(&mut self, source: ObjectId) {
@@ -274,10 +277,20 @@ impl Run {
             "mixed choices discriminate the kept outcome"
         );
         assert!(self.runner.state().active_coin_flip_frame().is_some());
+        self.runner
+            .state()
+            .resolution_stack
+            .validate(&self.runner.state().waiting_for)
+            .unwrap();
         let index = results.iter().position(|&result| result == won).unwrap();
         self.act(GameAction::SelectCoinFlips {
             keep_indices: vec![index],
         });
+        self.runner
+            .state()
+            .resolution_stack
+            .validate(&self.runner.state().waiting_for)
+            .unwrap();
     }
 
     fn assert_flips(&self, expected: &[(PlayerId, bool)]) {
@@ -394,6 +407,18 @@ fn activated_flip(efreet: bool, blink: bool, thumb: bool, restore: bool, won: bo
             StackEntryKind::ActivatedAbility { source_id, ability }
                 if *source_id == source && ability.source_id == source
         ));
+        let context = run
+            .runner
+            .state()
+            .active_coin_flip_frame()
+            .unwrap()
+            .trigger_context
+            .as_ref()
+            .expect("a newly paused activation owns an explicit empty scope");
+        assert!(context.event.is_none());
+        assert!(context.events.is_empty());
+        assert!(context.match_count.is_none());
+        assert!(context.die_result.is_none());
         if restore {
             // Full-state persistence at a legitimately produced pause; no fixture,
             // version pin, or replacement of the persisted source with live data.
@@ -1901,6 +1926,497 @@ fn synthetic_inline_dies_branch_finds_successor_and_its_own_second_move() {
         ]
     );
     assert_eq!(run.runner.state().objects[&source].zone, Zone::Hand);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RandomRestore {
+    Live,
+    GameState,
+    Trusted,
+    Raw,
+}
+
+const RANDOM_RESTORES: [RandomRestore; 4] = [
+    RandomRestore::Live,
+    RandomRestore::GameState,
+    RandomRestore::Trusted,
+    RandomRestore::Raw,
+];
+
+fn restore_random_pause(run: &mut Run, ingress: RandomRestore) {
+    run.runner.state_mut().capture_rng_word_pos();
+    let mut state = match ingress {
+        RandomRestore::Live => return,
+        RandomRestore::GameState => {
+            let bytes = serde_json::to_vec(run.runner.state()).unwrap();
+            serde_json::from_slice(&bytes).expect("full GameState restore")
+        }
+        RandomRestore::Trusted => {
+            let saved = PersistedGameState::capture(run.runner.state().clone());
+            let bytes = serde_json::to_vec(&saved).unwrap();
+            serde_json::from_slice::<PersistedGameState>(&bytes)
+                .unwrap()
+                .into_game_state()
+                .expect("checked trusted restore")
+        }
+        RandomRestore::Raw => {
+            let bytes = serde_json::to_vec(run.runner.state()).unwrap();
+            serde_json::from_slice::<PersistedGameState>(&bytes)
+                .unwrap()
+                .into_game_state()
+                .expect("checked raw restore")
+        }
+    };
+    state.rehydrate_rng();
+    state.resolution_stack.validate(&state.waiting_for).unwrap();
+    run.runner = GameRunner::from_state(state);
+}
+
+// Synthetic own-departure trigger, delivered by an actual Murder. The Thumb
+// replacement is printed Oracle; the composed dies body is not a printed card.
+fn departure_random_run(
+    body: AbilityDefinition,
+    thumb: bool,
+    extra_die: bool,
+) -> (Run, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    scenario.with_cards_in_hand(P0, &["First discard", "Second discard", "Spare"]);
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .valid_card(TargetFilter::SelfRef)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(body);
+    let source = scenario
+        .add_creature(P0, "Synthetic paused successor witness", 2, 2)
+        .with_trigger_definition(trigger)
+        .id();
+    let other = scenario.add_creature(P0, "Unrelated witness", 2, 2).id();
+    let thumb_id = thumb.then(|| {
+        scenario
+            .add_artifact_from_oracle(P0, "Krark's Thumb", THUMB)
+            .as_legendary()
+            .id()
+    });
+    if extra_die {
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Barbarian Class",
+            "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+        );
+    }
+    let kill = murder(&mut scenario);
+    let mut run = Run::new(scenario);
+    if let Some(thumb) = thumb_id {
+        assert_eq!(run.runner.state().objects[&thumb].zone, Zone::Battlefield);
+        assert_eq!(run.runner.state().objects[&thumb].controller, P0);
+        let candidates = engine::game::replacement::find_applicable_replacements(
+            run.runner.state(),
+            &engine::types::proposed_event::ProposedEvent::CoinFlip {
+                player_id: P0,
+                count: 1,
+                applied: Default::default(),
+            },
+            engine::game::replacement::replacement_registry(),
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the printed Thumb replacement is applicable"
+        );
+    }
+    let incarnation = run.runner.state().objects[&source].incarnation;
+    run.commit_at(kill, source);
+    run.spell_only(kill);
+    assert_eq!(run.runner.state().objects[&source].zone, Zone::Graveyard);
+    assert_ne!(run.runner.state().objects[&source].incarnation, incarnation);
+    assert_trigger(&run, source, P0);
+    let entry = run
+        .runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .unwrap();
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+        panic!("expected actual departure trigger");
+    };
+    assert_eq!(ability.source_incarnation, Some(incarnation));
+    assert_eq!(ability.trigger_source_incarnation(), Some(incarnation));
+    run.events.clear();
+    (run, source, other)
+}
+
+fn successor_body() -> AbilityDefinition {
+    let mut body = AbilityDefinition::new(
+        AbilityKind::Spell,
+        self_move(Zone::Graveyard, Zone::Battlefield),
+    );
+    body.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        self_move(Zone::Battlefield, Zone::Hand),
+    )));
+    body
+}
+
+fn thumb_departure(ingress: RandomRestore, won: bool) {
+    let (mut run, source, other) = departure_random_run(
+        AbilityDefinition::new(AbilityKind::Spell, flip_to(successor_body())),
+        true,
+        false,
+    );
+    pin(&mut run.runner, coin_seed(&[true, false]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::CoinFlipKeepChoice { .. }));
+    assert!(run.runner.state().current_trigger_event.is_none());
+    assert!(run.runner.state().current_trigger_events.is_empty());
+    restore_random_pause(&mut run, ingress);
+    run.keep(P0, won);
+    run.finish();
+    run.assert_flips(&[(P0, won)]);
+    // CR 400.7e + CR 400.7j: the winning branch finds the departure successor
+    // and then the object moved by its own preceding instruction.
+    let expected = if won {
+        vec![
+            (Some(Zone::Graveyard), Zone::Battlefield),
+            (Some(Zone::Battlefield), Zone::Hand),
+        ]
+    } else {
+        vec![]
+    };
+    assert_eq!(
+        moves(&run.events, source),
+        expected,
+        "{ingress:?}, won={won}"
+    );
+    assert_eq!(
+        run.runner.state().objects[&source].zone,
+        if won { Zone::Hand } else { Zone::Graveyard }
+    );
+    assert_eq!(run.runner.state().objects[&other].zone, Zone::Battlefield);
+}
+
+#[test]
+fn synthetic_thumb_dies_branch_finds_successor_and_its_own_second_move() {
+    thumb_departure(RandomRestore::Live, true);
+    thumb_departure(RandomRestore::Live, false);
+}
+
+#[test]
+fn synthetic_thumb_dies_branch_survives_all_persistence_ingresses() {
+    for ingress in RANDOM_RESTORES.into_iter().skip(1) {
+        thumb_departure(ingress, true);
+        thumb_departure(ingress, false);
+    }
+}
+
+#[test]
+fn synthetic_thumb_legacy_v9_does_not_invent_departure_authority() {
+    for trusted in [false, true] {
+        let (mut run, source, _) = departure_random_run(
+            AbilityDefinition::new(AbilityKind::Spell, flip_to(successor_body())),
+            true,
+            false,
+        );
+        pin(&mut run.runner, coin_seed(&[true, false]));
+        run.until(|state| matches!(state.waiting_for, WaitingFor::CoinFlipKeepChoice { .. }));
+        let mut value = serde_json::to_value(run.runner.state()).unwrap();
+        for frame in value["resolution_stack"]["frames"].as_array_mut().unwrap() {
+            frame["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("trigger_context");
+        }
+        let state = if trusted {
+            let frames = value
+                .as_object_mut()
+                .unwrap()
+                .remove("resolution_stack")
+                .unwrap();
+            value["resolution_frames"] = frames;
+            value["resolution_state_version"] = serde_json::json!(9);
+            serde_json::from_value::<PersistedGameState>(value)
+                .unwrap()
+                .into_game_state()
+                .unwrap()
+        } else {
+            serde_json::from_value::<GameState>(value).unwrap()
+        };
+        run.runner = GameRunner::from_state(state);
+        run.keep(P0, true);
+        run.finish();
+        run.assert_flips(&[(P0, true)]);
+        // Historical behavior, not a rules-correct result: the first move
+        // happens but the old frame cannot complete the second instruction.
+        assert_eq!(
+            moves(&run.events, source),
+            vec![(Some(Zone::Graveyard), Zone::Battlefield)]
+        );
+        assert_eq!(run.runner.state().objects[&source].zone, Zone::Battlefield);
+    }
+}
+
+fn d1_body(count: i32, branch: AbilityDefinition) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: count },
+            sides: 1,
+            modifier: None,
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 1,
+                effect: Box::new(branch),
+            }],
+        },
+    )
+}
+
+fn result_life_tail() -> Box<AbilityDefinition> {
+    Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            player: TargetFilter::Controller,
+        },
+    ))
+}
+
+#[test]
+fn synthetic_departure_die_keep_finds_successor_after_restore() {
+    for extra_die in [false, true] {
+        for ingress in RANDOM_RESTORES {
+            let mut body = d1_body(1, successor_body());
+            body.sub_ability = Some(result_life_tail());
+            let (mut run, source, other) = departure_random_run(body, false, extra_die);
+            if extra_die {
+                run.until(|state| matches!(state.waiting_for, WaitingFor::DieKeepChoice { .. }));
+                restore_random_pause(&mut run, ingress);
+                let WaitingFor::DieKeepChoice {
+                    player,
+                    results,
+                    ignore_count,
+                    ..
+                } = &run.runner.state().waiting_for
+                else {
+                    unreachable!()
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(results, &[1, 1]);
+                assert_eq!(*ignore_count, 1);
+                run.act(GameAction::SelectDieRolls {
+                    ignore_indices: vec![0],
+                });
+            }
+            run.finish();
+            assert_eq!(
+                moves(&run.events, source),
+                vec![
+                    (Some(Zone::Graveyard), Zone::Battlefield),
+                    (Some(Zone::Battlefield), Zone::Hand),
+                ],
+                "{ingress:?}, keep={extra_die}"
+            );
+            assert_eq!(run.runner.state().objects[&source].zone, Zone::Hand);
+            assert_eq!(run.runner.state().objects[&other].zone, Zone::Battlefield);
+            assert_eq!(run.runner.state().players[0].life, 41);
+            assert_eq!(
+                run.events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::DieRolled {
+                            result: Some(1),
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
+    for extra_die in [false, true] {
+        for ingress in RANDOM_RESTORES {
+            let mut body = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    sides: 2,
+                    modifier: None,
+                    results: vec![
+                        DieResultBranch {
+                            min: 1,
+                            max: 1,
+                            effect: Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::DiscardCard {
+                                    count: 1,
+                                    target: TargetFilter::Controller,
+                                },
+                            )),
+                        },
+                        DieResultBranch {
+                            min: 2,
+                            max: 2,
+                            effect: Box::new(successor_body()),
+                        },
+                    ],
+                },
+            );
+            body.sub_ability = Some(result_life_tail());
+            let (mut run, source, other) = departure_random_run(body, false, extra_die);
+            let naturals = if extra_die {
+                vec![1_u8, 1, 2]
+            } else {
+                vec![1_u8, 2]
+            };
+            let seed = (0..100_000)
+                .find(|&seed| {
+                    let mut rng = GameRng::seed_from_u64(seed);
+                    naturals.iter().all(|&result| {
+                        rng.draw(RandomDraw::Outcome).random_range(1..=2_u8) == result
+                    })
+                })
+                .unwrap();
+            pin(&mut run.runner, seed);
+            if extra_die {
+                run.until(|state| matches!(state.waiting_for, WaitingFor::DieKeepChoice { .. }));
+                restore_random_pause(&mut run, ingress);
+                run.act(GameAction::SelectDieRolls {
+                    ignore_indices: vec![0],
+                });
+            } else {
+                run.until(|state| matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }));
+            }
+            assert!(matches!(
+                run.runner.state().waiting_for,
+                WaitingFor::DiscardChoice { .. }
+            ));
+            restore_random_pause(&mut run, ingress);
+            let WaitingFor::DiscardChoice { player, .. } = run.runner.state().waiting_for else {
+                panic!("first survivor must offer its discard")
+            };
+            assert_eq!(player, P0);
+            let card = run.runner.state().players[0].hand[0];
+            run.act(GameAction::SelectCards { cards: vec![card] });
+            run.finish();
+            assert_eq!(run.runner.state().players[0].life, 43);
+            assert_eq!(
+                moves(&run.events, source),
+                vec![
+                    (Some(Zone::Graveyard), Zone::Battlefield),
+                    (Some(Zone::Battlefield), Zone::Hand),
+                ],
+                "{ingress:?}, keep={extra_die}"
+            );
+            assert_eq!(run.runner.state().objects[&other].zone, Zone::Battlefield);
+            let rolls: Vec<_> = run
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::DieRolled {
+                        result: Some(value),
+                        ..
+                    } => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rolls, vec![1, 2]);
+        }
+    }
+}
+
+#[test]
+fn synthetic_thumb_selected_dice_publish_survivors_and_aggregate() {
+    for coin in [false, true] {
+        for interactive in [false, true] {
+            for ingress in RANDOM_RESTORES {
+                let branch = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    if interactive {
+                        Effect::DiscardCard {
+                            count: 1,
+                            target: TargetFilter::Controller,
+                        }
+                    } else {
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        }
+                    },
+                );
+                let mut dice = d1_body(2, branch);
+                dice.sub_ability = Some(result_life_tail());
+                let body = if coin {
+                    AbilityDefinition::new(AbilityKind::Spell, flip_to(dice))
+                } else {
+                    dice
+                };
+                let (mut run, source, other) = departure_random_run(body, coin, false);
+                let hand = run.runner.state().players[0].hand.len();
+                if coin {
+                    pin(&mut run.runner, coin_seed(&[true, false]));
+                    run.until(|state| {
+                        matches!(state.waiting_for, WaitingFor::CoinFlipKeepChoice { .. })
+                    });
+                    restore_random_pause(&mut run, ingress);
+                    run.keep(P0, true);
+                } else if interactive {
+                    run.until(|state| {
+                        matches!(state.waiting_for, WaitingFor::DiscardChoice { .. })
+                    });
+                }
+                if interactive {
+                    assert!(matches!(
+                        run.runner.state().waiting_for,
+                        WaitingFor::DiscardChoice { .. }
+                    ));
+                    if coin {
+                        assert_eq!(run.runner.state().die_result_this_resolution, Some(1));
+                    }
+                    restore_random_pause(&mut run, ingress);
+                    for _ in 0..2 {
+                        assert!(matches!(
+                            run.runner.state().waiting_for,
+                            WaitingFor::DiscardChoice { .. }
+                        ));
+                        let card = run.runner.state().players[0].hand[0];
+                        run.act(GameAction::SelectCards { cards: vec![card] });
+                    }
+                    assert_eq!(run.runner.state().players[0].hand.len(), hand - 2);
+                }
+                run.finish();
+                assert_eq!(
+                    run.runner.state().players[0].life,
+                    if interactive { 42 } else { 44 },
+                    "{coin}, {interactive}, {ingress:?}"
+                );
+                assert_eq!(
+                    run.events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            GameEvent::DieRolled {
+                                result: Some(1),
+                                ..
+                            }
+                        ))
+                        .count(),
+                    2
+                );
+                assert_eq!(run.runner.state().objects[&source].zone, Zone::Graveyard);
+                assert_eq!(run.runner.state().objects[&other].zone, Zone::Battlefield);
+                run.assert_flips(&if coin { vec![(P0, true)] } else { vec![] });
+            }
+        }
+    }
 }
 
 #[test]

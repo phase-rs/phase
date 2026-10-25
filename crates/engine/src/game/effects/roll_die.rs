@@ -8,7 +8,7 @@ use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, ResolvingTriggerContext, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -332,6 +332,20 @@ fn execute_roll(
         chain_root_targets,
     } = instruction;
 
+    // CR 608.2c + CR 400.7e: capture before a table child can change the live
+    // channels. Explicit emptiness excludes foreign input after a pause.
+    let trigger_context = if outcome.needs_choice() || !results_table.is_empty() {
+        Some(
+            ResolvingTriggerContext::capture(state).unwrap_or_else(|| ResolvingTriggerContext {
+                event: None,
+                events: Vec::new(),
+                match_count: None,
+                die_result: None,
+            }),
+        )
+    } else {
+        None
+    };
     let pending = PendingDieRoll {
         source_id,
         controller,
@@ -352,6 +366,7 @@ fn execute_roll(
         // path drops it alongside whatever the roller picks from the tie.
         forced_ignored: outcome.forced.clone(),
         chain_root_targets,
+        trigger_context,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -469,6 +484,8 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
 /// recoverable from the rules alone — re-deriving it could drop a different tied
 /// roll than the one already committed to. The re-parked frame carries the
 /// resolved set verbatim in `forced_ignored`, and this reuses it.
+///
+/// This captures coin keep and post-roll die suspensions entered with an owning live scope. Pre-roll PendingDieRollInstruction replacement-ordering pauses remain outside this change. A die roll started by a coin's continuation drain still loses its published per-survivor result at the drain's whole-snapshot restore (pre-existing, unchanged).
 pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Only a mid-loop re-park drains here; a pending CR 706.6 keep prompt must
     // stay parked for its own action handler, which is the only thing that knows
@@ -487,6 +504,10 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     // CR 706.4 + CR 608.2c: restore the instruction context; a completed
     // aggregate stays live until the parent's later instructions consume it.
     let prev_die_result = state.die_result_this_resolution;
+    let trigger_snapshot = pending
+        .trigger_context
+        .as_ref()
+        .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
     match resume_after_ignore(state, pending, ignore_indices, events) {
@@ -505,6 +526,11 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
         }
         Err(_) => state.die_result_this_resolution = prev_die_result,
     }
+    let exit_die = state.die_result_this_resolution;
+    if let Some(snapshot) = trigger_snapshot {
+        crate::game::triggers::restore_trigger_event_context(state, snapshot);
+    }
+    state.die_result_this_resolution = exit_die;
 }
 
 /// CR 706.6 + CR 614.1a: Finish a die-roll instruction once the ignored rolls
@@ -556,6 +582,7 @@ pub(crate) fn resume_after_ignore(
         // frame's own copy is only a carrier across the suspension.
         forced_ignored: _,
         chain_root_targets,
+        trigger_context,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -673,6 +700,7 @@ pub(crate) fn resume_after_ignore(
                     // roller committed to.
                     forced_ignored: ignore_indices.clone(),
                     chain_root_targets: chain_root_targets.clone(),
+                    trigger_context,
                 };
                 // CR 706.3a + CR 608.2c: the die owner waits outside the
                 // branch's entire child stack, not merely its top frame.
@@ -1565,6 +1593,7 @@ mod tests {
             rolled_any: false,
             forced_ignored: vec![],
             chain_root_targets: vec![],
+            trigger_context: None,
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();

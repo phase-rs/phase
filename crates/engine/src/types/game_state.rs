@@ -44708,22 +44708,68 @@ mod tests {
         }
 
         let pyromancer = ObjectId(50);
-        let position_in = |copy_chosen: bool, incarnation: u64, controller: PlayerId| {
+        let position_in = |kind: u8, buried: bool, incarnation: u64, controller: PlayerId| {
+            use crate::types::resolution::{
+                FlipBranchContext, PendingCoinFlip, PendingCoinFlipKind, PendingDieRoll,
+            };
             let mut state = GameState::new_two_player(7);
             let tapped = GameEvent::PermanentTapped {
                 object_id: pyromancer,
                 caused_by: None,
                 incarnation: Some(incarnation),
             };
-            state.resolution_stack.push_inner(if copy_chosen {
-                copy_chosen_frame(tapped)
-            } else {
-                optional_frame(vec![tapped])
+            let context = ResolvingTriggerContext {
+                event: (kind % 2 == 0).then(|| tapped.clone()),
+                events: if kind % 2 == 1 {
+                    vec![tapped.clone()]
+                } else {
+                    vec![]
+                },
+                match_count: None,
+                die_result: None,
+            };
+            state.resolution_stack.push_inner(match kind {
+                0 => optional_frame(vec![tapped]),
+                1 => copy_chosen_frame(tapped),
+                2 | 3 => ResolutionFrame::CoinFlip(PendingCoinFlip {
+                    source_id: ObjectId(5),
+                    controller: PlayerId(0),
+                    flipper: PlayerId(0),
+                    targets: vec![],
+                    win_effect: None,
+                    lose_effect: None,
+                    kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+                    chain_root_targets: vec![],
+                    branch_context: FlipBranchContext::default(),
+                    trigger_context: Some(context),
+                }),
+                4 | 5 => ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                    source_id: ObjectId(5),
+                    controller: PlayerId(0),
+                    roller: PlayerId(0),
+                    targets: vec![],
+                    sides: 6,
+                    results: vec![1, 2],
+                    ignore_rules: vec![],
+                    results_table: vec![],
+                    modifier: None,
+                    die_result: None,
+                    next_index: 1,
+                    running_total: 1,
+                    rolled_any: true,
+                    forced_ignored: vec![],
+                    chain_root_targets: vec![],
+                    trigger_context: Some(context),
+                })),
+                _ => unreachable!(),
             });
-            // The frame above buries the event-bearing one.
-            state
-                .resolution_stack
-                .push_inner(optional_frame(Vec::new()));
+            // Buried coin fixtures exercise traversal only; they are not
+            // resumable/persisted stacks with two direct-choice owners.
+            if buried {
+                state
+                    .resolution_stack
+                    .push_inner(optional_frame(Vec::new()));
+            }
             state
                 .lki_by_incarnation
                 .entry(pyromancer)
@@ -44732,11 +44778,14 @@ mod tests {
             state
         };
 
-        // The buried optional frame's plural events, then a buried copy-chosen
-        // walk's singular trigger event.
-        for copy_chosen in [false, true] {
+        // Singular/plural coin and die authority, active and buried, joins the
+        // existing optional/copy carrier normalization family.
+        for (kind, buried) in
+            (0..6).flat_map(|kind| [false, true].map(move |buried| (kind, buried)))
+        {
+            let copy_chosen = format!("kind={kind}, buried={buried}");
             let position =
-                |incarnation, controller| position_in(copy_chosen, incarnation, controller);
+                |incarnation, controller| position_in(kind, buried, incarnation, controller);
             let early = position(3, PlayerId(1));
             let late = position(91, PlayerId(1));
             assert_ne!(

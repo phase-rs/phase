@@ -121,9 +121,11 @@ pub fn build_resolved_from_def_with_targets_and_chain_root(
 /// Resolution-segment provenance updates do not update this carrier, and
 /// off-stack mana abilities read whatever carrier is installed.
 ///
-/// CR 400.7e: parked branches cannot use the event-dependent departure successor:
-/// `stack.rs` clears `current_trigger_event` when `resolve_top` ends, including
-/// pauses. Persisted provenance does not restore that event.
+/// CR 608.2c + CR 400.7e: fresh random-result frames retain and replay their
+/// suspension's owning trigger scope. `Some(empty)` clears foreign channels;
+/// legacy `None` does not push a scope or reconstruct missing authority.
+///
+/// This captures coin keep and post-roll die suspensions entered with an owning live scope. Pre-roll PendingDieRollInstruction replacement-ordering pauses remain outside this change. A die roll started by a coin's continuation drain still loses its published per-survivor result at the drain's whole-snapshot restore (pre-existing, unchanged).
 ///
 /// This policy is dice/coin-only. Sibling branch builders in `vote.rs`,
 /// `reveal_from_hand.rs`, and `exile_top_card_contest.rs` are untouched.
