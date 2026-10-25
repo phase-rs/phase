@@ -1149,9 +1149,10 @@ struct AcceptedOptionalMove {
 }
 
 impl AcceptedOptionalMove {
-    /// The accepted instruction must be a single `ChangeZone` to a public zone
-    /// whose immediately parked dependent is a `ParentTarget` return gated by
-    /// this acceptance. Anything else keeps its pre-existing behavior.
+    /// The accepted instruction must be a single `SelfRef` `ChangeZone` to a
+    /// public zone whose immediately parked dependent is a bare `ParentTarget`
+    /// return gated by this acceptance. Anything else keeps its pre-existing
+    /// behavior.
     fn qualify(state: &GameState, ability: &ResolvedAbility) -> Option<Self> {
         let Effect::ChangeZone {
             destination,
@@ -1161,6 +1162,12 @@ impl AcceptedOptionalMove {
         else {
             return None;
         };
+        // CR 608.2d: a resolution-time selection has not chosen its subject at
+        // this prompt. Restrict this binder to SelfRef, whose subject is
+        // already determined; other producers keep their existing route.
+        if !matches!(target, TargetFilter::SelfRef) {
+            return None;
+        }
         // CR 400.2: hand and library are hidden; battlefield arrivals have
         // their own explicit `forward_result` contract; stack and command
         // moves are not zone-move instructions of this class.
@@ -1191,20 +1198,15 @@ impl AcceptedOptionalMove {
         ) {
             return None;
         }
-        // The dependent instruction must be exactly the "return it" move that
-        // needs this producer's object, and it must not own a declared slot of
-        // its own (an independently announced target is not this result).
-        //
-        // No separate `sub_has_independent_object_target_slot` exclusion is
-        // needed for THIS node: every arm of that helper requires an effect
-        // that does not `effect_requires_parent_target_object` (its
-        // resolution-time `ChangeZone` arm additionally requires
-        // `!target.is_context_ref()`, and `ChooseOneOf` is a different effect
-        // entirely), while the filter matched here requires exactly that. The
-        // exclusion is unreachable by construction for this dependent node.
+        // CR 400.7j + CR 608.2c: only the bare "it" operand denotes this move's
+        // result. A declared ParentTargetSlot has its own root-slot authority;
+        // wrappers and other parent references are not this exact referent.
         if !matches!(
             &chain.effect,
-            Effect::ChangeZone { target, .. } if filter_requires_parent_target_object(target)
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
         ) {
             return None;
         }
@@ -1230,10 +1232,10 @@ impl AcceptedOptionalMove {
 ///
 /// The result is read only from this producer's event slice (`producer_events`),
 /// restricted to the occurrences it selected and its requested destination. A
-/// completed instruction that moved nothing publishes `Some(empty)`: the
-/// dependent return has no referent and does nothing, while an independent
-/// later sibling still resolves. An ineligible delivery (a replacement, or no
-/// completion witness) leaves the continuation to its pre-existing route.
+/// completed instruction that moved nothing consumes its immediate dependent
+/// return locally with `NoOp` and clears that node's forwarded context; an
+/// independent later sibling still resolves. An ineligible delivery (a
+/// replacement, or no completion witness) keeps its pre-existing route.
 ///
 /// NODE-LOCAL by construction: only this parked node's targets, pins and
 /// forwarded result are written. Its continuation edges are left untouched, so

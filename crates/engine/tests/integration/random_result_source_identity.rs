@@ -10,9 +10,10 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones;
 use engine::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, Effect, EffectOutcomeSignal,
-    ObjectScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-    SubAbilityLink, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, ControllerRef, Effect,
+    EffectOutcomeSignal, MultiTargetSpec, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
@@ -733,9 +734,10 @@ fn ral_flip(won: bool, accept: bool, blink: bool, targeted: bool) {
         matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
             || (state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }))
     });
-    // CR 608.2d: a winning flip must offer the printed optional instruction,
-    // including when the source has since left and returned. The offer is the
-    // existing no-op producer, not a claim that an impossible cost is payable.
+    // Deliberately exercise the existing prompt-policy limitation: a winning
+    // flip offers the optional instruction even after the source left and
+    // returned. CR 608.2d forbids impossible choices; it does not require this
+    // stale-source offer or establish that its cost can be paid.
     if won {
         assert!(
             matches!(
@@ -966,7 +968,7 @@ fn ral_loss_after_control_change_damages_the_trigger_controller() {
 }
 
 /// Synthetic coverage for the accepted-optional-move result handoff. The
-/// resolving ability is an activated instruction that declares the witness in
+/// resolving ability is an attack trigger that declares the witness in
 /// its root target slot, then flips a coin whose winning branch is the optional
 /// `SelfRef` move. Its stashed dependent is the `ParentTarget` return, followed
 /// by a separately printed tail. No printed-card claim is made for the
@@ -1005,7 +1007,213 @@ fn move_definition(
     )
 }
 
-/// H2/H4 synthetic: the resolving activated ability declares the witness in its
+/// R-F1: CR 608.2d + CR 400.7j: an untargeted subject is chosen while the
+/// instruction resolves; the later return must not mistake the pre-choice
+/// empty target list for a completed-empty move.
+#[test]
+fn synthetic_optional_resolution_time_move_returns_sole_eligible_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let mut producer = move_definition(
+        Zone::Exile,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        false,
+    );
+    producer.optional = true;
+    producer.target_choice_timing = TargetChoiceTiming::Resolution;
+    let mut dependent = move_definition(Zone::Battlefield, TargetFilter::ParentTarget, false);
+    dependent.sub_link = SubAbilityLink::SequentialSibling;
+    dependent.condition = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    let mut flip = AbilityDefinition::new(AbilityKind::Spell, flip_to(producer));
+    flip.sub_ability = Some(Box::new(dependent));
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(flip);
+    let source = scenario
+        .add_creature(P0, "Sole eligible resolution-time creature", 1, 3)
+        .with_trigger_definition(trigger)
+        .id();
+    let mut run = Run::new(scenario);
+    run.runner.advance_to_combat();
+    run.act(GameAction::DeclareAttackers {
+        attacks: vec![(source, AttackTarget::Player(P1))],
+        bands: vec![],
+    });
+    pin(&mut run.runner, coin_seed(&[true]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    let incarnation = run.runner.state().objects[&source].incarnation;
+    let start = run.events.len();
+    run.act(GameAction::DecideOptionalEffect { accept: true });
+    run.finish();
+    run.assert_flips(&[(P0, true)]);
+    assert_eq!(
+        moves(&run.events[start..], source),
+        vec![
+            (Some(Zone::Battlefield), Zone::Exile),
+            (Some(Zone::Exile), Zone::Battlefield),
+        ],
+        "the resolution-selected creature must be exiled AND returned"
+    );
+    assert_eq!(run.runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_ne!(run.runner.state().objects[&source].incarnation, incarnation);
+}
+
+/// R-F2: CR 115.1d + CR 608.2c: the immediate gated move names an announced
+/// root slot, not the optional producer's result. The live-source row also
+/// follows that witness with a later anaphoric move. The zero-card choice is
+/// legal (CR 608.2d); neither row needs an impossible stale-source option.
+fn optional_move_before_declared_slot_consumer(zero_cards: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let witness = scenario
+        .add_creature(P0, "Declared move witness", 0, 10)
+        .id();
+    let mut producer = if zero_cards {
+        let mut producer = move_definition(
+            Zone::Exile,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            false,
+        );
+        producer.target_choice_timing = TargetChoiceTiming::Resolution;
+        producer.multi_target = Some(MultiTargetSpec::fixed(0, 0));
+        producer
+    } else {
+        move_definition(Zone::Exile, TargetFilter::SelfRef, false)
+    };
+    producer.optional = true;
+    let mut dependent = move_definition(
+        Zone::Graveyard,
+        TargetFilter::ParentTargetSlot { index: 0 },
+        false,
+    );
+    dependent.sub_link = SubAbilityLink::SequentialSibling;
+    dependent.condition = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    if !zero_cards {
+        let mut anaphoric = move_definition(Zone::Hand, TargetFilter::ParentTarget, false);
+        anaphoric.sub_link = SubAbilityLink::SequentialSibling;
+        dependent.sub_ability = Some(Box::new(anaphoric));
+    }
+    let mut flip = AbilityDefinition::new(AbilityKind::Spell, flip_to(producer));
+    flip.sub_ability = Some(Box::new(dependent));
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    );
+    root.sub_ability = Some(Box::new(if zero_cards {
+        // A separately announced player slot keeps the optional branch free
+        // of inherited OBJECT targets without altering the witness in slot 0.
+        let mut player_step = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Player,
+            },
+        );
+        player_step.sub_ability = Some(Box::new(flip));
+        player_step
+    } else {
+        flip
+    }));
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(root);
+    let source = scenario
+        .add_creature(P0, "Optional producer before declared move", 1, 3)
+        .with_trigger_definition(trigger)
+        .id();
+    let mut run = Run::new(scenario);
+    run.runner.advance_to_combat();
+    run.act(GameAction::DeclareAttackers {
+        attacks: vec![(source, AttackTarget::Player(P1))],
+        bands: vec![],
+    });
+    run.until(target_prompt_open);
+    run.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(witness)),
+    });
+    if zero_cards {
+        assert!(target_prompt_open(run.runner.state()));
+        run.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        });
+    }
+    run.until(|state| {
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.iter().any(|entry| entry.source_id == source)
+    });
+    let declared = run
+        .runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .and_then(|entry| entry.ability())
+        .expect("the trigger is on the stack");
+    assert_eq!(declared.targets, vec![TargetRef::Object(witness)]);
+    pin(&mut run.runner, coin_seed(&[true]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    let start = run.events.len();
+    run.act(GameAction::DecideOptionalEffect { accept: true });
+    run.finish();
+    run.assert_flips(&[(P0, true)]);
+    let expected_witness_moves = if zero_cards {
+        vec![(Some(Zone::Battlefield), Zone::Graveyard)]
+    } else {
+        vec![
+            (Some(Zone::Battlefield), Zone::Graveyard),
+            (Some(Zone::Graveyard), Zone::Hand),
+        ]
+    };
+    assert_eq!(
+        moves(&run.events[start..], witness),
+        expected_witness_moves,
+        "the gated declared-slot move and any later anaphor must use the witness"
+    );
+    assert_eq!(
+        run.runner.state().objects[&witness].zone,
+        if zero_cards {
+            Zone::Graveyard
+        } else {
+            Zone::Hand
+        }
+    );
+    let expected_source_moves = if zero_cards {
+        vec![]
+    } else {
+        vec![(Some(Zone::Battlefield), Zone::Exile)]
+    };
+    assert_eq!(moves(&run.events[start..], source), expected_source_moves);
+    assert_eq!(
+        run.runner.state().objects[&source].zone,
+        if zero_cards {
+            Zone::Battlefield
+        } else {
+            Zone::Exile
+        }
+    );
+}
+
+#[test]
+fn synthetic_optional_zero_card_move_preserves_gated_declared_slot() {
+    optional_move_before_declared_slot_consumer(true);
+}
+
+#[test]
+fn synthetic_optional_self_move_preserves_gated_declared_slot_and_anaphor() {
+    optional_move_before_declared_slot_consumer(false);
+}
+
+/// H2/H4 synthetic: the resolving attack trigger declares the witness in its
 /// root target slot, then flips one coin. Its winning branch is the optional
 /// `SelfRef` move; the stashed dependent is the `ParentTarget` return followed
 /// by a separately printed tail. The dependent node therefore inherits the
@@ -1318,7 +1526,7 @@ fn replaced_optional_move_delivery(redirect: bool) {
     // Both routes leave the card on the battlefield, but only the unredirected
     // row is the binder's own-result path; the redirected row is the
     // pre-existing continuation route, which must still run (a wrongly-enabled
-    // binder publishes `Some(empty)` for the redirected delivery and `NoOp`s
+    // binder treats the redirected delivery as empty and `NoOp`s
     // the dependent return, stranding the card in exile).
     let object = &run.runner.state().objects[&source];
     assert_eq!(
