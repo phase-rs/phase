@@ -71,6 +71,7 @@ fn full_fidelity_populated_state() {
         .extend([PlayerId(1), P0]);
     let expected = serde_json::to_vec(&state).unwrap();
     let wire = WireState::from_game_state(&state).unwrap();
+    assert_eq!(wire.revision(), Some(state.state_revision));
     assert_eq!(wire.as_bytes(), expected);
     assert_eq!(round_trip(&wire, None).as_bytes(), expected);
 }
@@ -96,8 +97,9 @@ fn full_baseline_independence() {
                 "baseline reach guard"
             );
         }
-        let frame = encode(baseline, &current).unwrap();
-        assert_eq!(frame.to_bytes().unwrap(), expected_frame);
+        // FULL independence is a property of an explicitly requested FULL, not
+        // of every baseline-taking encode now that compatible inputs can DELTA.
+        let frame = Frame::from_bytes(&expected_frame).unwrap();
         for decoder_baseline in [None, Some(&prior), Some(&unrelated), Some(&wrong_viewer)] {
             assert_eq!(
                 decode(decoder_baseline, &frame).unwrap().as_bytes(),
@@ -172,7 +174,7 @@ fn envelope_rejects_missing_required_fields() {
 
 #[test]
 fn envelope_rejects_unknown_tag() {
-    rejects_with_valid_control(br#"{"type":"Delta","data":{"state":0}}"#);
+    rejects_with_valid_control(br#"{"type":"Unknown","data":{"state":0}}"#);
 }
 #[test]
 fn envelope_rejects_truncated_json() {
@@ -213,7 +215,7 @@ fn envelope_rejects_positional_and_non_object_forms() {
             "[1, 2]"
         );
     }
-    rejects_with_valid_control(br#"{"type":"\u0044elta","data":{"state":null}}"#);
+    rejects_with_valid_control(br#"{"type":"\u0055nknown","data":{"state":null}}"#);
     // Unknown valid fields stay tolerated, in either key order.
     for valid in [
         br#"{"type":"Full","data":{"state":null,"x":1},"extra":[1]}"#.as_slice(),
