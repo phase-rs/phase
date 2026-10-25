@@ -280,6 +280,30 @@ fn gaeas_liege_time_stop_restores_before_cleanup_discard() {
         assert!(outcome.events().iter().any(|event| matches!(event,
             GameEvent::EffectResolved { kind: EffectKind::EndTheTurn, source_id, .. }
                 if *source_id == time_stop)));
+        // The resolution driver stops at empty-stack priority. Two public
+        // passes re-enter cleanup's hand-size action; guard every observation
+        // so a later turn or incidental layer refresh cannot rescue this test.
+        for passes in 0..=2 {
+            assert_eq!(r.state().phase, Phase::Cleanup);
+            assert_eq!(r.state().active_player, P0);
+            assert_eq!(r.state().turn_number, turn);
+            assert!(r.state().stack.is_empty());
+            assert!(r.state().combat.is_none());
+            assert_eq!(r.state().players[0].hand.len(), hand.len());
+            assert!(hand.iter().all(|id| r.state().players[0].hand.contains(id)));
+            pt(&r, id, 4);
+            if matches!(r.state().waiting_for, WaitingFor::DiscardToHandSize { .. }) {
+                break;
+            }
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "unexpected cleanup window: {:?}",
+                r.state().waiting_for
+            );
+            assert!(passes < 2, "cleanup did not request mandatory discard");
+            r.act(GameAction::PassPriority)
+                .expect("pass priority to execute cleanup's hand-size action");
+        }
         match &r.state().waiting_for {
             WaitingFor::DiscardToHandSize {
                 player,
