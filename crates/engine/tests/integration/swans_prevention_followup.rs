@@ -136,6 +136,716 @@ const COMEUPPANCE_ORACLE: &str = "Prevent all damage that would be dealt to you 
 const ZURS_WEIRDING_ORACLE: &str = "Players play with their hands revealed.\nIf a player would draw a card, they reveal it instead. Then any other player may pay 2 life. If a player does, put that card into its owner's graveyard. Otherwise, that player draws a card.";
 const NEW_WAY_FORWARD_ORACLE: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
 
+/// CR 707.10 + CR 201.5 + CR 615.5: each actual spell copy is its own
+/// damage source. Keeping or changing a copied target never changes that source.
+#[test]
+fn real_twincast_birth_binds_the_new_spell_source_before_saved_retarget_and_swans() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::mana::ManaCost;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for change_target in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let swans = scenario
+            .add_creature_from_oracle(p3, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+            .controlled_by(p2)
+            .id();
+        let other_swans = scenario
+            .add_creature_from_oracle(p2, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+            .controlled_by(p3)
+            .id();
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let twincast = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Twincast",
+                true,
+                "Copy target instant or sorcery spell. You may choose new targets for the copy.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        for player in [P0, P1, p2, p3] {
+            scenario.with_library_top(player, &["First", "Second", "Third", "Fourth"]);
+        }
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&bolt].parse_warnings.is_empty());
+        assert!(matches!(
+            *runner.state().objects[&bolt].abilities[0].effect,
+            Effect::DealDamage { .. }
+        ));
+        assert!(runner.state().objects[&twincast].parse_warnings.is_empty());
+        assert!(matches!(
+            *runner.state().objects[&twincast].abilities[0].effect,
+            Effect::CopySpell { .. }
+        ));
+        let mut events = runner.act(GameAction::PassPriority).unwrap().events;
+        runner.cast(bolt).target_object(swans).commit();
+        let original_pin = runner
+            .state()
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .context
+            .source_identity
+            .unwrap();
+        assert_eq!(original_pin.reference.object_id, bolt);
+        assert_eq!(original_pin.expected_zone, Zone::Stack);
+        for _ in 0..3 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        events.extend(
+            runner
+                .cast(twincast)
+                .target_object(bolt)
+                .resolve()
+                .events()
+                .iter()
+                .cloned(),
+        );
+        let WaitingFor::CopyRetarget {
+            copy_id, player, ..
+        } = runner.state().waiting_for
+        else {
+            panic!(
+                "Twincast must produce its real retarget prompt: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert_ne!(copy_id, bolt);
+        assert_ne!(copy_id, twincast);
+        let copy_pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&copy_id]),
+            Zone::Stack,
+        );
+        let copy = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap()
+            .ability()
+            .unwrap();
+        assert_eq!(copy.source_id, copy_id);
+        assert_eq!(copy.context.source_identity, Some(copy_pin));
+        assert_eq!(
+            copy.source_incarnation,
+            Some(copy_pin.reference.incarnation)
+        );
+        assert_eq!(copy.targets, vec![TargetRef::Object(swans)]);
+        assert_ne!(copy_pin, original_pin);
+        let canonical = runner.state().clone();
+        for view in [
+            engine::game::visibility::filter_state_for_viewer(&canonical, P0),
+            engine::game::visibility::filter_state_for_viewer(&canonical, P1),
+            engine::game::visibility::filter_state_for_viewer(&canonical, p2),
+            engine::game::visibility::filter_state_for_unseated_viewer(&canonical),
+        ] {
+            assert_eq!(
+                view.stack
+                    .iter()
+                    .find(|entry| entry.id == copy_id)
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .context
+                    .source_identity,
+                Some(copy_pin)
+            );
+        }
+        assert_eq!(runner.state(), &canonical);
+        let saved = serde_json::to_string(&PersistedGameState::capture(canonical.clone())).unwrap();
+        let restored = serde_json::from_str::<PersistedGameState>(&saved)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        assert_eq!(restored, canonical);
+        runner = GameRunner::from_state(restored);
+        events.extend(
+            runner
+                .act(if change_target {
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(other_swans)),
+                    }
+                } else {
+                    GameAction::KeepAllCopyTargets
+                })
+                .unwrap()
+                .events,
+        );
+        for _ in 0..40 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                runner.state().waiting_for
+            );
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::SpellCopied { object_id, .. } if *object_id == copy_id)).count(), 1);
+        for (source, target) in [
+            (bolt, swans),
+            (copy_id, if change_target { other_swans } else { swans }),
+        ] {
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamagePrevented { source_id, target: TargetRef::Object(actual), amount: 3 } if *source_id == source && *actual == target)).count(), 1);
+        }
+        for player in [P0, P1] {
+            assert_eq!(runner.state().players[player.0 as usize].hand.len(), 3);
+        }
+        for player in [p2, p3] {
+            assert!(runner.state().players[player.0 as usize].hand.is_empty());
+        }
+        assert_eq!(runner.state().objects[&bolt].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&twincast].zone, Zone::Graveyard);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 707.10b + CR 113.7a + CR 608.2h: copying an activated ability
+/// preserves its departed source, including its original battlefield occurrence.
+#[test]
+fn real_lithoform_ability_copy_keeps_the_sacrificed_moggs_exact_source_at_saved_retarget() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::game_state::PersistedGameState;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let swans = scenario
+        .add_creature_from_oracle(p3, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+        .controlled_by(p2)
+        .id();
+    let mogg = scenario
+        .add_creature_from_oracle(P0, "Mogg Fanatic", 1, 1, MOGG_ORACLE)
+        .controlled_by(P1)
+        .id();
+    let lithoform = scenario.add_creature(P1, "Lithoform Engine", 0, 0).as_artifact().from_oracle_text(
+        "{2}, {T}: Copy target activated or triggered ability you control. You may choose new targets for the copy.\n{3}, {T}: Copy target instant or sorcery spell you control. You may choose new targets for the copy.\n{4}, {T}: Copy target permanent spell you control. (The copy becomes a token.)").id();
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
+    );
+    for player in [P0, P1, p2, p3] {
+        scenario.with_library_top(player, &["First", "Second", "Third"]);
+    }
+    let mut runner = scenario.build();
+    let original_pin = ObjectIdentityBinding::new(
+        ObjectIncarnationRef::from_object(&runner.state().objects[&mogg]),
+        Zone::Battlefield,
+    );
+    assert!(runner.state().objects[&lithoform].parse_warnings.is_empty());
+    assert!(matches!(
+        *runner.state().objects[&lithoform].abilities[0].effect,
+        Effect::CopySpell { .. }
+    ));
+    let mut events = runner.act(GameAction::PassPriority).unwrap().events;
+    events.extend(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: mogg,
+                ability_index: 0,
+            })
+            .unwrap()
+            .events,
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(swans)),
+            })
+            .unwrap()
+            .events,
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    assert_eq!(runner.state().objects[&mogg].zone, Zone::Graveyard);
+    assert_ne!(
+        runner.state().objects[&mogg].incarnation,
+        original_pin.reference.incarnation
+    );
+    let original_id = runner.state().stack.back().unwrap().id;
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .context
+            .source_identity,
+        Some(original_pin)
+    );
+    events.extend(
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: lithoform,
+                ability_index: 0,
+            })
+            .unwrap()
+            .events,
+    );
+    // The original Mogg ability is the sole legal controlled ability.
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .targets,
+        vec![TargetRef::Object(original_id)]
+    );
+    for _ in 0..12 {
+        if matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    let WaitingFor::CopyRetarget {
+        copy_id, player, ..
+    } = runner.state().waiting_for
+    else {
+        panic!("actual ability copy must offer retarget");
+    };
+    assert_eq!(player, P1);
+    assert_ne!(copy_id, original_id);
+    assert_ne!(copy_id, mogg);
+    for id in [original_id, copy_id] {
+        let entry = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap();
+        assert_eq!(entry.source_id, mogg);
+        let ability = entry.ability().unwrap();
+        assert_eq!(ability.source_id, mogg);
+        assert_eq!(ability.context.source_identity, Some(original_pin));
+        assert_eq!(
+            ability.source_incarnation,
+            Some(original_pin.reference.incarnation)
+        );
+        assert_eq!(ability.targets, vec![TargetRef::Object(swans)]);
+    }
+    let saved =
+        serde_json::to_string(&PersistedGameState::capture(runner.state().clone())).unwrap();
+    let restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .unwrap()
+        .into_game_state()
+        .unwrap();
+    assert_eq!(restored, *runner.state());
+    runner = GameRunner::from_state(restored);
+    events.extend(runner.act(GameAction::KeepAllCopyTargets).unwrap().events);
+    for _ in 0..40 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    for player in [P0, p2, p3] {
+        assert!(runner.state().players[player.0 as usize].hand.is_empty());
+    }
+    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, player_id: P1 } if *object_id == mogg)).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamagePrevented { source_id, target: TargetRef::Object(target), amount: 1 } if *source_id == mogg && *target == swans)).count(), 2);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 400.7j + CR 608.2h + CR 615.5: only the immediate forwarded instruction
+/// sources the returned occurrence. Its independent tail still sources the spell.
+#[test]
+fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, SubAbilityLink, TypedFilter,
+    };
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::mana::ManaCost;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for parked_move in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let returned = scenario
+            .add_creature_to_graveyard(P0, "Forwarded borrowed dealer", 2, 5)
+            .id();
+        let swans = scenario
+            .add_creature_from_oracle(p3, "Swans of Bryn Argoll", 4, 3, SWANS_ORACLE)
+            .controlled_by(p2)
+            .id();
+        for player in [P0, P1, p2, p3] {
+            scenario.with_library_top(player, &["First", "Second"]);
+        }
+        let mut damage = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+        );
+        damage.instruction_actor = Some(ControllerRef::SpecificPlayer { id: p3 }.into());
+        damage.optional = true;
+        let mut tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::OriginalController,
+            },
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        tail.instruction_actor = Some(ControllerRef::You.into());
+        damage.sub_ability = Some(Box::new(tail));
+        let mut root = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: returned },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::SpecificPlayer { id: P1 }),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        root.forward_result = true;
+        root.optional = parked_move;
+        root.sub_ability = Some(Box::new(damage));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic forwarded source", false)
+            .with_ability_definition(root)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let old = ObjectIncarnationRef::from_object(&runner.state().objects[&returned]);
+        let mut events = runner
+            .cast(spell)
+            .target_object(swans)
+            .commit()
+            .stop_at_optional()
+            .resolve()
+            .events()
+            .to_vec();
+        if parked_move {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert_eq!(runner.state().objects[&returned].zone, Zone::Graveyard);
+            events.extend(
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap()
+                    .events,
+            );
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == p3)
+        );
+        assert_eq!(runner.state().objects[&returned].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&returned].controller, P1);
+        let pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&returned]),
+            Zone::Battlefield,
+        );
+        assert_ne!(pin.reference, old);
+        let frame = runner.state().active_optional_effect_frame().unwrap();
+        assert_eq!(frame.ability.source_id, returned);
+        assert_eq!(frame.ability.context.source_identity, Some(pin));
+        assert_eq!(
+            frame.ability.source_incarnation,
+            Some(pin.reference.incarnation)
+        );
+        assert_eq!(frame.ability.controller, p3);
+        assert_eq!(frame.ability.original_controller, Some(P0));
+        assert_eq!(frame.ability.targets, vec![TargetRef::Object(swans)]);
+        assert_eq!(frame.ability.sub_ability.as_ref().unwrap().source_id, spell);
+        assert_eq!(
+            frame
+                .ability
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .instruction_actor,
+            Some(ControllerRef::You.into())
+        );
+        let saved =
+            serde_json::to_string(&PersistedGameState::capture(runner.state().clone())).unwrap();
+        let restored = serde_json::from_str::<PersistedGameState>(&saved)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        assert_eq!(restored, *runner.state());
+        runner = GameRunner::from_state(restored);
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap()
+                .events,
+        );
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                runner.state().waiting_for
+            );
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(runner.state().players[1].hand.len(), 1);
+        for player in [P0, p2, p3] {
+            assert!(runner.state().players[player.0 as usize].hand.is_empty());
+        }
+        assert_eq!(runner.life(P0), 22);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamagePrevented { source_id, target: TargetRef::Object(target), amount: 1 } if *source_id == returned && *target == swans)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), 1);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 608.2c + CR 615.5: Instead selects the instruction's general event
+/// separately from its valid actor and the parent's own-source occurrence.
+#[test]
+fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_saved_choice() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::{
+        AbilityCondition, ControllerRef, DamageTargetFilter, DamageTargetPlayerScope,
+        PreventionAmount, ReplacementDefinition, ReplacementEventContext, SubAbilityLink,
+    };
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::replacements::ReplacementEvent;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for missing in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let donor = scenario
+            .add_creature(P1, "Selected event source", 2, 5)
+            .controlled_by(p2)
+            .id();
+        let host = scenario
+            .add_enchantment_from_oracle(P0, "Synthetic Instead prevention", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let own = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&host]),
+            Zone::Battlefield,
+        );
+        let selected = ReplacementEventContext {
+            source_id: Some(donor),
+            source_identity: (!missing).then(|| {
+                ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&runner.state().objects[&donor]),
+                    Zone::Battlefield,
+                )
+            }),
+            event_target: Some(TargetRef::Player(p3)),
+        };
+        let mut sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::PostReplacementSourceController,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            host,
+            P0,
+        );
+        sub.instruction_actor = Some(ControllerRef::SpecificPlayer { id: p3 }.into());
+        sub.context.replacement_event = Some(selected.clone());
+        sub.condition = Some(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::IsYourTurn),
+        });
+        sub.optional = true;
+        let mut tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::OriginalController,
+            },
+            vec![],
+            host,
+            P0,
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        sub.sub_ability = Some(Box::new(tail));
+        let mut parent = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            host,
+            P0,
+        );
+        parent.source_incarnation = Some(own.reference.incarnation);
+        parent.context.source_identity = Some(own);
+        parent.sub_ability = Some(Box::new(sub));
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .damage_target_filter(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Specific(P1),
+            })
+            .runtime_execute(parent);
+        shield.consume_on_apply = true;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .replacement_definitions
+            .push(shield.clone());
+        std::sync::Arc::make_mut(
+            &mut runner
+                .state_mut()
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .base_replacement_definitions,
+        )
+        .push(shield);
+        let mut events = runner
+            .cast(spell)
+            .target_player(P1)
+            .commit()
+            .stop_at_optional()
+            .resolve()
+            .events()
+            .to_vec();
+        if !missing {
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == p3)
+            );
+            let frame = runner.state().active_optional_effect_frame().unwrap();
+            assert_eq!(
+                frame.ability.context.replacement_event.as_ref(),
+                Some(&selected)
+            );
+            assert_eq!(frame.ability.context.source_identity, Some(own));
+            assert_eq!(frame.ability.source_id, host);
+            assert_eq!(frame.ability.controller, p3);
+            assert_eq!(frame.ability.original_controller, Some(P0));
+            let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .unwrap();
+            let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, *runner.state());
+            runner = GameRunner::from_state(restored);
+            events.extend(
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap()
+                    .events,
+            );
+        }
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                runner.state().waiting_for
+            );
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(
+            runner.life(P0),
+            23,
+            "independent tail once, base instruction replaced"
+        );
+        assert_eq!(runner.life(P1), 20, "original damage was prevented");
+        assert_eq!(runner.life(p2), if missing { 20 } else { 18 });
+        assert_eq!(
+            runner.life(p3),
+            20,
+            "actor is not a source-relative recipient"
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamagePrevented { source_id, target: TargetRef::Player(P1), amount: 3 } if *source_id == spell)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(target), amount: 2, .. } if *source_id == host && *target == p2)).count(), usize::from(!missing));
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
 /// CR 608.2c + CR 109.5 + CR 615.5: contextual replacement subjects and
 /// independent printed "you" remain different actors. These explicitly
 /// synthetic admitted sentences expose the actor through CounterAdded.
@@ -144,11 +854,12 @@ fn replacement_subject_actors_are_separate_from_replacer_owner_and_independent_y
     use engine::types::counter::CounterType;
     let p2 = PlayerId(2);
     let p3 = PlayerId(3);
-    for family in 0..3 {
+    for family in 0..4 {
         let (oracle, replacer, actor) = match family {
             0 => ("If a player would gain life, instead that player puts a +1/+1 counter on this creature. You draw a card.", P0, p2),
             1 => ("If damage would be dealt to a player, prevent that damage and that player puts a +1/+1 counter on this creature. You draw a card.", P0, p2),
             2 => ("If a source would deal damage to this creature, prevent that damage. The source's controller puts a +1/+1 counter on this creature. You draw a card.", p2, P1),
+            3 => ("If an opponent would draw two or more cards, instead that player puts a +1/+1 counter on this creature. You draw a card.", P0, p2),
             _ => unreachable!(),
         };
         let mut scenario = GameScenario::new_n_player(4, 42);
@@ -170,6 +881,8 @@ fn replacement_subject_actors_are_separate_from_replacer_owner_and_independent_y
                     true,
                     if family == 0 {
                         "Target player gains 2 life."
+                    } else if family == 3 {
+                        "Target player draws two cards."
                     } else {
                         "Synthetic event source deals 1 damage to target player."
                     },
@@ -217,6 +930,166 @@ fn replacement_subject_actors_are_separate_from_replacer_owner_and_independent_y
             WaitingFor::Priority { .. }
         ));
     }
+}
+
+/// CR 121.1 + CR 614.6: Alms's two subjects name its controller and the
+/// original drawer, independently of the caster and the Collector's owner.
+#[test]
+fn real_alms_draw_replacement_keeps_you_and_the_original_drawer_separate() {
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for count in [1, 2] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let collector = scenario.add_creature_from_oracle(p3, "Alms Collector", 3, 4,
+            "Flash\nIf an opponent would draw two or more cards, instead you and that player each draw a card.").controlled_by(P0).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Synthetic incoming draw",
+                true,
+                if count == 1 {
+                    "Target player draws a card."
+                } else {
+                    "Target player draws two cards."
+                },
+            )
+            .id();
+        for player in [P0, P1, p2, p3] {
+            scenario.with_library_top(player, &["First", "Second", "Third"]);
+        }
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&collector].parse_warnings.is_empty());
+        assert_eq!(
+            runner.state().objects[&collector]
+                .replacement_definitions
+                .len(),
+            1
+        );
+        let top0 = *runner.state().players[0].library.front().unwrap();
+        let top2 = *runner.state().players[p2.0 as usize]
+            .library
+            .front()
+            .unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        let outcome = runner.cast(spell).target_player(p2).resolve();
+        outcome.assert_hand_drawn(P0, i64::from(count == 2));
+        outcome.assert_hand_drawn(p2, 1);
+        for player in [P1, p3] {
+            outcome.assert_hand_drawn(player, 0);
+        }
+        assert!(outcome.state().players[p2.0 as usize].hand.contains(&top2));
+        assert_eq!(
+            outcome.state().objects[&top0].zone,
+            if count == 2 {
+                Zone::Hand
+            } else {
+                Zone::Library
+            }
+        );
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CardDrawn { player_id, object_id, .. } if *player_id == p2 && *object_id == top2)).count(), 1);
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, object_id, .. } if *object_id == top0)).count(), usize::from(count == 2));
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 701.20a + CR 614.6 + CR 608.2c: Zur's actual reveal head supplies
+/// the replaced drawer actor before its patient is normalized. The following
+/// counters are explicitly synthetic observations of that retained actor.
+#[test]
+fn real_zur_reveal_subject_actor_survives_normalization_and_keeps_explicit_you_independent() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, ControllerRef, SubAbilityLink};
+    use engine::types::counter::CounterType;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    let parsed = engine::parser::parse_oracle_text(
+        ZURS_WEIRDING_ORACLE,
+        "Zur's Weirding",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert!(parsed.parse_warnings.is_empty());
+    assert_eq!(parsed.replacements.len(), 1);
+    let mut replacement = parsed.replacements[0].clone();
+    let mut reveal = *replacement.execute.take().unwrap();
+    assert!(matches!(
+        *reveal.effect,
+        Effect::RevealTop {
+            player: TargetFilter::PostReplacementDamageTarget,
+            count: 1
+        }
+    ));
+    let actor = reveal
+        .instruction_actor
+        .clone()
+        .expect("actual they-reveal subject remains explicit");
+    assert_eq!(
+        actor.as_event(),
+        Some(&TargetFilter::PostReplacementDamageTarget)
+    );
+    let counter = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+    };
+    let mut affected_counter = counter();
+    affected_counter.instruction_actor = Some(actor);
+    let mut you_counter = counter();
+    you_counter.instruction_actor = Some(ControllerRef::You.into());
+    you_counter.sub_link = SubAbilityLink::SequentialSibling;
+    affected_counter.sub_ability = Some(Box::new(you_counter));
+    reveal.sub_ability = Some(Box::new(affected_counter));
+    replacement.execute = Some(Box::new(reveal));
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_enchantment_from_oracle(p3, "Synthetic counters after real Zur reveal", "")
+        .controlled_by(P0)
+        .with_replacement_definition(replacement)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Synthetic original draw",
+            true,
+            "Target player draws a card.",
+        )
+        .id();
+    for player in [P0, P1, p2, p3] {
+        scenario.with_library_top(player, &["First", "Second"]);
+    }
+    let mut runner = scenario.build();
+    let original_card = *runner.state().players[p2.0 as usize]
+        .library
+        .front()
+        .unwrap();
+    let decoy = *runner.state().players[0].library.front().unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    let outcome = runner.cast(spell).target_player(p2).resolve();
+    assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CardsRevealed { player, card_ids, .. } if *player == p2 && card_ids == &vec![original_card])).count(), 1);
+    assert!(!outcome.events().iter().any(|event| matches!(event, GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&decoy))));
+    for actor in [P0, p2] {
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == host)).count(), 1);
+    }
+    outcome.assert_zone(&[original_card, decoy], Zone::Library);
+    for player in [P0, P1, p2, p3] {
+        outcome.assert_hand_drawn(player, 0);
+    }
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 615.5 + CR 108.3: the owner who shuffles a prevented combat-damage

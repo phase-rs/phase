@@ -294,8 +294,19 @@ pub(crate) fn push_copy_to_stack(
             object.cast_occurrence = None;
             object.spell_announcement = Some(announcement);
         }
+        // CR 707.10 + CR 201.5: the new spell sources itself. Ability copies
+        // instead retain the original source occurrence (CR 707.10b).
+        let source_identity = state.objects.get(&entry.id).map(|object| {
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(object),
+                object.zone,
+            )
+        });
         if let Some(ability) = entry.ability_mut() {
             ability.set_cast_occurrence_recursive(None);
+            if let Some(identity) = source_identity {
+                ability.capture_source_identity_recursive(identity);
+            }
         }
     }
     // CR 701.27f: an activated or triggered ability of a permanent may transform

@@ -34,6 +34,107 @@ const TRIBUTE_ORACLE: &str = "Whenever a creature you control enters, draw a car
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
 
+/// CR 608.2c + CR 109.5: the declared or carried grammatical player
+/// performs a conjugated continuation. A following imperative starts with "you".
+#[test]
+fn synthetic_declared_and_carried_owner_library_subjects_keep_their_counter_actor() {
+    use engine::types::ability::{ControllerRef, Effect};
+    use engine::types::player::PlayerId;
+    let p2 = PlayerId(2);
+    let p3 = PlayerId(3);
+    for owner_subject in [false, true] {
+        let text = if owner_subject {
+            "Target creature's owner shuffles it into their library, then puts a +1/+1 counter on target creature. Put a +1/+1 counter on target creature."
+        } else {
+            "Target player shuffles their library, then puts a +1/+1 counter on target creature. Put a +1/+1 counter on target creature."
+        };
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let borrowed = scenario
+            .add_creature(P1, "Borrowed library subject", 2, 5)
+            .controlled_by(p2)
+            .id();
+        let recipient = scenario
+            .add_creature(p3, "Independent counter recipient", 2, 5)
+            .controlled_by(p2)
+            .id();
+        let independent = scenario
+            .add_creature(p2, "Imperative counter recipient", 2, 5)
+            .controlled_by(p3)
+            .id();
+        scenario.with_library_top(P1, &["Subject first", "Subject second"]);
+        scenario.with_library_top(P0, &["Caster library decoy"]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic carried subject", false, text)
+            .id();
+        let mut runner = scenario.build();
+        assert!(
+            runner.state().objects[&spell].parse_warnings.is_empty(),
+            "{text}: {:?}",
+            runner.state().objects[&spell].parse_warnings
+        );
+        let definition = &runner.state().objects[&spell].abilities[0];
+        let mut node = Some(definition);
+        let mut actors = Vec::new();
+        while let Some(current) = node {
+            assert!(!matches!(*current.effect, Effect::Unimplemented { .. }));
+            if matches!(*current.effect, Effect::PutCounter { .. }) {
+                actors.push(
+                    current
+                        .instruction_actor
+                        .clone()
+                        .expect("each instruction has its own grammatical actor"),
+                );
+            }
+            node = current.sub_ability.as_deref();
+        }
+        assert_eq!(actors.len(), 2);
+        assert_ne!(actors[0], ControllerRef::You.into());
+        assert_eq!(actors[1], ControllerRef::You.into());
+        let cast = runner.cast(spell);
+        let outcome = if owner_subject {
+            cast.target_objects(&[borrowed, recipient, independent])
+                .resolve()
+        } else {
+            cast.target_player(P1)
+                .target_objects(&[recipient, independent])
+                .resolve()
+        };
+        for (actor, object) in [(P1, recipient), (P0, independent)] {
+            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1, "{text}");
+        }
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::PutCounter, source_id, .. } if *source_id == spell)).count(), 2);
+        assert_eq!(
+            outcome.state().objects[&borrowed].zone,
+            if owner_subject {
+                Zone::Library
+            } else {
+                Zone::Battlefield
+            }
+        );
+        if owner_subject {
+            assert!(outcome.state().players[1].library.contains(&borrowed));
+            assert!(!outcome.state().players[p2.0 as usize]
+                .library
+                .contains(&borrowed));
+        }
+        assert!(outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: P1,
+                action: engine::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )));
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
 fn hand_size(runner: &GameRunner, player: engine::types::player::PlayerId) -> usize {
     runner.state().players[player.0 as usize].hand.len()
 }

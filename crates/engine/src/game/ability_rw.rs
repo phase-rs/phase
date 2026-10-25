@@ -7550,9 +7550,40 @@ mod tests {
         );
         assert_eq!(ability_rw_profile(&base), RwProfile::empty());
         for actor in crate::types::ability::instruction_actor_test_refs() {
-            let mut expected = actor.classify(rw_controller_ref, rw_target_filter);
-            expected.legacy_batch_prompt =
-                actor.classify(legacy_controller_ref, legacy_target_filter);
+            // Independent exact domain table, including the distinction
+            // between live event information and per-source bound storage.
+            let (event, member, legacy) = actor.classify(
+                |reference| match reference {
+                    ControllerRef::ParentTargetController
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::EventTargetController
+                    | ControllerRef::TriggeringPlayer => (true, false, true),
+                    ControllerRef::SourceChosenPlayer | ControllerRef::EnchantedPlayer => {
+                        (false, true, false)
+                    }
+                    ControllerRef::You
+                    | ControllerRef::Opponent
+                    | ControllerRef::ScopedPlayer
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DeclaredPlayer { .. }
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::ChosenPlayer { .. }
+                    | ControllerRef::ActivePlayer
+                    | ControllerRef::SpecificPlayer { .. } => (false, false, false),
+                },
+                |reference| {
+                    (
+                        true,
+                        false,
+                        *reference == TargetFilter::TriggeringSpellController,
+                    )
+                },
+            );
+            let mut expected = RwProfile::empty();
+            expected.reads_event_live = event;
+            expected.reads_member_bound = member;
+            expected.legacy_batch_prompt = legacy;
             let mut resolved = base.clone();
             resolved.instruction_actor = Some(actor.clone());
             assert_eq!(ability_rw_profile(&resolved), expected, "{actor:?}");
@@ -7597,6 +7628,77 @@ mod tests {
         }
         assert!(rw_controller_ref(&ControllerRef::EventTargetController).reads_event_live);
         assert!(rw_controller_ref(&ControllerRef::SourceChosenPlayer).reads_member_bound);
+    }
+
+    /// CR 608.2h + CR 603.10a + CR 603.3b: owning event references retain
+    /// their read dependency for current, departed and owned-missing contexts.
+    #[test]
+    fn instruction_actor_event_contexts_keep_live_lki_and_reentry_conflicts() {
+        use crate::types::ability::{InstructionActorRef, ReplacementEventContext, TargetRef};
+        use crate::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+        use crate::types::zones::Zone;
+        let base = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        for reference in [
+            TargetFilter::PostReplacementSourceController,
+            TargetFilter::PostReplacementDamageTarget,
+            TargetFilter::PostReplacementDamageTargetOwner,
+        ] {
+            for owned in [
+                ReplacementEventContext::default(),
+                ReplacementEventContext {
+                    source_id: Some(ObjectId(2)),
+                    source_identity: Some(ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::of(ObjectId(2), 7),
+                        Zone::Battlefield,
+                    )),
+                    event_target: Some(TargetRef::Player(PlayerId(1))),
+                },
+                ReplacementEventContext {
+                    source_id: Some(ObjectId(2)),
+                    source_identity: Some(ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::of(ObjectId(2), 3),
+                        Zone::Stack,
+                    )),
+                    event_target: Some(TargetRef::Object(ObjectId(3))),
+                },
+            ] {
+                let mut actor = InstructionActorRef::event(reference.clone()).unwrap();
+                actor.capture_replacement_event(&owned);
+                let mut ability = base.clone();
+                ability.instruction_actor = Some(actor);
+                let mut profile = ability_rw_profile(&ability);
+                let mut exact = RwProfile::empty();
+                exact.reads_event_live = true;
+                assert_eq!(profile, exact);
+                assert!(
+                    !profiles_conflict(&profile, &batch_uniform()),
+                    "read-only positive"
+                );
+                profile.writes_reentry_hazard = true;
+                assert!(
+                    profiles_conflict(&profile, &batch_uniform()),
+                    "a new incarnation invalidates a live/exact-LKI authority proof"
+                );
+                profile.writes_reentry_hazard = false;
+                profile.writes_event_object = KindSet::one(StateKind::Other);
+                assert!(
+                    profiles_conflict(&profile, &se()),
+                    "event-object write feeds an event authority read"
+                );
+            }
+        }
+        for actor in [
+            None,
+            Some(ControllerRef::You.into()),
+            Some(ControllerRef::ScopedPlayer.into()),
+        ] {
+            let mut ability = base.clone();
+            ability.instruction_actor = actor;
+            let mut profile = ability_rw_profile(&ability);
+            assert_eq!(profile, RwProfile::empty());
+            profile.writes_reentry_hazard = true;
+            assert!(!profiles_conflict(&profile, &batch_uniform()));
+        }
     }
 
     #[test]

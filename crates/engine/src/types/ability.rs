@@ -36670,6 +36670,14 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 608.2h: a true source change discards only the old
+    /// own-source occurrence. Even a reused storage id can name a new object.
+    pub(crate) fn rebind_source(&mut self, source_id: ObjectId) {
+        self.source_id = source_id;
+        self.source_incarnation = None;
+        self.context.source_identity = None;
+    }
+
     /// CR 113.7a + CR 608.2h: capture the same source before costs can move it.
     /// Previously captured nodes and independently sourced children keep their authority.
     pub(crate) fn capture_source_identity_recursive(&mut self, identity: ObjectIdentityBinding) {
@@ -38451,6 +38459,52 @@ mod tests {
             .unwrap()
             .get("instruction_actor")
             .is_none());
+    }
+
+    /// CR 400.7 + CR 608.2h: source rebinding replaces only this node's own
+    /// occurrence; actor, owning event, targets and future children are independent.
+    #[test]
+    fn true_source_rebind_clears_only_own_occurrence_even_when_storage_id_is_reused() {
+        let source = ObjectId(91);
+        let pin = ObjectIdentityBinding::new(ObjectIncarnationRef::of(source, 7), Zone::Stack);
+        let event = ReplacementEventContext {
+            source_id: Some(ObjectId(92)),
+            source_identity: Some(ObjectIdentityBinding::new(
+                ObjectIncarnationRef::of(ObjectId(92), 3),
+                Zone::Battlefield,
+            )),
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        for actor in instruction_actor_test_refs() {
+            let mut original = ResolvedAbility::new(
+                Effect::NoOp,
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            );
+            original.source_incarnation = Some(7);
+            original.context.source_identity = Some(pin);
+            original.context.replacement_event = Some(event.clone());
+            original.instruction_actor = Some(actor);
+            original.original_controller = Some(PlayerId(1));
+            original.chosen_x = Some(6);
+            original.sub_ability = Some(Box::new(original.clone()));
+            original.else_ability = Some(Box::new(original.clone()));
+            for rebound_id in [source, ObjectId(93)] {
+                let mut rebound = original.clone();
+                rebound.rebind_source(rebound_id);
+                assert_eq!(rebound.source_id, rebound_id);
+                assert_eq!(rebound.source_incarnation, None);
+                assert_eq!(rebound.context.source_identity, None);
+                let mut expected = original.clone();
+                expected.source_id = rebound_id;
+                expected.source_incarnation = None;
+                expected.context.source_identity = None;
+                assert_eq!(rebound, expected, "all unrelated authority remains exact");
+                assert_eq!(rebound.sub_ability, original.sub_ability);
+                assert_eq!(rebound.else_ability, original.else_ability);
+            }
+        }
     }
 
     #[test]

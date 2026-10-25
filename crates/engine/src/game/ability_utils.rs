@@ -16910,6 +16910,56 @@ mod tests {
 
         let swapped = apply_instead_swap(&parent, &sub);
 
+        // CR 608.2c + CR 615.5: selected instruction actor and general event
+        // are independent from the parent's preserved own-source/runtime facts.
+        let own = crate::types::identifiers::ObjectIdentityBinding::new(
+            ObjectIncarnationRef::of(parent.source_id, 7),
+            crate::types::zones::Zone::Stack,
+        );
+        let parent_event = crate::types::ability::ReplacementEventContext {
+            source_id: Some(ObjectId(80)),
+            source_identity: None,
+            event_target: Some(TargetRef::Player(PlayerId(0))),
+        };
+        let selected_event = crate::types::ability::ReplacementEventContext {
+            source_id: Some(ObjectId(81)),
+            source_identity: None,
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            for event in [None, Some(selected_event.clone()), Some(Default::default())] {
+                let mut runtime_parent = parent.clone();
+                runtime_parent.source_incarnation = Some(7);
+                runtime_parent.context.source_identity = Some(own);
+                runtime_parent.context.replacement_event = Some(parent_event.clone());
+                runtime_parent.original_controller = Some(PlayerId(1));
+                runtime_parent.chosen_x = Some(4);
+                runtime_parent.context.granting_object =
+                    Some(ObjectIncarnationRef::of(ObjectId(82), 3));
+                let mut selected = sub.clone();
+                selected.rebind_source(ObjectId(99));
+                selected.context.replacement_event = event.clone();
+                selected.instruction_actor = Some(actor.clone());
+                let result = apply_instead_swap(&runtime_parent, &selected);
+                assert_eq!(result.context.source_identity, Some(own));
+                assert_eq!(result.source_id, runtime_parent.source_id);
+                assert_eq!(result.source_incarnation, Some(7));
+                assert_eq!(
+                    result.context.replacement_event,
+                    event.or_else(|| Some(parent_event.clone()))
+                );
+                assert_eq!(result.instruction_actor, Some(actor.clone()));
+                assert_eq!(result.controller, runtime_parent.controller);
+                assert_eq!(result.original_controller, Some(PlayerId(1)));
+                assert_eq!(result.chosen_x, Some(4));
+                assert_eq!(result.targets, runtime_parent.targets);
+                assert_eq!(
+                    result.context.granting_object,
+                    runtime_parent.context.granting_object
+                );
+            }
+        }
+
         // Effect-shape fields come from sub.
         assert!(
             matches!(swapped.effect, Effect::Draw { .. }),
@@ -17147,6 +17197,41 @@ mod tests {
     /// collapse into one instruction, which is exactly what a mode-boundary
     /// consumer must not see. The `[0, 1, 2]` arm cannot distinguish the two
     /// keyings (index == ordinal there), which is why the repeat arm is here.
+    /// SHAPE companion to ordinary selected-branch/Instead/copy scenarios:
+    /// actual selected-mode construction retains all twenty node authorities.
+    #[test]
+    fn selected_mode_materialization_retains_all_twenty_actors_on_owned_nodes() {
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut mode = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            mode.instruction_actor = Some(actor.clone());
+            let mut child = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            child.instruction_actor = Some(ControllerRef::You.into());
+            let mut otherwise = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+            otherwise.instruction_actor =
+                Some(ControllerRef::SpecificPlayer { id: PlayerId(1) }.into());
+            mode.sub_ability = Some(Box::new(child));
+            mode.else_ability = Some(Box::new(otherwise));
+            let defs = [mode];
+            let actual = build_chained_resolved(&defs, &[0, 0], ObjectId(1), PlayerId(0)).unwrap();
+            let first_child = actual.sub_ability.as_deref().unwrap();
+            let second = first_child.sub_ability.as_deref().unwrap();
+            for (ordinal, node) in [&actual, second].into_iter().enumerate() {
+                assert_eq!(node.instruction_actor.as_ref(), Some(&actor));
+                assert_eq!(node.modal_instruction_ordinal, Some(ordinal));
+                assert_eq!(
+                    node.sub_ability.as_ref().unwrap().instruction_actor,
+                    Some(ControllerRef::You.into())
+                );
+                assert_eq!(
+                    node.else_ability.as_ref().unwrap().instruction_actor,
+                    Some(ControllerRef::SpecificPlayer { id: PlayerId(1) }.into())
+                );
+                assert!(node.context.replacement_event.is_none());
+            }
+            assert_eq!(defs[0].instruction_actor.as_ref(), Some(&actor));
+        }
+    }
+
     #[test]
     fn build_chained_resolved_stamps_occurrence_ordinals_not_printed_indices() {
         let mode = |effect| AbilityDefinition::new(AbilityKind::Spell, effect);

@@ -1009,14 +1009,14 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
     }
 }
 
-/// CR 707.10b: A copy is a new object; rewrite `source_id` on every link of
+/// CR 707.10 + CR 201.5: A spell copy is a new object; rewrite its source on every link of
 /// the resolved ability chain (the top-level effect plus its `sub_ability` /
 /// `else_ability` descendants) so a `SelfRef` anywhere in the chain resolves
 /// to the copy. Mirrors `set_resolved_controller_recursive`. Without this, the
 /// Chain cycle's nested optional `CopySpell` would keep the original spell's
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
-    ability.source_id = source_id;
+    ability.rebind_source(source_id);
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         set_resolved_source_recursive(sub_ability, source_id);
     }
@@ -1026,9 +1026,9 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
 }
 
 /// CR 707.10 + CR 707.10b: Normalize a copied activated/triggered ability.
-/// The copy keeps the original ability's source (unlike a spell copy, which
-/// sources itself), so this only re-stamps `source_id` uniformly through the
-/// chain — but it must ALSO clear `noted_mana_payment` (issue #6504):
+/// The copy keeps every node's original source and exact occurrence, including
+/// a source that departed while paying costs. It only clears
+/// `noted_mana_payment` (issue #6504):
 /// CR 707.10 says a copy of an activated ability is not itself activated, so
 /// it never paid a mana cost. A naive struct clone otherwise carries the
 /// ORIGINAL activation's payment snapshot along for the ride, and
@@ -1036,8 +1036,6 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
 /// ability copied via Rings of Brighthearth or similar) would falsely note
 /// mana colors the copy never paid.
 fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
-    let source_id = ability.source_id;
-    set_resolved_source_recursive(ability, source_id);
     ability.clear_noted_mana_payment_recursive();
 }
 
@@ -1105,6 +1103,252 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+
+    /// CR 707.10 + CR 707.10b: new spells replace every own-source pin, while
+    /// ability copies retain each original node's authority after departure.
+    #[test]
+    fn copy_source_materializers_preserve_all_twenty_actor_and_event_authorities() {
+        use crate::types::ability::ReplacementEventContext;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        let p0 = PlayerId(0);
+        let copy_id = ObjectId(800);
+        let event = ReplacementEventContext {
+            source_id: Some(ObjectId(900)),
+            source_identity: Some(ObjectIdentityBinding::new(
+                ObjectIncarnationRef::of(ObjectId(900), 4),
+                Zone::Battlefield,
+            )),
+            event_target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let node = |id, epoch| {
+                let mut node = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(id), p0);
+                node.source_incarnation = Some(epoch);
+                node.context.source_identity = Some(ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::of(ObjectId(id), epoch),
+                    Zone::Battlefield,
+                ));
+                node.context.replacement_event = Some(event.clone());
+                node.context.granting_object = Some(ObjectIncarnationRef::of(ObjectId(901), 2));
+                node.instruction_actor = Some(actor.clone());
+                node
+            };
+            let mut original = node(700, 5);
+            original.sub_ability = Some(Box::new(node(701, 6)));
+            original.else_ability = Some(Box::new(node(702, 7)));
+            let mut ability_copy = original.clone();
+            preserve_ability_copy_source_recursive(&mut ability_copy);
+            assert_eq!(
+                ability_copy, original,
+                "absent payment requires no other reset"
+            );
+
+            let mut spell_copy = original.clone();
+            set_resolved_source_recursive(&mut spell_copy, copy_id);
+            for node in [
+                &spell_copy,
+                spell_copy.sub_ability.as_deref().unwrap(),
+                spell_copy.else_ability.as_deref().unwrap(),
+            ] {
+                assert_eq!(node.source_id, copy_id);
+                assert_eq!(node.source_incarnation, None);
+                assert_eq!(node.context.source_identity, None);
+                assert_eq!(node.context.replacement_event.as_ref(), Some(&event));
+                assert_eq!(
+                    node.context.granting_object,
+                    Some(ObjectIncarnationRef::of(ObjectId(901), 2))
+                );
+                assert_eq!(node.instruction_actor.as_ref(), Some(&actor));
+            }
+            let mut state = GameState::new_two_player(42);
+            let copy = GameObject::new(copy_id, CardId(1), p0, "Copy".into(), Zone::Stack);
+            let pin =
+                ObjectIdentityBinding::new(ObjectIncarnationRef::from_object(&copy), Zone::Stack);
+            state.objects.insert(copy_id, copy);
+            crate::game::stack::push_copy_to_stack(
+                &mut state,
+                StackEntry {
+                    id: copy_id,
+                    source_id: copy_id,
+                    controller: p0,
+                    kind: StackEntryKind::Spell {
+                        card_id: CardId(1),
+                        ability: Some(Box::new(spell_copy)),
+                        casting_variant: CastingVariant::default(),
+                        actual_mana_spent: 0,
+                    },
+                },
+                None,
+                &mut Vec::new(),
+            );
+            let born = state.stack.back().unwrap().ability().unwrap();
+            for node in [
+                born,
+                born.sub_ability.as_deref().unwrap(),
+                born.else_ability.as_deref().unwrap(),
+            ] {
+                assert_eq!(node.context.source_identity, Some(pin));
+                assert_eq!(node.source_incarnation, Some(pin.reference.incarnation));
+                assert_eq!(node.instruction_actor.as_ref(), Some(&actor));
+                assert_eq!(node.context.replacement_event.as_ref(), Some(&event));
+            }
+        }
+    }
+
+    /// CR 702.50a + CR 707.10: an actual upkeep copy has a new source;
+    /// its stored Epic prototype remains a historical, independently pinned spell.
+    #[test]
+    fn enduring_ideal_real_cast_and_upkeep_copy_bind_distinct_stack_occurrences() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario
+            .add_spell_to_library_top(P0, "First enchantment", false)
+            .as_enchantment()
+            .id();
+        let second = scenario
+            .add_spell_to_library_top(P0, "Second enchantment", false)
+            .as_enchantment()
+            .id();
+        scenario.with_library_top(P1, &["P1 first", "P1 second", "P1 third"]);
+        let ideal = scenario.add_spell_to_hand(P0, "Enduring Ideal", false)
+            .from_oracle_text_with_keywords(&["Epic"],
+                "Search your library for an enchantment card, put it onto the battlefield, then shuffle.\nEpic (For the rest of the game, you can't cast spells. At the beginning of each of your upkeeps, copy this spell except for its epic ability.)")
+            .with_mana_cost(ManaCost::zero()).id();
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&ideal].parse_warnings.is_empty());
+        assert!(runner.state().objects[&ideal]
+            .keywords
+            .contains(&Keyword::Epic));
+        let mut events = runner.cast(ideal).resolve().events().to_vec();
+        let WaitingFor::SearchChoice {
+            player, ref cards, ..
+        } = runner.state().waiting_for
+        else {
+            panic!("real initial search must prompt");
+        };
+        assert_eq!(player, P0);
+        assert!(cards.contains(&first) && cards.contains(&second));
+        events.extend(
+            runner
+                .act(GameAction::SelectCards { cards: vec![first] })
+                .unwrap()
+                .events,
+        );
+        for _ in 0..12 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                runner.state().waiting_for
+            );
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&ideal].zone, Zone::Graveyard);
+        assert_eq!(runner.state().epic_effects.len(), 1);
+        let prototype = runner.state().epic_effects[0].clone();
+        let original_pin = prototype.spell.context.source_identity.unwrap();
+        assert_eq!(original_pin.reference.object_id, ideal);
+        assert_eq!(original_pin.expected_zone, Zone::Stack);
+        let mut produced_copy = None;
+        for _ in 0..160 {
+            if let Some(entry) = runner.state().stack.iter().find(|entry| {
+                entry.id != ideal && matches!(entry.kind, StackEntryKind::Spell { .. })
+            }) {
+                produced_copy = Some(entry.id);
+                break;
+            }
+            let result = match runner.state().waiting_for {
+                WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+                WaitingFor::DeclareAttackers { .. } => runner.declare_attackers(&[]),
+                WaitingFor::DeclareBlockers { .. } => runner.declare_blockers(&[]),
+                ref other => panic!("unexpected phase prompt {other:?}"),
+            }
+            .unwrap();
+            events.extend(result.events);
+        }
+        let copy_id = produced_copy.expect("the actual upkeep must produce its spell copy");
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        let copy_pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&runner.state().objects[&copy_id]),
+            Zone::Stack,
+        );
+        let copy = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap()
+            .ability()
+            .unwrap();
+        assert_eq!(copy.source_id, copy_id);
+        assert_eq!(
+            copy.source_incarnation,
+            Some(copy_pin.reference.incarnation)
+        );
+        assert_eq!(copy.context.source_identity, Some(copy_pin));
+        assert_ne!(copy_pin, original_pin);
+        assert_eq!(runner.state().epic_effects[0], prototype);
+        assert!(!runner.state().objects[&copy_id]
+            .keywords
+            .contains(&Keyword::Epic));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::SpellCast { .. }))
+                .count(),
+            1
+        );
+        for _ in 0..12 {
+            if matches!(runner.state().waiting_for, WaitingFor::SearchChoice { .. }) {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        let WaitingFor::SearchChoice {
+            player, ref cards, ..
+        } = runner.state().waiting_for
+        else {
+            panic!("the actual Epic copy must search");
+        };
+        assert_eq!(player, P0);
+        assert_eq!(cards, &vec![second]);
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![second],
+                })
+                .unwrap()
+                .events,
+        );
+        for _ in 0..12 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        assert_eq!(runner.state().epic_effects.len(), 1);
+        assert_eq!(runner.state().epic_effects[0], prototype);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::SpellCopied { object_id, .. } if *object_id == copy_id)).count(), 1);
+    }
 
     /// Helper: push a spell onto the stack with a matching GameObject.
     fn push_spell(

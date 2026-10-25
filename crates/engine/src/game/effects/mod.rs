@@ -993,13 +993,19 @@ fn rebind_child_to_forwarded_objects(
         TargetRef,
         Option<crate::types::identifiers::ObjectIncarnationRef>,
     )],
-    moved: &[ObjectId],
+    result: &ForwardedResultContext,
 ) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
     bind_forwarded_generic_self_ref(child);
+    let moved: Vec<_> = result
+        .object_incarnations
+        .iter()
+        .map(|pin| pin.object_id)
+        .collect();
     if moved.is_empty() {
         return Vec::new();
     }
-    let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
+    let attachment_candidates =
+        attach::attachment_candidates_from_zone_change(state, child, &moved);
     // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
     // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
     // rebinding `source_id` to the just-moved permanent would make
@@ -1012,20 +1018,32 @@ fn rebind_child_to_forwarded_objects(
     // ability's source. Its ParentTarget anaphora read the separate
     // forwarded-result context at delayed-trigger creation.
     if !matches!(child.effect, Effect::CreateDelayedTrigger { .. }) {
-        child.source_id = moved[0];
+        child.rebind_source(moved[0]);
         // CR 400.7j: this forwarded instruction names the moved object in its
         // new zone. Its own-source pin must agree with that changed source,
         // while the creating trigger and owning replacement event stay separate.
-        child.context.source_identity = state.objects.get(&moved[0]).map(|object| {
-            crate::types::identifiers::ObjectIdentityBinding::new(
-                crate::types::identifiers::ObjectIncarnationRef::from_object(object),
-                object.zone,
-            )
-        });
-        child.source_incarnation = child
-            .context
-            .source_identity
-            .map(|identity| identity.reference.incarnation);
+        let reference = result.object_incarnations[0];
+        child.source_incarnation = Some(reference.incarnation);
+        // CR 400.7j + CR 608.2h: a parked result retains its producer-time
+        // occurrence. A later current row with the same id cannot replace it.
+        let expected_zone = state
+            .objects
+            .get(&reference.object_id)
+            .filter(|object| object.incarnation == reference.incarnation)
+            .map(|object| object.zone)
+            .or_else(|| {
+                state
+                    .zone_changes_this_turn
+                    .iter()
+                    .rev()
+                    .find_map(|record| {
+                        (record.object_id == reference.object_id
+                            && record.entered_incarnation == Some(reference.incarnation))
+                        .then_some(record.to_zone)
+                    })
+            });
+        child.context.source_identity = expected_zone
+            .map(|zone| crate::types::identifiers::ObjectIdentityBinding::new(reference, zone));
     }
     if let Effect::Attach { target, .. } = &child.effect {
         let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
@@ -1098,13 +1116,8 @@ fn bind_moved_objects_to_child(
     )],
     result: ForwardedResultContext,
 ) {
-    let moved: Vec<ObjectId> = result
-        .object_incarnations
-        .iter()
-        .map(|pin| pin.object_id)
-        .collect();
     let attachment_candidates =
-        rebind_child_to_forwarded_objects(state, child, producer, producer_targets, &moved);
+        rebind_child_to_forwarded_objects(state, child, producer, producer_targets, &result);
     bind_forwarded_zone_result(child, result, attachment_candidates);
 }
 
@@ -19875,12 +19888,13 @@ fn resolve_chain_body(
             );
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
+            let result = ForwardedResultContext::from_object_ids(state, &forwarded_objects);
             let attachment_candidates = rebind_child_to_forwarded_objects(
                 state,
                 &mut sub_with_context,
                 ability.source_id,
                 &ability.target_occurrences(),
-                &forwarded_objects,
+                &result,
             );
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -19892,11 +19906,7 @@ fn resolve_chain_body(
             // from ordinary declared targets. A nested producer replaces this
             // value after its own parent context has been applied; `Some([])`
             // deliberately records a completed zero-object move.
-            bind_forwarded_zone_result(
-                &mut sub_with_context,
-                ForwardedResultContext::from_object_ids(state, &forwarded_objects),
-                attachment_candidates,
-            );
+            bind_forwarded_zone_result(&mut sub_with_context, result, attachment_candidates);
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -22276,6 +22286,504 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::ability::SpentColor;
+
+    /// CR 608.2c + CR 615.5: all four closed Event actors enter the existing
+    /// random/coordinator boundaries through a real prevented-damage dispatch.
+    #[test]
+    fn instruction_actor_event_dispatch_admits_random_sacrifice_and_aggregate_before_work() {
+        use crate::types::ability::{
+            CardSelectionMode, DamageTargetFilter, DamageTargetPlayerScope, InstructionActorRef,
+            PlayerChoiceDistinctness, PreventionAmount, ReplacementDefinition,
+            ReplacementEventContext,
+        };
+        use crate::types::identifiers::ObjectIdentityBinding;
+        use crate::types::replacements::ReplacementEvent;
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        for family in 0..4 {
+            for reference in [
+                TargetFilter::TriggeringSpellController,
+                TargetFilter::PostReplacementSourceController,
+                TargetFilter::PostReplacementDamageTarget,
+                TargetFilter::PostReplacementDamageTargetOwner,
+            ] {
+                for missing in [false, true] {
+                    let mut scenario = GameScenario::new_n_player(4, 42);
+                    scenario.at_phase(Phase::PreCombatMain);
+                    let scope = marked_instruction_scope(&mut scenario, &[P1, p2]);
+                    let pools = [
+                        [
+                            scenario.add_creature(P1, "P1 A", 1, 5).id(),
+                            scenario.add_creature(P1, "P1 B", 1, 5).id(),
+                        ],
+                        [
+                            scenario.add_creature(p2, "P2 A", 1, 5).id(),
+                            scenario.add_creature(p2, "P2 B", 1, 5).id(),
+                        ],
+                    ];
+                    scenario.add_creature(p3, "P3 payable", 1, 5);
+                    let graveyards = [
+                        scenario
+                            .add_creature_to_graveyard(P1, "P1 random card", 1, 1)
+                            .id(),
+                        scenario
+                            .add_creature_to_graveyard(p2, "P2 random card", 1, 1)
+                            .id(),
+                    ];
+                    let host = scenario
+                        .add_enchantment_from_oracle(P0, "Synthetic Event admission host", "")
+                        .id();
+                    let spell = scenario
+                        .add_spell_to_hand_from_oracle(
+                            P1,
+                            "Lightning Bolt",
+                            true,
+                            "Lightning Bolt deals 3 damage to any target.",
+                        )
+                        .id();
+                    let mut def = match family {
+                        0 => AbilityDefinition::new(AbilityKind::Spell, Effect::Choose {
+                            choice_type: ChoiceType::Opponent { restriction: Some(Box::new(scope.clone())), distinctness: PlayerChoiceDistinctness::Independent },
+                            persist: true, selection: TargetSelectionMode::Random,
+                        }),
+                        1 => AbilityDefinition::new(AbilityKind::Spell, Effect::ChooseFromZone {
+                            count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::Controller,
+                            filter: None, chooser: ZoneChoiceChooser::Controller, candidate_source: ZoneChoiceCandidateSource::Direct,
+                            reciprocal_role: None, up_to: false, constraint: None, selection: CardSelectionMode::Random,
+                        }),
+                        2 => {
+                            let mut sacrifice = AbilityDefinition::new(AbilityKind::Spell, Effect::Sacrifice {
+                                target: TargetFilter::Typed(TypedFilter::creature()), count: QuantityExpr::Fixed { value: 1 }, min_count: 1,
+                            });
+                            sacrifice.player_scope = Some(scope.clone());
+                            sacrifice
+                        }
+                        3 => crate::parser::oracle_effect::parse_effect_chain(
+                            "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.", AbilityKind::Spell,
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let mut tail = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::OriginalController,
+                        },
+                    );
+                    tail.sub_link = SubAbilityLink::SequentialSibling;
+                    if family == 1 {
+                        let mut delivery = AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::ChangeZone {
+                                origin: Some(Zone::Graveyard),
+                                destination: Zone::Hand,
+                                target: TargetFilter::ParentTarget,
+                                owner_library: false,
+                                enter_transformed: false,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                up_to: false,
+                                enter_with_counters: vec![],
+                                conditional_enter_with_counters: vec![],
+                                face_down_profile: None,
+                                enters_modified_if: None,
+                            },
+                        );
+                        delivery.sub_ability = Some(Box::new(tail));
+                        def.sub_ability = Some(Box::new(delivery));
+                    } else {
+                        def.sub_ability = Some(Box::new(tail));
+                    }
+                    let actor = InstructionActorRef::event(reference.clone()).unwrap();
+                    def.instruction_actor = Some(actor);
+                    let mut runtime = super::ability_utils::build_resolved_from_def(&def, host, P0);
+                    assert!(runtime.context.replacement_event.is_none());
+                    if missing {
+                        runtime.context.replacement_event =
+                            Some(ReplacementEventContext::default());
+                    }
+                    let mut runner = scenario.build();
+                    let own = ObjectIdentityBinding::new(
+                        ObjectIncarnationRef::from_object(&runner.state().objects[&host]),
+                        Zone::Battlefield,
+                    );
+                    runtime.capture_source_identity_recursive(own);
+                    let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                        .prevention_shield(PreventionAmount::All)
+                        .damage_target_filter(DamageTargetFilter::Player {
+                            player: DamageTargetPlayerScope::Specific(p2),
+                        })
+                        .runtime_execute(runtime);
+                    runner
+                        .state_mut()
+                        .objects
+                        .get_mut(&host)
+                        .unwrap()
+                        .replacement_definitions
+                        .push(shield.clone());
+                    std::sync::Arc::make_mut(
+                        &mut runner
+                            .state_mut()
+                            .objects
+                            .get_mut(&host)
+                            .unwrap()
+                            .base_replacement_definitions,
+                    )
+                    .push(shield);
+                    runner.act(GameAction::PassPriority).unwrap();
+                    let rng_before = runner.state().rng.outcome_draws();
+                    let mut events = runner
+                        .cast(spell)
+                        .target_player(p2)
+                        .resolve()
+                        .events()
+                        .to_vec();
+                    let admitted = !missing && reference != TargetFilter::TriggeringSpellController;
+                    let actor = if reference == TargetFilter::PostReplacementSourceController {
+                        P1
+                    } else {
+                        p2
+                    };
+                    if family == 2 && admitted {
+                        let pending = runner
+                            .state()
+                            .pending_player_scope_sacrifice_choice
+                            .as_ref()
+                            .expect("same-shape Event positive reaches the coordinator");
+                        assert_eq!(
+                            pending.admitted_actors,
+                            Some([(P1, actor), (p2, actor)].into_iter().collect())
+                        );
+                        assert!(pending.selections.is_empty());
+                        assert!(
+                            matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneOpponentChooser { player, candidates, .. } if *player == actor && candidates == &vec![P1, p2])
+                        );
+                        runner = restore_actor_prompt(runner);
+                        events.extend(
+                            runner
+                                .act(GameAction::ChooseZoneOpponentChooser { opponent: P1 })
+                                .unwrap()
+                                .events,
+                        );
+                        assert!(
+                            matches!(runner.state().waiting_for, WaitingFor::EffectZoneChoice { player, .. } if player == actor)
+                        );
+                        let selected = pools[usize::from(actor == p2)][0];
+                        events.extend(
+                            runner
+                                .act(GameAction::SelectCards {
+                                    cards: vec![selected],
+                                })
+                                .unwrap()
+                                .events,
+                        );
+                    }
+                    if family == 3 && admitted {
+                        for payer in [P1, p2, p3] {
+                            assert!(
+                                matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { player, .. } if player == payer)
+                            );
+                            let pending = runner
+                                .state()
+                                .pending_player_scope_unless_payment
+                                .as_ref()
+                                .unwrap();
+                            assert_eq!(pending.pending_effect.controller, actor);
+                            assert_eq!(pending.pending_effect.original_controller, Some(P0));
+                            assert_eq!(pending.pending_effect.instruction_actor, None);
+                            assert!(pending.pending_effect.context.replacement_event.is_some());
+                            assert!(!runner
+                                .state()
+                                .battlefield
+                                .iter()
+                                .any(|id| runner.state().objects[id].is_token));
+                            events.extend(
+                                runner
+                                    .act(GameAction::PayUnlessCost { pay: false })
+                                    .unwrap()
+                                    .events,
+                            );
+                        }
+                    }
+                    for _ in 0..20 {
+                        if runner.state().stack.is_empty()
+                            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                        {
+                            break;
+                        }
+                        assert!(
+                            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                            "family={family}, {reference:?}, missing={missing}: {:?}",
+                            runner.state().waiting_for
+                        );
+                        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                    }
+                    if family == 0 {
+                        assert_eq!(
+                            runner.state().last_named_choice,
+                            admitted.then_some(ChoiceValue::Player(if actor == P1 {
+                                p2
+                            } else {
+                                P1
+                            }))
+                        );
+                        assert_eq!(
+                            runner.state().rng.outcome_draws() - rng_before,
+                            u64::from(admitted)
+                        );
+                    }
+                    if family == 1 {
+                        for (index, card) in graveyards.into_iter().enumerate() {
+                            let selected = admitted && index == usize::from(actor == p2);
+                            assert_eq!(
+                                runner.state().objects[&card].zone,
+                                if selected {
+                                    Zone::Hand
+                                } else {
+                                    Zone::Graveyard
+                                }
+                            );
+                        }
+                    }
+                    if family == 2 {
+                        for (index, pool) in pools.into_iter().enumerate() {
+                            let moved = admitted && index == usize::from(actor == p2);
+                            for object in pool {
+                                assert_eq!(
+                                    runner.state().objects[&object].zone,
+                                    if moved {
+                                        Zone::Graveyard
+                                    } else {
+                                        Zone::Battlefield
+                                    }
+                                );
+                            }
+                        }
+                        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PermanentSacrificed { player_id, .. } if *player_id == actor)).count(), if admitted { 2 } else { 0 });
+                    }
+                    if family == 3 {
+                        let tokens: Vec<_> = runner
+                            .state()
+                            .battlefield
+                            .iter()
+                            .map(|id| &runner.state().objects[id])
+                            .filter(|object| object.is_token)
+                            .collect();
+                        assert_eq!(tokens.len(), if admitted { 3 } else { 0 });
+                        assert!(tokens.iter().all(|object| object.controller == P0
+                            && object.owner == P0
+                            && object.name == "Zombie"));
+                    }
+                    assert_eq!(runner.life(P0), 21, "the independent tail runs once");
+                    assert_eq!(runner.life(p2), 20);
+                    assert!(runner
+                        .state()
+                        .pending_player_scope_sacrifice_choice
+                        .is_none());
+                    assert!(runner.state().pending_player_scope_unless_payment.is_none());
+                    assert!(runner.state().stack.is_empty());
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                }
+            }
+        }
+    }
+
+    /// CR 608.2c + CR 615.5: an actual selected definition stays unbound in
+    /// its prompt; materialization reads the prompt's owning replacement event.
+    #[test]
+    fn instruction_actor_selected_branch_uses_the_saved_owning_event_without_binding_definitions() {
+        use crate::types::ability::{
+            DamageTargetFilter, DamageTargetPlayerScope, InstructionActorRef, PreventionAmount,
+            ReplacementDefinition,
+        };
+        use crate::types::game_state::PersistedGameState;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        use crate::types::replacements::ReplacementEvent;
+        let p2 = PlayerId(2);
+        let p3 = PlayerId(3);
+        for (actor, expected) in [
+            (InstructionActorRef::from(ControllerRef::You), Some(P0)),
+            (
+                InstructionActorRef::from(ControllerRef::SpecificPlayer { id: p3 }),
+                Some(p3),
+            ),
+            (
+                InstructionActorRef::event(TargetFilter::PostReplacementSourceController).unwrap(),
+                Some(P1),
+            ),
+            (
+                InstructionActorRef::event(TargetFilter::PostReplacementDamageTarget).unwrap(),
+                Some(p2),
+            ),
+            (
+                InstructionActorRef::event(TargetFilter::PostReplacementDamageTargetOwner).unwrap(),
+                Some(p2),
+            ),
+            (
+                InstructionActorRef::event(TargetFilter::TriggeringSpellController).unwrap(),
+                None,
+            ),
+        ] {
+            let mut scenario = GameScenario::new_n_player(4, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let host = scenario
+                .add_creature(P0, "Synthetic branch prevention", 2, 10)
+                .id();
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Lightning Bolt",
+                    true,
+                    "Lightning Bolt deals 3 damage to any target.",
+                )
+                .id();
+            let mut branch = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            branch.instruction_actor = Some(actor.clone());
+            branch.optional = true;
+            let mut head = ResolvedAbility::new(
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![branch],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            let mut tail = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::OriginalController,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            head.sub_ability = Some(Box::new(tail));
+            let mut runner = scenario.build();
+            let own = ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&runner.state().objects[&host]),
+                Zone::Battlefield,
+            );
+            head.capture_source_identity_recursive(own);
+            let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(PreventionAmount::All)
+                .damage_target_filter(DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::Specific(p2),
+                })
+                .runtime_execute(head);
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .replacement_definitions
+                .push(shield.clone());
+            std::sync::Arc::make_mut(
+                &mut runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&host)
+                    .unwrap()
+                    .base_replacement_definitions,
+            )
+            .push(shield);
+            runner.act(GameAction::PassPriority).unwrap();
+            let mut events = runner
+                .cast(spell)
+                .target_player(p2)
+                .resolve()
+                .events()
+                .to_vec();
+            let WaitingFor::ChooseOneOfBranch {
+                player,
+                branches,
+                context,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("real replacement must produce branch choice");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(branches[0].instruction_actor.as_ref(), Some(&actor));
+            assert!(branches[0]
+                .instruction_actor
+                .as_ref()
+                .unwrap()
+                .replacement_event()
+                .is_none());
+            let owned = context.replacement_event.as_ref().unwrap().clone();
+            assert_eq!(owned.source_id, Some(spell));
+            assert_eq!(owned.event_target, Some(TargetRef::Player(p2)));
+            assert_eq!(context.source_identity, Some(own));
+            let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .unwrap();
+            let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, *runner.state());
+            runner = GameRunner::from_state(restored);
+            events.extend(
+                runner
+                    .act(GameAction::ChooseBranch { index: 0 })
+                    .unwrap()
+                    .events,
+            );
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == expected)
+                );
+                let frame = runner.state().active_optional_effect_frame().unwrap();
+                assert_eq!(frame.ability.controller, expected);
+                assert_eq!(frame.ability.instruction_actor, None);
+                assert_eq!(
+                    frame.ability.context.replacement_event.as_ref(),
+                    Some(&owned)
+                );
+                assert_eq!(frame.ability.context.source_identity, Some(own));
+                events.extend(
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap()
+                        .events,
+                );
+            }
+            for _ in 0..20 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "{:?}",
+                    runner.state().waiting_for
+                );
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if Some(*actor) == expected && *object_id == host)).count(), usize::from(expected.is_some()));
+            assert_eq!(runner.life(P0), 21);
+            assert_eq!(runner.life(p2), 20);
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
 
     #[test]
     fn instruction_actor_real_instead_swap_uses_selected_nodes_actor_and_keeps_its_independent_tail(
@@ -31143,6 +31651,73 @@ mod tests {
             object.base_toughness = Some(2);
         }
         (state, source, returned, other)
+    }
+
+    /// CR 400.7j + CR 608.2h: parked producer results keep their exact moved
+    /// occurrence even if a later row has reused that storage id.
+    #[test]
+    fn forwarded_source_rebind_preserves_the_parked_occurrence_and_independent_context() {
+        use crate::types::ability::ReplacementEventContext;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        let (mut state, source, returned, _) = forwarded_test_objects();
+        let source_pin = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&state.objects[&source]),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, returned, Zone::Battlefield, &mut events);
+        let result = ForwardedResultContext::from_object_ids(&state, &[returned]);
+        let moved_pin =
+            ObjectIdentityBinding::new(result.object_incarnations[0], Zone::Battlefield);
+        crate::game::zones::move_to_zone(&mut state, returned, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, returned, Zone::Battlefield, &mut events);
+        assert_ne!(
+            ObjectIncarnationRef::from_object(&state.objects[&returned]),
+            moved_pin.reference
+        );
+        let owned_event = ReplacementEventContext {
+            source_id: Some(source),
+            source_identity: Some(source_pin),
+            event_target: Some(TargetRef::Player(P1)),
+        };
+        for actor in crate::types::ability::instruction_actor_test_refs() {
+            let mut producer = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+            producer.source_incarnation = Some(source_pin.reference.incarnation);
+            producer.context.source_identity = Some(source_pin);
+            let mut child = producer.clone();
+            child.instruction_actor = Some(actor.clone());
+            child.context.replacement_event = Some(owned_event.clone());
+            child.context.granting_object = Some(source_pin.reference);
+            child.chosen_x = Some(8);
+            child.push_target(TargetRef::Player(P1));
+            child.sub_ability = Some(Box::new(child.clone()));
+            let future = child.sub_ability.clone();
+            bind_moved_objects_to_child(&state, &mut child, source, &[], result.clone());
+            apply_parent_chain_context(&mut child, &producer, None, &mut state);
+            assert_eq!(child.source_id, returned);
+            assert_eq!(
+                child.source_incarnation,
+                Some(moved_pin.reference.incarnation)
+            );
+            assert_eq!(child.context.source_identity, Some(moved_pin));
+            assert_eq!(child.context.replacement_event.as_ref(), Some(&owned_event));
+            assert_eq!(child.instruction_actor.as_ref(), Some(&actor));
+            assert_eq!(child.targets, vec![TargetRef::Player(P1)]);
+            assert_eq!(
+                child.sub_ability, future,
+                "true source change is node-local"
+            );
+            let mut empty = producer.clone();
+            bind_moved_objects_to_child(
+                &state,
+                &mut empty,
+                source,
+                &[],
+                ForwardedResultContext::from_object_ids(&state, &[]),
+            );
+            assert_eq!(empty.source_id, source);
+            assert_eq!(empty.context.source_identity, Some(source_pin));
+        }
     }
 
     fn has_forwarded_test_grant(state: &GameState, id: ObjectId, keyword: Keyword) -> bool {

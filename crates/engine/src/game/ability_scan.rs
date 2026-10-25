@@ -7595,13 +7595,35 @@ mod tests {
         let baseline = resolved_ability_axes(&base, ScanMode::Conservative);
         assert!(!baseline.event && !baseline.sibling && !baseline.projected);
         for actor in crate::types::ability::instruction_actor_test_refs() {
-            let expected = actor.classify(scan_controller_ref, |filter| {
-                scan_target_filter(
-                    filter,
-                    FilterReadContext::SnapshotOrEvent,
-                    ScanMode::Conservative,
-                )
-            });
+            // Independent domain table: do not derive the expected axes from
+            // the scanner whose actor dispatch this test exercises.
+            let event = actor.classify(
+                |reference| match reference {
+                    ControllerRef::DeclaredPlayer { .. }
+                    | ControllerRef::ParentTargetController
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::EventTargetController
+                    | ControllerRef::TriggeringPlayer => true,
+                    ControllerRef::You
+                    | ControllerRef::Opponent
+                    | ControllerRef::ScopedPlayer
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::ChosenPlayer { .. }
+                    | ControllerRef::SourceChosenPlayer
+                    | ControllerRef::EnchantedPlayer
+                    | ControllerRef::ActivePlayer
+                    | ControllerRef::SpecificPlayer { .. } => false,
+                },
+                |_| true,
+            );
+            let expected = Axes {
+                event,
+                sibling: false,
+                projected: false,
+                history: HistoryReads::NONE,
+            };
             let mut resolved = base.clone();
             resolved.instruction_actor = Some(actor.clone());
             let actual = resolved_ability_axes(&resolved, ScanMode::Conservative);

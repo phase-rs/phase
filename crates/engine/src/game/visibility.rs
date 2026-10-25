@@ -14271,6 +14271,174 @@ mod tests {
     /// every projected event carrier, and a ResolvedAbility's library
     /// `effect_context_object` is dropped from the projection; a battlefield
     /// subject is untouched in both. The authoritative state keeps all of it.
+    /// CR 400.2 + CR 400.7 + CR 608.2h: an actual source departure can hide
+    /// a captured occurrence while its canonical optional continuation remains playable.
+    #[test]
+    fn ordinary_saved_resolution_redacts_a_hidden_source_pin_and_keeps_the_public_twin() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, SubAbilityLink,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PersistedGameState;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+        for destination in [Zone::Library, Zone::Exile] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Library decoy", "Second"]);
+            let mut optional = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            optional.optional = true;
+            optional.instruction_actor = Some(ControllerRef::You.into());
+            let mut tail = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            tail.instruction_actor = Some(ControllerRef::SpecificPlayer { id: P1 }.into());
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            optional.sub_ability = Some(Box::new(tail));
+            let root = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Stack),
+                    destination,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )
+            .sub_ability(optional);
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic source departure before optional", true)
+                .with_ability_definition(root)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).commit().stop_at_optional().resolve();
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert_eq!(runner.state().objects[&spell].zone, destination);
+            let canonical = runner.state().clone();
+            let frame = canonical.active_optional_effect_frame().unwrap();
+            let pin = frame
+                .ability
+                .context
+                .source_identity
+                .expect("the old stack occurrence remains captured");
+            assert_eq!(pin.reference.object_id, spell);
+            assert_eq!(pin.expected_zone, Zone::Stack);
+            assert_ne!(
+                pin.reference.incarnation,
+                canonical.objects[&spell].incarnation
+            );
+            assert_eq!(
+                frame.ability.instruction_actor, None,
+                "the begun instruction stays latched"
+            );
+            assert_eq!(
+                frame
+                    .ability
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .instruction_actor,
+                Some(ControllerRef::SpecificPlayer { id: P1 }.into())
+            );
+            for view in [
+                filter_state_for_viewer(&canonical, P0),
+                filter_state_for_viewer(&canonical, P1),
+                filter_state_for_unseated_viewer(&canonical),
+            ] {
+                let entry = view
+                    .resolving_stack_entry
+                    .as_ref()
+                    .expect("the public resolving carrier remains");
+                let projected = entry.ability().unwrap();
+                assert_eq!(
+                    projected.context.source_identity,
+                    (destination == Zone::Exile).then_some(pin)
+                );
+                assert!(
+                    view.resolution_stack.is_empty(),
+                    "private executable frames never become viewer authority"
+                );
+            }
+            assert_eq!(runner.state(), &canonical);
+            let saved =
+                serde_json::to_string(&PersistedGameState::capture(canonical.clone())).unwrap();
+            let restored = serde_json::from_str::<PersistedGameState>(&saved)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            assert_eq!(restored, canonical);
+            let mut malformed = canonical.clone();
+            malformed
+                .resolving_stack_entry
+                .as_mut()
+                .unwrap()
+                .ability_mut()
+                .unwrap()
+                .context
+                .source_identity = Some(ObjectIdentityBinding::new(
+                ObjectIncarnationRef::of(ObjectId(999_999), 8),
+                Zone::Stack,
+            ));
+            assert!(serde_json::from_str::<PersistedGameState>(
+                &serde_json::to_string(&PersistedGameState::capture(malformed)).unwrap()
+            )
+            .is_err());
+            runner = GameRunner::from_state(restored);
+            let mut events = outcome.events().to_vec();
+            events.extend(
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap()
+                    .events,
+            );
+            for _ in 0..12 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert_eq!(runner.life(P0), 22);
+            assert_eq!(runner.life(P1), 21);
+            assert_eq!(runner.state().objects[&spell].zone, destination);
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), 2);
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+
     #[test]
     fn hidden_instruction_source_and_event_pins_are_redacted_as_whole_values() {
         use crate::types::ability::{InstructionActorRef, ReplacementEventContext, TargetRef};
