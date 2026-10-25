@@ -101,8 +101,10 @@ fn read_zipped_json(path: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    String::from_utf8(output.stdout)
-        .unwrap_or_else(|err| panic!("{} was not utf-8 json: {err}", path.display()))
+    let json = String::from_utf8(output.stdout)
+        .unwrap_or_else(|err| panic!("{} was not utf-8 json: {err}", path.display()));
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 fn action_type(action: GameAction) -> &'static str {

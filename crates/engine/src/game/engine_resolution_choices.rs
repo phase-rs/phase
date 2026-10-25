@@ -3339,7 +3339,8 @@ pub(super) fn handle_resolution_choice(
                 let mut pending = pending_mana_ability.as_ref().clone();
                 // CR 107.1c / CR 107.3a: bind the announced amount to the
                 // correct mana-ability cost axis — a removed-counter count
-                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
+                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179f)
+                // or an `{X}` mana leg.
                 match resource {
                     // CR 107.3a + CR 107.3i: for a literal "Remove X counters"
                     // mana-ability cost (Saltcrusted Steppe class), CR 107.3i
@@ -3365,8 +3366,16 @@ pub(super) fn handle_resolution_choice(
                         }
                         pending.chosen_counter_counts.push(amount);
                     }
-                    PayableResource::Speed => pending.chosen_x = Some(amount),
-                    other => {
+                    // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a
+                    // mana ability's `Pay X speed` (CR 702.179f) or `{X}` mana
+                    // leg. The activation's own cost cursor pays the leg with X
+                    // concretized; nothing is deducted here.
+                    PayableResource::Speed | PayableResource::ManaGeneric { .. } => {
+                        pending.chosen_x = Some(amount)
+                    }
+                    other @ (PayableResource::Energy
+                    | PayableResource::Life
+                    | PayableResource::LoopCollapse { .. }) => {
                         return Err(EngineError::InvalidAction(format!(
                             "Unexpected pay-amount resource {other:?} for mana ability"
                         )));

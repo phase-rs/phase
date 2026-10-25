@@ -17,8 +17,8 @@ use crate::types::ability::{
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
     ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission,
     MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReturnResultReadSpec, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
+    ReturnResultReadSpec, RoundingMode, SiblingCondition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -894,6 +894,10 @@ pub(crate) struct ClauseIr {
     /// after it proves the immediately preceding clause announced the object.
     #[serde(skip_serializing_if = "TargetReadOrigin::is_own")]
     pub(crate) target_reads: TargetReadOrigin,
+    /// CR 608.2c: lowered onto the node's `sibling_condition`; written only by the
+    /// chunk loop's trailing-guard pass.
+    #[serde(skip_serializing_if = "SiblingCondition::is_default")]
+    pub(crate) sibling_condition: SiblingCondition,
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
@@ -1034,6 +1038,7 @@ impl ClauseIr {
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads,
+            sibling_condition,
             reads_return_result,
             source: _,
             disposition,
@@ -1063,6 +1068,7 @@ impl ClauseIr {
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
+        *sibling_condition = SiblingCondition::Dependent;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -1352,6 +1358,7 @@ impl ClauseIrBuilder {
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
+            absorbed.sibling_condition = c.sibling_condition;
         }
     }
 
@@ -1704,6 +1711,7 @@ impl ClauseDraft<'_> {
             declares_chosen_clause,
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,
+            sibling_condition: SiblingCondition::Dependent,
             reads_return_result,
             source,
             disposition: self.disposition,

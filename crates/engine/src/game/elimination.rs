@@ -897,6 +897,14 @@ fn end_control_effects_for_leaving_players(
                 .any(|m| matches!(m, ContinuousModification::ChangeController)))
     });
 
+    // CR 611.2c + CR 614.1a: a resolved token-controller redirect ("each token
+    // that would be created under an opponent's control this turn is created
+    // under your control instead" — Crafty Cutpurse) gives nobody control of an
+    // existing object; it modifies future creation events, so it is not ended
+    // here and lasts its turn. A token it would create under a player who has
+    // left the game is not created (CR 800.4b), which the token materialization
+    // authority enforces (`effects::token::token_creator_has_left_game`).
+
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
     // every object whose control TCE was pruned. evaluate_layers is pure (no events).
     super::layers::mark_layers_full(state);
