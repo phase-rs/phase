@@ -24,7 +24,7 @@ use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use state_codec::{decode, encode, state_hash, Frame, WireState};
+use state_codec::{decode, encode, state_hash, Frame, FrameKind, WireState};
 
 fn database() -> CardDatabase {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -213,7 +213,7 @@ struct Recipient {
     reconnect_full: usize,
     reconnect_full_bytes: usize,
     reconnect_full_gzip: usize,
-    last_tag: String,
+    last_kind: Option<FrameKind>,
     memory: MemorySamples,
     timings: BTreeMap<&'static str, Samples>,
 }
@@ -246,8 +246,6 @@ struct Coverage {
 
 #[derive(Deserialize)]
 struct EnvelopeMeasure<'a> {
-    #[serde(rename = "type")]
-    tag: String,
     #[serde(borrow)]
     data: &'a RawValue,
 }
@@ -276,10 +274,10 @@ struct PatchMeasure<'a> {
     objects: Option<OperationsMeasure<'a>>,
 }
 
-fn operation_sizes(envelope: &EnvelopeMeasure<'_>) -> (usize, usize, usize) {
-    match envelope.tag.as_str() {
-        "Full" => (0, 0, 0),
-        "Delta" => {
+fn operation_sizes(kind: FrameKind, envelope: &EnvelopeMeasure<'_>) -> (usize, usize, usize) {
+    match kind {
+        FrameKind::Full => (0, 0, 0),
+        FrameKind::Delta => {
             #[derive(Deserialize)]
             struct Data<'a> {
                 #[serde(borrow)]
@@ -304,7 +302,6 @@ fn operation_sizes(envelope: &EnvelopeMeasure<'_>) -> (usize, usize, usize) {
             // overhead is delta_bytes - order - operations - hash bytes.
             (order, operations, 128)
         }
-        other => panic!("unexpected codec tag {other}"),
     }
 }
 
@@ -427,20 +424,20 @@ impl Coverage {
                     .is_some_and(|old| old.as_bytes() != wire.as_bytes()),
             );
             let envelope: EnvelopeMeasure<'_> = serde_json::from_slice(&bytes).unwrap();
-            let (order, operations, hashes) = operation_sizes(&envelope);
+            let kind = frame.kind();
+            let (order, operations, hashes) = operation_sizes(kind, &envelope);
             recipient.order_bytes += order;
             recipient.operation_bytes += operations;
             recipient.hash_bytes += hashes;
-            match envelope.tag.as_str() {
-                "Full" => {
+            match kind {
+                FrameKind::Full => {
                     recipient.full += 1;
                     recipient.fallback += usize::from(recipient.continuous.sender.is_some());
                 }
-                "Delta" => {
+                FrameKind::Delta => {
                     recipient.delta += 1;
                     recipient.delta_bytes += bytes.len();
                 }
-                other => panic!("unexpected codec tag {other}"),
             }
             recipient.time("correctness_and_measurement_parsing", class, stage);
             let stage = Instant::now();
@@ -483,11 +480,11 @@ impl Coverage {
                     driver: context,
                 },
             );
-            let delivered_envelope: EnvelopeMeasure<'_> =
-                serde_json::from_slice(&delivered).unwrap();
+            let delivered_kind = delivered_frame.kind();
             if reset {
                 assert_eq!(
-                    delivered_envelope.tag, "Full",
+                    delivered_kind,
+                    FrameKind::Full,
                     "reset must explicitly request FULL"
                 );
                 recipient.reconnect_full += 1;
@@ -498,11 +495,12 @@ impl Coverage {
                 .is_some_and(|at| self.states == at || self.states == at + 1)
             {
                 assert_eq!(
-                    delivered_envelope.tag, "Delta",
+                    delivered_kind,
+                    FrameKind::Delta,
                     "other recipients continue; reset recipient resumes DELTA"
                 );
             }
-            recipient.last_tag = delivered_envelope.tag;
+            recipient.last_kind = Some(delivered_kind);
             recipient.delivered_bytes += delivered.len();
             recipient.delivered_gzip += gzip_len(&delivered);
             recipient.delivered.receiver = Some(received);
@@ -549,7 +547,8 @@ impl Coverage {
     fn require_delta(&self, audiences: &[Audience]) {
         for audience in audiences {
             assert_eq!(
-                self.recipients[audience].last_tag, "Delta",
+                self.recipients[audience].last_kind,
+                Some(FrameKind::Delta),
                 "transition DELTA reach guard: {audience:?}"
             );
         }
