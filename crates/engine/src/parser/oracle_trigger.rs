@@ -93,7 +93,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::str::FromStr;
@@ -13635,7 +13635,30 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 509.3a + CR 608.2k + CR 603.7e: a self-subject block condition that names
+    // no other object ("~ blocks" / "~ attacks or blocks") introduces only the
+    // source, so a bare "it" in the body names it. Without the pin, `ParentTarget`
+    // resolves the BlockersDeclared event to the blocked ATTACKER — through
+    // `delayed_trigger::parent_target_snapshot` for "at end of combat" bodies and
+    // the parentless-ParentTarget event fallback for immediate bodies — so Cinder
+    // Wall destroyed, and Zephyr Spirit bounced, the creature it blocked.
+    if matches!(trigger_subject, TargetFilter::SelfRef)
+        && nom_primitives::scan_at_word_boundaries(after_keyword, parse_intransitive_blocks)
+            .is_some()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
+}
+
+/// CR 509.3a: a terminal intransitive "blocks" ("~ blocks", "~ attacks or
+/// blocks") — the condition names no object other than its subject. Rejects
+/// "blocks a creature", "blocks or becomes blocked" and every other form with a
+/// trailing object or qualifier, because only end of input (optionally after the
+/// condition's closing comma) may follow.
+fn parse_intransitive_blocks(input: &str) -> OracleResult<'_, ()> {
+    value((), terminated(tag("blocks"), (opt(tag(",")), eof))).parse(input)
 }
 
 /// CR 509.3c + CR 608.2k: the object a bare-pronoun pin names, where the pinned
@@ -20172,25 +20195,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
-    // CR 603.2 + CR 613.3: "When you lose control of ~" — fires after a
-    // controller change on the source object. Maps to ChangesController so
-    // the trigger fires on the GainControl/GiveControl effect-resolved event.
-    // valid_card = SelfRef gates the trigger to changes on this specific object.
-    // The trigger controller is the previous controller (still Khârn's holder
-    // at trigger-scan time, because layer re-evaluation runs after trigger
-    // collection in the post-action pipeline).
-    fn parse_you_lose_control_of_self(i: &str) -> OracleResult<'_, ()> {
+    // CR 603.2 + CR 603.10 + CR 603.10d: "When[ever] you lose control of ~" /
+    // "When[ever] you gain control of ~[ from another player]". Maps to
+    // ChangesController, which fires on the `ControllerChanged` event published by
+    // the control-changing instructions (not by control the layer pass assigns or
+    // retires, #9903).
+    // valid_card = SelfRef gates the trigger to
+    // changes on this specific object; the `side` names which endpoint of the
+    // change is "you" (CR 603.3a: the trigger's controller). "From another player"
+    // adds no constraint: a ControllerChanged event exists only when the
+    // controller changed, and every permanent has a controller (CR 110.2).
+    fn parse_you_change_control_of_self(i: &str) -> OracleResult<'_, ControlChangeSide> {
         all_consuming(preceded(
-            alt((tag("when "), tag("whenever "))),
-            value((), tag("you lose control of ~")),
+            (alt((tag("when "), tag("whenever "))), tag("you ")),
+            alt((
+                value(ControlChangeSide::Loses, tag("lose control of ~")),
+                value(
+                    ControlChangeSide::Gains,
+                    terminated(tag("gain control of ~"), opt(tag(" from another player"))),
+                ),
+            )),
         ))
         .parse(i)
     }
-    if parse_you_lose_control_of_self(lower).is_ok() {
+    if let Ok((_, side)) = parse_you_change_control_of_self(lower) {
         let mut def = make_base();
-        def.mode = TriggerMode::ChangesController;
+        def.mode = TriggerMode::ChangesController { side };
         def.valid_card = Some(TargetFilter::SelfRef);
-        return Some((TriggerMode::ChangesController, def));
+        return Some((def.mode.clone(), def));
     }
 
     if matches!(lower, "whenever you lose life" | "when you lose life") {

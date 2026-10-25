@@ -26,9 +26,9 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_bare_was_dealt_damage_suffix, parse_source_blocked_history_clause, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -39,13 +39,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
-    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
-    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
+    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -4569,11 +4569,16 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attachable: bool) {
-    if let Some(new_effect) =
-        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    if let Some((new_effect, onset)) =
+        rewrite_token_anaphor_with_onset(&def.effect, def.duration.clone())
     {
         *def.effect = new_effect;
         def.duration = None;
+        // CR 611.2e + CR 111.3: the rewritten node is an instruction of this chain, so it
+        // carries the onset its verb phrase states — "The tokens have \"…\"" defines the
+        // tokens as they enter; "The token gains haste" applies after they are on the
+        // battlefield.
+        def.entry_onset = onset;
         return;
     }
 
@@ -4737,6 +4742,16 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
     effect: &Effect,
     clause_duration: Option<Duration>,
 ) -> Option<Effect> {
+    rewrite_token_anaphor_with_onset(effect, clause_duration).map(|(effect, _)| effect)
+}
+
+/// [`rewrite_token_created_this_way_unimplemented`], also returning the CR 611.2e onset the
+/// anaphor's verb phrase states, read by the subject-predicate authority
+/// [`subject::predicate_onset`].
+fn rewrite_token_anaphor_with_onset(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<(Effect, ContinuousEffectOnset)> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -4765,12 +4780,13 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .affected(TargetFilter::LastCreated)
         .modifications(mods)
         .description(text.to_string());
-    Some(Effect::GenericEffect {
+    let effect = Effect::GenericEffect {
         static_abilities: vec![static_def],
         duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
         end_cost: None,
-    })
+    };
+    Some((effect, subject::predicate_onset(rest.trim())))
 }
 
 /// CR 608.2c + CR 701.20: True when this effect publishes a revealed or
@@ -7359,6 +7375,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
         || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
+        || combat_history_relative_clause_owns_suffix(lower.as_str())
     {
         return (text, None);
     }
@@ -7673,6 +7690,32 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
     )
         .parse(rest)
         .is_ok()
+}
+
+/// CR 608.2i + CR 611.2a: a combat-history relative clause ("each creature it
+/// blocked this combat", "all creatures it blocked this turn") owns its trailing
+/// window; it is a look-back restriction, not an effect duration (#9179:
+/// Cathedral Membrane, Defiant Vanguard). Context-free on purpose: when the
+/// target parser declines to bind a bare "it" (no `SelfRef` antecedent), the
+/// window still belongs to the clause, so no spurious duration appears and the
+/// swallow audit reports the unrepresented clause. Recognition is delegated to
+/// `parse_source_blocked_history_clause`, the clause's single authority, and the
+/// clause must run to end of input, so a genuine OUTER duration after it leaves
+/// a non-empty remainder and still strips.
+fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(input, |i| {
+        terminated(
+            parse_source_blocked_history_clause,
+            (
+                multispace0,
+                opt(alt((tag("."), tag(",")))),
+                multispace0,
+                eof,
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
 }
 
 fn target_relative_clause_owns_suffix(input: &str) -> bool {
@@ -9813,6 +9856,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9899,6 +9943,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9974,6 +10019,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -10085,6 +10131,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -16213,6 +16260,44 @@ mod where_x_tests {
         // The guard preserves the full clause (trailing period retained, as for
         // the other `preserves_*` guard tests).
         assert_eq!(stripped, text.trim());
+    }
+
+    /// CR 608.2i + CR 611.2a (#9179): the window closing a combat-history
+    /// relative clause ("each creature it blocked this combat", "all creatures it
+    /// blocked this turn") belongs to the clause, not to the effect — no duration
+    /// is stripped and the clause text survives intact for the target parser.
+    #[test]
+    fn strip_trailing_duration_preserves_combat_history_relative_clause() {
+        use super::strip_trailing_duration;
+
+        for text in [
+            "it deals 6 damage to each creature it blocked this combat.",
+            "destroy it and all creatures it blocked this turn.",
+        ] {
+            let (stripped, duration) = strip_trailing_duration(text);
+            assert_eq!(duration, None, "{text}");
+            assert_eq!(stripped, text, "{text}");
+        }
+    }
+
+    /// Hostile fixtures for the combat-history guard: a GENUINE outer duration
+    /// after the clause still strips (the guard requires the clause to run to end
+    /// of input), and a bare "this combat" effect duration with no blocked-history
+    /// clause keeps its `UntilEndOfCombat` (CR 511.2).
+    #[test]
+    fn strip_trailing_duration_combat_history_guard_does_not_over_suppress() {
+        use super::strip_trailing_duration;
+
+        let (stripped, duration) = strip_trailing_duration(
+            "creatures it blocked this turn gain flying until end of turn.",
+        );
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(stripped, "creatures it blocked this turn gain flying");
+
+        let (stripped, duration) =
+            strip_trailing_duration("creatures you control can't block this combat.");
+        assert_eq!(duration, Some(Duration::UntilEndOfCombat));
+        assert_eq!(stripped, "creatures you control can't block");
     }
 
     /// Hostile fixture (review requirement): a `who`-introduced look-back

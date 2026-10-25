@@ -5675,10 +5675,12 @@ fn build_instead_def(
 
     let instead_def =
         super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
-    let mut result = instead_def;
-    result.condition = Some(AbilityCondition::ConditionInstead {
-        inner: Box::new(condition),
-    });
+    let mut result = super::instead_override_definition(
+        instead_def,
+        AbilityCondition::ConditionInstead {
+            inner: Box::new(condition),
+        },
+    );
     if result
         .condition
         .as_ref()

@@ -750,13 +750,13 @@ fn replacement_targets(
         return ability.targets.clone();
     }
 
-    // CR 201.5: SelfRef resolves to the ability's source object — text that
-    // refers to the object it's on by name (or "~") means that particular
-    // object. Used by self-installing replacements (Crafty Cutpurse: "When ~
-    // enters, [until end of turn] each token that would be created under an
-    // opponent's control is created under your control instead.") so the
-    // trigger anchors the replacement on its own source without needing to
-    // consult the target pipeline.
+    // CR 201.5 + CR 400.7: SelfRef names the ability's source as the object
+    // the carried replacement affects (Unearth's "If it would leave the
+    // battlefield, exile it instead", `valid_card: SelfRef`), so it installs on
+    // the source only while `self_ref_binding` can still find it. A replacement
+    // that affects no object (Crafty Cutpurse's token controller redirect) is
+    // not hosted on its source: it uses the floating `TargetFilter::None` arm
+    // in `resolve` (CR 113.7a).
     if matches!(target, TargetFilter::SelfRef) {
         return ability
             .self_ref_binding(state)
@@ -818,9 +818,13 @@ pub fn resolve(
     // creation of turn-bound damage-modification replacements (Rankle and
     // Torbran's "If a source would deal damage to a player or battle this
     // turn..."; I Call for Slaughter's "If a source you control would deal
-    // damage this turn, it deals that much damage plus 1 instead.") and of
-    // floating entry-modifier riders (Communal Brewing's "that creature enters
-    // with X additional +1/+1 counters on it").
+    // damage this turn, it deals that much damage plus 1 instead."), of
+    // turn-bound token-creation replacements (Kaya, Geist Hunter's −2; Crafty
+    // Cutpurse's "each token that would be created under an opponent's control
+    // this turn is created under your control instead", whose "your" is the
+    // `ability.controller` latched below) and of floating entry-modifier riders
+    // (Communal Brewing's "that creature enters with X additional +1/+1
+    // counters on it").
     if matches!(target, TargetFilter::None) {
         let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
         bind_replacement_to_trigger_source(&mut replacement, state);
@@ -1878,14 +1882,14 @@ mod tests {
         );
     }
 
-    // Crafty Cutpurse end-to-end: a self-installed CreateToken replacement
-    // with `token_owner_scope: Opponent` and `token_owner_redirect: You`
-    // redirects opponent-created tokens to the source's controller.
+    // Crafty Cutpurse end-to-end: a floating CreateToken replacement with
+    // `token_owner_scope: Opponent` and `token_owner_redirect: You` redirects
+    // opponent-created tokens to the installing ability's controller.
     // Covers CR 111.2 (token controller redirection — "the token enters the
     // battlefield under that player's control") + CR 614.1a (replacement
     // ordering: redirect applies before the token materializes).
     #[test]
-    fn crafty_cutpurse_self_install_redirects_opponent_tokens_to_controller() {
+    fn crafty_cutpurse_floating_redirect_redirects_opponent_tokens_to_controller() {
         use crate::types::ability::ControllerRef;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
@@ -1908,7 +1912,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -1917,14 +1921,21 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &install_ability, &mut events).unwrap();
 
-        // Sanity: replacement landed on Cutpurse, marked EOT-expiring.
-        let installed = &state.objects[&cutpurse_id].replacement_definitions;
-        assert_eq!(installed.iter_all().count(), 1);
+        // Sanity: CR 113.7a — the replacement floats (not on Cutpurse), latched
+        // to the installing controller, marked EOT-expiring.
+        assert!(state.objects[&cutpurse_id]
+            .replacement_definitions
+            .iter_all()
+            .next()
+            .is_none());
+        let installed = &state.pending_damage_replacements;
+        assert_eq!(installed.len(), 1);
         assert_eq!(
             installed[0].token_owner_scope,
             Some(ControllerRef::Opponent)
         );
         assert_eq!(installed[0].token_owner_redirect, Some(ControllerRef::You));
+        assert_eq!(installed[0].source_controller, Some(PlayerId(0)));
         assert_eq!(installed[0].expiry, Some(RestrictionExpiry::EndOfTurn));
 
         // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
@@ -2012,7 +2023,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -2098,7 +2109,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -2106,6 +2117,11 @@ mod tests {
         );
         let mut events = Vec::new();
         resolve(&mut state, &install_ability, &mut events).unwrap();
+        assert_eq!(
+            state.pending_damage_replacements.len(),
+            1,
+            "reach guard: the floating redirect is installed"
+        );
 
         // Our own token creation — must not be intercepted.
         let token_spec = TokenSpec {
