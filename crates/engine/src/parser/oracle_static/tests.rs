@@ -41282,7 +41282,9 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
 // CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
 #[test]
 fn static_gaeas_liege_complementary_forest_setters() {
-    let defs = parse_static_line_multi("As long as Gaea's Liege isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as Gaea's Liege is attacking, its power and toughness are each equal to the number of Forests defending player controls.");
+    // The static parser receives card-name references normalized to `~` by the
+    // Oracle pipeline; full-card dispatch below covers the verbatim Oracle text.
+    let defs = parse_static_line_multi("As long as ~ isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as ~ is attacking, its power and toughness are each equal to the number of Forests defending player controls.");
     assert_eq!(defs.len(), 2, "{defs:?}");
     let gates = [
         StaticCondition::Not {
