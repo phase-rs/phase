@@ -27,7 +27,9 @@ parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
 Argument and wrapper-pattern splitting accepts an optional trailing comma.
 Range-endpoint projections count; free `drop` calls accept explicit generic
-arguments without extending the existing classification of `.drop` methods.
+arguments; single-dot `.drop` methods never classify their helper arguments.
+Semicolon-terminated bare statement blocks discard helper tails, not header
+blocks or let initializers (which retain their binding classification).
 Discovery excludes exactly tests.rs and *_tests.rs, snapshots, and modules
 proven test-only; a filename merely containing `tests` remains production.
 
@@ -495,7 +497,7 @@ def find_discards(relpath, lines):
         if value == "drop" and i + 1 < len(v):
             opened = ex.turbofish_end(i + 1)
             # Extend free calls, not methods; doubled dots are range punctuation.
-            if (opened is not None and i > 0 and v[i - 1] == "."
+            if (i > 0 and v[i - 1] == "."
                     and not (i > 1 and v[i - 2] == ".")):
                 continue
             if opened is None:
@@ -505,12 +507,18 @@ def find_discards(relpath, lines):
                 if len(args) == 1:
                     add(ex.origin(*args[0]), "whole-result")
         if value == ";":
-            start = i - 1
-            while start >= 0 and v[start] not in (";", "{", "}"):
-                if v[start] in (")", "]"):
-                    start = ex.pairs[start]
-                start -= 1
-            add(ex.origin(start + 1, i), "whole-result")
+            if i > 0 and v[i - 1] == "}":
+                opened = ex.pairs[i - 1]
+                # Bare statement blocks only; headers and let RHSs have owners.
+                if opened == 0 or v[opened - 1] in (";", "{", "}"):
+                    add(ex.origin(opened, i), "whole-result")
+            else:
+                start = i - 1
+                while start >= 0 and v[start] not in (";", "{", "}"):
+                    if v[start] in (")", "]"):
+                        start = ex.pairs[start]
+                    start -= 1
+                add(ex.origin(start + 1, i), "whole-result")
         if value == "unwrap_or" and i > 0 and v[i - 1] == "." and i + 1 < len(v) and v[i + 1] == "(":
             args = ex.split(i + 2, ex.pairs[i + 1])
             arg = v[args[0][0]:args[0][1]] if len(args) == 1 else []

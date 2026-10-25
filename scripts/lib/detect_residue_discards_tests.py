@@ -79,7 +79,7 @@ class DiscardTests(unittest.TestCase):
                     ["whole-result", "binding"])
 
     def test_drop_turbofish_preserves_whole_result_classification(self):
-        for drop in ("drop", "std::mem::drop"):
+        for drop in ("drop", "std::mem::drop", "mem::drop"):
             for generic in ("", "::<_>", "::<(T, &str)>"):
                 for comma in ("", ","):
                     call = drop + generic
@@ -99,6 +99,67 @@ class DiscardTests(unittest.TestCase):
                        "object.drop::<_>(consume(parse_target(i)));"):
             with self.subTest(source=source):
                 self.assertEqual(hits(source), [])
+
+    def test_drop_methods_do_not_discard_helper_arguments(self):
+        for receiver in ("reader", "(reader)", "factory()", "readers[0]"):
+            for generic in ("", "::<_>", "::<(T, &str)>"):
+                for arg in ("parse_target(i)", "consume(parse_target(i))"):
+                    source = f"{receiver}.drop{generic}({arg});"
+                    with self.subTest(source=source):
+                        self.assertEqual(hits(source), [])
+        for prefix in ("..", "a.."):
+            for generic in ("", "::<_>", "::<(T, &str)>"):
+                source = f"let range = {prefix}drop{generic}(parse_target(i));"
+                with self.subTest(source=source):
+                    self.assertEqual([(h.family, h.symbol) for h in hits(source)],
+                                     [("whole-result", "parse_target")])
+
+    def test_bare_block_statements_discard_only_helper_tails(self):
+        for helper in ("parse_target", "parse_target_with_syntax"):
+            for template in (
+                "EXPR;",
+                "fn f(i: &str) { EXPR; }",
+                "fn f(i: &str) { observe(); EXPR; }",
+                "fn f(i: &str) { { observe(); } EXPR; }",
+            ):
+                expr = f"{{ let t = i.trim(); {helper}(t) }}"
+                for tail, expected in (
+                    (f"{helper}(t)", [("whole-result", helper)]),
+                    (f"consume({helper}(t))", []),
+                    (f"{helper}(t).1", []),
+                    ("unrelated(t)", []),
+                ):
+                    source = template.replace("EXPR", expr.replace(f"{helper}(t)", tail))
+                    with self.subTest(source=source):
+                        self.assertEqual([(h.family, h.symbol) for h in hits(source)],
+                                         expected)
+
+    def test_block_headers_preserve_existing_classification(self):
+        for source in (
+            "if c { parse_target(i) };",
+            "if c {} else { parse_target(i) };",
+            "match x { _ => parse_target(i) };",
+            "loop { parse_target(i) };",
+            "unsafe { parse_target(i) };",
+            "fn f() { parse_target(i) };",
+            "while ready() { parse_target(i) };",
+            "let result = { parse_target(i) };",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(hits(source), [])
+
+    def test_block_statement_recognizers_do_not_double_count(self):
+        for helper in ("parse_target", "parse_target_with_syntax"):
+            for source, family in (
+                (f"let _ = {{ {helper}(i) }};", "whole-result"),
+                (f"drop({{ {helper}(i) }});", "whole-result"),
+                (f"{{ drop({helper}(i)) }};", "whole-result"),
+                (f"{{ let t = i.trim(); {helper}(t) }}.0;", "projection"),
+                (f"{{ {helper}(i).0 }};", "projection"),
+            ):
+                with self.subTest(source=source):
+                    self.assertEqual([(h.family, h.symbol) for h in hits(source)],
+                                     [(family, helper)])
 
     def test_q_trailing_comma_drop_arguments(self):
         for drop in ("drop", "std::mem::drop"):
