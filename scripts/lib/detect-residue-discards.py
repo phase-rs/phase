@@ -503,12 +503,13 @@ def production_sources(root, index):
         return name == "tests.rs" or name.endswith("_tests.rs")
 
     sources = {p: read_snapshot(root, p, index) for p in sorted(paths)
-               if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts
-               and not is_test_file(p)}
-    if not sources:
+               if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts}
+    if not any(not is_test_file(p) for p in sources):
         raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
     edges = {}
-    test_files = set()
+    # Exact test filenames stay in the module graph so the children they outline
+    # (tests/support.rs) are test-only too; their own text is never scanned.
+    test_files = {p for p in sources if is_test_file(p)}
     for path, text in sources.items():
         declared, inner_test = scan_file(path, module_edges, text.splitlines())
         edges[path] = [(target, live) for target, live in declared if target in sources]

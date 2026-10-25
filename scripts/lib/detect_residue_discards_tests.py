@@ -559,6 +559,28 @@ class DiscardTests(unittest.TestCase):
             ("production.rs", "binding"),
         ])
 
+    def test_children_outlined_under_exact_test_filenames_stay_test_only(self):
+        discard = "fn f() { let _parsed = parse_target(i); }"
+        for owner, directory in (("tests.rs", "tests"), ("unit_tests.rs", "unit_tests")):
+            with self.subTest(owner=owner):
+                found = self.discovery_hits({
+                    "mod.rs": "#[cfg(test)]\nmod " + owner[:-3] + ";\nmod witness;",
+                    owner: "mod support;",
+                    directory + "/support.rs": "mod deeper;\n" + discard,
+                    directory + "/support/deeper.rs": discard,
+                    "witness.rs": discard,
+                })
+                self.assertEqual(sorted(found), [("witness.rs", "whole-result")])
+
+    def test_production_reference_wins_over_children_of_exact_test_filenames(self):
+        discard = "fn f() { let _parsed = parse_target(i); }"
+        found = self.discovery_hits({
+            "mod.rs": '#[cfg(test)]\nmod tests;\n#[path = "tests/support.rs"]\nmod shared;',
+            "tests.rs": "mod support;",
+            "tests/support.rs": discard,
+        })
+        self.assertEqual(found, [("tests/support.rs", "whole-result")])
+
     def test_production_module_reference_wins_over_test_path_alias(self):
         found = self.discovery_hits({
             "mod.rs": 'mod x;\n#[cfg(test)]\n#[path = "x.rs"]\nmod y;\nmod witness;',

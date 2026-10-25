@@ -382,6 +382,27 @@ for name in contests.rs latest_tests_helper.rs; do
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$name" "$RC" "$OUT"
 done
 
+# A child outlined under an exact test filename (tests/support.rs) is test-only
+# in both snapshots; a production #[path] reference to it brings it back.
+for owner in tests unit_tests; do
+    new_fixture
+    printf '#[cfg(test)]\nmod %s;\n' "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
+    printf 'mod support;\n' > "$FIXTURE/crates/engine/src/parser/$owner.rs"
+    mkdir -p "$FIXTURE/crates/engine/src/parser/$owner"
+    printf 'fn hidden() { let _parsed = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$owner/support.rs"
+    run_gate
+    expect_rc "$owner child stays test-only in worktree" 0
+    expect_out "$owner child is not counted in worktree" 'residue: 1 legacy obligations, ceiling 1'
+    git -C "$FIXTURE" add crates/engine/src/parser
+    run_cached
+    expect_rc "$owner child stays test-only in index" 0
+    expect_out "$owner child is not counted in index" 'residue: 1 legacy obligations, ceiling 1'
+    printf '#[cfg(test)]\nmod %s;\n#[path = "%s/support.rs"]\nmod shared;\n' "$owner" "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
+    run_gate
+    expect_rc "$owner child reached by production path counts" 1
+    expect_out "$owner production path names the child" "$owner/support.rs: actual 1, ceiling 0 (no ledger entry)"
+done
+
 # Availability failures are loud, including the inline seam suite.
 for dependency in lib/detect-residue-discards.py residue-ratchet.txt lib/detect_residue_discards_tests.py; do
     new_fixture
