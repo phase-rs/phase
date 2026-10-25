@@ -7010,7 +7010,8 @@ pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition)
 ///   on the mana spent to cast the spell that directly follows another such
 ///   clause (CR 601.2h + CR 608.2c: "A if {R} was spent …, and B if {G} was
 ///   spent …"), whose gate reads the spell's payment rather than the previous
-///   clause.
+///   clause, and on a suffix-guarded instruction that follows another across
+///   ", then" (CR 608.2c), whose guard governs only its own instruction.
 ///
 /// Two consumers, which is why this is factored out rather than spelled twice:
 /// `resolve_ability_chain` (below) on its condition-false path, and

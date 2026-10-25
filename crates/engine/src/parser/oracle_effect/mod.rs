@@ -1516,6 +1516,64 @@ fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut Clause
     clause.condition = Some(merge_clause_conditions(outer.clone(), inner));
 }
 
+/// CR 608.2c + CR 614.6: an "instead" override's `condition` selects the
+/// replacement and its `else_ability` carries the unreplaced instructions, so a
+/// body with its own guard or otherwise branch resolves beneath a no-op carrier
+/// instead of surrendering them to the selector.
+pub(crate) fn instead_override_definition(
+    body: AbilityDefinition,
+    selector: AbilityCondition,
+) -> AbilityDefinition {
+    if body.condition.is_none() && body.else_ability.is_none() {
+        return body.condition(selector);
+    }
+    AbilityDefinition::new(body.kind, Effect::NoOp)
+        .condition(selector)
+        .sub_ability(body)
+}
+
+/// CR 608.2c: a trailing "<instruction> if <condition>, then" guards that
+/// instruction alone, so the instruction after it is the next independent one and a
+/// following instruction with its own trailing guard is evaluated on that guard.
+/// `pushed_from` is the clause count before the guarded chunk pushed anything.
+fn settle_trailing_guard(
+    clauses: &mut [ClauseIr],
+    pushed_from: Option<usize>,
+    released: &mut bool,
+) {
+    let guarded = pushed_from
+        .and_then(|start| clauses.get_mut(start..))
+        .and_then(<[ClauseIr]>::last_mut)
+        .filter(|clause| {
+            clause.condition.is_some()
+                && !clause.is_optional
+                && matches!(clause.disposition, ClauseDisposition::Emit { .. })
+        });
+    let Some(clause) = guarded else {
+        *released = false;
+        return;
+    };
+    if *released {
+        clause.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+    }
+    *released = matches!(clause.boundary, Some(ClauseBoundary::Then));
+    if *released {
+        clause.boundary = Some(ClauseBoundary::Sentence);
+    }
+}
+
+/// The replacement body of an [`instead_override_definition`] result: the
+/// carrier's sub when one was built, else the override itself.
+pub(crate) fn instead_override_body_mut(instead: &mut AbilityDefinition) -> &mut AbilityDefinition {
+    if matches!(*instead.effect, Effect::NoOp) && instead.sub_ability.is_some() {
+        return instead
+            .sub_ability
+            .as_deref_mut()
+            .expect("the carrier's body was checked");
+    }
+    instead
+}
+
 /// CR 608.2c: Propagate the committed `ChoiceType` from a chain's head
 /// `Effect::Choose` onto every `GuessSubject::CommittedChoice` in the assembled
 /// definition. The head `Choose` is the in-resolution authority for "the last
@@ -26861,6 +26919,17 @@ fn has_explicit_player_target(effect: &Effect) -> bool {
         .is_some_and(target_filter_is_explicit_player_target)
 }
 
+/// CR 115.1 + CR 108.3: a clause announces a player when it targets one or when the cards it acts on are scoped to a target player's zone ("target player's graveyard").
+fn clause_announces_player(effect: &Effect) -> bool {
+    use crate::game::ability_utils::{
+        effect_bound_filter_matches, filter_binds_target_player, PlayerBindingAxis,
+    };
+    has_explicit_player_target(effect)
+        || effect_bound_filter_matches(effect, |filter| {
+            filter_binds_target_player(filter, PlayerBindingAxis::Owner)
+        })
+}
+
 /// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
 /// shapes (`And` / `Or` wrapping a `Typed`). Effect-kind whitelist mirrors
 /// `has_typed_target` exactly — only the filter-shape recognition is
@@ -27910,7 +27979,7 @@ fn declared_player_reference(
 ) -> Option<TargetFilter> {
     let Some(index) = clauses
         .iter()
-        .rposition(|clause| has_explicit_player_target(&clause.parsed.effect))
+        .rposition(|clause| clause_announces_player(&clause.parsed.effect))
     else {
         return enclosing.clone();
     };
@@ -27974,7 +28043,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         ) {
             continue;
         }
-        if has_explicit_player_target(&prev.parsed.effect) {
+        if clause_announces_player(&prev.parsed.effect) {
             return Some(prev);
         }
         if matches!(
@@ -43020,7 +43089,17 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
+    // CR 608.2c: the clause count before the previous chunk's trailing-guarded
+    // instruction was pushed, and whether the instruction settled before it
+    // released its successor (see `settle_trailing_guard`).
+    let mut pending_trailing_guard: Option<usize> = None;
+    let mut trailing_guard_released = false;
     'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        settle_trailing_guard(
+            builder.clauses_mut(),
+            pending_trailing_guard.take(),
+            &mut trailing_guard_released,
+        );
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -44747,6 +44826,13 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
+        if if_you_do.is_none()
+            && guard_condition.is_some()
+            && conditions::parse_leading_conditional_prefix(&normalized_text.to_lowercase())
+                .is_none()
+        {
+            pending_trailing_guard = Some(builder.clauses().len());
+        }
         let condition = match (if_you_do, guard_condition) {
             (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
                 Some(reflexive.with_when_you_do_guard(guard))
@@ -44848,6 +44934,25 @@ fn parse_effect_chain_ir_body(
                 ctx.next_declared_player_group = chain_declared_groups;
                 let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
                 chain_declared_groups = ctx.next_declared_player_group;
+                // CR 608.2c + CR 614.6: an "instead" body is one replacement of the
+                // earlier instruction, not N independently gated instructions.
+                if outer_condition.is_instead_override() && !builder.is_empty() {
+                    let def = instead_override_definition(
+                        lower_effect_chain_ir(&body_ir),
+                        outer_condition.clone(),
+                    );
+                    builder
+                        .clause(
+                            normalized_text,
+                            placeholder_parsed_clause("instead_clause_placeholder"),
+                            chunk.boundary_after,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(Box::new(def)),
+                            },
+                        )
+                        .push();
+                    continue;
+                }
                 if let Some(last) = body_ir.clauses.last_mut() {
                     if last.boundary.is_none() {
                         last.boundary = chunk.boundary_after;
@@ -47972,6 +48077,11 @@ fn parse_effect_chain_ir_body(
     ctx.chain_declared_object_target = outer_declared_object_target;
     ctx.chain_declared_slots = outer_declared_slots;
 
+    settle_trailing_guard(
+        builder.clauses_mut(),
+        pending_trailing_guard.take(),
+        &mut trailing_guard_released,
+    );
     // Once more after the loop: the final iteration's stamp has no next-iteration
     // top to check it. See the declaration of `pending_stamp` above.
     debug_assert!(

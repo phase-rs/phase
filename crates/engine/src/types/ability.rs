@@ -29847,7 +29847,9 @@ impl ContinuousEffectOnset {
 /// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) and by
 /// `mark_independent_mana_spent_gates` (a clause gated on the mana spent to cast
 /// the spell that directly follows another such clause, CR 601.2h — its gate
-/// reads the payment, never the previous clause) — never by ordinary
+/// reads the payment, never the previous clause), and by `settle_trailing_guard`
+/// (a suffix-guarded instruction after an earlier suffix-guarded one across
+/// ", then", CR 608.2c) — never by ordinary
 /// sentence-boundary `SequentialSibling` stamping — so it cannot leak into a
 /// Thieving-Skydiver-shaped dependent continuation that also happens to carry
 /// `SequentialSibling`.
@@ -30997,6 +30999,17 @@ impl AbilityCondition {
             guard => conditions.push(guard),
         }
         AbilityCondition::And { conditions }
+    }
+
+    /// CR 608.2c + CR 614.1a: a condition under which this node replaces its parent's effect.
+    pub fn is_instead_override(&self) -> bool {
+        matches!(
+            self,
+            AbilityCondition::AdditionalCostPaidInstead
+                | AbilityCondition::CastVariantPaidInstead { .. }
+                | AbilityCondition::TargetHasKeywordInstead { .. }
+                | AbilityCondition::ConditionInstead { .. }
+        )
     }
 
     /// Whether this condition carries the CR 603.12 creation marker at its
