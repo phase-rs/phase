@@ -42852,10 +42852,19 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
     )
 }
 
-/// `None` is reserved for an explicit ability-root entry. Nested builders receive
-/// `Some` and retain that permission limit, even at their first chunk.
-/// Replacement and granted-ability builders retain the withheld default:
-/// their legacy unbound population fallback remains, not a strict parse failure.
+/// `None` is reserved for ability-root entries, including
+/// `parse_effect_chain_ir_ability_root` and `parse_effect_chain_with_context_ability_root`.
+/// Spell/activated roots, trigger bodies, granted activated-ability bodies, and
+/// the exert-reflexive body start independent bodies and use that default.
+///
+/// The nested entries `parse_effect_chain_ir`, `parse_effect_chain_with_context`,
+/// and `parse_effect_chain_ir_after_player_choices` keep the withheld default for
+/// continuation bodies: replacement follow-ups, vote outcomes, the separate-piles
+/// continuation, and nested compound bodies. Nested builders receive `Some` and
+/// retain that permission limit, even at their first chunk.
+///
+/// Withheld permission leaves the pre-existing broad, unbound population fallback;
+/// it is not a strict parse failure.
 fn parse_effect_chain_ir_with_damage_context(
     text: &str,
     kind: AbilityKind,
