@@ -4,7 +4,7 @@ use super::rules::{
     AttackTarget, GameAction, GameEvent, GameRunner, GameScenario, ObjectId, Phase, WaitingFor,
     Zone, P0, P1,
 };
-use engine::types::ability::{ChosenAttribute, TargetRef};
+use engine::types::ability::{ChosenAttribute, EffectKind, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
@@ -17,6 +17,8 @@ const GODHEAD: &str = "Flying\nOther creatures have base power and toughness 1/1
 const MOB: &str = "Trample\nDuring your turn, Angry Mob's power and toughness are each equal to 2 plus the number of Swamps your opponents control. During turns other than yours, Angry Mob's power and toughness are each 2.";
 const MARO: &str = "Maro's power and toughness are each equal to the number of cards in your hand.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
+const MANDATE: &str = "Cast this spell only during combat.\nYour opponents can't cast spells this turn.\nEnd the combat phase. (Remove all attackers and blockers from combat. Exile all spells and abilities from the stack, including this spell.)";
+const TIME_STOP: &str = "End the turn. (Exile all spells and abilities, including this spell. The player whose turn it is discards down to their maximum hand size. Damage heals and \"this turn\" and \"until end of turn\" effects end.)";
 
 fn forests(s: &mut GameScenario, player: PlayerId, count: usize) {
     for _ in 0..count {
@@ -173,8 +175,145 @@ fn gaeas_liege_attack_switches_immediately_and_restores() {
             )],
         );
         pt(&r, id, if attacks_itself { 2 } else { 4 });
+        assert!(r.state().transient_continuous_effects.is_empty());
         finish_combat(&mut r);
+        assert!(r.state().combat.is_none());
+        complete(&r);
         pt(&r, id, 4);
+    }
+}
+
+// CR 724.2d + CR 611.3a: forced combat exit must refresh live statics through
+// the same removal authority as normal combat, without an expiring effect.
+#[test]
+fn gaeas_liege_mandate_restores_after_forced_combat_exit() {
+    let mut s = scenario();
+    forests(&mut s, P0, 4);
+    forests(&mut s, P1, 2);
+    let id = liege(&mut s);
+    let mandate = s
+        .add_spell_to_hand_from_oracle(P0, "Mandate of Peace", true, MANDATE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let mut r = s.build();
+    attack(&mut r, &[(id, AttackTarget::Player(P1))]);
+    pt(&r, id, 2);
+    assert!(r.state().transient_continuous_effects.is_empty());
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    // Phase transitions empty mana pools, so fund the actual cast window.
+    for _ in 0..2 {
+        r.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::White,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    let outcome = r.cast(mandate).resolve();
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::EffectResolved { kind: EffectKind::EndCombatPhase, source_id, .. }
+            if *source_id == mandate)));
+    assert_eq!(r.state().objects[&mandate].zone, Zone::Exile);
+    assert_eq!(r.state().phase, Phase::PostCombatMain);
+    assert!(r.state().combat.is_none());
+    complete(&r);
+    pt(&r, id, 4);
+}
+
+// CR 724.1d + CR 611.3a + CR 514.1: observe restoration at the mandatory
+// cleanup discard, before a new turn could incidentally refresh the layers.
+#[test]
+fn gaeas_liege_time_stop_restores_before_cleanup_discard() {
+    for during_combat in [true, false] {
+        let mut s = scenario();
+        forests(&mut s, P0, 3);
+        let forest = s.add_basic_land(P0, ManaColor::Green);
+        forests(&mut s, P1, 2);
+        let id = liege(&mut s);
+        let hand: Vec<_> = (0..8)
+            .map(|_| {
+                s.add_land_to_hand(P0, "Forest")
+                    .with_subtypes(vec!["Forest"])
+                    .id()
+            })
+            .collect();
+        let time_stop = s
+            .add_spell_to_hand_from_oracle(P0, "Time Stop", true, TIME_STOP)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Blue; 2],
+            })
+            .id();
+        let mut r = s.build();
+        if during_combat {
+            attack(&mut r, &[(id, AttackTarget::Player(P1))]);
+            pt(&r, id, 2);
+        } else {
+            // An ordinary mana activation settles the scenario's initial
+            // derived state while retaining precombat priority for the cast.
+            r.activate(forest, 0).resolve();
+            complete(&r);
+            assert_eq!(r.state().phase, Phase::PreCombatMain);
+            pt(&r, id, 4);
+        }
+        assert!(r.state().transient_continuous_effects.is_empty());
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        let turn = r.state().turn_number;
+        for _ in 0..6 {
+            r.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Blue,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let outcome = r.cast(time_stop).resolve();
+        assert!(outcome.events().iter().any(|event| matches!(event,
+            GameEvent::EffectResolved { kind: EffectKind::EndTheTurn, source_id, .. }
+                if *source_id == time_stop)));
+        match &r.state().waiting_for {
+            WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards,
+            } => {
+                assert_eq!(*player, P0);
+                assert_eq!(*count, 1);
+                assert_eq!(cards.len(), hand.len());
+                assert!(hand.iter().all(|id| cards.contains(id)));
+                assert_eq!(r.state().players[0].hand.len(), hand.len());
+                assert!(hand.iter().all(|id| r.state().players[0].hand.contains(id)));
+            }
+            other => panic!("expected mandatory cleanup discard, got {other:?}"),
+        }
+        assert_eq!(r.state().phase, Phase::Cleanup);
+        assert_eq!(r.state().active_player, P0);
+        assert_eq!(r.state().turn_number, turn);
+        assert_eq!(r.state().objects[&time_stop].zone, Zone::Exile);
+        assert!(r.state().stack.is_empty());
+        assert!(r.state().combat.is_none());
+        pt(&r, id, 4);
+        r.act(GameAction::SelectCards {
+            cards: vec![hand[0]],
+        })
+        .unwrap();
+        for _ in 0..16 {
+            if matches!(r.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            r.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(r.state().objects[&hand[0]].zone, Zone::Graveyard);
+        complete(&r);
     }
 }
 

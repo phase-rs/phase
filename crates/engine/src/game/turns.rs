@@ -409,6 +409,11 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // is skipped, so we must expire the restriction here.
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
+    // CR 724.1d + CR 611.3a: the effect already cleared combat; live static
+    // conditions must observe that removal before cleanup begins.
+    if state.phase.is_combat() {
+        state.layers_dirty.mark_full();
+    }
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
@@ -417,6 +422,9 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// that skip directly out of combat use the same teardown authority.
 fn complete_end_combat_teardown(state: &mut GameState) {
     state.combat = None;
+    // CR 511.3 + CR 611.3a: removing combat membership changes live static
+    // conditions even when no transient continuous effect expires.
+    state.layers_dirty.mark_full();
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
