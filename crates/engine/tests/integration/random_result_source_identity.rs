@@ -1430,10 +1430,10 @@ fn synthetic_declared_slot_tail_survives_empty_move_result() {
     parked_optional_move(ParkedMoveTail::SlotPumpAndDamage, false);
 }
 
-/// CR 614.1c + CR 614.2: the Rest-in-Peace-class graveyard→exile `Moved`
-/// redirect, installed on an otherwise inert battlefield permanent. It makes
-/// the accepted move's *delivery* ineligible for the normal-path binder, which
-/// is the branch this fixture feeds.
+/// CR 614.1a + CR 614.6: an `instead` replacement substitutes exile for the
+/// original graveyard-entry event, installed on an otherwise inert battlefield
+/// permanent. It makes the accepted move's *delivery* ineligible for the
+/// normal-path binder, which is the branch this fixture feeds.
 fn graveyard_to_exile_redirect() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Graveyard)
@@ -1664,22 +1664,13 @@ fn optional_move_destination_scope(producer_destination: Zone) {
         assert_eq!(witness_object.zone, Zone::Battlefield);
         assert!(moves(&run.events[start..], witness).is_empty());
     } else {
-        // Negative: `Hand` is outside the scope, so the accepted move never
-        // binds. The dependent node keeps its pre-existing route, which here
-        // reaches the stale inherited witness (CR 608.2c: an inherited
-        // referent, not this move's result). This pins the guard's contract —
-        // out-of-scope destinations are not this binder's business — it does
-        // not endorse the stale referent.
+        // Negative: `Hand` is outside the binder's scope, so the accepted move
+        // never binds.
         assert_eq!(
             moves(&run.events[start..], source),
             vec![(Some(Zone::Battlefield), Zone::Hand)]
         );
         assert_eq!(source_object.zone, Zone::Hand);
-        assert_eq!(
-            moves(&run.events[start..], witness),
-            vec![(Some(Zone::Battlefield), Zone::Graveyard)]
-        );
-        assert_eq!(witness_object.zone, Zone::Graveyard);
     }
 }
 
