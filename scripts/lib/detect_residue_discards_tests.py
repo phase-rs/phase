@@ -21,6 +21,110 @@ def hits(src):
 
 
 class DiscardTests(unittest.TestCase):
+    def test_q_trailing_comma_drop_arguments(self):
+        for drop in ("drop", "std::mem::drop"):
+            with self.subTest(drop=drop):
+                self.assertEqual([h.family for h in hits(
+                    f"{drop}(\n    parse_target(\n        i,\n    ),\n);")],
+                    ["whole-result"])
+                self.assertEqual(hits(
+                    f"{drop}(\n    consume(parse_target(i)),\n);"), [])
+                self.assertEqual(hits(
+                    f"{drop}(\n    unrelated(i),\n);"), [])
+                self.assertEqual(hits(
+                    f"{drop}(parse_target(i), unrelated(i));"), [])
+
+    def test_q_trailing_comma_exact_defaults_in_nested_expressions(self):
+        for variant in ("Any", "SelfRef"):
+            for template in ("EXPR", "consume(Some(\n    EXPR,\n))",
+                             "let f = (EXPR, unrelated());"):
+                with self.subTest(variant=variant, template=template):
+                    expr = f"x\n    .unwrap_or(\n        TargetFilter::{variant},\n    )"
+                    self.assertEqual([h.family for h in hits(template.replace("EXPR", expr))],
+                                     ["default"])
+                    for control in (f"x.unwrap_or(\n    Other::{variant},\n)",
+                                    f"x.unwrap_or(\n    make(TargetFilter::{variant}),\n)",
+                                    f"x.unwrap_or(TargetFilter::{variant}, unrelated())"):
+                        self.assertEqual(hits(template.replace("EXPR", control)), [])
+
+    def test_q_rustfmt_binding_matrix(self):
+        forms = (
+            "let (filter, REST,) = EXPR; consume(REST);",
+            "let (filter, REST,): (TargetFilter, &str) = EXPR; consume(REST);",
+            "let (filter, mut REST,) = EXPR; consume(REST);",
+            "let (filter, ref REST,) = EXPR; consume(REST);",
+            "let (filter, ref mut REST,) = EXPR; consume(REST);",
+            "let (filter, REST, ..) = EXPR; consume(REST);",
+            "let (Typed(filter), REST,) = EXPR else { return; }; consume(REST);",
+            "if let (Typed(filter), REST,) = EXPR { consume(REST); } else {}",
+            "match EXPR {\n    (Typed(filter), REST,) => consume(REST),\n}",
+        )
+        call = "parse_target_with_ctx(\n    text,\n    ctx,\n)"
+        exprs = (
+            call,
+            "ctx.with_player_antecedents(\n    |s| parse_target_with_ctx(i, s),\n)",
+            "ctx.with_player_antecedents(\n    |s| {\n"
+            "        parse_target_with_ctx(\n            i,\n            s,\n        )\n    },\n)",
+            "ctx.with_player_scope(\n    scope,\n"
+            "    |s| parse_target_with_ctx(i, s),\n)",
+            "ctx.with_player_scope(\n    scope,\n    |s| {\n"
+            "        parse_target_with_ctx(\n            i,\n            s,\n        )\n    },\n)",
+        )
+        for template in forms:
+            for expr in exprs:
+                for residue, expected in (("_rest", ["binding"]), ("rest", [])):
+                    source = template.replace("REST", residue).replace("EXPR", expr)
+                    with self.subTest(template=template, expr=expr, residue=residue):
+                        self.assertEqual([h.family for h in hits(source)], expected)
+                with self.subTest(template=template, unrelated=True, expr=expr):
+                    self.assertEqual(hits(template.replace("REST", "_").replace(
+                        "EXPR", f"consume(\n    {expr},\n)")), [])
+
+    def test_q_rustfmt_result_and_pattern_wrappers(self):
+        for wrapper in ("Some", "Ok"):
+            for trailing_pattern_comma in ("", ","):
+                for residue, expected in (("_rest", ["binding"]), ("rest", [])):
+                    expr = f"{wrapper}(\n    parse_target(\n        i,\n    ),\n)"
+                    pattern = f"{wrapper}((filter, {residue},){trailing_pattern_comma})"
+                    for template in (
+                        "if let PATTERN = EXPR { consume(REST); }",
+                        "match EXPR {\n    PATTERN => consume(REST),\n}",
+                    ):
+                        source = template.replace("PATTERN", pattern).replace(
+                            "EXPR", expr).replace("REST", residue)
+                        with self.subTest(wrapper=wrapper, comma=trailing_pattern_comma,
+                                          residue=residue, template=template):
+                            self.assertEqual([h.family for h in hits(source)], expected)
+
+    def test_q_rustfmt_projections_and_whole_results(self):
+        for helper, projection in (("parse_target", "0"),
+                                   ("parse_target_with_syntax", "0"),
+                                   ("parse_target_with_syntax", "2")):
+            args = "i,\n    ctx," if helper == "parse_target_with_syntax" else "i,"
+            call = f"{helper}(\n    {args}\n)"
+            for expr in (call, f"(\n    {call}\n)"):
+                with self.subTest(helper=helper, projection=projection, expr=expr):
+                    self.assertEqual([h.family for h in hits(
+                        f"let value = {expr}\n    .{projection};")], ["projection"])
+                    self.assertEqual(hits(f"let rest = {expr}\n    .1; consume(rest);"), [])
+        call = "parse_target(\n    i,\n)"
+        for template in ("let _ = EXPR;", "let _: (TargetFilter, &str) = EXPR;", "EXPR;"):
+            with self.subTest(template=template):
+                self.assertEqual([h.family for h in hits(template.replace("EXPR", call))],
+                                 ["whole-result"])
+                self.assertEqual(hits(template.replace("EXPR", f"consume(\n    {call},\n)")), [])
+
+    def test_r_known_limit_import_alias_shadowing_is_untracked(self):
+        """Aliases never occur in the real parser tree; local shadowing is untracked."""
+        imported = "use crate::target::parse_target as parse;\n"
+        shadowed = ("let parse = |s| (s.len(), ());\n"
+                    "let (n, _) = parse(i);")
+        self.assertEqual([(h.family, h.symbol) for h in hits(imported + shadowed)],
+                         [("binding", "parse_target")])
+        self.assertEqual(hits(shadowed), [])
+        self.assertEqual(hits(imported + shadowed.replace(
+            "let (n, _) = parse(i);", "let (n, rest) = parse(i); consume(rest);")), [])
+
     def test_o_refutable_let_else_and_if_let_else(self):
         self.assertEqual([h.family for h in hits(
             "fn probe(input: &str) -> Option<TargetFilter> { "
@@ -92,8 +196,12 @@ class DiscardTests(unittest.TestCase):
         )
         for helper in ("parse_target", "parse_target_with_syntax"):
             call = f"{helper}(input)"
+            multiline = f"{helper}(\n    input,\n)"
             for expr in (call, f"ctx.with_player_antecedents(|s| {call})",
-                         f"ctx.with_player_scope(scope, |s| {{ {call} }})"):
+                         f"ctx.with_player_scope(scope, |s| {{ {call} }})",
+                         multiline,
+                         f"ctx.with_player_antecedents(\n    |s| {multiline},\n)",
+                         f"ctx.with_player_scope(\n    scope,\n    |s| {{ {multiline} }},\n)"):
                 for name, template, discards in forms:
                     for residue in ("_rest", "rest"):
                         src = template.replace("REST", residue).replace("EXPR", expr)

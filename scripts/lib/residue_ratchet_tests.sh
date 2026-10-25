@@ -238,9 +238,9 @@ run_cached
 expect_rc 'precise capture cannot hide an indexed discard' 1
 expect_out 'precise capture indexed growth names source' 'probe.rs:3: binding parse_target_with_ctx'
 
-# Refutable let-else and top-level or-patterns must grow the actual H census in
-# both snapshots; consumed-remainder replacements remove the new obligations.
-for form in let-else or-pattern; do
+# Refutable let-else, or-patterns and rustfmt trailing commas must grow the real
+# H census in both snapshots; consumed/unrelated replacements remove the growth.
+for form in let-else or-pattern trailing-comma-drop qualified-drop any-default selfref-default wrapped-pattern; do
     new_fixture
     case "$form" in
         let-else)
@@ -252,6 +252,65 @@ for form in let-else or-pattern; do
             discarded='fn probe(input: &str) { match parse_target(input) { (TargetFilter::Any, _) | (TargetFilter::SelfRef, _) => None, (filter, rest) => rest.is_empty().then_some(filter), } }'
             consumed='fn probe(input: &str) { match parse_target(input) { (TargetFilter::Any, rest) | (TargetFilter::SelfRef, rest) => consume(rest), (filter, rest) => rest.is_empty().then_some(filter), } }'
             actual=3
+            ;;
+        trailing-comma-drop|qualified-drop)
+            drop_name=drop
+            if [ "$form" = qualified-drop ]; then drop_name=std::mem::drop; fi
+            discarded="fn probe(input: &str) {
+    $drop_name(
+        parse_target(
+            input,
+        ),
+    );
+}"
+            consumed="fn probe(input: &str) {
+    $drop_name(
+        consume(parse_target(input)),
+    );
+}"
+            actual=2
+            ;;
+        any-default|selfref-default)
+            variant=Any
+            if [ "$form" = selfref-default ]; then variant=SelfRef; fi
+            discarded="fn probe() {
+    consume(Some(
+        producer().unwrap_or(
+            TargetFilter::$variant,
+        ),
+    ));
+}"
+            consumed="fn probe() {
+    consume(Some(
+        producer().unwrap_or(
+            Other::$variant,
+        ),
+    ));
+}"
+            actual=2
+            ;;
+        wrapped-pattern)
+            discarded='fn probe(input: &str) {
+    match Some(
+        parse_target(
+            input,
+        ),
+    ) {
+        Some((filter, _),) => use_it(filter),
+        None => (),
+    }
+}'
+            consumed='fn probe(input: &str) {
+    match Some(
+        parse_target(
+            input,
+        ),
+    ) {
+        Some((filter, rest),) => consume(rest),
+        None => (),
+    }
+}'
+            actual=2
             ;;
     esac
     printf '%s\n' "$discarded" >> "$FIXTURE/crates/engine/src/parser/probe.rs"

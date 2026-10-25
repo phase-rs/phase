@@ -9,11 +9,14 @@ Expression-with-block statement boundaries are shared by closure tails and
 comma-free match arms. Import aliases are lexical (module boundaries do not
 inherit them); precise-capture use<...> bounds are not imports. Bare closures
 are not helper results: only established result-forwarding methods unwrap them.
+Local bindings shadowing imported aliases are not tracked; helper import aliases
+do not occur in the current production parser tree.
 Binding annotations and ref/mut modifiers do not hide ignored remainders.
 Let-else initializers stop before the top-level else, not its diverging block.
 Each discarding top-level or-pattern alternative counts separately, including
 parenthesized alternatives: splitting an arm preserves its obligation count.
 Mixed alternatives count only the discarding alternatives, not the whole arm.
+Argument and wrapper-pattern splitting accepts an optional trailing comma.
 
 --list reports each path:line family symbol and scan totals; --baseline prints
 sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
@@ -281,8 +284,12 @@ class Expressions:
                     return b == a + 1 and v[a].startswith("_")
                 start += 1
                 end -= 1
-            elif end > start + 2 and v[start] in ("Some", "Ok") and v[start + 1] == "(":
-                start += 1
+            elif (end > start + 2 and v[start] in ("Some", "Ok")
+                  and v[start + 1] == "(" and self.pairs[start + 1] == end - 1):
+                args = self.split(start + 2, end - 1)
+                if len(args) != 1:
+                    return False
+                start, end = args[0]
             else:
                 return False
         return False
@@ -299,8 +306,12 @@ class Expressions:
             yield start
             return
         v = self.values
-        if start < end and v[start] in ("Some", "Ok"):
-            start += 1
+        if (start + 1 < end and v[start] in ("Some", "Ok")
+                and v[start + 1] == "(" and self.pairs[start + 1] == end - 1):
+            args = self.split(start + 2, end - 1)
+            if len(args) == 1:
+                yield from self.discard_patterns(*args[0], arity)
+            return
         if start < end and v[start] == "(" and self.pairs[start] == end - 1:
             # Only grouping/wrappers expose whole-result alternatives. Do not
             # confuse alternatives inside the filter component with tuple arms.
@@ -362,7 +373,9 @@ def find_discards(relpath, lines):
             if origin and (v[i + 1] == "0" or origin[1] == "parse_target_with_syntax"):
                 add(origin, "projection")
         if value == "drop" and i + 1 < len(v) and v[i + 1] == "(":
-            add(ex.origin(i + 2, ex.pairs[i + 1]), "whole-result")
+            args = ex.split(i + 2, ex.pairs[i + 1])
+            if len(args) == 1:
+                add(ex.origin(*args[0]), "whole-result")
         if value == ";":
             start = i - 1
             while start >= 0 and v[start] not in (";", "{", "}"):
@@ -371,8 +384,8 @@ def find_discards(relpath, lines):
                 start -= 1
             add(ex.origin(start + 1, i), "whole-result")
         if value == "unwrap_or" and i > 0 and v[i - 1] == "." and i + 1 < len(v) and v[i + 1] == "(":
-            end = ex.pairs[i + 1]
-            arg = v[i + 2:end]
+            args = ex.split(i + 2, ex.pairs[i + 1])
+            arg = v[args[0][0]:args[0][1]] if len(args) == 1 else []
             if len(arg) == 3 and arg[:2] == ["TargetFilter", "::"] and arg[2] in ("SelfRef", "Any"):
                 hits[i] = Hit(relpath, ex.lines[i], "default", "TargetFilter::" + arg[2])
     return sorted(hits.values())

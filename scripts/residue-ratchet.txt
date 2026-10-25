@@ -24,9 +24,13 @@
 # block-expression closure tails / comma-free arms, module-scoped aliases,
 # ref/mut residue bindings and typed wildcards still measure 128; no increases.
 # Uncalled closures are excluded; precise-capture bounds are not imports.
+# Local bindings shadowing imported helper aliases are untracked (possible false
+# positives); helper import aliases do not occur in the current parser tree.
 # Let-else initializers stop at top-level else; typed/ref/mut forms are included.
 # Revalidated at source revision fd3d6cf3c2fea2a7853ec422891188475cec5236:
 # let-else / or-pattern recognition still measures 128; no ceiling increased.
+# Revalidated at source revision 5c4bfcbcb1e8c25e572e42fb518c05cebcc3c145:
+# optional trailing argument/pattern commas still measure 128; no increases.
 # Gate H opts into item exclusion; other censuses retain their legacy population.
 # Format: <repository-relative-path> <nonnegative decimal ceiling>.
 # Tightening rule: every burn-down change must lower its ceiling in the same
