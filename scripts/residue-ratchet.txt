@@ -11,8 +11,10 @@
 # helpers are NOT this helper family; their second-component drops are excluded.
 # _name bindings include debug-asserted remainders: conservative syntax risks,
 # not claims that every site loses text. Defaults likewise freeze syntax only.
-# Distinct match-arm discard patterns count separately; overlapping recognizers
-# of the same occurrence do not. All baseline sites were reviewed in source.
+# Distinct match-arm alternatives count separately, including parenthesized and
+# leading-| forms: splitting an arm preserves its obligation count. Mixed arms
+# count only discarding alternatives. Overlapping recognizers count once.
+# All baseline sites were reviewed in source.
 # Bindings include optional types and tuple `..`; match arms include guards and
 # comma-free block bodies. Closure propagation is limited to ParseContext's
 # with_player_antecedents / with_player_scope methods, which return f(...) intact.
@@ -22,6 +24,9 @@
 # block-expression closure tails / comma-free arms, module-scoped aliases,
 # ref/mut residue bindings and typed wildcards still measure 128; no increases.
 # Uncalled closures are excluded; precise-capture bounds are not imports.
+# Let-else initializers stop at top-level else; typed/ref/mut forms are included.
+# Revalidated at source revision fd3d6cf3c2fea2a7853ec422891188475cec5236:
+# let-else / or-pattern recognition still measures 128; no ceiling increased.
 # Gate H opts into item exclusion; other censuses retain their legacy population.
 # Format: <repository-relative-path> <nonnegative decimal ceiling>.
 # Tightening rule: every burn-down change must lower its ceiling in the same

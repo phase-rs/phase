@@ -21,6 +21,92 @@ def hits(src):
 
 
 class DiscardTests(unittest.TestCase):
+    def test_o_refutable_let_else_and_if_let_else(self):
+        self.assertEqual([h.family for h in hits(
+            "fn probe(input: &str) -> Option<TargetFilter> { "
+            "let (TargetFilter::Typed(typed), _) = parse_target(input) "
+            "else { return None; }; Some(TargetFilter::Typed(typed)) }")], ["binding"])
+        for expr in (
+            "parse_target(input)",
+            "ctx.with_player_antecedents(|s| parse_target(input))",
+            "ctx.with_player_scope(scope, |s| { parse_target(input) })",
+        ):
+            for annotation in ("", ": (TargetFilter, &str)"):
+                for modifier in ("", "mut ", "ref ", "ref mut "):
+                    for residue, expected in (("_rest", ["binding"]), ("rest", [])):
+                        pattern = f"(TargetFilter::Typed(typed), {modifier}{residue})"
+                        src = (f"fn probe(input: &str) -> Option<TargetFilter> {{ "
+                               f"let {pattern}{annotation} = {expr} else {{ return None; }}; "
+                               f"consume({residue}); Some(TargetFilter::Typed(typed)) }}")
+                        with self.subTest(expr=expr, annotation=annotation,
+                                          modifier=modifier, residue=residue):
+                            self.assertEqual([h.family for h in hits(src)], expected)
+            for residue, expected in (("_rest", ["binding"]), ("rest", [])):
+                src = (f"if let (TargetFilter::Typed(typed), {residue}) = {expr} "
+                       "{ consume(" + residue + "); } else { return None; }")
+                with self.subTest(expr=expr, residue=residue):
+                    self.assertEqual([h.family for h in hits(src)], expected)
+
+    def test_p_or_patterns_count_each_discarding_alternative(self):
+        for pattern in (
+            "(TargetFilter::Any, REST) | (TargetFilter::SelfRef, REST)",
+            "| (TargetFilter::Any, REST) | (TargetFilter::SelfRef, REST)",
+            "((TargetFilter::Any, REST) | (TargetFilter::SelfRef, REST))",
+            "((TargetFilter::Any, REST)) | ((TargetFilter::SelfRef, REST))",
+        ):
+            for residue, expected in (("_", 2), ("rest", 0)):
+                body = "None" if residue == "_" else "consume(rest)"
+                src = ("match parse_target(input) { " + pattern.replace("REST", residue)
+                       + " => " + body + ", "
+                       "(filter, rest) => rest.is_empty().then_some(filter), }")
+                with self.subTest(pattern=pattern, residue=residue):
+                    self.assertEqual([h.family for h in hits(src)], ["binding"] * expected)
+        for pattern in (
+            "(TargetFilter::Any, _) | (TargetFilter::SelfRef, rest)",
+            "(TargetFilter::Any, rest) | (TargetFilter::SelfRef, _)",
+        ):
+            with self.subTest(mixed=pattern):
+                self.assertEqual([h.family for h in hits(
+                    f"match parse_target(input) {{ {pattern} => consume(rest), }}")],
+                    ["binding"])
+        combined = ("match parse_target(input) { "
+                    "(TargetFilter::Any, _) | (TargetFilter::SelfRef, _) => None, }")
+        split = combined.replace(" | ", " => None, ")
+        self.assertEqual(len(hits(combined)), 2)
+        self.assertEqual(len(hits(split)), 2)
+
+    def test_supported_binding_matrix_discarded_vs_consumed(self):
+        # Deterministic cross-product, not randomized fuzzing: each grammar axis
+        # carries a consumed-remainder control, including inside both wrappers.
+        forms = (
+            ("plain", "let (filter, REST) = EXPR; consume(REST);", 1),
+            ("typed", "let (filter, REST): (TargetFilter, &str) = EXPR; consume(REST);", 1),
+            ("mut", "let (filter, mut REST) = EXPR; consume(REST);", 1),
+            ("ref", "let (filter, ref REST) = EXPR; consume(REST);", 1),
+            ("ref-mut", "let (filter, ref mut REST) = EXPR; consume(REST);", 1),
+            ("tuple-rest", "let (filter, REST, ..) = EXPR; consume(REST);", 1),
+            ("let-else", "let (Typed(filter), REST) = EXPR else { return; }; consume(REST);", 1),
+            ("if-let", "if let (Typed(filter), REST) = EXPR { consume(REST); } else {}", 1),
+            ("match", "match EXPR { (Typed(filter), REST) => consume(REST), }", 1),
+            ("or-pattern", "match EXPR { (Any, REST) | (SelfRef, REST) => consume(REST), }", 2),
+        )
+        for helper in ("parse_target", "parse_target_with_syntax"):
+            call = f"{helper}(input)"
+            for expr in (call, f"ctx.with_player_antecedents(|s| {call})",
+                         f"ctx.with_player_scope(scope, |s| {{ {call} }})"):
+                for name, template, discards in forms:
+                    for residue in ("_rest", "rest"):
+                        src = template.replace("REST", residue).replace("EXPR", expr)
+                        if helper == "parse_target_with_syntax":
+                            src = src.replace(", " + residue + ")", ", " + residue + ", syntax)")
+                            src = src.replace("(TargetFilter, &str)", "(TargetFilter, &str, Syntax)")
+                        elif name == "tuple-rest":
+                            pattern = "(filter, ..)" if residue == "_rest" else "(.., rest)"
+                            src = src.replace(f"(filter, {residue}, ..)", pattern)
+                        with self.subTest(helper=helper, expr=expr, form=name, residue=residue):
+                            self.assertEqual([h.family for h in hits(src)],
+                                             ["binding"] * (discards if residue == "_rest" else 0))
+
     def test_h_block_closure_tail_after_expression_statements(self):
         for statement in ("if input.is_empty() { observe(); }",
                           "if flag { observe(); } else { observe(); }",

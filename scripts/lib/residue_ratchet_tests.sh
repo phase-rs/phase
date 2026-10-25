@@ -238,6 +238,47 @@ run_cached
 expect_rc 'precise capture cannot hide an indexed discard' 1
 expect_out 'precise capture indexed growth names source' 'probe.rs:3: binding parse_target_with_ctx'
 
+# Refutable let-else and top-level or-patterns must grow the actual H census in
+# both snapshots; consumed-remainder replacements remove the new obligations.
+for form in let-else or-pattern; do
+    new_fixture
+    case "$form" in
+        let-else)
+            discarded='fn probe(input: &str) -> Option<TargetFilter> { let (TargetFilter::Typed(typed), _) = parse_target(input) else { return None; }; Some(TargetFilter::Typed(typed)) }'
+            consumed='fn probe(input: &str) -> Option<TargetFilter> { let (TargetFilter::Typed(typed), rest) = parse_target(input) else { return None; }; consume(rest); Some(TargetFilter::Typed(typed)) }'
+            actual=2
+            ;;
+        or-pattern)
+            discarded='fn probe(input: &str) { match parse_target(input) { (TargetFilter::Any, _) | (TargetFilter::SelfRef, _) => None, (filter, rest) => rest.is_empty().then_some(filter), } }'
+            consumed='fn probe(input: &str) { match parse_target(input) { (TargetFilter::Any, rest) | (TargetFilter::SelfRef, rest) => consume(rest), (filter, rest) => rest.is_empty().then_some(filter), } }'
+            actual=3
+            ;;
+    esac
+    printf '%s\n' "$discarded" >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+    run_gate
+    expect_rc "$form introduced discard fails worktree H" 1
+    expect_out "$form worktree growth is counted" "actual $actual, ceiling 1"
+    printf 'SMOKE %s worktree added: exit %s\n%s\n' "$form" "$RC" "$OUT"
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
+    run_gate
+    expect_rc "$form removing discard passes worktree H" 0
+    expect_out "$form consumed worktree returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    printf 'SMOKE %s worktree removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/probe.rs"
+    git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
+    run_cached
+    expect_rc "$form indexed discard fails despite consumed worktree" 1
+    expect_out "$form index growth is counted" "actual $actual, ceiling 1"
+    printf 'SMOKE %s staged-index added: exit %s\n%s\n' "$form" "$RC" "$OUT"
+    git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+    run_cached
+    expect_rc "$form removing indexed discard passes H" 0
+    expect_out "$form consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$form consumed snapshot is index" 'snapshot index)'
+    printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
+done
+
 # Availability failures are loud, including the inline seam suite.
 for dependency in lib/detect-residue-discards.py residue-ratchet.txt lib/detect_residue_discards_tests.py; do
     new_fixture

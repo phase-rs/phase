@@ -10,6 +10,10 @@ comma-free match arms. Import aliases are lexical (module boundaries do not
 inherit them); precise-capture use<...> bounds are not imports. Bare closures
 are not helper results: only established result-forwarding methods unwrap them.
 Binding annotations and ref/mut modifiers do not hide ignored remainders.
+Let-else initializers stop before the top-level else, not its diverging block.
+Each discarding top-level or-pattern alternative counts separately, including
+parenthesized alternatives: splitting an arm preserves its obligation count.
+Mixed alternatives count only the discarding alternatives, not the whole arm.
 
 --list reports each path:line family symbol and scan totals; --baseline prints
 sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
@@ -283,6 +287,26 @@ class Expressions:
                 return False
         return False
 
+    def discard_patterns(self, start, end, arity=2):
+        """Yield distinct discarding alternatives, preserving their token sites."""
+        alternatives = self.split(start, end, "|")
+        if len(alternatives) > 1:
+            for a, b in alternatives:
+                if a < b:  # A leading `|` is an empty prefix, not an obligation.
+                    yield from self.discard_patterns(a, b, arity)
+            return
+        if self.residue_pattern(start, end, arity):
+            yield start
+            return
+        v = self.values
+        if start < end and v[start] in ("Some", "Ok"):
+            start += 1
+        if start < end and v[start] == "(" and self.pairs[start] == end - 1:
+            # Only grouping/wrappers expose whole-result alternatives. Do not
+            # confuse alternatives inside the filter component with tuple arms.
+            if len(self.split(start + 1, end - 1)) == 1:
+                yield from self.discard_patterns(start + 1, end - 1, arity)
+
 
 def find_discards(relpath, lines):
     """Pure classification. No filesystem, git, baseline, or mutable global state."""
@@ -293,8 +317,8 @@ def find_discards(relpath, lines):
     def add(origin, family, occurrence=None):
         if origin:
             i, symbol = origin
-            # Overlapping recognizers share a result occurrence. Distinct match
-            # arm patterns are distinct syntactic discards of that result.
+            # Overlapping recognizers share a result occurrence. Distinct arm
+            # alternatives are distinct syntactic discards of that result.
             site = i if occurrence is None else occurrence
             hits.setdefault((i, site), Hit(relpath, ex.lines[site], family, symbol))
 
@@ -303,16 +327,17 @@ def find_discards(relpath, lines):
             equals = ex.end(i + 1, {"=", ";", "}"})
             if equals >= len(v) or v[equals] != "=":
                 continue
-            end = ex.end(equals + 1, {";", "{", "}"})
+            end = ex.end(equals + 1, {";", "{", "}", "else"})
             # A closure/block RHS needs its opening brace, unlike if-let's body.
             if end < len(v) and v[end] == "{" and end == equals + 1:
                 end = ex.pairs[end] + 1
             origin = ex.origin(equals + 1, end)
             arity = 3 if origin and origin[1] == "parse_target_with_syntax" else 2
             pattern_end = ex.end(i + 1, {":"}, equals)
-            if ex.residue_pattern(i + 1, pattern_end, arity):
-                add(origin, "binding")
-            elif v[i + 1:pattern_end] == ["_"]:
+            patterns = list(ex.discard_patterns(i + 1, pattern_end, arity))
+            for site in patterns:
+                add(origin, "binding", site if len(patterns) > 1 else None)
+            if not patterns and v[i + 1:pattern_end] == ["_"]:
                 add(origin, "whole-result")
         if value == "match":
             end = ex.end(i + 1, {"{"})
@@ -320,8 +345,8 @@ def find_discards(relpath, lines):
             if origin and end < len(v):
                 arity = 3 if origin[1] == "parse_target_with_syntax" else 2
                 for a, b in ex.match_patterns(end + 1, ex.pairs[end]):
-                    if ex.residue_pattern(a, b, arity):
-                        add(origin, "binding", a)
+                    for site in ex.discard_patterns(a, b, arity):
+                        add(origin, "binding", site)
         if value == "." and i + 1 < len(v) and v[i + 1] in ("0", "2"):
             # Walk backward over the receiver's balanced call/parentheses and
             # qualified/method name. Do not absorb an enclosing assignment.
