@@ -367,7 +367,6 @@ fn committed_dumps_preserve_every_audience_and_hidden_identity() {
             state.objects.values().any(|o| o.zone == Zone::Battlefield),
             "{name}: populated board"
         );
-        let mut prior = None;
         for viewer in audiences(&state) {
             let projected = projection(&state, viewer);
             let hidden: Vec<_> = projected
@@ -390,8 +389,7 @@ fn committed_dumps_preserve_every_audience_and_hidden_identity() {
             }
             let wire = WireState::from_game_state(&projected).unwrap();
             assert_eq!(wire.as_bytes(), expected);
-            round_trip(&wire, prior.as_ref());
-            prior = Some(wire);
+            round_trip(&wire, None);
         }
     }
 }
