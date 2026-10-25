@@ -337,7 +337,9 @@ fn restore_dump(name: &str) -> GameState {
         File::open(path).unwrap(),
     )))
     .unwrap();
-    let restore = |value| {
+    let restore = |mut value: Value| {
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        engine::types::game_state::record_captured_onsets(&mut value);
         serde_json::from_value::<PersistedGameState>(value)
             .map_err(|e| e.to_string())
             .and_then(|p| p.into_game_state().map_err(|e| format!("{e:?}")))
