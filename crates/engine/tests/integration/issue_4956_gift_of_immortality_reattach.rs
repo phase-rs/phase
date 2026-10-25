@@ -1570,3 +1570,81 @@ fn auriok_survivors_returned_equipment_enters_unattached() {
          producing a self-attached state"
     );
 }
+
+/// CR 400.7 + CR 400.7f: Gift of Immortality's dies trigger can find the
+/// graveyard card the Aura became, but not what that card becomes next. Exiled
+/// from the graveyard in response, it is a new object, and the end-step return
+/// must not bring it back from exile.
+#[test]
+fn gift_of_immortality_exiled_from_graveyard_before_its_trigger_resolves_stays_exiled() {
+    const MURDER: &str = "Destroy target creature.";
+    const GRAVE_EXILE: &str = "Exile target card from a graveyard.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let gift = scenario
+        .add_creature(P0, "Gift of Immortality", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(GIFT_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let grave_exile = scenario
+        .add_spell_to_hand_from_oracle(P0, "Grave Exile", true, GRAVE_EXILE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), gift, host);
+
+    {
+        let mut commit = runner.cast(murder).target_object(host).commit();
+        commit.act(GameAction::PassPriority).expect("pass");
+        commit.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(
+        runner.state().objects[&gift].zone,
+        Zone::Graveyard,
+        "reach: SBA moved the Aura"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: Gift's dies trigger waits on the stack"
+    );
+    {
+        let mut commit = runner.cast(grave_exile).target_object(gift).commit();
+        commit.act(GameAction::PassPriority).expect("pass");
+        commit.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(runner.state().objects[&gift].zone, Zone::Exile);
+    drain_priority(&mut runner);
+    assert_eq!(
+        runner.state().objects[&host].zone,
+        Zone::Battlefield,
+        "the dies trigger returned the host"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the delayed return was created"
+    );
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the delayed return fired"
+    );
+    assert_eq!(
+        runner.state().objects[&gift].zone,
+        Zone::Exile,
+        "the exiled card is a new object; the return does not find it"
+    );
+}

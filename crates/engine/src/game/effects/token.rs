@@ -772,6 +772,28 @@ pub(crate) fn no_token(
     Ok(())
 }
 
+/// CR 800.4b: "If a token would be created under the control of a player who
+/// has left the game, no token is created."
+///
+/// A token's creator is its owner and the player it enters under the control
+/// of (CR 111.2), so the player this rule tests is a settled `CreateToken`
+/// event's `owner`: read only after every CR 614 replacement has applied, so a
+/// controller redirect (Crafty Cutpurse) is already folded in and the test is
+/// against the FINAL controller, never one the event only passed through. The
+/// same reading enforces CR 800.4d's "If an object that would be owned by a
+/// player who has left the game would be created in any zone, it isn't
+/// created" for tokens.
+///
+/// Single authority for both token materialization seams: the ordinary-token
+/// loop in [`apply_create_token_after_replacement_with_created_ids`] and the
+/// copy-token loop in `token_copy::apply_copy_token_after_replacement_with_created_ids`.
+/// Every `ProposedEvent::CreateToken` route — first resolution, a resumed
+/// CR 616.1 replacement choice, a replacement-appended batch, a resumed batch
+/// tail — reaches one of the two (Incubate bypasses `CreateToken` entirely).
+pub(crate) fn token_creator_has_left_game(state: &GameState, owner: PlayerId) -> bool {
+    !crate::game::players::is_alive(state, owner)
+}
+
 /// CR 111.1 + CR 111.4 + CR 111.10: Build the resolved `TokenSpec` for a
 /// token creation event, combining parsed script attributes with typed
 /// `Effect::Token` fallback fields and ability context (source/controller/
@@ -1003,6 +1025,16 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             super::token_copy::CopyTokenApplyCompletion::Completed => true,
             super::token_copy::CopyTokenApplyCompletion::Paused => false,
         };
+    }
+
+    // CR 800.4b: the settled controller has left the game, so none of this
+    // batch is created. Publish only the tokens an earlier pass of this batch
+    // already created (none on a first pass) — CR 608.2c: a later instruction's
+    // "it" names only what this one created — and report completion, so the creating
+    // ability's remaining instructions run against an empty referent.
+    if token_creator_has_left_game(state, owner) {
+        state.last_created_token_ids = initial_created_ids;
+        return true;
     }
 
     let mut created_ids = initial_created_ids;

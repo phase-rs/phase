@@ -8,7 +8,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ChoiceType, ContinuousModification};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, GameRng, RandomDraw, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameRng, GameState, RandomDraw, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
@@ -72,7 +72,7 @@ fn setup(with_creatures: bool, thumb_controller: Option<PlayerId>) -> Gamble {
     }
 }
 
-fn seed_for_flip(won: bool) -> u64 {
+pub(super) fn seed_for_flip(won: bool) -> u64 {
     (0u64..10_000)
         .find(|&seed| {
             GameRng::seed_from_u64(seed)
@@ -83,7 +83,7 @@ fn seed_for_flip(won: bool) -> u64 {
         .expect("a seed exists for either flip outcome")
 }
 
-fn seed_for_mixed_pair() -> u64 {
+pub(super) fn seed_for_mixed_pair() -> u64 {
     (0u64..10_000)
         .find(|&seed| {
             let mut rng = GameRng::seed_from_u64(seed);
@@ -408,9 +408,8 @@ fn s1_7_krark_keep_won_does_not_run_the_lost_branch() {
     loss_control.assert_creatures(P2);
 }
 
-fn change_controller_effect_count(game: &Gamble) -> usize {
-    game.runner
-        .state()
+pub(super) fn change_controller_effect_count(state: &GameState) -> usize {
+    state
         .transient_continuous_effects
         .iter()
         .filter(|effect| {
@@ -430,7 +429,7 @@ fn zero_creatures_lost_flip(own_thumb: bool) {
         .iter()
         .map(|(id, object)| (*id, object.controller))
         .collect();
-    let effects_before = change_controller_effect_count(&game);
+    let effects_before = change_controller_effect_count(game.runner.state());
     game.cast_to_creature_choice();
     // CR 609.3: the completed-empty object choice does not stop independent
     // instructions. NamedChoice is required, so a creature prompt cannot hide.
@@ -448,7 +447,10 @@ fn zero_creatures_lost_flip(own_thumb: bool) {
             .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
         "the resolving sorcery must not be given away"
     );
-    assert_eq!(change_controller_effect_count(&game), effects_before);
+    assert_eq!(
+        change_controller_effect_count(game.runner.state()),
+        effects_before
+    );
     assert_eq!(game.runner.state().objects[&game.spell].controller, P1);
     for (id, controller) in controllers {
         assert_eq!(
