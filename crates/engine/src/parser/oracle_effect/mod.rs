@@ -42790,6 +42790,8 @@ fn unsupported_search_result_guard(
 /// [`parse_effect_chain_ir_body`] so every one of its return paths passes
 /// through the per-opponent choice tail rule
 /// ([`per_opponent_choice::enforce_per_opponent_choice_tail`]).
+/// Production paths use `parse_effect_chain_ir_ability_root` or the explicit-context entry.
+#[cfg(test)]
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
@@ -42813,6 +42815,8 @@ pub(crate) fn parse_effect_chain_ir_ability_root(
 /// player chosen in it is the `already_chosen`-th-plus-one player of the
 /// resolution, because the enclosing chain's earlier choices come first at
 /// runtime (CR 608.2c). A fresh chain passes 0.
+/// Production paths use `parse_effect_chain_ir_ability_root` or the explicit-context entry.
+#[cfg(test)]
 pub(crate) fn parse_effect_chain_ir_after_player_choices(
     text: &str,
     kind: AbilityKind,
