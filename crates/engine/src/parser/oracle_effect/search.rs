@@ -76,7 +76,7 @@ pub(super) fn parse_search_library_details(
 
     // CR 701.23a: Detect "search target opponent's/player's library" patterns.
     // These target a player, searching that player's library instead of the controller's.
-    let target_player = parse_search_target_player(lower);
+    let target_player = parse_search_target_player(lower, ctx);
 
     // CR 107.1c: "any number of [FILTER] cards" — searcher may find 0..=matching.len()
     // cards. Detected before "up to N" since they share no overlap: "any number of"
@@ -642,10 +642,12 @@ fn scan_after_tag(lower: &str, tag_prefix: &str) -> Option<usize> {
 
 /// CR 701.23a: Detect player-targeting search patterns like "search target opponent's library"
 /// or "search target player's library". Returns a TargetFilter for the player.
-fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
+fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     use nom::branch::alt;
     use nom::combinator::value;
     use nom::sequence::preceded;
+
+    let has_declared_player = ctx.declared_player_scope.is_some();
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -667,6 +669,12 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("an opponent's "),
+                ),
+                // CR 608.2c + CR 701.23a: "that player" names the player the chain
+                // already declared; the caster still searches.
+                value(
+                    TargetFilter::ParentTarget,
+                    verify(tag("that player's "), |_: &str| has_declared_player),
                 ),
             )),
         )
@@ -3228,6 +3236,23 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(details.target_player, None);
+    }
+
+    #[test]
+    fn search_that_players_library_after_declared_player_binds_parent_target() {
+        let mut ctx = ParseContext {
+            declared_player_scope: Some(ControllerRef::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            }),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for up to fifteen cards",
+            &mut ctx,
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 15 });
+        assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
     }
 
     #[test]

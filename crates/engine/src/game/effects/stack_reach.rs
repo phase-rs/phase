@@ -424,15 +424,9 @@ fn resolves_once_as_bound(bound: &ResolvedAbility) -> bool {
 /// CR 608.2c: a node that replaces its parent's effect when its condition
 /// holds.
 fn is_instead_override(node: &ResolvedAbility) -> bool {
-    matches!(
-        node.condition,
-        Some(
-            AbilityCondition::AdditionalCostPaidInstead
-                | AbilityCondition::CastVariantPaidInstead { .. }
-                | AbilityCondition::TargetHasKeywordInstead { .. }
-                | AbilityCondition::ConditionInstead { .. }
-        )
-    )
+    node.condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_instead_override)
 }
 
 /// A condition that reads only what the entry's context recorded when it was

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::AbilityTag;
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
+use crate::types::player::PlayerId;
 
 /// CR 603.2: Event-keyed bucket discriminator for the battlefield
 /// `TriggerIndex`. Indexes the small set of structural axes that statically
@@ -84,13 +85,14 @@ pub enum TriggerEventKey {
     Sacrificed,
     /// CR 701.8: A permanent was destroyed.
     Destroyed,
-    /// CR 611.3 (continuous-effect rules covering control-changing statics)
-    /// — a permanent's controller changed via a `GainControl` effect.
-    /// NOTE: Administrative control transfers on player elimination
-    /// (CR 800.4) do NOT produce an `EffectResolved { kind: GainControl }`
-    /// event and therefore do NOT flow through this bucket — they are not
-    /// caught by `TriggerMode::ChangesController` either (see
-    /// `match_changes_controller`).
+    /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
+    /// event published by the control-changing instruction handlers
+    /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
+    /// of turn" control effect).
+    /// NOTE: Control changes that publish no `ControllerChanged` event
+    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
+    /// elimination) do NOT flow through this bucket — they are not caught by
+    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,
@@ -218,6 +220,33 @@ pub enum PlaneswalkRole {
     Any,
 }
 
+/// CR 603.2 + CR 603.3a + CR 109.5: which endpoint of a control change a
+/// `ChangesController` trigger's "you" names. `Loses` — "When you lose control
+/// of ~" — is a CR 603.10d look-back trigger; `Gains` — "When you gain control
+/// of ~ [from another player]" — is an ordinary trigger (CR 603.10). The axis is
+/// also the CR 603.10 / CR 603.10d distinction any future look-back collection
+/// for this mode keys on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ControlChangeSide {
+    Loses,
+    Gains,
+}
+
+impl ControlChangeSide {
+    /// The player on this side of a change from `old_controller` to
+    /// `new_controller`. Single authority for the matcher's direction test and
+    /// the CR 603.3a trigger-controller attribution.
+    pub fn participant(self, old_controller: PlayerId, new_controller: PlayerId) -> PlayerId {
+        match self {
+            // CR 603.10d: the player who lost control is the pre-change controller.
+            ControlChangeSide::Loses => old_controller,
+            // CR 603.10 + CR 603.3a: the player who gained control controls the
+            // trigger, and is the controller immediately after the event.
+            ControlChangeSide::Gains => new_controller,
+        }
+    }
+}
+
 /// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
 /// meta-trigger observes. The two points are distinct events with distinct
 /// timing consequences: an ability that triggers may still be countered
@@ -239,15 +268,30 @@ pub enum AbilityLifecyclePoint {
 /// placed on the stack the next time a player would receive priority (CR 603.3).
 ///
 /// Matched case-sensitively against Forge trigger mode strings.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): the legacy
+/// unit form `"ChangesController"` (written before the variant carried a
+/// `ControlChangeSide`; it always meant "when you lose control") still loads
+/// as `ChangesController { side: Loses }`. This is a deliberate, narrow
+/// departure from the strict card-data / transport decode policy in
+/// `game_state.rs` (obsolete tags stay rejected): the tag only ever had one
+/// meaning, so accepting it loses nothing. Precedent: the `WardCost` shim in
+/// `keywords.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum TriggerMode {
     // Zone changes — CR 603.6: zone-change triggers look for objects in their new zone.
     /// CR 603.6a: Enters-the-battlefield and other zone-change triggers.
     ChangesZone,
     /// CR 603.6: Zone change affecting all objects matching a filter.
     ChangesZoneAll,
-    /// CR 603.2e: "Becomes" trigger — fires when control changes, not while state persists.
-    ChangesController,
+    /// CR 603.2 + CR 603.10 / CR 603.10d (side-dependent): fires on a
+    /// `ControllerChanged` event for the endpoint `side` names — `Loses` is the
+    /// player who lost control (look-back, CR 603.10d), `Gains` the player who
+    /// gained it (ordinary, CR 603.10).
+    ChangesController {
+        side: ControlChangeSide,
+    },
     /// CR 603.6c: Leaves-the-battlefield trigger — fires when a permanent moves from battlefield.
     LeavesBattlefield,
 
@@ -639,6 +683,50 @@ pub enum TriggerMode {
     Unknown(String),
 }
 
+impl Serialize for TriggerMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TriggerMode::serialize(self, serializer)
+    }
+}
+
+/// Non-buffering visitor behind `TriggerMode`'s normalizing `Deserialize`.
+/// Routes every current-shape payload to the derived implementation and maps the
+/// one legacy unit tag (`"ChangesController"`) onto its only historical meaning.
+/// Uses `deserialize_any`, so it needs a self-describing format (serde_json,
+/// serde-wasm-bindgen — the only ones in use); bincode / postcard cannot decode
+/// a `TriggerMode`.
+struct TriggerModeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for TriggerModeVisitor {
+    type Value = TriggerMode;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a TriggerMode (variant name string or externally tagged map)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<TriggerMode, E> {
+        use serde::de::IntoDeserializer;
+        match v {
+            // CR 603.10d: before the `side` axis existed, the unit
+            // `ChangesController` mode was only ever "When you lose control of ~".
+            "ChangesController" => Ok(TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses,
+            }),
+            other => TriggerMode::deserialize(IntoDeserializer::<E>::into_deserializer(other)),
+        }
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<TriggerMode, A::Error> {
+        TriggerMode::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(TriggerModeVisitor)
+    }
+}
+
 impl FromStr for TriggerMode {
     type Err = Infallible;
 
@@ -676,7 +764,13 @@ impl FromStr for TriggerMode {
             "BlocksOrBecomesBlocked" => TriggerMode::BlocksOrBecomesBlocked,
             "CaseSolved" => TriggerMode::CaseSolved,
             "Championed" => TriggerMode::Championed,
-            "ChangesController" => TriggerMode::ChangesController,
+            // Decodes the legacy source-level variant name (it always meant "when
+            // you lose control", see the `Deserialize` shim) so the enum stays
+            // enumerable. NOT a Forge direction mapping: Forge imports go through
+            // `translate_trigger_mode`, which fails closed on this string.
+            "ChangesController" => TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses,
+            },
             "ChangesZone" => TriggerMode::ChangesZone,
             "ChangesZoneAll" => TriggerMode::ChangesZoneAll,
             "ChaosEnsues" => TriggerMode::ChaosEnsues,
@@ -951,6 +1045,108 @@ mod tests {
                 "serde round-trip must preserve the planeswalk role"
             );
         }
+    }
+
+    /// CR 603.2 + CR 603.10 / CR 603.10d: the side axis round-trips through
+    /// serde in the struct-variant form, and the legacy unit tag written before
+    /// the axis existed still decodes as its only historical meaning (lose
+    /// control). The committed GameState dump and integration-card fixtures hold
+    /// the legacy form, so removing the `Deserialize` shim fails their consumers.
+    #[test]
+    fn changes_controller_sides_round_trip_and_legacy_unit_decodes_as_loses() {
+        for (side, json) in [
+            (
+                ControlChangeSide::Loses,
+                r#"{"ChangesController":{"side":"Loses"}}"#,
+            ),
+            (
+                ControlChangeSide::Gains,
+                r#"{"ChangesController":{"side":"Gains"}}"#,
+            ),
+        ] {
+            let mode = TriggerMode::ChangesController { side };
+            assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+            assert_eq!(serde_json::from_str::<TriggerMode>(json).unwrap(), mode);
+        }
+
+        // Legacy unit form -> Loses (the shim under test).
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(r#""ChangesController""#).unwrap(),
+            TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses
+            }
+        );
+        // The legacy tag also decodes when nested in a trigger definition, the
+        // shape the fixtures hold.
+        let nested: Vec<TriggerMode> =
+            serde_json::from_str(r#"["ChangesController",{"ChangesController":{"side":"Gains"}}]"#)
+                .unwrap();
+        assert_eq!(
+            nested,
+            vec![
+                TriggerMode::ChangesController {
+                    side: ControlChangeSide::Loses
+                },
+                TriggerMode::ChangesController {
+                    side: ControlChangeSide::Gains
+                },
+            ]
+        );
+    }
+
+    /// The normalizing `Deserialize` must leave every other mode shape intact:
+    /// unit variants, `Unknown(String)`, struct variants, tuple variants.
+    #[test]
+    fn trigger_mode_deserialize_shim_preserves_other_shapes() {
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(r#""ChangesZone""#).unwrap(),
+            TriggerMode::ChangesZone
+        );
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(r#"{"Unknown":"X"}"#).unwrap(),
+            TriggerMode::Unknown("X".to_string())
+        );
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(r#"{"Planeswalked":{"role":"From"}}"#).unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From
+            }
+        );
+        let boast = TriggerMode::KeywordAbilityActivated(AbilityTag::Boast);
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(&serde_json::to_string(&boast).unwrap()).unwrap(),
+            boast
+        );
+        let saga = TriggerMode::FinalSagaChapterAbility {
+            lifecycle: AbilityLifecyclePoint::Resolved,
+        };
+        assert_eq!(
+            serde_json::from_str::<TriggerMode>(&serde_json::to_string(&saga).unwrap()).unwrap(),
+            saga
+        );
+        assert!(serde_json::from_str::<TriggerMode>(r#""NotAMode""#).is_err());
+    }
+
+    /// The legacy source-level variant name decodes to its only historical
+    /// meaning (lose control) so the enum stays enumerable; Forge imports do not
+    /// use this path (`translate_trigger_mode` fails closed).
+    #[test]
+    fn changes_controller_from_str_is_loses() {
+        assert_eq!(
+            TriggerMode::from_str("ChangesController").unwrap(),
+            TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses
+            }
+        );
+    }
+
+    /// CR 603.10d (Loses -> pre-change controller) / CR 603.10 + CR 603.3a
+    /// (Gains -> post-change controller).
+    #[test]
+    fn control_change_side_participant_names_the_endpoint() {
+        let (old, new) = (PlayerId(0), PlayerId(1));
+        assert_eq!(ControlChangeSide::Loses.participant(old, new), old);
+        assert_eq!(ControlChangeSide::Gains.participant(old, new), new);
     }
 
     #[test]

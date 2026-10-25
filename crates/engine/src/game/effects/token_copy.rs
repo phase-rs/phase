@@ -698,6 +698,17 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     initial_created_ids: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
+    // CR 800.4b + CR 707.2: a token copy is a created token like any other; when
+    // its settled controller has left the game none of this batch is created.
+    // Returning before any per-token or liminal work keeps the created referent
+    // to what an earlier pass of this batch already created; every caller
+    // publishes `created_ids` into the ledger that owns the batch.
+    if super::token::token_creator_has_left_game(state, token_owner) {
+        return CopyTokenApplyStatus {
+            created_ids: initial_created_ids,
+            completion: CopyTokenApplyCompletion::Completed,
+        };
+    }
     let CopyTokenSpec {
         mut values,
         display,

@@ -82,8 +82,8 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
-    inject_printed_color_choice_filter, intrinsic_continuation_effect, mark_uses_tracked_set,
-    nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
+    inject_printed_color_choice_filter, instead_override_body_mut, intrinsic_continuation_effect,
+    mark_uses_tracked_set, nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
@@ -2613,8 +2613,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // THAT damage instruction, not the chain's first one — the
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
-                            let base_index =
-                                instead_damage_antecedent_index(&env, &defs, instead_def);
+                            let mut instead = *instead_def.clone();
+                            let base_index = instead_damage_antecedent_index(
+                                &env,
+                                &defs,
+                                instead_override_body_mut(&mut instead),
+                            );
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
                             // The TAIL defs (after the base) are nested into it below, so
@@ -2628,10 +2632,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             for next in chain_defs {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
-                            let mut instead = *instead_def.clone();
                             if base_index > 0 {
                                 rebind_damage_anaphor_to_antecedent(
-                                    &mut instead.effect,
+                                    &mut instead_override_body_mut(&mut instead).effect,
                                     intrinsic_continuation_effect(&root),
                                 );
                             }
@@ -2644,17 +2647,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                     .sub_ability
                                     .as_deref_mut()
                                     .expect("the optional-payment continuation was checked");
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    continuation,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
-                                ) {
-                                    instead.target_choice_timing =
-                                        continuation.target_choice_timing;
-                                }
                                 if has_explicit_player_target(continuation.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2664,16 +2660,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 // CR 111.1 + CR 707.10: Resolve "create N of those
                                 // tokens" anaphor against the root (the antecedent
                                 // for a multi-clause base is the first printed clause).
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    &root,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
-                                ) {
-                                    instead.target_choice_timing = root.target_choice_timing;
-                                }
                                 if has_explicit_player_target(root.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2971,6 +2961,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        def.sibling_condition = clause_ir.sibling_condition;
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
@@ -3708,6 +3699,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // parent chain, so reset it to the default within-process step.
                 let lifted_sub_link = inner.sub_link;
                 inner.sub_link = SubAbilityLink::ContinuationStep;
+                // The clause's own guard scope belongs to the slot, like its link.
+                let lifted_sibling_condition = std::mem::take(&mut inner.sibling_condition);
                 let delayed_return_reader = inner.reads_return_result.take();
                 *current = AbilityDefinition::new(
                     kind,
@@ -3724,6 +3717,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 current.repeat_for = lifted_repeat_for;
                 current.player_scope = lifted_player_scope;
                 current.sub_link = lifted_sub_link;
+                current.sibling_condition = lifted_sibling_condition;
             }
         }
 
@@ -4853,6 +4847,15 @@ fn rebind_condition_instead_damage_anaphor(
         return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
     }
     false
+}
+
+/// CR 111.1 + CR 608.2c: an override body's "those tokens" / counter-target
+/// anaphors name the instruction it replaces.
+fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &AbilityDefinition) {
+    rewrite_those_tokens_from_antecedent(&mut body.effect, &antecedent.effect);
+    if rewrite_counter_instead_target_from_antecedent(&mut body.effect, &antecedent.effect) {
+        body.target_choice_timing = antecedent.target_choice_timing;
+    }
 }
 
 /// CR 608.2c: identify the structural "you may pay ... If you do, X" form
