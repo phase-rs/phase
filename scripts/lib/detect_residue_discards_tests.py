@@ -307,6 +307,26 @@ class DiscardTests(unittest.TestCase):
                                  ["binding"])
                 self.assertEqual(hits(prefix + " (v, rest) => consume(rest), }"), [])
 
+    def test_l_turbofish_commas_do_not_end_a_match_arm_expression(self):
+        # Generic-argument commas are not arm separators: the discard arm that follows
+        # a turbofish-bearing arm expression must still be counted, and a consumed
+        # remainder must still count nothing.
+        for call in ("tag::<_, _, E>(\"tail\")",
+                     "tag::<_, _, OracleError<'_>>(\"tail\")",
+                     "collect::<Vec<(A, B)>>()",
+                     "nom::combinator::opt::<_, _, (E, F)>(inner)",
+                     "tag::<_, _, E>(\"a\").or(tag::<_, _, E>(\"b\"))"):
+            with self.subTest(call=call):
+                prefix = ("match parse_target(input) { (TargetFilter::Any, rest) => "
+                          f"{call}.parse(rest).is_ok(), ")
+                self.assertEqual([h.family for h in hits(prefix + "(v, _) => use_it(v), }")],
+                                 ["binding"])
+                self.assertEqual(hits(prefix + "(v, rest) => consume(rest), }"), [])
+        # A comparison is not a turbofish: its `<` and `>` must not swallow the arm.
+        self.assertEqual([h.family for h in hits(
+            "match parse_target(input) { (TargetFilter::Any, rest) => a < b, "
+            "(v, _) => use_it(v), }")], ["binding"])
+
     def test_j_aliases_are_scoped_to_lexical_modules(self):
         src = ("mod a { use crate::target::parse_target_with_syntax as read; "
                "fn f(i: &str) { let s = read(i, ctx).2; } }\n"

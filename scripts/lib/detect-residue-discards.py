@@ -136,6 +136,31 @@ class Expressions:
             scope = self.parents[scope]
         return name if name in HELPERS else None
 
+    def turbofish_end(self, i):
+        """Index after the `::<...>` generic-argument list starting at i, else None.
+
+        Generic-argument commas are not expression separators, so `end` and `split`
+        step over the balanced list. A turbofish is only `::` followed by `<`; a
+        comparison never is, and the `>` of a `->` inside the list does not close it.
+        """
+        v = self.values
+        if v[i] != "::" or i + 1 >= len(v) or v[i + 1] != "<":
+            return None
+        depth = 0
+        j = i + 1
+        while j < len(v):
+            if v[j] in ("(", "[", "{"):
+                j = self.pairs[j] + 1
+                continue
+            if v[j] == "<":
+                depth += 1
+            elif v[j] == ">" and v[j - 1] != "-":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return None
+
     def split(self, start, end, separator=","):
         out = []
         part = start
@@ -143,6 +168,10 @@ class Expressions:
         while i < end:
             if self.values[i] in ("(", "[", "{"):
                 i = self.pairs[i] + 1
+                continue
+            after = self.turbofish_end(i)
+            if after is not None:
+                i = after
                 continue
             if self.values[i] == separator:
                 out.append((part, i))
@@ -160,8 +189,9 @@ class Expressions:
                 break
             if self.values[i] in ("(", "[", "{"):
                 i = self.pairs[i] + 1
-            else:
-                i += 1
+                continue
+            after = self.turbofish_end(i)
+            i = i + 1 if after is None else after
         return i
 
     def body_brace(self, head, end):
