@@ -1194,11 +1194,18 @@ impl AcceptedOptionalMove {
         // The dependent instruction must be exactly the "return it" move that
         // needs this producer's object, and it must not own a declared slot of
         // its own (an independently announced target is not this result).
+        //
+        // No separate `sub_has_independent_object_target_slot` exclusion is
+        // needed for THIS node: every arm of that helper requires an effect
+        // that does not `effect_requires_parent_target_object` (its
+        // resolution-time `ChangeZone` arm additionally requires
+        // `!target.is_context_ref()`, and `ChooseOneOf` is a different effect
+        // entirely), while the filter matched here requires exactly that. The
+        // exclusion is unreachable by construction for this dependent node.
         if !matches!(
             &chain.effect,
             Effect::ChangeZone { target, .. } if filter_requires_parent_target_object(target)
-        ) || sub_has_independent_object_target_slot(chain)
-        {
+        ) {
             return None;
         }
         // A non-sibling sub is a resolution step of the dependent clause, so
@@ -1300,6 +1307,12 @@ fn publish_accepted_optional_move_result(
         // (CR 400.7), so a later same-`ObjectId` incarnation cannot be mistaken
         // for it — rather than leaving the node to rediscover a referent from
         // the triggering spell's chosen targets or the ability source.
+        //
+        // The pin is kept because it is the correct producer-time identity, not
+        // because a test distinguishes it: the dependent consumes this node in
+        // the same resolution, so at this seam the pinned and the live
+        // incarnation always coincide today (mutation-tested: dropping it is
+        // currently unobservable).
         //
         // Replacing the occurrences is required, not merely filling empty ones:
         // an inherited cast-event or declared-slot referent is a different

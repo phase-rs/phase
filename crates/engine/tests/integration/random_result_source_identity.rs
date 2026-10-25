@@ -11,8 +11,8 @@ use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CoinFlipRun, Effect, EffectOutcomeSignal,
-    ObjectScope, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SubAbilityLink, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter,
+    ObjectScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+    SubAbilityLink, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
@@ -26,6 +26,7 @@ use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
 use rand::Rng;
@@ -1219,6 +1220,269 @@ fn synthetic_declared_slot_tail_survives_live_move_result() {
 #[test]
 fn synthetic_declared_slot_tail_survives_empty_move_result() {
     parked_optional_move(ParkedMoveTail::SlotPumpAndDamage, false);
+}
+
+/// CR 614.1c + CR 614.2: the Rest-in-Peace-class graveyard→exile `Moved`
+/// redirect, installed on an otherwise inert battlefield permanent. It makes
+/// the accepted move's *delivery* ineligible for the normal-path binder, which
+/// is the branch this fixture feeds.
+fn graveyard_to_exile_redirect() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            *move_definition(Zone::Exile, TargetFilter::SelfRef, false).effect,
+        ))
+        .description("If a card would be put into a graveyard, exile it instead.".to_string())
+}
+
+/// M7 (test strength): an accepted optional public-zone move whose delivery is
+/// REPLACED is not this producer's own completed result, so the parked
+/// dependent return must keep its pre-existing route rather than be bound to
+/// the requested destination or silently replaced by a `NoOp`.
+///
+/// CR 614.6 + CR 616.1: the move still happens, but to the redirected
+/// destination. That is precisely why `publish_accepted_optional_move_result`
+/// rejects a `ReplacementApplied` delivery: the binder's own-original-delivery
+/// rule cannot claim it.
+fn replaced_optional_move_delivery(redirect: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let host = redirect.then(|| scenario.add_creature(P0, "Redirect host", 0, 1).id());
+    let mut win = move_definition(Zone::Graveyard, TargetFilter::SelfRef, false);
+    win.optional = true;
+    let mut dependent = move_definition(Zone::Battlefield, TargetFilter::ParentTarget, false);
+    dependent.sub_link = SubAbilityLink::SequentialSibling;
+    dependent.condition = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    let mut flip = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            win_effect: Some(Box::new(win)),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    flip.sub_ability = Some(Box::new(dependent));
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(flip);
+    let source = scenario
+        .add_creature(P0, "Synthetic replaced-move source", 1, 3)
+        .with_trigger_definition(trigger)
+        .id();
+
+    let mut run = Run::new(scenario);
+    if let Some(host) = host {
+        let object = run
+            .runner
+            .state_mut()
+            .objects
+            .get_mut(&host)
+            .expect("redirect host is on the battlefield");
+        let redirect = graveyard_to_exile_redirect();
+        // The layer pass reseeds the live list from the printed base, so both
+        // must carry the redirect.
+        object.replacement_definitions.push(redirect.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(redirect);
+    }
+    run.runner.advance_to_combat();
+    run.act(GameAction::DeclareAttackers {
+        attacks: vec![(source, AttackTarget::Player(P1))],
+        bands: vec![],
+    });
+    run.until(|state| {
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.iter().any(|entry| entry.source_id == source)
+    });
+    assert_trigger(&run, source, P0);
+    let start = run.events.len();
+    pin(&mut run.runner, coin_seed(&[true]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    run.act(GameAction::DecideOptionalEffect { accept: true });
+    run.finish();
+    run.assert_flips(&[(P0, true)]);
+
+    let replaced = run.events[start..]
+        .iter()
+        .any(|event| matches!(event, GameEvent::ReplacementApplied { .. }));
+    assert_eq!(
+        replaced, redirect,
+        "the redirect fixture must actually replace the delivery"
+    );
+    // Both routes leave the card on the battlefield, but only the unredirected
+    // row is the binder's own-result path; the redirected row is the
+    // pre-existing continuation route, which must still run (a wrongly-enabled
+    // binder publishes `Some(empty)` for the redirected delivery and `NoOp`s
+    // the dependent return, stranding the card in exile).
+    let object = &run.runner.state().objects[&source];
+    assert_eq!(
+        object.zone,
+        Zone::Battlefield,
+        "the dependent return must still run for a replaced delivery"
+    );
+    let expected = if redirect {
+        vec![
+            (Some(Zone::Battlefield), Zone::Exile),
+            (Some(Zone::Exile), Zone::Battlefield),
+        ]
+    } else {
+        vec![
+            (Some(Zone::Battlefield), Zone::Graveyard),
+            (Some(Zone::Graveyard), Zone::Battlefield),
+        ]
+    };
+    assert_eq!(moves(&run.events[start..], source), expected);
+}
+
+#[test]
+fn synthetic_replaced_optional_move_keeps_the_pre_existing_route() {
+    replaced_optional_move_delivery(true);
+}
+
+#[test]
+fn synthetic_completed_optional_move_binds_its_own_delivery() {
+    replaced_optional_move_delivery(false);
+}
+
+/// M6 (test strength): the accepted optional move's destination decides whether
+/// its own result may bind the parked dependent return. `Exile` is in scope;
+/// `Hand` is not.
+///
+/// The dependent clause inherits the declared-slots WITNESS as its stale
+/// referent, while the producer moves the ability SOURCE. The two routes then
+/// reach different objects: an in-scope producer replaces the stale referent
+/// with the object it moved, an out-of-scope producer leaves the pre-existing
+/// route alone. Both objects' move logs distinguish the outcomes.
+fn optional_move_destination_scope(producer_destination: Zone) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    fund(&mut scenario);
+    let witness = scenario
+        .add_creature(P0, "Declared slot witness", 0, 10)
+        .id();
+    let mut win = move_definition(producer_destination, TargetFilter::SelfRef, false);
+    win.optional = true;
+    // "If you do, put it into its owner's graveyard" — the anaphoric follower.
+    let mut dependent = move_definition(Zone::Graveyard, TargetFilter::ParentTarget, false);
+    dependent.sub_link = SubAbilityLink::SequentialSibling;
+    dependent.condition = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    let mut flip = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::Exactly {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            win_effect: Some(Box::new(win)),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    flip.sub_ability = Some(Box::new(dependent));
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    );
+    root.sub_ability = Some(Box::new(flip));
+    let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(root);
+    let source = scenario
+        .add_creature(P0, "Synthetic scoped-move source", 1, 3)
+        .with_trigger_definition(trigger)
+        .id();
+
+    let mut run = Run::new(scenario);
+    run.runner.advance_to_combat();
+    run.act(GameAction::DeclareAttackers {
+        attacks: vec![(source, AttackTarget::Player(P1))],
+        bands: vec![],
+    });
+    // The trigger's declared root slot is announced publicly before it reaches
+    // the stack; answer that prompt in whichever window the engine raises it.
+    let mut announced = false;
+    run.until(|state| {
+        if target_prompt_open(state) {
+            return true;
+        }
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.iter().any(|entry| entry.source_id == source)
+    });
+    if target_prompt_open(run.runner.state()) {
+        run.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(witness)),
+        });
+        announced = true;
+        run.until(|state| {
+            matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.stack.iter().any(|entry| entry.source_id == source)
+        });
+    }
+    assert!(
+        announced,
+        "the witness must be announced into the root slot before the move"
+    );
+    let start = run.events.len();
+    pin(&mut run.runner, coin_seed(&[true]));
+    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    run.act(GameAction::DecideOptionalEffect { accept: true });
+    run.finish();
+    run.assert_flips(&[(P0, true)]);
+
+    let witness_object = &run.runner.state().objects[&witness];
+    let source_object = &run.runner.state().objects[&source];
+    if producer_destination == Zone::Exile {
+        // Positive control: the in-scope producer binds ITS OWN moved source,
+        // superseding the stale inherited witness.
+        assert_eq!(
+            moves(&run.events[start..], source),
+            vec![
+                (Some(Zone::Battlefield), Zone::Exile),
+                (Some(Zone::Exile), Zone::Graveyard),
+            ]
+        );
+        assert_eq!(source_object.zone, Zone::Graveyard);
+        assert_eq!(witness_object.zone, Zone::Battlefield);
+        assert!(moves(&run.events[start..], witness).is_empty());
+    } else {
+        // Negative: `Hand` is outside the scope, so the accepted move never
+        // binds. The dependent node keeps its pre-existing route, which here
+        // reaches the stale inherited witness (CR 608.2c: an inherited
+        // referent, not this move's result). This pins the guard's contract —
+        // out-of-scope destinations are not this binder's business — it does
+        // not endorse the stale referent.
+        assert_eq!(
+            moves(&run.events[start..], source),
+            vec![(Some(Zone::Battlefield), Zone::Hand)]
+        );
+        assert_eq!(source_object.zone, Zone::Hand);
+        assert_eq!(
+            moves(&run.events[start..], witness),
+            vec![(Some(Zone::Battlefield), Zone::Graveyard)]
+        );
+        assert_eq!(witness_object.zone, Zone::Graveyard);
+    }
+}
+
+#[test]
+fn synthetic_out_of_scope_optional_move_keeps_the_pre_existing_route() {
+    optional_move_destination_scope(Zone::Hand);
+}
+
+#[test]
+fn synthetic_exile_scoped_optional_move_binds_its_result() {
+    optional_move_destination_scope(Zone::Exile);
 }
 
 fn declare_attack(run: &mut Run, source: ObjectId, response_land: ObjectId) {
