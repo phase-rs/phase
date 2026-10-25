@@ -121,11 +121,27 @@ fn gaeas_liege_cast_survives_only_with_controlled_forests() {
         }
         forests(&mut s, P1, 2);
         s.add_basic_land(P0, ManaColor::White);
-        s.add_land_to_hand(P0, "Forest");
-        s.add_land_to_graveyard(P0, "Forest");
+        let hand_forest = s
+            .add_land_to_hand(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let graveyard_forest = s
+            .add_land_to_graveyard(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id();
         let id = liege_spell(&mut s);
         fund(&mut s, ManaType::Green, 6);
         let mut r = s.build();
+        assert_eq!(r.state().objects[&hand_forest].zone, Zone::Hand);
+        assert_eq!(
+            r.state().objects[&hand_forest].card_types.subtypes,
+            vec!["Forest"]
+        );
+        assert_eq!(r.state().objects[&graveyard_forest].zone, Zone::Graveyard);
+        assert_eq!(
+            r.state().objects[&graveyard_forest].card_types.subtypes,
+            vec!["Forest"]
+        );
         r.cast(id).resolve();
         complete(&r);
         if count == 0 {
