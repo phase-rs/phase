@@ -277,7 +277,14 @@ class DiscardTests(unittest.TestCase):
                           "if flag { observe(); } else { observe(); }",
                           "match flag { true => {}, false => {} }",
                           "unsafe { observe(); }", "loop { break; }",
-                          "while flag { break; }", "for x in xs { observe(); }"):
+                          "while flag { break; }", "for x in xs { observe(); }",
+                          "if let Foo { a } = prior { observe(a); }",
+                          "if let Foo { a } = prior { observe(a); } else { observe(); }",
+                          "if let Foo { a } = prior && let Bar { b } = a { observe(b); }",
+                          "while let Foo { a } = it.next() { observe(a); }",
+                          "for Foo { a } in xs { observe(a); }",
+                          "for (Foo { a }, 0..=3) in xs { observe(a); }",
+                          "match prior { Foo { a } => observe(a), _ => {} }"):
             expr = ("ctx.with_player_antecedents(|s| { " + statement
                     + " parse_target_with_ctx(input, s) })")
             with self.subTest(statement=statement):
@@ -290,7 +297,10 @@ class DiscardTests(unittest.TestCase):
                      "match flag { true => consume(rest), false => () }",
                      "unsafe { consume(rest); }", "loop { consume(rest); break; }",
                      "while flag { consume(rest); break; }",
-                     "for x in xs { consume(rest); }"):
+                     "for x in xs { consume(rest); }",
+                     "if let Foo { a } = prior { consume(rest); }",
+                     "for Foo { a } in xs { consume(rest); }",
+                     "while let Foo { a } = it.next() { consume(rest); break; }"):
             with self.subTest(body=body):
                 prefix = "match parse_target(input) { (TargetFilter::Any, rest) => " + body
                 self.assertEqual([h.family for h in hits(prefix + " (v, _) => use_it(v), }")],

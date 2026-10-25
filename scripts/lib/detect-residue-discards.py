@@ -164,6 +164,37 @@ class Expressions:
                 i += 1
         return i
 
+    def body_brace(self, head, end):
+        """The `{` opening the body of the `if`/`while`/`for`/`match` at head.
+
+        Rust forbids struct literals in these headers, but struct PATTERNS are
+        legal between `let` and `=` (and between `for` and `in`), so braces in
+        that window are not the body.
+        """
+        v = self.values
+        in_pattern = v[head] == "for"
+        n = head + 1
+        while n < end:
+            token = v[n]
+            if token in ("(", "["):
+                n = self.pairs[n] + 1
+                continue
+            if token == "{":
+                if not in_pattern:
+                    return n
+                n = self.pairs[n] + 1
+                continue
+            if token == "let":
+                in_pattern = True
+            elif in_pattern and token == "in" and v[head] == "for":
+                in_pattern = False
+            elif (in_pattern and token == "=" and v[head] != "for"
+                  and v[n - 1] not in (".", "=", "!", "<", ">")
+                  and n + 1 < end and v[n + 1] != "="):
+                in_pattern = False
+            n += 1
+        return end
+
     def block_expression_end(self, start, end):
         """End of an expression-with-block, before any postfix/operator."""
         v = self.values
@@ -176,7 +207,7 @@ class Expressions:
             return self.pairs[head] + 1
         if v[head] not in ("if", "match", "unsafe", "loop", "while", "for", "async", "const"):
             return None
-        opened = self.end(head + 1, {"{"}, end)
+        opened = self.body_brace(head, end)
         if opened == end:
             return None
         after = self.pairs[opened] + 1
