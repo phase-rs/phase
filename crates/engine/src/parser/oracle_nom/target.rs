@@ -1450,6 +1450,40 @@ pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<O
     .parse(input)
 }
 
+/// CR 608.2c + CR 701.14a: Recognize the paired created-object fight
+/// sentence — "each of those tokens fights a different one of those
+/// creatures" (Ezuri's Predation) — where the subject anaphor names the
+/// objects the preceding instruction created and the target anaphor names
+/// the objects that instruction was repeated for, one fight per pair.
+///
+/// The whole sentence is the unit (an optional terminal period, then end of
+/// input): a pairing with any further rider is not this shape, so the caller's
+/// ordinary lowering keeps charge of it. Each axis of variation is one `alt`:
+/// the created noun (`tokens`/`creatures`/`permanents`), the verb's number
+/// (`fights`/`fight`), and the paired noun (`creatures`/`permanents`).
+///
+/// This is not folded into `parse_selected_from_set_reference` (target-side
+/// only, returns the selected-member anaphor) or the singular fight-subject
+/// anaphor rewrite, because it recognizes the subject+target PAIRING and drives
+/// a clause-level rewrite of both fight slots.
+///
+/// Input must already be lowercase.
+pub(crate) fn parse_paired_created_object_fight(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("each of those "),
+            alt((tag("tokens"), tag("creatures"), tag("permanents"))),
+            alt((tag(" fights "), tag(" fight "))),
+            tag("a different one of those "),
+            alt((tag("creatures"), tag("permanents"))),
+            opt(tag(".")),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1553,6 +1587,42 @@ mod tests {
             "They Controlled",
         ] {
             assert!(they_control.parse(declined).is_err(), "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn paired_created_object_fight_accepts_each_axis() {
+        for input in [
+            "each of those tokens fights a different one of those creatures.",
+            "each of those tokens fights a different one of those creatures",
+            "each of those creatures fights a different one of those creatures",
+            "each of those permanents fights a different one of those permanents",
+            "each of those tokens fight a different one of those creatures",
+            "each of those tokens fights a different one of those permanents.",
+        ] {
+            assert!(
+                parse_paired_created_object_fight(input).is_ok(),
+                "expected the pairing shape to be recognized: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn paired_created_object_fight_rejects_other_shapes() {
+        for input in [
+            // A singular subject is the ordinary "it fights" anaphor.
+            "it fights a different one of those creatures",
+            // No "different one of" pairing: every token fights the same set.
+            "each of those tokens fights up to one target creature",
+            // A trailing rider is not the bare pairing sentence.
+            "each of those tokens fights a different one of those creatures, then draw a card",
+            // An unsupported paired noun.
+            "each of those tokens fights a different one of those cards",
+        ] {
+            assert!(
+                parse_paired_created_object_fight(input).is_err(),
+                "expected the pairing shape to be refused: {input}"
+            );
         }
     }
 

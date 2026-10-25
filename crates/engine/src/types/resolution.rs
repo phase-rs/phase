@@ -8200,6 +8200,7 @@ mod tests {
                 ability: Box::new(resolved_draw(111)),
                 tracked_members: Vec::new(),
                 iterated_counter_kinds: Vec::new(),
+                iterated_created_objects: Vec::new(),
                 next_iteration: 0,
                 total_iterations: 0,
                 copy_order_fixed: None,

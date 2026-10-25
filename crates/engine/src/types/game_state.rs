@@ -3234,6 +3234,21 @@ pub struct PendingRepeatIteration {
     /// the loop is not counter-kind-driven.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
+    /// CR 701.14a + CR 608.2c: the objects the preceding instruction created,
+    /// snapshotted at loop entry for a member-driven loop whose body pairs each
+    /// member with one created object ("each of those tokens fights a
+    /// different one of those creatures"). Indexed by iteration like
+    /// `tracked_members`; each resumed iteration binds `[created, member]`.
+    /// Empty when the loop pairs nothing.
+    ///
+    /// Wire contract: like `iterated_counter_kinds`, this is server-side
+    /// resolution state that no client renders or derives a fallback from, so
+    /// the `#[serde(default)]` rule in `lobby-broker`'s `PROTOCOL_VERSION` doc
+    /// applies and no bump is made. A peer that predates the field drops it
+    /// from a frame parked mid-loop, so resuming such a frame on a peer that
+    /// predates it loses the pairing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterated_created_objects: Vec<ObjectId>,
     pub next_iteration: usize,
     pub total_iterations: usize,
     /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
@@ -52665,6 +52680,7 @@ mod restored_exact_attack_authority_tests {
                     ability: node.clone(),
                     tracked_members: vec![],
                     iterated_counter_kinds: vec![],
+                    iterated_created_objects: vec![],
                     next_iteration: 0,
                     total_iterations: 1,
                     copy_order_fixed: None,

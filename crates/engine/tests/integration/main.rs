@@ -426,6 +426,7 @@ mod exquisite_blood_routing;
 mod extract_power_each_player_exile;
 mod exuberant_wolfbear_base_pt_target;
 mod eyetwitch_learn_decline_lesson;
+mod ezuri_predation_pairing;
 mod face_down_cast_offer;
 mod face_down_cause_marker;
 mod face_down_spell_cost_filter;
