@@ -11,9 +11,11 @@ use nom::Parser;
 
 use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
+#[cfg(test)]
+use super::oracle_effect::parse_effect_chain_ir;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
+    lower_effect_chain_ir, parse_effect_chain_ir_ability_root, parse_player_relative_clause,
     rebind_event_context_amount_counts_in_ability, target_filter_controller_ref,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
@@ -1890,7 +1892,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             // conservative side of that line: a split body that would have been
             // answerable stays an honest gap rather than a guessed binding.
             let mut reflexive_ctx = effect_ctx.clone_for_independent_body();
-            let mut effect_chain = parse_effect_chain_ir(
+            // CR 603.12: the split reflexive trigger has its own ability body.
+            let mut effect_chain = parse_effect_chain_ir_ability_root(
                 &reflexive_effect_text,
                 AbilityKind::Spell,
                 &mut reflexive_ctx,
@@ -2004,7 +2007,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     extract_illegal_targets_disposition(&effect_for_parse);
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut effect_ctx,
@@ -2014,7 +2017,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut stripped_ctx,
@@ -2024,7 +2027,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir(
+                            let ir = parse_effect_chain_ir_ability_root(
                                 &effect_for_parse,
                                 AbilityKind::Spell,
                                 &mut effect_ctx,

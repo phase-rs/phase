@@ -42798,6 +42798,17 @@ pub(crate) fn parse_effect_chain_ir(
     parse_effect_chain_ir_after_player_choices(text, kind, ctx, 0)
 }
 
+/// Parse the first instruction of an ability, retaining its established context.
+/// CR 603.1: a trigger's effect is its own ability body, not a continuation of
+/// its trigger condition. Antecedent and quantity guards still limit binding.
+pub(crate) fn parse_effect_chain_ir_ability_root(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> EffectChainIr {
+    parse_effect_chain_ir_with_damage_context(text, kind, ctx, 0, None)
+}
+
 /// [`parse_effect_chain_ir`] for a chain that CONTINUES an enclosing one: a
 /// player chosen in it is the `already_chosen`-th-plus-one player of the
 /// resolution, because the enclosing chain's earlier choices come first at
@@ -42818,8 +42829,8 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
 }
 
 /// `None` is reserved for an explicit ability-root entry. Nested builders receive
-/// `Some` and retain that permission limit, even at their first chunk. Trigger,
-/// replacement and granted-ability bodies currently use the withheld default:
+/// `Some` and retain that permission limit, even at their first chunk.
+/// Replacement and granted-ability builders retain the withheld default:
 /// their legacy unbound population fallback remains, not a strict parse failure.
 fn parse_effect_chain_ir_with_damage_context(
     text: &str,
@@ -53861,6 +53872,113 @@ mod parent_controller_population_tests {
             Some(ControllerRef::ParentTargetController)
         );
         assert!(has_parent_population_binding(filter));
+    }
+
+    fn parse_population_trigger(text: &str) -> AbilityDefinition {
+        let mut parsed = parse_oracle_text(text, "Boundary Probe", &[], &["Creature".into()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{text}");
+        *parsed.triggers.remove(0).execute.expect("trigger effect")
+    }
+
+    fn assert_trigger_population_permission(prefix: &str) {
+        let text = format!("{prefix}, ~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.");
+        let definition = parse_population_trigger(&text);
+        let filter = population_filter(&definition);
+        assert_eq!(
+            filter.controller,
+            Some(ControllerRef::ParentTargetController),
+            "{text}"
+        );
+        assert_eq!(
+            filter.properties,
+            vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn upkeep_trigger_parent_controller_population_binds() {
+        assert_trigger_population_permission("At the beginning of your upkeep");
+    }
+
+    #[test]
+    fn etb_trigger_parent_controller_population_binds() {
+        assert_trigger_population_permission("When this creature enters");
+    }
+
+    #[test]
+    fn reflexive_trigger_parent_controller_population_binds() {
+        assert_trigger_population_permission(
+            "At the beginning of your upkeep, you may pay {R}. When you do",
+        );
+    }
+
+    fn assert_trigger_population_boundary(head: &str, suffix: &str) {
+        let ordinary = format!("{head} and 1 damage to each creature{suffix}.");
+        population_filter(&parse_population_trigger(&ordinary));
+        let qualified =
+            format!("{head} and 1 damage to each other creature with the same controller{suffix}.");
+        assert!(
+            !has_parent_population_binding(population_filter(&parse_population_trigger(
+                &qualified
+            ))),
+            "{qualified}"
+        );
+    }
+
+    #[test]
+    fn dies_trigger_parent_controller_population_keeps_permission_disabled() {
+        assert_trigger_population_boundary(
+            "Whenever a creature you control dies, ~ deals 2 damage to target creature",
+            "",
+        );
+    }
+
+    #[test]
+    fn event_object_trigger_parent_controller_population_keeps_permission_disabled() {
+        assert_trigger_population_boundary(
+            "Whenever a creature you control attacks, ~ deals 2 damage to target creature",
+            "",
+        );
+    }
+
+    #[test]
+    fn cast_object_trigger_parent_controller_population_keeps_permission_disabled() {
+        assert_trigger_population_boundary(
+            "Whenever you cast a creature spell, ~ deals 2 damage to target creature",
+            "",
+        );
+    }
+    #[test]
+    fn where_x_trigger_parent_controller_population_keeps_permission_disabled() {
+        assert_trigger_population_boundary(
+            "At the beginning of your upkeep, ~ deals X damage to target creature",
+            ", where X is the number of cards in target player's hand",
+        );
+    }
+
+    #[test]
+    fn nonplain_amount_trigger_parent_controller_population_keeps_permission_disabled() {
+        assert_trigger_population_boundary(
+            "At the beginning of your upkeep, ~ deals damage equal to ~'s power to target creature",
+            "",
+        );
+    }
+
+    #[test]
+    fn cant_cast_head_parent_controller_population_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "Target player can't cast spells and ~ deals 2 damage to target creature",
+        );
+    }
+
+    #[test]
+    fn pump_head_parent_controller_population_keeps_permission_disabled() {
+        assert_population_boundary_through_both_parsers(
+            "Target creature gets +1/+1 until end of turn and ~ deals 2 damage to target creature",
+        );
     }
 
     /// Recursive defaults withhold parent-target binding while retaining the
