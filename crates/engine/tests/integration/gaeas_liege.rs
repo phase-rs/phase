@@ -401,11 +401,11 @@ fn gaeas_liege_land_activation_rejects_nonland_target() {
     ));
     assert!(r
         .act(GameAction::ChooseTarget {
-            target: TargetRef::Object(creature)
+            target: Some(TargetRef::Object(creature))
         })
         .is_err());
     r.act(GameAction::ChooseTarget {
-        target: TargetRef::Object(land),
+        target: Some(TargetRef::Object(land)),
     })
     .unwrap();
     for _ in 0..12 {
