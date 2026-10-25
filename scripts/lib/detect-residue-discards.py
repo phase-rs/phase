@@ -5,10 +5,16 @@ This is not a proof that unread Oracle text cannot be dropped. Named ignored
 remainders are conservative obligations; defaults freeze syntax, not semantic
 loss. Same-file deletion/addition can fit under a ceiling. No arbitrary dataflow,
 unwrap_or_else, future Parsed API, or waiver enforcement is claimed here.
+Expression-with-block statement boundaries are shared by closure tails and
+comma-free match arms. Import aliases are lexical (module boundaries do not
+inherit them); precise-capture use<...> bounds are not imports. Bare closures
+are not helper results: only established result-forwarding methods unwrap them.
+Binding annotations and ref/mut modifiers do not hide ignored remainders.
 
 --list reports each path:line family symbol and scan totals; --baseline prints
 sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
 --index reads SOURCE AND LEDGER from git's index, using this executing tool.
+Unexpected per-file scanner failures report the path and fail closed.
 """
 from __future__ import annotations
 
@@ -74,15 +80,50 @@ class Expressions:
                 self.pairs[i] = opened
         if stack:
             raise CensusError("unclosed expression delimiters")
-        self.aliases = {h: h for h in HELPERS}
-        # Imports are code tokens, including grouped imports. Recognize aliases
-        # by the explicit known helper, never by an arbitrary parse_* prefix.
-        for i, value in enumerate(self.values):
-            if value == "use":
-                end = self.values.index(";", i)
-                for j in range(i + 1, end - 1):
-                    if self.values[j] in HELPERS and self.values[j + 1] == "as":
-                        self.aliases[self.values[j + 2]] = self.values[j]
+        # Imports belong to lexical scopes, not the whole file. A module starts
+        # a fresh name environment; ordinary blocks inherit their parent scope.
+        v = self.values
+        module_bodies = {i + 2 for i in range(len(v) - 2)
+                         if v[i] == "mod" and re.fullmatch(r"\w+", v[i + 1])
+                         and v[i + 2] == "{"}
+        self.scopes = []
+        self.parents = {-1: None}
+        self.aliases = {-1: {}}
+        scopes = [-1]
+        for i, value in enumerate(v):
+            self.scopes.append(scopes[-1])
+            if value == "{":
+                self.parents[i] = None if i in module_bodies else scopes[-1]
+                self.aliases[i] = {}
+                scopes.append(i)
+            elif value == "}":
+                scopes.pop()
+        for i, value in enumerate(v):
+            if value != "use" or i + 1 == len(v) or v[i + 1] == "<":
+                continue  # `use<'a>` is a precise-capture bound, not an item.
+            before = i - 1
+            if before >= 0 and v[before] == ")":
+                before = self.pairs[before] - 1
+            if before >= 0 and v[before] == "pub":
+                before -= 1
+            if before >= 0 and v[before] not in (";", "{", "}", "]"):
+                continue
+            end = self.end(i + 1, {";"})
+            if end == len(v):
+                continue
+            for j in range(i + 1, end - 2):
+                if v[j + 1] == "as":
+                    self.aliases[self.scopes[i]][v[j + 2]] = (
+                        v[j] if v[j] in HELPERS else None)
+
+    def helper_name(self, token):
+        name = self.values[token]
+        scope = self.scopes[token]
+        while scope is not None:
+            if name in self.aliases[scope]:
+                return self.aliases[scope][name]
+            scope = self.parents[scope]
+        return name if name in HELPERS else None
 
     def split(self, start, end, separator=","):
         out = []
@@ -112,8 +153,42 @@ class Expressions:
                 i += 1
         return i
 
+    def block_expression_end(self, start, end):
+        """End of an expression-with-block, before any postfix/operator."""
+        v = self.values
+        if start >= end:
+            return None
+        head = start
+        if v[head] == "'" and head + 3 < end and v[head + 2] == ":":
+            head += 3
+        if v[head] == "{":
+            return self.pairs[head] + 1
+        if v[head] not in ("if", "match", "unsafe", "loop", "while", "for", "async", "const"):
+            return None
+        opened = self.end(head + 1, {"{"}, end)
+        if opened == end:
+            return None
+        after = self.pairs[opened] + 1
+        if v[head] == "if" and after < end and v[after] == "else":
+            return self.block_expression_end(after + 1, end)
+        return after
+
+    def block_tail(self, start, end):
+        """Skip semicolon statements and comma-free expression-with-blocks."""
+        while start < end:
+            after = self.block_expression_end(start, end)
+            if after is not None and after < end and self.values[after] not in (
+                    ".", "?", "(", "[", "+", "-", "*", "/", "%", "as"):
+                start = after
+                continue
+            stop = self.end(start, {";"}, end)
+            if stop == end:
+                return start, end
+            start = stop + 1
+        return end, end
+
     def match_patterns(self, start, end):
-        """Arm patterns without guards; a block body needs no trailing comma."""
+        """Arm patterns without guards; expressions-with-block need no comma."""
         v = self.values
         arm = start
         while arm < end:
@@ -126,8 +201,9 @@ class Expressions:
             pattern_end = self.end(arm, {"if"}, arrow)
             yield arm, pattern_end
             body = arrow + 1
-            if body < end and v[body] == "{":
-                arm = self.pairs[body] + 1
+            after = self.block_expression_end(body, end)
+            if after is not None:
+                arm = after
                 # A postfix/operator makes this a larger expression, which
                 # requires comma termination rather than the block shortcut.
                 next_pattern = (arm < end and v[arm] in ("(", "[")
@@ -149,19 +225,7 @@ class Expressions:
         if start >= end:
             return None
         if v[start] == "{" and self.pairs[start] == end - 1:
-            if end > start + 1 and v[end - 2] == ";":
-                return None
-            parts = self.split(start + 1, end - 1, ";")
-            return self.origin(*parts[-1]) if parts else None
-        # Closure wrappers return their tail; arguments consumed by some other
-        # function are deliberately NOT followed.
-        closure_start = start + (v[start] == "move")
-        if closure_start < end and v[closure_start] == "|":
-            try:
-                close = v.index("|", closure_start + 1, end)
-            except ValueError:
-                return None
-            return self.origin(close + 1, end)
+            return self.origin(*self.block_tail(start + 1, end - 1))
         if v[end - 1] != ")":
             return None
         opened = self.pairs[end - 1]
@@ -175,8 +239,9 @@ class Expressions:
                 and all(re.fullmatch(r"\w+", x) for x in path[::2])
                 and all(x in ("::", ".") for x in path[1::2])):
             return None
-        if name in self.aliases and "." not in path:
-            return opened - 1, self.aliases[name]
+        helper = self.helper_name(opened - 1)
+        if helper and "." not in path:
+            return opened - 1, helper
         args = self.split(opened + 1, end - 1)
         if name in ("Some", "Ok") and len(args) == 1:
             a, b = args[0]
@@ -184,14 +249,15 @@ class Expressions:
                 return self.origin(a, b)
         if "." in path and len(args) == RESULT_WRAPPERS.get(name):
             a, b = args[-1]
-            if a < b and v[a] in ("|", "move"):
-                return self.origin(a, b)
+            closure = a + (a < b and v[a] == "move")
+            if closure < b and v[closure] == "|":
+                close = self.end(closure + 1, {"|"}, b)
+                if close < b:
+                    return self.origin(close + 1, b)
         return None
 
     def residue_pattern(self, start, end, arity=2):
         v = self.values
-        # A type annotation belongs to the binding, not its tuple pattern.
-        end = self.end(start, {":"}, end)
         while start < end:
             if v[start] == "(" and self.pairs[start] == end - 1:
                 parts = self.split(start + 1, end - 1)
@@ -206,6 +272,8 @@ class Expressions:
                         residue = rest + 1 + residue - (arity - suffix)
                 if len(parts) > residue:
                     a, b = parts[residue]
+                    while a < b and v[a] in ("ref", "mut"):
+                        a += 1
                     return b == a + 1 and v[a].startswith("_")
                 start += 1
                 end -= 1
@@ -241,9 +309,10 @@ def find_discards(relpath, lines):
                 end = ex.pairs[end] + 1
             origin = ex.origin(equals + 1, end)
             arity = 3 if origin and origin[1] == "parse_target_with_syntax" else 2
-            if ex.residue_pattern(i + 1, equals, arity):
+            pattern_end = ex.end(i + 1, {":"}, equals)
+            if ex.residue_pattern(i + 1, pattern_end, arity):
                 add(origin, "binding")
-            elif v[i + 1:equals] == ["_"]:
+            elif v[i + 1:pattern_end] == ["_"]:
                 add(origin, "whole-result")
         if value == "match":
             end = ex.end(i + 1, {"{"})
@@ -292,6 +361,17 @@ def read_snapshot(root, path, index):
     if index:
         return git(root, "show", ":" + path).decode("utf-8")
     return (root / path).read_text(encoding="utf-8")
+
+
+def scan_file(path, operation, lines):
+    """Keep internal scanner failures actionable at both per-file entrypoints."""
+    try:
+        return operation(path, lines)
+    except CensusError as error:
+        raise CensusError(f"{path}: {error}") from error
+    except Exception as error:
+        raise CensusError(
+            f"detector internal error at {path}: {type(error).__name__}: {error}") from error
 
 
 def module_edges(path, lines):
@@ -379,7 +459,7 @@ def production_sources(root, index):
     edges = {}
     test_files = set()
     for path, text in sources.items():
-        declared, inner_test = module_edges(path, text.splitlines())
+        declared, inner_test = scan_file(path, module_edges, text.splitlines())
         edges[path] = [(target, live) for target, live in declared if target in sources]
         if inner_test:
             test_files.add(path)
@@ -438,7 +518,8 @@ def main():
         sources = production_sources(args.root, args.index)
         if not sources:
             raise ValueError("empty production parser scope")
-        found = [h for p, text in sources.items() for h in find_discards(p, text.splitlines())]
+        found = [h for p, text in sources.items()
+                 for h in scan_file(p, find_discards, text.splitlines())]
         counts = Counter(h.path for h in found)
         if args.baseline:
             for path, count in sorted(counts.items()):

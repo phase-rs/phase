@@ -18,6 +18,10 @@
 # with_player_antecedents / with_player_scope methods, which return f(...) intact.
 # Revalidated at source revision 1a02596722fa122040542716e0af8a982b84a49a:
 # --baseline still measures these same 128 obligations; no ceiling increased.
+# Revalidated at source revision 9f4e171edfd14b24845b853402521cd9f715c9db:
+# block-expression closure tails / comma-free arms, module-scoped aliases,
+# ref/mut residue bindings and typed wildcards still measure 128; no increases.
+# Uncalled closures are excluded; precise-capture bounds are not imports.
 # Gate H opts into item exclusion; other censuses retain their legacy population.
 # Format: <repository-relative-path> <nonnegative decimal ceiling>.
 # Tightening rule: every burn-down change must lower its ceiling in the same

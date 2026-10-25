@@ -6,6 +6,9 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stderr
+from io import StringIO
+from unittest.mock import patch
 
 _SPEC = importlib.util.spec_from_file_location(
     "residue", Path(__file__).with_name("detect-residue-discards.py"))
@@ -18,6 +21,102 @@ def hits(src):
 
 
 class DiscardTests(unittest.TestCase):
+    def test_h_block_closure_tail_after_expression_statements(self):
+        for statement in ("if input.is_empty() { observe(); }",
+                          "if flag { observe(); } else { observe(); }",
+                          "match flag { true => {}, false => {} }",
+                          "unsafe { observe(); }", "loop { break; }",
+                          "while flag { break; }", "for x in xs { observe(); }"):
+            expr = ("ctx.with_player_antecedents(|s| { " + statement
+                    + " parse_target_with_ctx(input, s) })")
+            with self.subTest(statement=statement):
+                self.assertEqual([h.family for h in hits(f"let (v, _) = {expr};")], ["binding"])
+                self.assertEqual(hits(f"let (v, rest) = {expr}; consume(rest);"), [])
+
+    def test_i_comma_free_expression_with_block_match_arms(self):
+        for body in ("if rest.is_empty() { observe(); }",
+                     "if flag { consume(rest); } else { consume(rest); }",
+                     "match flag { true => consume(rest), false => () }",
+                     "unsafe { consume(rest); }", "loop { consume(rest); break; }",
+                     "while flag { consume(rest); break; }",
+                     "for x in xs { consume(rest); }"):
+            with self.subTest(body=body):
+                prefix = "match parse_target(input) { (TargetFilter::Any, rest) => " + body
+                self.assertEqual([h.family for h in hits(prefix + " (v, _) => use_it(v), }")],
+                                 ["binding"])
+                self.assertEqual(hits(prefix + " (v, rest) => consume(rest), }"), [])
+
+    def test_j_aliases_are_scoped_to_lexical_modules(self):
+        src = ("mod a { use crate::target::parse_target_with_syntax as read; "
+               "fn f(i: &str) { let s = read(i, ctx).2; } }\n"
+               "mod b { use crate::target::parse_target as read; "
+               "fn g(i: &str) { let (v, rest) = read(i); consume(rest); } }\n"
+               "mod c { fn read(i: &str) -> (u8, u8) { (0, 0) } "
+               "fn h(i: &str) { let (v, _) = read(i); } }")
+        self.assertEqual([(h.line, h.family, h.symbol) for h in hits(src)],
+                         [(1, "projection", "parse_target_with_syntax")])
+        self.assertEqual(hits(src.replace("read(i, ctx).2", "read(i, ctx).1")), [])
+
+    def test_k_binding_modifiers_preserve_ignored_remainder(self):
+        for modifier in ("mut", "ref", "ref mut"):
+            with self.subTest(modifier=modifier):
+                self.assertEqual([h.family for h in hits(
+                    f"let (value, {modifier} _rest) = parse_target(i);")], ["binding"])
+                self.assertEqual(hits(
+                    f"let (value, {modifier} rest) = parse_target(i); consume(rest);"), [])
+
+    def test_l_typed_wildcard_drops_whole_result(self):
+        self.assertEqual([h.family for h in hits(
+            "let _: (TargetFilter, &str) = parse_target(input);")], ["whole-result"])
+        self.assertEqual(hits(
+            "let result: (TargetFilter, &str) = parse_target(input); consume(result.1);"), [])
+
+    def test_m_uncalled_closure_is_not_a_helper_result(self):
+        for closure in ("|| parse_target(input)", "move || parse_target(input)",
+                        "|s| { parse_target_with_ctx(input, s) }"):
+            with self.subTest(closure=closure):
+                src = f"let _ = {closure};\nlet (v, _) = parse_target(witness);"
+                self.assertEqual([(h.line, h.family) for h in hits(src)], [(2, "binding")])
+
+    def test_n_precise_capture_is_not_an_import(self):
+        capture = "fn keep<'a>(i: &'a str) -> impl Fn() -> &'a str + use<'a> { move || i }"
+        self.assertEqual(hits(capture), [])
+        self.assertEqual([h.family for h in hits(
+            capture + "\nfn f() { let (v, _) = parse_target(input); }")], ["binding"])
+
+    def test_n_precise_capture_module_discovery(self):
+        capture = "fn keep<'a>(i: &'a str) -> impl Fn() -> &'a str + use<'a> { move || i }"
+        for source in (capture + "\nmod child;", "mod child;\n" + capture):
+            with self.subTest(source=source):
+                self.assertEqual(self.discovery_hits({
+                    "mod.rs": source,
+                    "child.rs": "fn f() { let (v, _) = parse_target(input); }",
+                }), [("child.rs", "binding")])
+
+    def test_n_import_item_visibilities(self):
+        for visibility in ("", "pub ", "pub(crate) "):
+            self.assertEqual([h.symbol for h in hits(
+                f"{visibility}use crate::target::parse_target as read;\n"
+                "fn f() { let (v, _) = read(input); }")], ["parse_target"])
+
+    def test_n_internal_errors_name_file_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parser = root / rd.SCOPE
+            parser.mkdir(parents=True)
+            (parser / "probe.rs").write_text("fn f() {}")
+            for operation in ("module_edges", "find_discards"):
+                stderr = StringIO()
+                with self.subTest(operation=operation):
+                    with patch.object(rd, operation, side_effect=RuntimeError("injected failure")), \
+                            patch("sys.argv", ["detector", "--list", "--root", tmp]), \
+                            redirect_stderr(stderr):
+                        self.assertEqual(rd.main(), 1)
+                    self.assertIn("detector internal error at crates/engine/src/parser/probe.rs",
+                                  stderr.getvalue())
+                    self.assertIn("RuntimeError: injected failure", stderr.getvalue())
+                    self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_helper_table_and_discard_bindings(self):
         for helper in rd.HELPERS:
             for rest in ("_", "_rem", "_rest"):

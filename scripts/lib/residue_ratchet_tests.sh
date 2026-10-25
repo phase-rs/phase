@@ -216,6 +216,28 @@ run_cached
 expect_rc 'unstaged ledger cannot replace indexed deletion' 1
 expect_out 'missing indexed ledger is identified' 'scripts/residue-ratchet.txt'
 
+# Precise-capture `use<'a>` bounds are valid Rust, not import items. Exercise
+# source classification and module discovery through both real snapshot paths.
+new_fixture
+cat > "$FIXTURE/crates/engine/src/parser/capture.rs" <<'EOF'
+fn keep<'a>(i: &'a str) -> impl Fn() -> &'a str + use<'a> { move || i }
+EOF
+printf 'fn consumed(i: &str) { let (v, rest) = parse_target(i); consume(rest); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'precise capture and consumed remainder pass worktree gate' 0
+expect_out 'precise capture worktree preserves witness' 'residue: 1 legacy obligations, ceiling 1'
+printf 'PRECISE-CAPTURE worktree gate: exit %s\n%s\n' "$RC" "$OUT"
+git -C "$FIXTURE" add crates/engine/src/parser/probe.rs crates/engine/src/parser/capture.rs
+run_cached
+expect_rc 'precise capture and consumed remainder pass index gate' 0
+expect_out 'precise capture index preserves witness' 'snapshot index)'
+printf 'PRECISE-CAPTURE staged-index gate: exit %s\n%s\n' "$RC" "$OUT"
+add_discard
+git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+run_cached
+expect_rc 'precise capture cannot hide an indexed discard' 1
+expect_out 'precise capture indexed growth names source' 'probe.rs:3: binding parse_target_with_ctx'
+
 # Availability failures are loud, including the inline seam suite.
 for dependency in lib/detect-residue-discards.py residue-ratchet.txt lib/detect_residue_discards_tests.py; do
     new_fixture
