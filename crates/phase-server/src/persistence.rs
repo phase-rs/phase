@@ -784,10 +784,9 @@ impl GameDb {
                 error!("Skipped Full session row {game_code}: deck_pools_json is NULL");
                 continue;
             };
-            match serde_json::from_str(&json).and_then(|mut persisted: PersistedSession| {
-                persisted.deck_pools = serde_json::from_str(&pools)?;
-                Ok(persisted)
-            }) {
+            // The pools column passes the engine's onset admission inside
+            // `decode_row`; a refused row is skipped like any decode failure.
+            match PersistedSession::decode_row(&json, &pools) {
                 Ok(persisted) => snapshots.push(FullPersistSnapshot {
                     key: FullSessionKey {
                         game_code,
@@ -1507,7 +1506,7 @@ fn now_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::game_state::{GameState, PersistedGameState};
+    use engine::types::game_state::{AbilityOnsetRecord, GameState, PersistedGameState};
     use tempfile::NamedTempFile;
 
     fn test_db() -> GameDb {
@@ -1722,6 +1721,150 @@ mod tests {
             payload["state"]["state"]["deck_pools"],
             serde_json::json!([]),
             "the mutation-time payload must not carry the pools"
+        );
+    }
+
+    /// One deck pool whose sideboard holds a face carrying an ability node of an
+    /// onset-admitting kind (CR 611.2e) — the face an outside-game fetch
+    /// materializes an object from (`put_outside_game_face_into`).
+    fn pool_with_onset_admitting_sideboard_face() -> engine::types::game_state::PlayerDeckPool {
+        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+
+        let card = engine::types::card::CardFace {
+            name: "Onset Sideboard Card".to_string(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: Vec::new(),
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            )],
+            ..Default::default()
+        };
+        let sideboard = std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
+            card,
+            count: 1,
+        }]);
+        let mut pool = pool_named("Forest");
+        pool.registered_sideboard = std::sync::Arc::clone(&sideboard);
+        pool.current_sideboard = sideboard;
+        pool
+    }
+
+    /// Saves a Full session holding `pools` under the given writer record. For
+    /// `Unrecorded` it rewrites the stored payload to what an engine that
+    /// predates the onset record wrote: the trusted envelope's state with no
+    /// `ability_onset_record`.
+    fn save_row_with_pools(
+        db: &GameDb,
+        pools: Vec<engine::types::game_state::PlayerDeckPool>,
+        record: AbilityOnsetRecord,
+    ) -> String {
+        let (mut mgr, code) = seeded_full_session(db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = pools;
+        assert_eq!(save(db, &mgr, &code), FullPersistDisposition::Applied);
+        match record {
+            AbilityOnsetRecord::Recorded => {}
+            AbilityOnsetRecord::Unrecorded => {
+                let mut payload: serde_json::Value =
+                    serde_json::from_str(&column::<String>(db, "session_state_json", &code))
+                        .expect("the stored payload decodes");
+                assert_eq!(
+                    payload["state"]["state"]
+                        .as_object_mut()
+                        .expect("the trusted envelope's state is an object")
+                        .remove("ability_onset_record"),
+                    Some(serde_json::Value::from("Recorded")),
+                    "reach guard: this build writes the onset record"
+                );
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE game_sessions SET session_state_json = ?1 WHERE game_code = ?2",
+                        params![serde_json::to_string(&payload).unwrap(), code],
+                    )
+                    .expect("rewrite the payload");
+            }
+        }
+        code
+    }
+
+    /// CR 611.2e: the detached `deck_pools_json` column passes the same onset
+    /// admission as the payload it was lifted from. An unrecorded row whose
+    /// only onset-admitting node sits in a sideboard face is refused; a
+    /// recorded row with the same pools restores and keeps the face's node;
+    /// an unrecorded row with onset-free pools restores, so the refusal is the
+    /// pools' and not the payload's own.
+    #[test]
+    fn an_unrecorded_row_is_refused_for_an_onset_admitting_node_in_its_pools_column() {
+        let db = test_db();
+        let refused = save_row_with_pools(
+            &db,
+            vec![pool_with_onset_admitting_sideboard_face()],
+            AbilityOnsetRecord::Unrecorded,
+        );
+        let recorded = save_row_with_pools(
+            &db,
+            vec![pool_with_onset_admitting_sideboard_face()],
+            AbilityOnsetRecord::Recorded,
+        );
+        let onset_free = save_row_with_pools(
+            &db,
+            vec![pool_named("Forest")],
+            AbilityOnsetRecord::Unrecorded,
+        );
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+        let find = |code: &str| {
+            loaded
+                .iter()
+                .find(|snapshot| snapshot.key.game_code == code)
+                .cloned()
+        };
+
+        assert!(
+            find(&refused).is_none(),
+            "an unrecorded row whose pools hold an onset-admitting node is not restored"
+        );
+        let refusal = PersistedSession::decode_row(
+            &column::<String>(&db, "session_state_json", &refused),
+            &column::<String>(&db, "deck_pools_json", &refused),
+        )
+        .expect_err("the row decoder refuses the unrecorded row");
+        assert!(
+            refusal.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{refusal}"
+        );
+
+        let db_cards = std::sync::Arc::new(engine::database::CardDatabase::default());
+        let recorded = find(&recorded).expect("a recorded row with the same pools restores");
+        let restored =
+            server_core::session::GameSession::from_persisted(recorded.persisted, &db_cards)
+                .expect("the recorded row restores");
+        let face = &restored.state.deck_pools[0].current_sideboard[0].card;
+        assert!(
+            matches!(
+                *face.abilities[0].effect,
+                engine::types::ability::Effect::GenericEffect { .. }
+            ),
+            "reach guard: the restored sideboard face keeps its onset-admitting node"
+        );
+
+        let onset_free =
+            find(&onset_free).expect("an unrecorded row with onset-free pools restores");
+        let restored =
+            server_core::session::GameSession::from_persisted(onset_free.persisted, &db_cards)
+                .expect("the onset-free unrecorded row restores");
+        assert_eq!(
+            restored.state.ability_onset_record,
+            AbilityOnsetRecord::Recorded,
+            "the admitted unrecorded payload is recorded"
         );
     }
 
