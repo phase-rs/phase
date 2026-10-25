@@ -13,8 +13,10 @@
 //!
 //! Structural maps must be uniquely keyed and exactly reproducible by serde;
 //! otherwise encoding falls back to FULL. Opaque values retain their raw bytes.
-//! The current encoder emits verified DELTA candidates for compatible revisioned
-//! inputs; cached object digests and size-based selection are a subsequent unit.
+//! DELTA is selected only when its complete serialized size is strictly smaller
+//! than FULL. Object comparisons use cached whole-object SHA-256 digests; checked
+//! reconstruction still detects omitted changes, including a digest collision.
+//! Indexing costs O(input bytes + key indexing), not O(changed objects).
 //!
 //! Viewer projections must **not** pass through `GameState` deserialization:
 //! that decoder can normalize allocators or reject redacted authority. Codec
@@ -23,6 +25,10 @@
 //! Native verification: `cargo test -p state-codec --test integration`.
 //! Opt-in full games: `cargo test -p state-codec self_play::full_ -- --ignored --nocapture`.
 //! These tests do not claim independent native/WASM state-construction parity.
+//! Add `-- --nocapture` to emit same-stream raw/gzip, operation/order overhead,
+//! baseline-memory and cold/warm stage timings per audience. Reconnect delivery
+//! is measured separately from the uninterrupted lane. Debug timings are smoke
+//! diagnostics only; CPU acceptance measurements require an optimized build.
 
 use std::{
     borrow::Cow,
@@ -53,6 +59,24 @@ pub struct WireState {
 struct StateCache {
     hash: OnceLock<StateHash>,
     structure: OnceLock<Eligibility>,
+}
+
+/// Retained bytes for one unique baseline allocation, not per cloned handle.
+///
+/// Includes initialized cache storage and vector/key capacities. Object digest
+/// storage is separated from index bytes, never counted twice. Excludes allocator
+/// headers, Arc bookkeeping and the small caller-owned `WireState` handle.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BaselineMemoryUsage {
+    pub json_bytes: usize,
+    pub index_key_bytes: usize,
+    pub object_hash_bytes: usize,
+}
+
+impl BaselineMemoryUsage {
+    pub fn total_bytes(self) -> usize {
+        self.json_bytes + self.index_key_bytes + self.object_hash_bytes
+    }
 }
 
 /// An opaque, baseline-independent FULL or integrity-checked DELTA frame.
@@ -186,6 +210,29 @@ impl WireState {
         self.as_json().as_bytes()
     }
 
+    /// Initialize this baseline's shared index/hash cache and account its storage.
+    pub fn baseline_memory_usage(&self) -> BaselineMemoryUsage {
+        state_hash(self);
+        let mut usage = BaselineMemoryUsage {
+            json_bytes: self.as_bytes().len(),
+            index_key_bytes: std::mem::size_of::<StateCache>(),
+            object_hash_bytes: 0,
+        };
+        if let Eligibility::Eligible(shape) = self.structure() {
+            shape.root.account(&mut usage);
+            if let Some(data) = &shape.data {
+                data.account(&mut usage);
+            }
+            if let Some(state) = &shape.state {
+                state.account(&mut usage);
+            }
+            if let Some(objects) = &shape.objects {
+                objects.account(&mut usage);
+            }
+        }
+        usage
+    }
+
     fn structure(&self) -> &Eligibility {
         self.cache
             .structure
@@ -204,6 +251,18 @@ pub fn encode(baseline: Option<&WireState>, state: &WireState) -> Result<Frame, 
     let Some(base) = baseline else {
         return Ok(full());
     };
+    // Read only the named root map, before any revision/layout eligibility work.
+    // Duplicate or non-object roots are FULL-only, not encode errors.
+    if let Ok(root) = serde_json::from_str::<RawMap<'_>>(state.as_json()) {
+        if root.get("type").is_some_and(|raw| {
+            serde_json::from_str::<Cow<'_, str>>(raw.get())
+                .ok()
+                .as_deref()
+                == Some("GameStarted")
+        }) {
+            return Ok(full());
+        }
+    }
     let (Some(base_revision), Some(revision)) = (base.revision, state.revision) else {
         return Ok(full());
     };
@@ -222,12 +281,35 @@ pub fn encode(baseline: Option<&WireState>, state: &WireState) -> Result<Frame, 
     if !check.matches() {
         return Ok(full());
     }
+    let base_hash = state_hash(base);
+    let result_hash = state_hash(state);
+    let candidate = DeltaWriteData {
+        base_revision,
+        revision,
+        base_hash,
+        result_hash,
+        patch: &patch,
+    };
+    let delta_size = serialized_size(&FrameEnvelope {
+        tag: "Delta",
+        data: candidate,
+    })?;
+    let full_size = serialized_size(&FrameEnvelope {
+        tag: "Full",
+        data: FullData {
+            state: &state.json,
+            revision: state.revision,
+        },
+    })?;
+    if !prefer_delta(delta_size, full_size) {
+        return Ok(full());
+    }
     Ok(Frame {
         payload: FramePayload::Delta(Delta {
             base_revision,
             revision,
-            base_hash: state_hash(base),
-            result_hash: state_hash(state),
+            base_hash,
+            result_hash,
             patch: Arc::from(serde_json::value::to_raw_value(&patch)?),
         }),
     })
@@ -278,6 +360,41 @@ pub fn state_hash(state: &WireState) -> StateHash {
         .cache
         .hash
         .get_or_init(|| StateHash(Sha256::digest(state.as_bytes()).into()))
+}
+
+fn prefer_delta(delta_bytes: usize, full_bytes: usize) -> bool {
+    delta_bytes < full_bytes
+}
+
+#[derive(Default)]
+struct CountingWriter(usize);
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("serialized size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_size(value: &impl Serialize) -> Result<usize, CodecError> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
+}
+
+#[derive(Serialize)]
+struct DeltaWriteData<'a, 'b> {
+    base_revision: u64,
+    revision: u64,
+    base_hash: StateHash,
+    result_hash: StateHash,
+    patch: &'b Patch<'a>,
 }
 
 // The envelope remains a two-stage borrowed RawValue reader, never serde content.
@@ -369,22 +486,15 @@ impl Frame {
             })?),
             FramePayload::Delta(delta) => {
                 // Serialize the typed operation records, not their original whitespace.
-                #[derive(Serialize)]
-                struct Data<'a> {
-                    base_revision: u64,
-                    revision: u64,
-                    base_hash: StateHash,
-                    result_hash: StateHash,
-                    patch: Patch<'a>,
-                }
+                let patch = Patch::parse(&delta.patch)?;
                 Ok(serde_json::to_vec(&FrameEnvelope {
                     tag: "Delta",
-                    data: Data {
+                    data: DeltaWriteData {
                         base_revision: delta.base_revision,
                         revision: delta.revision,
                         base_hash: delta.base_hash,
                         result_hash: delta.result_hash,
-                        patch: Patch::parse(&delta.patch)?,
+                        patch: &patch,
                     },
                 })?)
             }
@@ -468,19 +578,30 @@ enum Eligibility {
 }
 
 #[derive(Debug)]
-struct IndexedEntry {
+struct IndexedEntry<D = ()> {
     key: Box<str>,
     range: Range<usize>,
+    digest: D,
 }
 
 #[derive(Debug)]
-struct MapIndex {
-    entries: Vec<IndexedEntry>,
+struct MapIndex<D = ()> {
+    entries: Vec<IndexedEntry<D>>,
     lookup: Vec<usize>,
 }
 
 impl MapIndex {
     fn index(backing: &str, raw: &RawValue) -> Result<Self, CodecError> {
+        Self::index_with(backing, raw, |_| ())
+    }
+}
+
+impl<D> MapIndex<D> {
+    fn index_with(
+        backing: &str,
+        raw: &RawValue,
+        digest: impl Fn(&RawValue) -> D,
+    ) -> Result<Self, CodecError> {
         let map: RawMap<'_> = serde_json::from_str(raw.get())?;
         let mut comparison = Comparison::new(raw.get().as_bytes());
         serde_json::to_writer(&mut comparison, &map)?;
@@ -503,6 +624,7 @@ impl MapIndex {
                 Ok(IndexedEntry {
                     key: key.into_owned().into_boxed_str(),
                     range: start..end,
+                    digest: digest(value),
                 })
             })
             .collect::<Result<_, CodecError>>()?;
@@ -522,7 +644,11 @@ impl MapIndex {
         self.raw(backing, &self.entries[self.lookup[i]]).map(Some)
     }
 
-    fn raw<'a>(&self, backing: &'a str, entry: &IndexedEntry) -> Result<&'a RawValue, CodecError> {
+    fn raw<'a>(
+        &self,
+        backing: &'a str,
+        entry: &IndexedEntry<D>,
+    ) -> Result<&'a RawValue, CodecError> {
         let text = backing
             .get(entry.range.clone())
             .ok_or(CodecError::InvalidDelta("invalid cached raw span"))?;
@@ -540,6 +666,26 @@ impl MapIndex {
             lookup: self.lookup.clone(),
         })
     }
+
+    fn entry(&self, key: &str) -> Option<&IndexedEntry<D>> {
+        self.lookup
+            .binary_search_by(|&i| self.entries[i].key.as_ref().cmp(key))
+            .ok()
+            .map(|i| &self.entries[self.lookup[i]])
+    }
+
+    fn account(&self, usage: &mut BaselineMemoryUsage) {
+        let hashes = self.entries.capacity() * std::mem::size_of::<D>();
+        usage.object_hash_bytes += hashes;
+        usage.index_key_bytes += self.entries.capacity() * std::mem::size_of::<IndexedEntry<D>>()
+            - hashes
+            + self.lookup.capacity() * std::mem::size_of::<usize>()
+            + self
+                .entries
+                .iter()
+                .map(|entry| entry.key.len())
+                .sum::<usize>();
+    }
 }
 
 #[derive(Debug)]
@@ -548,7 +694,7 @@ struct Shape {
     root: MapIndex,
     data: Option<MapIndex>,
     state: Option<MapIndex>,
-    objects: Option<MapIndex>,
+    objects: Option<MapIndex<StateHash>>,
 }
 
 impl Shape {
@@ -576,7 +722,9 @@ impl Shape {
         let state_map = state.as_ref().unwrap_or(&root);
         let objects = match state_map.get(backing, "objects")? {
             Some(raw) if raw.get().starts_with('{') => {
-                let objects = MapIndex::index(backing, raw)?;
+                let objects = MapIndex::index_with(backing, raw, |body| {
+                    StateHash(Sha256::digest(body.get().as_bytes()).into())
+                })?;
                 for entry in &objects.entries {
                     if !objects.raw(backing, entry)?.get().starts_with('{') {
                         return Err(CodecError::InvalidDelta("object body must be an object"));
@@ -826,9 +974,11 @@ fn apply_map<'a>(
             return Err(CodecError::InvalidDelta("removal target is missing"));
         }
     }
+    let mut removed: Vec<_> = remove.iter().map(|key| key.as_ref()).collect();
+    removed.sort_unstable();
     let mut entries = Vec::new();
     for (key, value) in &base.entries {
-        if !remove.iter().any(|removed| removed == key) {
+        if removed.binary_search(&key.as_ref()).is_err() {
             entries.push((
                 key.clone(),
                 Node::Raw(set.and_then(|set| set.get(key)).unwrap_or(value)),
@@ -848,13 +998,23 @@ fn apply_map<'a>(
                 "order is not a complete key permutation",
             ));
         }
+        let mut lookup: Vec<_> = (0..entries.len()).collect();
+        lookup.sort_unstable_by(|&a, &b| entries[a].0.cmp(&entries[b].0));
+        let positions = order
+            .iter()
+            .map(|key| {
+                lookup
+                    .binary_search_by(|&i| entries[i].0.as_ref().cmp(key.as_ref()))
+                    .map(|i| lookup[i])
+                    .map_err(|_| CodecError::InvalidDelta("unknown order key"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut slots: Vec<_> = entries.into_iter().map(Some).collect();
         let mut reordered = Vec::with_capacity(slots.len());
-        for key in order {
+        for position in positions {
             let slot = slots
-                .iter_mut()
-                .find(|slot| slot.as_ref().is_some_and(|(k, _)| k == key))
-                .ok_or(CodecError::InvalidDelta("unknown or repeated order key"))?;
+                .get_mut(position)
+                .ok_or(CodecError::InvalidDelta("invalid order position"))?;
             reordered.push(
                 slot.take()
                     .ok_or(CodecError::InvalidDelta("repeated order key"))?,
@@ -961,13 +1121,24 @@ fn diff_fields<'a>(
     after: &RawMap<'a>,
     child: Option<&str>,
 ) -> Result<FieldPatch<'a>, CodecError> {
+    diff_fields_by(before, after, child, |_, a, b| a.get() == b.get())
+}
+
+fn diff_fields_by<'a>(
+    before: &RawMap<'a>,
+    after: &RawMap<'a>,
+    child: Option<&str>,
+    equivalent: impl Fn(&str, &RawValue, &RawValue) -> bool,
+) -> Result<FieldPatch<'a>, CodecError> {
     let set = RawMap::new(
         after
             .entries
             .iter()
             .filter(|(key, value)| {
                 child != Some(key.as_ref())
-                    && before.get(key).map(RawValue::get) != Some(value.get())
+                    && !before
+                        .get(key)
+                        .is_some_and(|old| equivalent(key, old, value))
             })
             .map(|(key, value)| (key.clone(), *value))
             .collect(),
@@ -1011,10 +1182,16 @@ fn diff<'a>(
     )?;
     let objects = common_objects
         .map(|(before, after)| {
-            let fields = diff_fields(
+            let fields = diff_fields_by(
                 &before.borrow(base.as_json())?,
                 &after.borrow(target.as_json())?,
                 None,
+                |key, _, _| {
+                    before
+                        .entry(key)
+                        .zip(after.entry(key))
+                        .is_some_and(|(a, b)| a.digest == b.digest)
+                },
             )?;
             Ok::<_, CodecError>(ObjectPatch {
                 upsert: fields.set,
@@ -1047,11 +1224,28 @@ fn diff<'a>(
             (Some(message), Some(data))
         }
     };
+    let nonempty = |field: &FieldPatch<'_>| {
+        !field.set.is_empty() || !field.remove.is_empty() || field.order.is_some()
+    };
     Ok(Patch {
         layout: before.layout,
-        message,
-        data,
-        state: Some(state),
-        objects,
+        message: message.filter(&nonempty),
+        data: data.filter(&nonempty),
+        state: Some(state).filter(nonempty),
+        objects: objects.filter(|objects| {
+            !objects.upsert.is_empty() || !objects.remove.is_empty() || objects.order.is_some()
+        }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefer_delta;
+
+    #[test]
+    fn equal_or_larger_candidate_selects_full() {
+        assert!(prefer_delta(99, 100));
+        assert!(!prefer_delta(100, 100));
+        assert!(!prefer_delta(101, 100));
+    }
 }

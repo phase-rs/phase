@@ -11,8 +11,8 @@ fn wire(text: &str, revision: u64) -> WireState {
 }
 
 fn objects(extra: &str) -> String {
-    // Large unchanged whole-object content makes these fixtures useful when U2
-    // adds strict size selection, not merely while all candidates are emitted.
+    // Large unchanged object content keeps mutation tests DELTA-reachable under
+    // strict serialized-size selection.
     format!(
         r#"{{"17":{{"name":"Stable permanent","oracle_text":"{}"}},"23":{{"power":2{extra}}}}}"#,
         "A reusable unchanged object description. ".repeat(100)
@@ -20,7 +20,10 @@ fn objects(extra: &str) -> String {
 }
 
 fn message(root: &str, data: &str, state: &str) -> String {
-    format!(r#"{{"type":"StateUpdate",{root}"data":{{{data}"state":{{{state}}}}}}}"#)
+    let definitions = objects("");
+    format!(
+        r#"{{"type":"StateUpdate","definitions":{definitions},{root}"data":{{{data}"state":{{{state}}}}}}}"#
+    )
 }
 
 fn tag(bytes: &[u8]) -> String {
@@ -153,11 +156,11 @@ fn d2_removals_at_every_scope_and_present_null_transitions() {
 fn d2_structural_children_missing_null_empty_and_populated() {
     let populated = objects("");
     let base = wire(
-        &format!(r#"{{"counter":1,"objects":{populated}}}"#),
+        &format!(r#"{{"counter":1,"definitions":{populated},"objects":{populated}}}"#),
         REVISION,
     );
     let changed = wire(
-        &format!(r#"{{"counter":2,"objects":{populated}}}"#),
+        &format!(r#"{{"counter":2,"definitions":{populated},"objects":{populated}}}"#),
         REVISION,
     );
     round_trip(Some(&base), &changed, "Delta");
@@ -167,7 +170,10 @@ fn d2_structural_children_missing_null_empty_and_populated() {
         r#""counter":2,"objects":null"#.to_owned(),
         r#""counter":2,"objects":{}"#.to_owned(),
     ] {
-        let target = wire(&format!("{{{content}}}"), REVISION + 1);
+        let target = wire(
+            &format!(r#"{{"definitions":{populated},{content}}}"#),
+            REVISION + 1,
+        );
         round_trip(Some(&base), &target, "Delta");
         round_trip(Some(&target), &base, "Delta");
     }
@@ -198,7 +204,10 @@ fn d2_structural_children_missing_null_empty_and_populated() {
 #[test]
 fn d4_opaque_lexical_values_survive_delta() {
     let objects = objects("");
-    let base = wire(&format!(r#"{{"value":0,"objects":{objects}}}"#), REVISION);
+    let base = wire(
+        &format!(r#"{{"value":0,"definitions":{objects},"objects":{objects}}}"#),
+        REVISION,
+    );
     for value in [
         "1",
         "1.0",
@@ -212,14 +221,14 @@ fn d4_opaque_lexical_values_survive_delta() {
         r#""Éowyn \u0061""#,
     ] {
         let target = wire(
-            &format!(r#"{{"value":{value},"objects":{objects}}}"#),
+            &format!(r#"{{"value":{value},"definitions":{objects},"objects":{objects}}}"#),
             REVISION + 1,
         );
         assert_ne!(base.as_bytes(), target.as_bytes());
         round_trip(Some(&base), &target, "Delta");
     }
     let nested = format!(
-        r#"{{"value":1,"objects":{{"17":{{ "a":1, "a":2, "n":1.0 }},"23":{{"text":"{}"}}}}}}"#,
+        r#"{{"value":1,"definitions":{objects},"objects":{{"17":{{ "a":1, "a":2, "n":1.0 }},"23":{{"text":"{}"}}}}}}"#,
         "An unchanged sibling. ".repeat(200)
     );
     let target = wire(&nested, REVISION);
@@ -248,7 +257,7 @@ fn d4_structural_losslessness_boundaries_force_exact_full() {
         valid.replacen(r#""type""#, r#""\u0074ype""#, 1),
         valid.replacen(r#""state""#, r#""\u0073tate""#, 1),
         valid.replacen(r#""counter""#, r#""\u0063ounter""#, 1),
-        valid.replacen(r#""17""#, r#""\u00317""#, 1),
+        valid.replacen(r#""objects":{"17""#, r#""objects":{"\u00317""#, 1),
         // Literal and escape-alias duplicates at every expanded scope.
         message(r#""x":0,"x":1,"#, "", &state),
         message(r#""x":0,"\u0078":1,"#, "", &state),
@@ -526,4 +535,239 @@ fn d6_parent_child_conflicts_and_missing_targets() {
         assert_eq!(source.revision(), Some(REVISION));
     }
     assert_ne!(base.as_bytes(), target.as_bytes());
+}
+
+#[test]
+fn d1_multilevel_whole_field_replacements() {
+    let stable = objects("");
+    let before = wire(
+        &message(
+            r#""command_id":"a","#,
+            r#""events":[1],"#,
+            &format!(r#""players":[{{"life":20,"old":true}}],"objects":{stable}"#),
+        ),
+        REVISION,
+    );
+    let after = wire(
+        &message(
+            r#""command_id":"b","#,
+            r#""events":[2,3],"#,
+            &format!(r#""players":[{{"life":19}}],"objects":{stable}"#),
+        ),
+        REVISION + 1,
+    );
+    assert_ne!(before.as_bytes(), after.as_bytes());
+    let bytes = round_trip(Some(&before), &after, "Delta");
+    let frame: Value = serde_json::from_slice(&bytes).unwrap();
+    let patch = &frame["data"]["patch"];
+    assert_eq!(patch["message"]["set"]["command_id"], "b");
+    assert_eq!(patch["data"]["set"]["events"], json!([2, 3]));
+    assert_eq!(patch["state"]["set"]["players"], json!([{"life":19}]));
+    assert!(patch["objects"].get("upsert").is_none());
+}
+
+#[test]
+fn d3_objects_replace_remove_add_and_preserve_explicit_order() {
+    let stable = objects("");
+    let before = wire(
+        &format!(
+            r#"{{"definitions":{stable},"objects":{{"a":{{"name":"A","old":1}},"b":{{"name":"B"}},"c":{{"name":"C"}}}}}}"#
+        ),
+        REVISION,
+    );
+    let after = wire(
+        &format!(
+            r#"{{"definitions":{stable},"objects":{{"c":{{"name":"C"}},"a":{{"name":"changed"}},"d":{{"name":"D"}}}}}}"#
+        ),
+        REVISION + 1,
+    );
+    let initial: Value = serde_json::from_str(before.as_json()).unwrap();
+    assert_eq!(initial["objects"]["a"]["old"], 1);
+    assert_eq!(initial["objects"]["b"]["name"], "B");
+    assert_eq!(initial["objects"]["c"]["name"], "C");
+    let bytes = round_trip(Some(&before), &after, "Delta");
+    let patch: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(patch["data"]["patch"]["objects"]["remove"], json!(["b"]));
+    assert_eq!(
+        patch["data"]["patch"]["objects"]["order"],
+        json!(["c", "a", "d"])
+    );
+    assert_eq!(
+        patch["data"]["patch"]["objects"]["upsert"]["a"],
+        json!({"name":"changed"})
+    );
+    assert_eq!(
+        patch["data"]["patch"]["objects"]["upsert"]["d"],
+        json!({"name":"D"})
+    );
+    let reordered = wire(
+        &format!(
+            r#"{{"definitions":{stable},"objects":{{"c":{{"name":"C"}},"b":{{"name":"B"}},"a":{{"name":"A","old":1}}}}}}"#
+        ),
+        REVISION,
+    );
+    let bytes = round_trip(Some(&before), &reordered, "Delta");
+    let patch: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        patch["data"]["patch"]["objects"]["order"],
+        json!(["c", "b", "a"])
+    );
+    assert!(patch["data"]["patch"]["objects"].get("upsert").is_none());
+    let empty = wire(
+        &format!(r#"{{"definitions":{stable},"objects":{{}}}}"#),
+        REVISION,
+    );
+    round_trip(Some(&before), &empty, "Delta");
+    round_trip(Some(&empty), &before, "Delta");
+}
+
+#[test]
+fn d3_field_order_at_all_three_levels() {
+    let stable = objects("");
+    let before = wire(
+        &message(
+            r#""a":1,"b":2,"#,
+            r#""a":1,"b":2,"#,
+            &format!(r#""a":1,"b":2,"objects":{stable}"#),
+        ),
+        REVISION,
+    );
+    let after = wire(
+        &format!(
+            r#"{{"data":{{"state":{{"objects":{stable},"b":2,"a":1}},"b":2,"a":1}},"b":2,"a":1,"definitions":{stable},"type":"StateUpdate"}}"#
+        ),
+        REVISION,
+    );
+    assert_ne!(before.as_bytes(), after.as_bytes());
+    let bytes = round_trip(Some(&before), &after, "Delta");
+    let patch: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        patch["data"]["patch"]["message"]["order"],
+        json!(["data", "b", "a", "definitions", "type"])
+    );
+    assert_eq!(
+        patch["data"]["patch"]["data"]["order"],
+        json!(["state", "b", "a"])
+    );
+    assert_eq!(
+        patch["data"]["patch"]["state"]["order"],
+        json!(["objects", "b", "a"])
+    );
+}
+
+#[test]
+fn d7_recipient_reset_integrity_recovery_and_game_started() {
+    let (first, second, delta) = control();
+    let mut sender = [Some(first.clone()), Some(first.clone())];
+    let mut receiver = [
+        Some(
+            decode(
+                None,
+                &Frame::from_bytes(&round_trip(None, &first, "Full")).unwrap(),
+            )
+            .unwrap(),
+        ),
+        Some(
+            decode(
+                None,
+                &Frame::from_bytes(&round_trip(None, &first, "Full")).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ];
+    for seat in 0..2 {
+        let bytes = round_trip(sender[seat].as_ref(), &second, "Delta");
+        receiver[seat] =
+            Some(decode(receiver[seat].as_ref(), &Frame::from_bytes(&bytes).unwrap()).unwrap());
+        sender[seat] = Some(second.clone());
+    }
+    sender[0] = None;
+    receiver[0] = None;
+    let third = wire(
+        &second.as_json().replace(r#""counter":2"#, r#""counter":3"#),
+        REVISION + 1,
+    );
+    for (seat, expected) in ["Full", "Delta"].into_iter().enumerate() {
+        let bytes = round_trip(sender[seat].as_ref(), &third, expected);
+        receiver[seat] =
+            Some(decode(receiver[seat].as_ref(), &Frame::from_bytes(&bytes).unwrap()).unwrap());
+        sender[seat] = Some(third.clone());
+    }
+    let fourth = wire(
+        &third.as_json().replace(r#""counter":3"#, r#""counter":4"#),
+        REVISION + 2,
+    );
+    for baseline in &receiver {
+        round_trip(baseline.as_ref(), &fourth, "Delta");
+    }
+    assert!(matches!(
+        decode(Some(&third), &Frame::from_bytes(&delta).unwrap()),
+        Err(CodecError::BaseRevisionMismatch { .. })
+    ));
+    let wrong = wire(
+        &first.as_json().replace("Stable permanent", "Wrong viewer"),
+        REVISION,
+    );
+    assert!(matches!(
+        decode(Some(&wrong), &Frame::from_bytes(&delta).unwrap()),
+        Err(CodecError::BaseHashMismatch { .. })
+    ));
+    let full = round_trip(None, &second, "Full");
+    let recovered = decode(Some(&wrong), &Frame::from_bytes(&full).unwrap()).unwrap();
+    round_trip(Some(&recovered), &third, "Delta");
+    let stable = objects("");
+    let update1 = wire(
+        &message("", "", &format!(r#""counter":1,"objects":{stable}"#)),
+        REVISION,
+    );
+    let update2 = wire(
+        &message("", "", &format!(r#""counter":2,"objects":{stable}"#)),
+        REVISION + 1,
+    );
+    round_trip(Some(&update1), &update2, "Delta");
+    let started1 = wire(
+        &update1.as_json().replace("StateUpdate", "GameStarted"),
+        REVISION,
+    );
+    let started2 = wire(
+        &update2.as_json().replace("StateUpdate", "GameStarted"),
+        REVISION + 1,
+    );
+    round_trip(Some(&started1), &started2, "Full");
+}
+
+#[test]
+fn d8_size_bound_and_large_change_fallback() {
+    let (before, after, bytes) = control();
+    assert!(bytes.len() < round_trip(None, &after, "Full").len());
+    for (base, target) in [
+        (
+            wire(r#"{"value":1}"#, REVISION),
+            wire(r#"{"value":2}"#, REVISION),
+        ),
+        (
+            before,
+            wire(r#"{"objects":{},"value":"entirely replaced"}"#, REVISION),
+        ),
+    ] {
+        assert_ne!(base.as_bytes(), target.as_bytes());
+        let selected = round_trip(Some(&base), &target, "Full");
+        assert_eq!(selected.len(), round_trip(None, &target, "Full").len());
+    }
+}
+
+#[test]
+fn baseline_memory_accounts_shared_index_and_object_digests() {
+    let (base, _, _) = control();
+    let memory = base.baseline_memory_usage();
+    assert_eq!(memory.json_bytes, base.as_bytes().len());
+    assert!(memory.index_key_bytes > 0);
+    assert!(memory.object_hash_bytes >= 2 * 32);
+    assert_eq!(memory.object_hash_bytes % 32, 0);
+    let clone = base.clone().with_revision(1);
+    assert_eq!(base.as_bytes().as_ptr(), clone.as_bytes().as_ptr());
+    assert_eq!(
+        memory.total_bytes(),
+        clone.baseline_memory_usage().total_bytes()
+    );
 }
