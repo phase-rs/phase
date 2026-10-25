@@ -85,6 +85,13 @@ pub struct Frame {
     payload: FramePayload,
 }
 
+/// The FULL or DELTA payload carried by a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    Full,
+    Delta,
+}
+
 #[derive(Clone, Debug)]
 enum FramePayload {
     Full(WireState),
@@ -444,6 +451,14 @@ fn object_record<'a, T: Deserialize<'a>>(raw: &'a RawValue) -> Result<T, CodecEr
 }
 
 impl Frame {
+    /// Identify the payload without serializing the frame.
+    pub fn kind(&self) -> FrameKind {
+        match &self.payload {
+            FramePayload::Full(_) => FrameKind::Full,
+            FramePayload::Delta(_) => FrameKind::Delta,
+        }
+    }
+
     /// Read named records, accepting either envelope order and escaped tag spellings.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
         let text = std::str::from_utf8(bytes)

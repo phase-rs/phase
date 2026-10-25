@@ -130,7 +130,7 @@ use engine::types::InteractionSessionId;
 use serde::{Deserialize, Serialize};
 use server_core::session::ActionResult;
 use server_core::FullSessionKey;
-use state_codec::{decode, encode, state_hash, Frame, WireState};
+use state_codec::{decode, encode, state_hash, Frame, FrameKind, WireState};
 
 use super::StateUpdateSource;
 use crate::socket_mailbox::Envelope;
@@ -723,13 +723,7 @@ struct Baselines {
 struct CodecFrames {
     full: Vec<u8>,
     selected: Vec<u8>,
-    is_delta: bool,
-}
-
-#[derive(Deserialize)]
-struct CodecHeader<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
+    kind: FrameKind,
 }
 
 /// Exact raw JSON value spans; operation names, braces and layout are syntax.
@@ -750,7 +744,7 @@ impl CodecProfile {
 
         use serde_json::value::RawValue;
 
-        if !frames.is_delta {
+        if frames.kind == FrameKind::Full {
             self.full_bytes += frames.selected.len() as u64;
             return;
         }
@@ -801,24 +795,17 @@ impl Baselines {
             .expect("FULL encodes")
             .to_bytes()
             .expect("FULL serializes");
-        let selected = encode(self.sender.as_ref(), &current)
-            .expect("codec encodes")
-            .to_bytes()
-            .expect("codec frame serializes");
+        let frame = encode(self.sender.as_ref(), &current).expect("codec encodes");
+        let kind = frame.kind();
+        let selected = frame.to_bytes().expect("codec frame serializes");
         assert!(
             selected.len() <= full.len(),
             "selected frame {} exceeds FULL {} at revision {revision}",
             selected.len(),
             full.len()
         );
-        let header: CodecHeader<'_> =
-            serde_json::from_slice(&selected).expect("frame has a JSON envelope");
-        let is_delta = match header.kind {
-            "Full" => false,
-            "Delta" => true,
-            other => panic!("unexpected codec frame type {other}"),
-        };
         let frame = Frame::from_bytes(&selected).expect("serialized frame parses");
+        assert_eq!(frame.kind(), kind, "serialized frame preserves its kind");
         let reconstructed =
             decode(self.receiver.as_ref(), &frame).expect("delivered frame decodes");
         assert_eq!(
@@ -834,7 +821,7 @@ impl Baselines {
         CodecFrames {
             full,
             selected,
-            is_delta,
+            kind,
         }
     }
 }
@@ -912,10 +899,9 @@ fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatM
         .expect("StateUpdate serializes");
         let frames = total.baselines.deliver(&json, revision);
         total.profile.record(&frames);
-        if frames.is_delta {
-            total.delta_updates += 1;
-        } else {
-            total.full_updates += 1;
+        match frames.kind {
+            FrameKind::Full => total.full_updates += 1,
+            FrameKind::Delta => total.delta_updates += 1,
         }
         total.legacy.record(json);
         total
@@ -1096,11 +1082,19 @@ fn completion_envelope_removes_command_id_through_delta() {
             Some(id) => {
                 assert_eq!(original.get("command_id"), Some(&serde_json::json!(id.0)));
                 assert_eq!(decoded.get("command_id"), original.get("command_id"));
-                assert!(!frames.is_delta, "completion establishes a FULL baseline");
+                assert_eq!(
+                    frames.kind,
+                    FrameKind::Full,
+                    "completion establishes a FULL baseline"
+                );
             }
             None => {
                 assert!(original.get("command_id").is_none());
-                assert!(frames.is_delta, "key removal must reach DELTA");
+                assert_eq!(
+                    frames.kind,
+                    FrameKind::Delta,
+                    "key removal must reach DELTA"
+                );
                 assert!(
                     decoded.get("command_id").is_none(),
                     "no stale completion key"

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
-use state_codec::{decode, encode, state_hash, CodecError, Frame, WireState};
+use state_codec::{decode, encode, state_hash, CodecError, Frame, FrameKind, WireState};
 
 const REVISION: u64 = 9_007_199_254_740_993;
 
@@ -69,6 +69,23 @@ fn with_patch(bytes: &[u8], patch: &str) -> Vec<u8> {
     let data = &value["data"];
     format!(r#"{{"type":"Delta","data":{{"base_revision":{},"revision":{},"base_hash":{},"result_hash":{},"patch":{patch}}}}}"#,
         data["base_revision"], data["revision"], data["base_hash"], data["result_hash"]).into_bytes()
+}
+
+#[test]
+fn frame_kind_tracks_payload_through_serialization() {
+    let (base, target, _) = control();
+    let full = encode(None, &target).unwrap();
+    let delta = encode(Some(&base), &target).unwrap();
+    let full_bytes = full.to_bytes().unwrap();
+    let delta_bytes = delta.to_bytes().unwrap();
+    assert_eq!(tag(&full_bytes), "Full");
+    assert_eq!(tag(&delta_bytes), "Delta", "delta selection reach guard");
+    assert!(delta_bytes.len() < full_bytes.len());
+    assert_eq!(full.kind(), FrameKind::Full);
+    assert_eq!(delta.kind(), FrameKind::Delta);
+    for (frame, bytes) in [(full, full_bytes), (delta, delta_bytes)] {
+        assert_eq!(Frame::from_bytes(&bytes).unwrap().kind(), frame.kind());
+    }
 }
 
 #[test]
