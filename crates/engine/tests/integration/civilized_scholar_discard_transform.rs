@@ -93,8 +93,7 @@ fn seed_library_top(runner: &mut GameRunner, name: &str, core_type: CoreType) ->
     id
 }
 
-/// Activate the loot ability and discard the drawn card (the only card in hand).
-fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId, drawn: ObjectId) {
+fn activate_loot(runner: &mut GameRunner, scholar: ObjectId) {
     let idx = activated_ability_definitions(runner.state(), scholar)
         .into_iter()
         .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::Draw { .. }))
@@ -107,6 +106,97 @@ fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId, drawn:
             payment_mode: Default::default(),
         })
         .expect("Civilized Scholar's {T} ability must be activatable");
+}
+
+/// Put a card of `core_type` directly into P0's hand.
+fn add_hand_card(runner: &mut GameRunner, name: &str, core_type: CoreType) -> ObjectId {
+    let state = runner.state_mut();
+    let id = create_object(
+        state,
+        CardId(state.next_object_id),
+        P0,
+        name.to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(core_type);
+    id
+}
+
+/// Activate the loot ability with a two-card hand (a creature and a land) plus
+/// a drawn Island, so the discard is a real choice (CR 701.9b), then discard
+/// `chosen` through `SelectCards`.
+fn loot_choosing_discard(runner: &mut GameRunner, scholar: ObjectId, chosen_core: CoreType) {
+    let creature = add_hand_card(runner, "Grizzly Bears", CoreType::Creature);
+    let land = add_hand_card(runner, "Forest", CoreType::Land);
+    seed_library_top(runner, "Island", CoreType::Land);
+    activate_loot(runner, scholar);
+    for _ in 0..10 {
+        if matches!(runner.state().waiting_for, WaitingFor::DiscardChoice { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve the loot ability");
+    }
+    let chosen = if chosen_core == CoreType::Creature {
+        creature
+    } else {
+        land
+    };
+    match &runner.state().waiting_for {
+        WaitingFor::DiscardChoice { player, cards, .. } => {
+            assert_eq!(*player, P0, "the Scholar's controller chooses the discard");
+            assert!(cards.contains(&creature) && cards.contains(&land));
+        }
+        other => panic!("expected a DiscardChoice prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen],
+        })
+        .expect("discard the chosen card");
+    assert!(
+        runner.state().players[0].graveyard.contains(&chosen),
+        "the chosen card must have reached the graveyard"
+    );
+    assert!(runner.state().stack.is_empty(), "the loot ability resolved");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "priority returns after the discard"
+    );
+}
+
+#[test]
+fn interactive_discard_of_a_creature_card_untaps_and_transforms() {
+    let (mut runner, scholar) = setup();
+    loot_choosing_discard(&mut runner, scholar, CoreType::Creature);
+
+    let obj = &runner.state().objects[&scholar];
+    assert!(!obj.tapped, "creature discard untaps the Scholar");
+    assert!(obj.transformed, "creature discard transforms the Scholar");
+    assert_eq!(obj.name, "Homicidal Brute");
+}
+
+#[test]
+fn interactive_discard_of_a_noncreature_card_neither_untaps_nor_transforms() {
+    let (mut runner, scholar) = setup();
+    loot_choosing_discard(&mut runner, scholar, CoreType::Land);
+
+    let obj = &runner.state().objects[&scholar];
+    assert!(obj.tapped, "noncreature discard leaves the Scholar tapped");
+    assert!(!obj.transformed);
+    assert_eq!(obj.name, "Civilized Scholar");
+}
+
+/// Activate the loot ability and discard the drawn card (the only card in hand).
+fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId, drawn: ObjectId) {
+    activate_loot(runner, scholar);
 
     // The lone drawn card is discarded without a prompt (CR 701.9b: a hand
     // of one card leaves no choice), so just drain the stack; still answer a
