@@ -46,6 +46,8 @@ EOF
     printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
     printf '# fixture reviewed ceiling\ncrates/engine/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
     git -C "$FIXTURE" init -q
+    git -C "$FIXTURE" config commit.gpgsign false
+    git -C "$FIXTURE" config tag.gpgsign false
     git -C "$FIXTURE" config user.email fixture@example.invalid
     git -C "$FIXTURE" config user.name 'Gate H fixture'
     git -C "$FIXTURE" add .
