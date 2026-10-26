@@ -171,15 +171,26 @@ fn choose_source(runner: &mut GameRunner, source: ObjectId, nondamaging: ObjectI
     };
     // CR 609.7a: the activator chooses on resolution, including nondamaging permanents.
     assert_eq!(*player, P0);
-    assert!(options.contains(&source));
-    assert!(options.contains(&nondamaging));
+    assert!(options
+        .iter()
+        .any(|option| option.identity.reference.object_id == source));
+    assert!(options
+        .iter()
+        .any(|option| option.identity.reference.object_id == nondamaging));
     assert_ne!(
-        options.first(),
-        Some(&source),
+        options
+            .first()
+            .map(|option| option.identity.reference.object_id),
+        Some(source),
         "exercise a non-first source choice"
     );
     runner
-        .act(GameAction::ChooseDamageSource { source })
+        .act(GameAction::ChooseDamageSource {
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                source,
+                runner.state().objects[&source].incarnation,
+            ),
+        })
         .expect("resume with the chosen source");
     assert!(runner.state().stack.is_empty());
     assert!(

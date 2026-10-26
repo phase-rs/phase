@@ -2028,3 +2028,26 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod exact_damage_source_order_tests {
+    use super::*;
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    #[test]
+    fn same_storage_id_different_birth_has_distinct_action_order_and_storage_relation() {
+        let a = GameAction::ChooseDamageSource {
+            source: ObjectIncarnationRef::of(ObjectId(7), 1),
+        };
+        let b = GameAction::ChooseDamageSource {
+            source: ObjectIncarnationRef::of(ObjectId(7), 2),
+        };
+        assert_eq!(cmp_game_actions(&a, &b), Ordering::Less);
+        assert_eq!(cmp_game_actions(&b, &a), Ordering::Greater);
+        assert_eq!(a.related_object_ids(), vec![ObjectId(7)]);
+        assert_eq!(b.related_object_ids(), vec![ObjectId(7)]);
+        assert_eq!(
+            serde_json::from_value::<GameAction>(serde_json::to_value(&b).unwrap()).unwrap(),
+            b
+        );
+    }
+}

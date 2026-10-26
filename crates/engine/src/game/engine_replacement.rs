@@ -216,6 +216,52 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
+    // The simultaneous combat batch owns this survivor. Delivering it here
+    // would bypass the batch's lifelink and combat-damage bookkeeping.
+    let combat_replacement = matches!(
+        pending.proposed,
+        ProposedEvent::Damage {
+            is_combat: true,
+            ..
+        }
+    ) && state
+        .pending_combat_lifelink
+        .as_ref()
+        .is_some_and(|batch| batch.replacement_work.is_some());
+    if combat_replacement {
+        let prior_tally = state.combat_prevention_tally.take();
+        state.combat_prevention_tally = Some(
+            state
+                .pending_combat_lifelink
+                .as_ref()
+                .unwrap()
+                .prevention_tally
+                .iter()
+                .copied()
+                .collect(),
+        );
+        let result = super::replacement::continue_replacement(state, index, events);
+        let tally = state.combat_prevention_tally.take().unwrap_or_default();
+        state.combat_prevention_tally = prior_tally;
+        let batch = state.pending_combat_lifelink.as_mut().unwrap();
+        batch.prevention_tally = tally.into_iter().collect();
+        batch.prevention_tally.sort_by_key(|(key, _)| *key);
+        let work = batch.replacement_work.as_mut().unwrap();
+        match result {
+            super::replacement::ReplacementResult::Execute(event) => {
+                work.survivors.push(Some(event))
+            }
+            super::replacement::ReplacementResult::Prevented => work.survivors.push(None),
+            super::replacement::ReplacementResult::NeedsChoice(player) => {
+                return Ok(super::replacement::replacement_choice_waiting_for(
+                    player, state,
+                ));
+            }
+        }
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    }
     let replacement_action_event_start = events.len();
     let pending_creation = match &pending.proposed {
         ProposedEvent::CreateToken { creation_frame, .. } => *creation_frame,
@@ -4410,6 +4456,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_opportunity: Vec::new(),
             damage_source_context: None,
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
@@ -5088,6 +5135,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_opportunity: Vec::new(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

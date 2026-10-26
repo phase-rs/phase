@@ -13130,6 +13130,7 @@ mod tests {
             QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: TargetFilter::ChosenDamageSource {
+                        chooser: None,
                         filter: Some(Box::new(TargetFilter::Any)),
                     },
                 },

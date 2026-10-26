@@ -952,6 +952,10 @@ export class GameStateFactory extends Factory<GameState> {
   }
 
   // --- WaitingFor variants (each replaces `waiting_for` exactly) ---
+  damageSourceChoice(data: Extract<WaitingFor, { type: "DamageSourceChoice" }>["data"]) {
+    return this.waitingFor({ type: "DamageSourceChoice", data });
+  }
+
   priority(player: PlayerId = 0) {
     return this.waitingFor(waitingForFactory.priority(player).build());
   }

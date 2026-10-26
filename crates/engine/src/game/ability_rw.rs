@@ -5961,7 +5961,7 @@ fn rw_effect(
             b.drop_writes();
             (b, None)
         }
-        Effect::PreventDamage {
+        Effect::PreventDamage { lifetime: _,
             amount_dynamic,
             target: _,
             recipient_scope: _,

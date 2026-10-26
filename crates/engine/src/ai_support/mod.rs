@@ -533,7 +533,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },
-        ) => !options.contains(source),
+        ) => !options.iter().any(|option| option.identity.reference == *source),
         (WaitingFor::LearnChoice { hand_cards, .. }, GameAction::LearnDecision { choice }) => {
             match choice {
                 crate::types::actions::LearnOption::Rummage { card_id } => {

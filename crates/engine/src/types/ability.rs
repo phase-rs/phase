@@ -2309,6 +2309,72 @@ pub enum RedirectionLifetime {
     Continuous,
 }
 
+/// Old generic prevention programs prevent every matching event until expiry.
+pub fn continuous_prevention_lifetime() -> RedirectionLifetime {
+    RedirectionLifetime::Continuous
+}
+
+/// Normalize legacy chooser omission while the complete lexical program is owned.
+/// Generic serde remains format-generic; only complete JSON ingress calls this.
+pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Value) {
+    fn walk(value: &mut serde_json::Value, inherited: bool) {
+        if value.as_str() == Some("ChosenDamageSource") {
+            *value = serde_json::json!({"type": "ChosenDamageSource"});
+        }
+        match value {
+            serde_json::Value::Object(object) => {
+                let producer = object
+                    .get("effect")
+                    .and_then(|effect| effect.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ChooseDamageSource");
+                let selected = ["context", "branch_context"].iter().any(|key| {
+                    object
+                        .get(*key)
+                        .and_then(|context| context.get("damage_source_choice"))
+                        .is_some_and(|choice| !choice.is_null())
+                });
+                if object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("ChosenDamageSource")
+                {
+                    object.entry("chooser").or_insert_with(|| {
+                        if inherited {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::String("Controller".to_string())
+                        }
+                    });
+                }
+                let registered_payload = matches!(
+                    object.get("type").and_then(serde_json::Value::as_str),
+                    Some(
+                        "CreateDelayedTrigger"
+                            | "AddTargetReplacement"
+                            | "CreateEmblem"
+                            | "Token"
+                            | "GenericEffect"
+                            | "Counter"
+                    )
+                );
+                for (key, child) in object.iter_mut() {
+                    // Own-resolution descendants and actual flip branches inherit
+                    // the producer. Registered later programs begin a new scope.
+                    let owned = !registered_payload
+                        && (inherited || selected || (producer && key == "sub_ability"));
+                    walk(child, owned);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    walk(child, inherited);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, false);
+}
+
 impl RedirectionLifetime {
     /// True for the CR 614.5 single-opportunity lifetime (the serde default, so
     /// this doubles as the `skip_serializing_if` predicate).
@@ -8715,6 +8781,9 @@ pub enum TargetFilter {
     /// object's live properties when damage would be dealt; `None` is the bare "a
     /// source of your choice" / "that source" form (any source is a legal choice).
     ChosenDamageSource {
+        /// CR 609.7a: Some creates a fresh choice; None reads its lexical producer.
+        #[serde(default)]
+        chooser: Option<Chooser>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<TargetFilter>>,
     },
@@ -23917,6 +23986,9 @@ pub enum Effect {
     /// context reference) or to an untargeted population, per
     /// `recipient_scope`.
     PreventDamage {
+        /// CR 615.8: a next-instance opportunity is separate from its expiry.
+        #[serde(default = "continuous_prevention_lifetime")]
+        lifetime: RedirectionLifetime,
         amount: PreventionAmount,
         /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
         /// resolution — the dynamic quantity is resolved to a concrete count and
@@ -26928,6 +27000,29 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 608.2c: a fresh source instruction owns its own answer, including
+    /// when a conditional branch follows an earlier source instruction.
+    pub fn is_fresh_damage_source_producer(&self) -> bool {
+        matches!(
+            self,
+            Self::ChooseDamageSource { .. }
+                | Self::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(_),
+                        ..
+                    }),
+                    ..
+                }
+                | Self::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(_),
+                        ..
+                    }),
+                    ..
+                }
+        )
+    }
+
     /// Single authority for constructing the "parser couldn't handle this"
     /// effect. Parser code must use this instead of a literal
     /// `Effect::Unimplemented { .. }` (enforced for new code by
@@ -35285,10 +35380,19 @@ pub struct PendingForwardedZoneResult {
     pub group: Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
 }
 
+/// Bounded definitions consumed within one damage operation and its exact parks.
+pub type DamageOpportunity = Vec<(AppliedReplacementKey, ReplacementDefinition)>;
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 609.7a: completed selection owned by this producer and its descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
+    /// Consumed definitions belong only to an explicitly parked damage remainder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_opportunity: Option<DamageOpportunity>,
     /// Private authority owned by one concrete counter-removal producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_removal_result: Option<crate::types::game_state::CounterRemovalResultBinding>,
@@ -38719,6 +38823,9 @@ impl ReplacementOrigin {
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
+    /// CR 609.7a: exact selected source; null explicitly denotes native predicates.
+    #[serde(default)]
+    pub selected_damage_source: Option<crate::types::game_state::TriggerSourceContext>,
     pub event: ReplacementEvent,
     #[serde(default)]
     pub execute: Option<Box<AbilityDefinition>>,
@@ -39108,6 +39215,7 @@ impl ReplacementDefinition {
     /// [`Self::validate_draw_scope`].
     pub fn new(event: ReplacementEvent) -> Self {
         Self {
+            selected_damage_source: None,
             event,
             draw_scope: None,
             planeswalk_scope: None,
@@ -52487,6 +52595,7 @@ mod departure_owned_dependency_walk_tests {
                     target: TargetFilter::Controller,
                 },
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: Some(quantity.clone()),
                     target: TargetFilter::Controller,
@@ -52599,6 +52708,7 @@ mod departure_owned_dependency_walk_tests {
     ) {
         let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
         let prevention = |target, scope, source| Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target,

@@ -4007,7 +4007,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
 /// - optional rider: `and put that many [+1/+1 | +0/+1 | …] counter[s] on <target>`
 /// - terminal period
 ///
-/// Emits `Effect::PreventDamage { amount: All, target: ParentTarget,
+/// Emits `Effect::PreventDamage { lifetime: crate::types::ability::RedirectionLifetime::Continuous, amount: All, target: ParentTarget,
 /// scope: AllDamage }` with `duration: UntilEndOfTurn`, and (when the rider is
 /// present) a `PutCounter` sub-ability with `repeat_for: EventContextAmount`.
 /// The CR 615.5 prevented-amount stash by the runtime damage applier resolves
@@ -4116,6 +4116,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target,
@@ -42829,9 +42830,10 @@ fn parse_effect_chain_ir_body(
     let text = text.as_str();
     let chunks = merge_counter_unless_cost_riders(
         text,
-        sequence::split_subject_elided_control_continuations(split_clause_sequence(text), |head| {
-            head_carries_player_subject(head, ctx)
-        }),
+        sequence::split_subject_elided_control_continuations(
+            sequence::split_source_choice_conjunctions(split_clause_sequence(text)),
+            |head| head_carries_player_subject(head, ctx),
+        ),
     );
     // CR 611.2a + CR 608.2c: expand any chunk whose leading duration governs conjuncts the
     // single-clause parse discarded. The expanded conjuncts become ORDINARY chunks of THIS
@@ -44255,7 +44257,7 @@ fn parse_effect_chain_ir_body(
         // CR 615 + CR 514.2: "If damage would be dealt to <target> this turn,
         // prevent that damage [and put that many <kind> counter(s) on <target>]"
         // — sub-clause of a chain that already chose a target. Emits an
-        // `Effect::PreventDamage { amount: All, target: ParentTarget }` with
+        // `Effect::PreventDamage { lifetime: crate::types::ability::RedirectionLifetime::Continuous, amount: All, target: ParentTarget }` with
         // `duration: UntilEndOfTurn` and (optionally) a counter rider sub-ability
         // that fires once per damage prevented this way. Gatta and Luzzu is the
         // motivating case; the same shape applies to any future card with this

@@ -8,7 +8,7 @@ use super::game_state::{
     MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, PriorityPassingMode,
     ReplacementAutoChoiceId, ShardChoice, YieldScope, YieldTarget,
 };
-use super::identifiers::{CardId, ObjectId};
+use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
 use super::mana::{ManaPipId, ManaSourceSelection, ManaType};
 use super::match_config::DeckCardCount;
@@ -496,7 +496,8 @@ pub enum GameAction {
     },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
-        source: ObjectId,
+        #[serde(deserialize_with = "deserialize_damage_source_reference")]
+        source: ObjectIncarnationRef,
     },
     SelectModes {
         indices: Vec<usize>,
@@ -1868,6 +1869,24 @@ fn push_decision_template(ids: &mut Vec<ObjectId>, template: &DecisionTemplate) 
     }
 }
 
+fn deserialize_damage_source_reference<'de, D>(
+    deserializer: D,
+) -> Result<ObjectIncarnationRef, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct ExactSource {
+        object_id: ObjectId,
+        incarnation: u64,
+    }
+    let source = ExactSource::deserialize(deserializer)?;
+    Ok(ObjectIncarnationRef::of(
+        source.object_id,
+        source.incarnation,
+    ))
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
@@ -2078,10 +2097,12 @@ impl GameAction {
                 }
             }
             Self::ActivateAbility { source_id, .. }
-            | Self::ChooseDamageSource { source: source_id }
             | Self::CastPreparedCopy { source: source_id }
             | Self::CastParadigmCopy { source: source_id } => {
                 push_related_object_id(&mut ids, *source_id)
+            }
+            Self::ChooseDamageSource { source } => {
+                push_related_object_id(&mut ids, source.object_id)
             }
             Self::DeclareAttackers { attacks, bands } => {
                 for (attacker, target) in attacks {
@@ -2307,7 +2328,7 @@ impl GameAction {
             GameAction::TurnFaceUp { object_id, .. } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChoosePair { partner } => *partner,
-            GameAction::ChooseDamageSource { source } => Some(*source),
+            GameAction::ChooseDamageSource { source } => Some(source.object_id),
             GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
             GameAction::ChooseEnlist { target } => *target,
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),

@@ -26832,7 +26832,10 @@ pub mod tests {
             TargetFilter::CostPaidObject {
                 reference: crate::types::ability::CostPaidObjectRef::Selected,
             },
-            TargetFilter::ChosenDamageSource { filter: None },
+            TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            },
             TargetFilter::PostReplacementDamageSource,
         ] {
             assert!(

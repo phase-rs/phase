@@ -865,3 +865,22 @@ mod tests {
         assert!(guard_game_action_payload(&oversized_cost).is_err());
     }
 }
+
+#[cfg(test)]
+mod exact_damage_source_payload_tests {
+    use super::*;
+    #[test]
+    fn exact_source_reference_survives_the_ordinary_action_payload_guard() {
+        let value = serde_json::json!({"type":"ChooseDamageSource", "data":{"source":{"object_id":7,"incarnation":19}}});
+        let action: GameAction = serde_json::from_value(value.clone()).unwrap();
+        assert!(guard_game_action_payload(&action).is_ok());
+        assert_eq!(serde_json::to_value(&action).unwrap(), value);
+        assert!(
+            serde_json::from_value::<GameAction>(
+                serde_json::json!({"type":"ChooseDamageSource", "data":{"source":7}})
+            )
+            .is_err(),
+            "an unbound storage id cannot silently become an exact public source choice"
+        );
+    }
+}

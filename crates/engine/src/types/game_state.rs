@@ -846,7 +846,11 @@ impl PromptSourceBinding {
         Self {
             identity: context.identity,
             controller: context.lki.controller,
-            display_name: context.lki.name.clone(),
+            display_name: if context.face_down {
+                String::new()
+            } else {
+                context.lki.name.clone()
+            },
         }
     }
 
@@ -2498,13 +2502,14 @@ impl ResolveAllConsentRun {
 }
 
 /// CR 609.7a: A source of damage chosen while creating a prevention or
-/// replacement effect. The original filter is retained so property-based
-/// choices such as "red source of your choice" recheck source qualities when
-/// damage would be dealt (CR 609.7b).
+/// replacement effect. Candidate eligibility belongs to the producer; each
+/// later prevention/replacement instruction owns its property rechecks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChosenDamageSource {
-    pub source_id: ObjectId,
-    pub source_filter: TargetFilter,
+    /// None is a completed empty domain, never an unrestricted source.
+    pub source: Option<TriggerSourceContext>,
+    /// Initial eligibility only; later consumers own their own qualifiers.
+    pub candidate_filter: TargetFilter,
 }
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
@@ -3022,6 +3027,9 @@ fn default_next_return_result_occurrence_id() -> u64 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
+    /// Full private authority for the exact public source options of this pause.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage_source_candidates: Vec<TriggerSourceContext>,
     pub chain: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
@@ -3105,6 +3113,7 @@ impl PendingContinuation {
             chain,
             return_result_occurrence: state.active_return_result_occurrence,
             pending_return_result_producer: None,
+            damage_source_candidates: Vec::new(),
             parent_kind: None,
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
@@ -3129,6 +3138,7 @@ impl PendingContinuation {
             chain,
             return_result_occurrence: state.active_return_result_occurrence,
             pending_return_result_producer: None,
+            damage_source_candidates: Vec::new(),
             parent_kind: Some(parent_kind),
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
@@ -18864,7 +18874,7 @@ pub enum WaitingFor {
     DamageSourceChoice {
         player: PlayerId,
         source_filter: TargetFilter,
-        options: Vec<ObjectId>,
+        options: Vec<PromptSourceBinding>,
     },
     /// Player must choose modes for a modal spell (e.g. "Choose one —").
     ModeChoice {
@@ -20487,8 +20497,42 @@ pub struct PendingLifelinkGain {
 /// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
 /// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
 /// while the CR 616.1 prompt is open.
+/// Exact collected source/assignment, independent of a later live object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatDamageEntry {
+    pub context: crate::types::ability::DamageContextSnapshot,
+    pub source: Option<TriggerSourceContext>,
+    pub assignment: crate::game::combat::DamageAssignment,
+    pub source_is_commander: bool,
+    pub lifelink_controller: Option<PlayerId>,
+}
+
+/// CR 510.2 + CR 616.1: pre-delivery work for one simultaneous combat batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatReplacementWork {
+    pub entries: Vec<PendingCombatDamageEntry>,
+    pub remaining: VecDeque<ProposedEvent>,
+    pub survivors: Vec<Option<ProposedEvent>>,
+    pub opportunity: crate::types::ability::DamageOpportunity,
+}
+
+impl PendingCombatReplacementWork {
+    pub fn new(proposed: Vec<ProposedEvent>) -> Self {
+        Self {
+            entries: Vec::new(),
+            remaining: proposed.into(),
+            survivors: Vec::new(),
+            opportunity: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
+    /// Before delivery, this owns replacement progress and the paused event's
+    /// remaining siblings. None once damage has completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_work: Option<Box<PendingCombatReplacementWork>>,
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
     /// gain events, never merged.
     ///
@@ -26140,9 +26184,9 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub noted_numbers_this_resolution: Vec<(PlayerId, i32)>,
 
-    /// CR 609.7a-b: The most recently chosen damage source and its source
-    /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
-    /// continuation effects, and then cleared.
+    /// Historical compatibility input only. Canonical restore transfers an
+    /// authentic selected scalar to its one actual continuation/flip owner;
+    /// current source choices live on that owner's SpellContext instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_chosen_damage_source: Option<ChosenDamageSource>,
 
@@ -27423,6 +27467,864 @@ fn freeze_stored_created_token_referents(state: &mut GameState) {
     }
 }
 
+/// Complete-state source admission runs before embedded serde defaults erase
+/// whether a durable definition was written with the current native-null marker.
+fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+    let frames_key = if value.get("resolution_frames").is_some() {
+        "resolution_frames"
+    } else {
+        "resolution_stack"
+    };
+    fn visit(value: &Value, path: &str, f: &mut impl FnMut(&Value, &str)) {
+        f(value, path);
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    visit(child, &format!("{path}/{key}"), f);
+                }
+            }
+            Value::Array(array) => {
+                for (index, child) in array.iter().enumerate() {
+                    visit(child, &format!("{path}/{index}"), f);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn source_id(filter: &Value) -> Option<u64> {
+        match filter.get("type")?.as_str()? {
+            "SpecificObject" => filter.get("id")?.as_u64(),
+            "And" => {
+                let mut ids = filter
+                    .get("filters")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(source_id);
+                let first = ids.next()?;
+                ids.all(|id| id == first).then_some(first)
+            }
+            _ => None,
+        }
+    }
+    // A detached rider may retain an earlier selection even when the parent
+    // materialized a native predicate. Its context alone does not prove the
+    // parent definition used that choice as its damage-source authority.
+    fn common_materializer_image(node: &Value) -> bool {
+        use crate::types::ability::{ReplacementDefinition, ShieldKind};
+        let Ok(definition) = serde_json::from_value::<ReplacementDefinition>(node.clone()) else {
+            return false;
+        };
+        // Reconstruct the complete set of fields either source materializer
+        // can independently preserve. Any other predicate/authority rules out
+        // this bounded common image; absence of the new field is insufficient.
+        let mut image = ReplacementDefinition::new(definition.event.clone());
+        image.description = definition.description.clone();
+        image.damage_source_filter = definition.damage_source_filter.clone();
+        image.damage_target_filter = definition.damage_target_filter.clone();
+        image.valid_card = definition.valid_card.clone();
+        image.combat_scope = definition.combat_scope.clone();
+        image.expiry = definition.expiry.clone();
+        image.source_controller = definition.source_controller;
+        image.source_object = definition.source_object;
+        image.origin = definition.origin;
+        image.is_consumed = definition.is_consumed;
+        image.runtime_execute = definition.runtime_execute.clone();
+        match definition.shield_kind {
+            ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot => {
+                if definition.damage_modification.is_some()
+                    || definition.redirect_target.is_some()
+                    || definition.consume_on_apply
+                        != matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
+                {
+                    return false;
+                }
+            }
+            ShieldKind::DamageReplacementOneShot => {
+                if definition.damage_modification.is_none()
+                    || definition.redirect_target.is_some()
+                    || definition.runtime_execute.is_some()
+                {
+                    return false;
+                }
+                image.damage_modification = definition.damage_modification.clone();
+            }
+            ShieldKind::Redirection { .. } => {
+                if definition.damage_modification.is_some() || definition.runtime_execute.is_some()
+                {
+                    return false;
+                }
+                image.redirect_target = definition.redirect_target.clone();
+            }
+            ShieldKind::None | ShieldKind::Regeneration => return false,
+        }
+        if !matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
+            && definition.consume_on_apply
+        {
+            return false;
+        }
+        image.shield_kind = definition.shield_kind;
+        image.consume_on_apply = definition.consume_on_apply;
+        image == definition
+    }
+    // An unanswered historical prompt has not selected a source yet. Its
+    // scalar options name the live occurrences at this atomic pause, and the
+    // actual source-producing continuation owns the reconstructed captures.
+    if value.pointer("/waiting_for/type").and_then(Value::as_str) == Some("DamageSourceChoice") {
+        if let Some(old_options) = value
+            .pointer("/waiting_for/options")
+            .and_then(Value::as_array)
+            .filter(|options| !options.is_empty() && options.iter().all(Value::is_u64))
+            .cloned()
+        {
+            let pending_path = if value
+                .get("pending_continuation")
+                .is_some_and(|pending| !pending.is_null())
+            {
+                "/pending_continuation".to_string()
+            } else {
+                let frames = value
+                    .get(frames_key)
+                    .and_then(|stack| stack.get("frames"))
+                    .and_then(Value::as_array)
+                    .ok_or("legacy damage source prompt has no owning continuation")?;
+                let index = frames
+                    .len()
+                    .checked_sub(1)
+                    .ok_or("legacy damage source prompt has no owning continuation")?;
+                if frames[index].get("type").and_then(Value::as_str) != Some("AbilityContinuation")
+                {
+                    return Err("legacy damage source prompt has no owning continuation".into());
+                }
+                format!("/{frames_key}/frames/{index}/data/pending")
+            };
+            let owner = value
+                .pointer(&pending_path)
+                .ok_or("legacy damage source prompt has no owning continuation")?;
+            let effect = owner
+                .pointer("/chain/effect")
+                .ok_or("legacy damage source prompt has no source instruction")?;
+            let producer = effect.get("type").and_then(Value::as_str) == Some("ChooseDamageSource")
+                || ["damage_source_filter", "source_filter"].iter().any(|key| {
+                    effect.get(*key).is_some_and(|filter| {
+                        filter.as_str() == Some("ChosenDamageSource")
+                            || filter.get("type").and_then(Value::as_str)
+                                == Some("ChosenDamageSource")
+                    })
+                });
+            if !producer
+                || owner.pointer("/chain/controller") != value.pointer("/waiting_for/player")
+            {
+                return Err(
+                    "legacy damage source prompt has incoherent source producer or controller"
+                        .into(),
+                );
+            }
+            let objects: Vec<crate::game::game_object::GameObject> = value
+                .get("objects")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|objects| objects.values())
+                .map(|raw| {
+                    serde_json::from_value(raw.clone())
+                        .map_err(|error| format!("legacy source prompt object: {error}"))
+                })
+                .collect::<Result<_, _>>()?;
+            let exits: Vec<ZoneChangeRecord> = value
+                .get("zone_changes_this_turn")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| format!("legacy source prompt exits: {error}"))?
+                .unwrap_or_default();
+            let mut available: Vec<TriggerSourceContext> = owner
+                .get("damage_source_candidates")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| format!("legacy source prompt captures: {error}"))?
+                .unwrap_or_default();
+            let mut capture = |reference: crate::types::identifiers::ObjectIncarnationRef| {
+                objects
+                    .iter()
+                    .find(|object| {
+                        object.id == reference.object_id
+                            && object.incarnation == reference.incarnation
+                    })
+                    .and_then(|object| {
+                        object
+                            .snapshot_for_zone_change(object.id, Some(object.zone), object.zone)
+                            .trigger_source_context()
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        exits
+                            .iter()
+                            .rev()
+                            .filter_map(ZoneChangeRecord::trigger_source_context)
+                            .find(|source| source.identity.reference == reference)
+                            .cloned()
+                    })
+            };
+            for object in &objects {
+                let actual_spell = value
+                    .get("stack")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .chain(value.get("resolving_stack_entry"))
+                    .any(|entry| {
+                        entry.get("id").and_then(Value::as_u64) == Some(object.id.0)
+                            && entry.pointer("/kind/type").and_then(Value::as_str) == Some("Spell")
+                    });
+                if object.zone == crate::types::zones::Zone::Battlefield
+                    || (object.zone == crate::types::zones::Zone::Command && !object.face_down)
+                    || actual_spell
+                {
+                    available.extend(capture(
+                        crate::types::identifiers::ObjectIncarnationRef::of(
+                            object.id,
+                            object.incarnation,
+                        ),
+                    ));
+                }
+            }
+            let mut programs: Vec<&Value> = vec![&owner["chain"]];
+            for entry in value
+                .get("stack")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .chain(value.get("resolving_stack_entry"))
+            {
+                if let Some(program) = entry
+                    .pointer("/kind/data/ability")
+                    .filter(|program| !program.is_null())
+                {
+                    programs.push(program);
+                }
+            }
+            for trigger in value
+                .get("delayed_triggers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(program) = trigger.get("ability") {
+                    programs.push(program);
+                }
+            }
+            for frame in value
+                .pointer(&format!("/{frames_key}/frames"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if frame.get("type").and_then(Value::as_str) == Some("AbilityContinuation") {
+                    if let Some(program) = frame.pointer("/data/pending/chain") {
+                        programs.push(program);
+                    }
+                }
+            }
+            for program in programs {
+                let mut program = program.clone();
+                crate::types::ability::normalize_legacy_damage_source_program(&mut program);
+                let program: crate::types::ability::ResolvedAbility =
+                    serde_json::from_value(program)
+                        .map_err(|error| format!("legacy source prompt owning program: {error}"))?;
+                crate::game::effects::choose_damage_source::referred_by_ability_with(
+                    &program,
+                    &mut available,
+                    &mut capture,
+                );
+            }
+            let mut candidates = Vec::new();
+            for id in old_options {
+                let id = id.as_u64().expect("checked scalar option");
+                let mut exact: Vec<_> = available
+                    .iter()
+                    .filter(|source| {
+                        source.identity.reference.object_id.0 == id
+                            && source.identity.reference.incarnation
+                                != crate::types::identifiers::LEGACY_INCARNATION
+                    })
+                    .cloned()
+                    .collect();
+                exact.sort_by_key(|source| source.identity.reference);
+                exact.dedup_by_key(|source| source.identity.reference);
+                if exact.len() != 1 {
+                    return Err("legacy damage source prompt option has unrecoverable exact identity in its typed referred domain".into());
+                }
+                candidates.push(exact.pop().expect("one exact offered occurrence"));
+            }
+            let options: Vec<_> = candidates
+                .iter()
+                .map(PromptSourceBinding::from_trigger_source)
+                .collect();
+            value
+                .pointer_mut(&pending_path)
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(
+                    "damage_source_candidates".into(),
+                    serde_json::to_value(candidates).map_err(|error| error.to_string())?,
+                );
+            *value.pointer_mut("/waiting_for/options").unwrap() =
+                serde_json::to_value(options).map_err(|error| error.to_string())?;
+        }
+    }
+    let mut errors = Vec::new();
+    visit(value, "$", &mut |node, path| {
+        if let Some(map) = node.get("damage_opportunity").filter(|map| !map.is_null()) {
+            use crate::types::ability::{
+                DamageOpportunity, PreventionAmount, RedirectionLifetime, ShieldKind,
+            };
+            use crate::types::proposed_event::AppliedReplacementKey;
+            match serde_json::from_value::<DamageOpportunity>(map.clone()) {
+                Ok(map) => {
+                    let mut keys = std::collections::HashSet::new();
+                    if map.iter().any(|(key, definition)| {
+                        !keys.insert(*key)
+                            || !matches!(
+                                key,
+                                AppliedReplacementKey::Object { .. }
+                                    | AppliedReplacementKey::Floating { .. }
+                            )
+                            || definition.event
+                                != crate::types::replacements::ReplacementEvent::DamageDone
+                            || definition.is_consumed
+                            || !matches!(
+                                definition.shield_kind,
+                                ShieldKind::PreventionOneShot
+                                    | ShieldKind::DamageReplacementOneShot
+                                    | ShieldKind::Redirection {
+                                        amount: PreventionAmount::All,
+                                        lifetime: RedirectionLifetime::OneOpportunity,
+                                        ..
+                                    }
+                            )
+                    }) {
+                        errors.push(format!(
+                            "{path}/damage_opportunity: incoherent consumed-definition authority"
+                        ));
+                    }
+                }
+                Err(_) => errors.push(format!(
+                    "{path}/damage_opportunity: malformed consumed-definition authority"
+                )),
+            }
+        }
+        if node.get("event").is_none() {
+            return;
+        }
+        let characteristic = path.strip_prefix("$/objects/").and_then(|tail| tail.split_once('/')).is_some_and(|(host, _)| {
+            value.get("objects").and_then(|objects| objects.get(host))
+                .and_then(|object| object.get("base_replacement_definitions")).and_then(Value::as_array)
+                .is_some_and(|base| base.iter().any(|original| {
+                    let original = serde_json::from_value::<crate::types::ability::ReplacementDefinition>(original.clone());
+                    let installed = serde_json::from_value::<crate::types::ability::ReplacementDefinition>(node.clone());
+                    matches!((original, installed), (Ok(original), Ok(installed)) if original == installed)
+                }))
+        });
+        let filter = node.get("damage_source_filter").unwrap_or(&Value::Null);
+        if let Some(selected) = node
+            .get("selected_damage_source")
+            .filter(|selected| !selected.is_null())
+        {
+            match serde_json::from_value::<TriggerSourceContext>(selected.clone()) {
+                Ok(selected)
+                    if source_id(filter) == Some(selected.identity.reference.object_id.0)
+                        && selected.identity.reference.incarnation
+                            != crate::types::identifiers::LEGACY_INCARNATION => {}
+                _ => errors.push(format!(
+                    "{path}: incoherent selected damage-source capture and source predicate"
+                )),
+            }
+        } else if !node
+            .as_object()
+            .unwrap()
+            .contains_key("selected_damage_source")
+            && node.get("event").and_then(Value::as_str) == Some("DamageDone")
+            && node.pointer("/expiry/type").and_then(Value::as_str) == Some("EndOfTurn")
+            && !characteristic
+            && (path.contains("/pending_damage_replacements/")
+                || (path.contains("/replacement_definitions/")
+                    && (node.get("origin").is_none()
+                        || node.get("origin").and_then(Value::as_str) == Some("Resolution"))))
+            && source_id(filter).is_some()
+            && common_materializer_image(node)
+        {
+            // These are the two real materializers' common image: direct
+            // source predicates are cloned, while selected identities become
+            // the identical SpecificObject (or And) predicate. Installation,
+            // expiry and storage establish neither preimage on their own.
+            errors.push(format!("{path}: unrecoverable damage source-origin ambiguity between native and selected-source materializers"));
+        }
+    });
+    if let Some(error) = errors.into_iter().next() {
+        return Err(error);
+    }
+    // Replay the journal's existing structural operands to recover the one
+    // resident owner, never a first/latest/similar selection from its population.
+    // Complete stack equality except this owner's erased selected record is the
+    // link: unrelated or retired frames cannot donate authority.
+    fn recover_resident_selection(value: &mut Value, frames_key: &str) -> Result<(), String> {
+        use crate::types::resolution::ResolutionStack;
+        use crate::types::resolved_commands::{
+            ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+        };
+        let Some(entries) = value
+            .pointer("/resolved_rules_journal/entries")
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+        let mut replay = ResolutionStack::default();
+        for entry in entries {
+            let Some(raw) = entry.pointer("/command/FrameTransition") else {
+                continue;
+            };
+            let mut raw = raw.clone();
+            crate::types::ability::normalize_legacy_damage_source_program(&mut raw);
+            let Ok(command) = serde_json::from_value::<ResolvedFrameTransitionCommand>(raw) else {
+                return Ok(());
+            };
+            let result = match command.transition {
+                ResolvedFrameTransition::Push { frame } => {
+                    replay.push_inner(frame);
+                    Ok(())
+                }
+                ResolvedFrameTransition::InsertParentOfActive { frame } => {
+                    replay.insert_parent_of_active(frame)
+                }
+                ResolvedFrameTransition::ParkBeneathLivePrompt { frame } => {
+                    let _ = replay.park_beneath_live_prompt(frame);
+                    Ok(())
+                }
+                ResolvedFrameTransition::PopExpected { kind } => {
+                    replay.pop_expected(kind).map(|_| ())
+                }
+                ResolvedFrameTransition::ReplaceActive { frame } => replay.replace_active(frame),
+            };
+            if result.is_err() {
+                return Ok(());
+            }
+        }
+        let Some(current) = value.get(frames_key) else {
+            return Ok(());
+        };
+        let mut current = current.clone();
+        let mut retained = serde_json::to_value(replay).map_err(|error| error.to_string())?;
+        let Some(frames) = current.get("frames").and_then(Value::as_array) else {
+            return Ok(());
+        };
+        let Some(index) = frames.len().checked_sub(1) else {
+            return Ok(());
+        };
+        let context = match frames[index].get("type").and_then(Value::as_str) {
+            Some("AbilityContinuation") => "data/pending/chain/context",
+            Some("CoinFlip") => "data/branch_context",
+            _ => return Ok(()),
+        };
+        let path = format!("/frames/{index}/{context}/damage_source_choice");
+        let Some(choice) = retained
+            .pointer(&path)
+            .filter(|choice| !choice.is_null())
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if current
+            .pointer(&path)
+            .is_some_and(|choice| !choice.is_null())
+        {
+            return Ok(());
+        }
+        // Normalize omitted legacy readers with this provisional owner only;
+        // authority is installed in the real input only after full equality.
+        let Some(context_object) = current
+            .pointer_mut(&format!("/frames/{index}/{context}"))
+            .and_then(Value::as_object_mut)
+        else {
+            return Ok(());
+        };
+        context_object.insert("damage_source_choice".into(), choice.clone());
+        crate::types::ability::normalize_legacy_damage_source_program(&mut current);
+        let Ok(current_stack) = serde_json::from_value::<ResolutionStack>(current) else {
+            return Ok(());
+        };
+        let mut current = serde_json::to_value(current_stack).map_err(|error| error.to_string())?;
+        for stack in [&mut current, &mut retained] {
+            if let Some(context) = stack
+                .pointer_mut(&format!("/frames/{index}/{context}"))
+                .and_then(Value::as_object_mut)
+            {
+                context.remove("damage_source_choice");
+            }
+        }
+        if current == retained {
+            let target = value
+                .pointer_mut(&format!("/{frames_key}/frames/{index}/{context}"))
+                .and_then(Value::as_object_mut)
+                .ok_or("resident selected-source context is incoherent")?;
+            target.insert("damage_source_choice".into(), choice);
+        }
+        Ok(())
+    }
+    recover_resident_selection(value, frames_key)?;
+    let legacy_choice = value
+        .get("last_chosen_damage_source")
+        .filter(|choice| choice.get("source_id").is_some())
+        .cloned();
+    if let Some(legacy_choice) = legacy_choice {
+        let id = legacy_choice
+            .get("source_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                "last_chosen_damage_source: invalid legacy selected source".to_string()
+            })?;
+        fn has_reader(node: &Value) -> bool {
+            match node {
+                Value::String(tag) => tag == "ChosenDamageSource",
+                Value::Object(object) => {
+                    if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource") {
+                        return true;
+                    }
+                    if matches!(
+                        object.get("type").and_then(Value::as_str),
+                        Some("CreateDelayedTrigger" | "AddTargetReplacement" | "CreateEmblem")
+                    ) {
+                        return false;
+                    }
+                    object.values().any(has_reader)
+                }
+                Value::Array(array) => array.iter().any(has_reader),
+                _ => false,
+            }
+        }
+        // A historical scalar has one actual active owner. Retained journal
+        // copies, other controllers' programs, and merely similar branches
+        // cannot acquire it by a recursive population scan.
+        let owner = if value
+            .get("pending_continuation")
+            .is_some_and(|pending| !pending.is_null())
+        {
+            Some(("/pending_continuation/chain".to_string(), false))
+        } else if value
+            .get("pending_coin_flip")
+            .is_some_and(|pending| !pending.is_null())
+        {
+            Some(("/pending_coin_flip".to_string(), true))
+        } else {
+            value
+                .get(frames_key)
+                .and_then(|stack| stack.get("frames"))
+                .and_then(Value::as_array)
+                .and_then(|frames| {
+                    let index = frames.len().checked_sub(1)?;
+                    match frames[index].get("type").and_then(Value::as_str)? {
+                        "AbilityContinuation" => Some((
+                            format!("/{frames_key}/frames/{index}/data/pending/chain"),
+                            false,
+                        )),
+                        "CoinFlip" => Some((format!("/{frames_key}/frames/{index}/data"), true)),
+                        _ => None,
+                    }
+                })
+        }
+        .filter(|(path, _)| value.pointer(path).is_some_and(has_reader));
+        let (owner_path, flip) = owner.ok_or_else(|| {
+            "last_chosen_damage_source: selected-source continuation owner is incoherent"
+                .to_string()
+        })?;
+        let choice_path = format!(
+            "{owner_path}/{}/damage_source_choice",
+            if flip { "branch_context" } else { "context" }
+        );
+        let mut agreeing: Vec<TriggerSourceContext> = Vec::new();
+        if let Some(capture) = value
+            .pointer(&choice_path)
+            .and_then(|choice| choice.get("source"))
+            .filter(|capture| !capture.is_null())
+        {
+            let capture: TriggerSourceContext = serde_json::from_value(capture.clone())
+                .map_err(|_| "last_chosen_damage_source: incoherent owned capture".to_string())?;
+            if capture.identity.reference.object_id.0 != id {
+                return Err("last_chosen_damage_source: incoherent owned capture".into());
+            }
+            agreeing.push(capture);
+        }
+        // A complete current-turn ledger with no transition of this selected
+        // id proves one birth throughout this active choice's interval. This
+        // recovery is reached only AFTER the historical scalar establishes
+        // the selected role; it is never applied to a native source predicate.
+        if agreeing.is_empty() {
+            let complete_ledger = value
+                .get("zone_changes_this_turn")
+                .and_then(Value::as_array)
+                .filter(|records| {
+                    records.iter().enumerate().all(|(index, record)| {
+                        record.get("recorded_turn_number") == value.get("turn_number")
+                            && record.get("turn_zone_change_index").and_then(Value::as_u64)
+                                == Some(index as u64)
+                    })
+                });
+            if complete_ledger.is_some_and(|records| {
+                records
+                    .iter()
+                    .all(|record| record.get("object_id").and_then(Value::as_u64) != Some(id))
+            }) {
+                if let Some(raw) = value
+                    .get("objects")
+                    .and_then(|objects| objects.get(id.to_string()))
+                {
+                    if let Ok(object) =
+                        serde_json::from_value::<crate::game::game_object::GameObject>(raw.clone())
+                    {
+                        if object.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                            agreeing.extend(
+                                object
+                                    .snapshot_for_zone_change(
+                                        object.id,
+                                        Some(object.zone),
+                                        object.zone,
+                                    )
+                                    .trigger_source_context()
+                                    .cloned(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        agreeing.sort_by_key(|capture| capture.identity.reference);
+        agreeing.dedup_by_key(|capture| capture.identity.reference);
+        if agreeing.len() != 1 {
+            return Err("last_chosen_damage_source: unrecoverable selected-source identity; no unique owned exact capture".into());
+        }
+        let selected = serde_json::json!({"source": agreeing.pop(), "candidate_filter": legacy_choice.get("source_filter").cloned().unwrap_or_else(|| serde_json::json!({"type":"Any"}))});
+        fn retain_historical_recheck(node: &mut Value, qualifier: &Value) {
+            match node {
+                Value::Object(object) => {
+                    if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource")
+                        && !object.contains_key("chooser")
+                    {
+                        object.insert("chooser".into(), Value::Null);
+                        if qualifier.get("type").and_then(Value::as_str) != Some("Any") {
+                            let previous = object
+                                .get("filter")
+                                .filter(|filter| !filter.is_null())
+                                .cloned();
+                            object.insert("filter".into(), match previous {
+                                Some(previous) if previous != *qualifier => serde_json::json!({"type":"And", "filters":[previous, qualifier]}),
+                                _ => qualifier.clone(),
+                            });
+                        }
+                        return;
+                    }
+                    if matches!(
+                        object.get("type").and_then(Value::as_str),
+                        Some("CreateDelayedTrigger" | "AddTargetReplacement" | "CreateEmblem")
+                    ) {
+                        return;
+                    }
+                    for child in object.values_mut() {
+                        retain_historical_recheck(child, qualifier);
+                    }
+                }
+                Value::Array(array) => {
+                    for child in array {
+                        retain_historical_recheck(child, qualifier);
+                    }
+                }
+                Value::String(tag) if tag == "ChosenDamageSource" => {
+                    *node = serde_json::json!({"type":"ChosenDamageSource", "chooser":null, "filter": if qualifier.get("type").and_then(Value::as_str) == Some("Any") { Value::Null } else { qualifier.clone() }});
+                }
+                _ => {}
+            }
+        }
+        let qualifier = legacy_choice
+            .get("source_filter")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"type":"Any"}));
+        retain_historical_recheck(
+            value.pointer_mut(&owner_path).expect("checked owner"),
+            &qualifier,
+        );
+        let owner = value
+            .pointer_mut(&owner_path)
+            .expect("the checked active owner remains present");
+        let context = owner
+            .as_object_mut()
+            .ok_or("selected-source owner must be an object")?
+            .entry(if flip { "branch_context" } else { "context" })
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(previous) = context
+            .get("damage_source_choice")
+            .filter(|choice| !choice.is_null())
+        {
+            if previous != &selected {
+                return Err("last_chosen_damage_source: conflicting owned selection".into());
+            }
+        }
+        context
+            .as_object_mut()
+            .ok_or("selected-source context must be an object")?
+            .insert("damage_source_choice".into(), selected);
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("last_chosen_damage_source".into(), Value::Null);
+    }
+    // A detached saved flip is still a reader when the actual resolving
+    // entry retains its own lexical ChooseDamageSource -> matching FlipCoins
+    // instruction. Do not turn erased selection into a fresh inline prompt.
+    let flip_path = if value
+        .get("pending_coin_flip")
+        .is_some_and(|frame| !frame.is_null())
+    {
+        Some("/pending_coin_flip".to_string())
+    } else {
+        value
+            .get(frames_key)
+            .and_then(|stack| stack.get("frames"))
+            .and_then(Value::as_array)
+            .and_then(|frames| {
+                let index = frames.len().checked_sub(1)?;
+                (frames[index].get("type").and_then(Value::as_str) == Some("CoinFlip"))
+                    .then(|| format!("/{frames_key}/frames/{index}/data"))
+            })
+    };
+    if let Some(path) = flip_path {
+        let frame = value.pointer(&path).expect("checked frame");
+        if frame
+            .pointer("/branch_context/damage_source_choice")
+            .is_none_or(Value::is_null)
+        {
+            fn lexical_flip<'a>(
+                node: &'a Value,
+                frame: &Value,
+                selected: bool,
+            ) -> Option<&'a Value> {
+                let effect = node.get("effect")?;
+                let selected = selected
+                    || effect.get("type").and_then(Value::as_str) == Some("ChooseDamageSource");
+                if selected
+                    && effect.get("type").and_then(Value::as_str) == Some("FlipCoins")
+                    && effect.get("win_effect") == frame.get("win_effect")
+                    && effect.get("lose_effect") == frame.get("lose_effect")
+                {
+                    return Some(node);
+                }
+                node.get("sub_ability")
+                    .and_then(|child| lexical_flip(child, frame, selected))
+            }
+            let root = value.pointer("/resolving_stack_entry/kind/data/ability");
+            if let Some(root) = root.filter(|root| {
+                root.get("source_id") == frame.get("source_id")
+                    && root.get("controller") == frame.get("controller")
+            }) {
+                if let Some(owner) = lexical_flip(root, frame, false) {
+                    let choice = owner.pointer("/context/damage_source_choice").filter(|choice| !choice.is_null()).cloned()
+                        .ok_or_else(|| format!("{path}: unrecoverable selected-source identity in the owned flip branch"))?;
+                    let data = value
+                        .pointer_mut(&path)
+                        .and_then(Value::as_object_mut)
+                        .expect("checked frame object");
+                    let context = data
+                        .entry("branch_context")
+                        .or_insert_with(|| serde_json::json!({}));
+                    context
+                        .as_object_mut()
+                        .ok_or("flip branch context must be an object")?
+                        .insert("damage_source_choice".into(), choice);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    if let WaitingFor::DamageSourceChoice {
+        player,
+        options,
+        source_filter,
+    } = &state.waiting_for
+    {
+        let owner = state
+            .active_ability_continuation()
+            .ok_or_else(|| "damage source prompt has no owning continuation".to_string())?;
+        let expected: Vec<_> = owner
+            .damage_source_candidates
+            .iter()
+            .map(PromptSourceBinding::from_trigger_source)
+            .collect();
+        if owner.chain.controller != *player || options != &expected || options.is_empty() {
+            return Err("damage source prompt has incoherent candidate identity or owner".into());
+        }
+        let expected_filter = match &owner.chain.effect {
+            crate::types::ability::Effect::ChooseDamageSource { source_filter } => {
+                Some(source_filter)
+            }
+            crate::types::ability::Effect::PreventDamage {
+                damage_source_filter:
+                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { filter, .. }),
+                ..
+            }
+            | crate::types::ability::Effect::CreateDamageReplacement {
+                source_filter:
+                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { filter, .. }),
+                ..
+            } => filter.as_deref(),
+            _ => return Err("damage source prompt has no source-producing instruction".into()),
+        };
+        if expected_filter.unwrap_or(&crate::types::ability::TargetFilter::Any) != source_filter {
+            return Err("damage source prompt candidate predicate disagrees with its owner".into());
+        }
+        // Candidate membership was frozen atomically with this continuation.
+        // Re-enumerating the live domain here would discard an offered departed
+        // occurrence or silently authorize its returned birth at a save boundary.
+        let mut identities = std::collections::HashSet::new();
+        if owner.damage_source_candidates.iter().any(|candidate| {
+            candidate.identity.reference.incarnation
+                == crate::types::identifiers::LEGACY_INCARNATION
+                || !identities.insert(candidate.identity.reference)
+        }) {
+            return Err("damage source prompt has incoherent exact candidate identities".into());
+        }
+    }
+    if let Some(batch) = &state.pending_combat_lifelink {
+        if let Some(work) = &batch.replacement_work {
+            let settled = work.survivors.len() + work.remaining.len();
+            if work.entries.len() == settled + 1 {
+                let pending = state
+                    .pending_replacement
+                    .as_ref()
+                    .ok_or_else(|| "combat replacement work lacks its paused event".to_string())?;
+                if !matches!(
+                    pending.proposed,
+                    ProposedEvent::Damage {
+                        is_combat: true,
+                        ..
+                    }
+                ) || work.opportunity != pending.damage_opportunity
+                {
+                    return Err("combat replacement work and paused damage are incoherent".into());
+                }
+            } else if work.entries.len() != settled
+                || matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                return Err("combat replacement work has incoherent survivor progress".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -27467,6 +28369,7 @@ impl GameStateDecode {
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
+        validate_damage_source_authority(&state)?;
         validate_trigger_firing_coherence(&state)?;
         validate_owed_spell_final_part_coherence(&state)?;
         validate_return_result_occurrence_coherence(&state)?;
@@ -27480,6 +28383,8 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        prepare_damage_source_authority(&mut value)?;
+        crate::types::ability::normalize_legacy_damage_source_program(&mut value);
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         reject_legacy_deferred_spell_delivery(&value)?;
@@ -27513,6 +28418,7 @@ impl GameStateDecode {
         // The gate lives only on the PERSISTENCE ingress
         // (`decode_persisted_resolution_state`), which is what a saved game restores
         // through and where installing a projection as authority is the actual defect.
+        validate_damage_source_authority(&state)?;
         validate_trigger_firing_coherence(&state)?;
         validate_owed_spell_final_part_coherence(&state)?;
         if state.viewer_projection.is_none() {
@@ -27535,6 +28441,8 @@ impl GameStateDecode {
         value: &mut serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<(), String> {
+        prepare_damage_source_authority(value)?;
+        crate::types::ability::normalize_legacy_damage_source_program(value);
         debug_assert!(matches!(
             mode,
             GameStateDecodeMode::ResolutionWireV1
@@ -28729,6 +29637,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    /// CR 609.7a + CR 615.8: same-operation consumed definitions for this exact
+    /// parked event, including the final recipient with no later continuation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage_opportunity: crate::types::ability::DamageOpportunity,
     /// Private source authority for this exact damage event, established before
     /// any replacement consult, including synchronous replay.
     /// Box this rare, large parked payload to preserve the GameState stack budget.
@@ -39754,6 +40666,7 @@ mod tests {
         let expected =
             ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
         state.pending_replacement = Some(PendingReplacement {
+            damage_opportunity: Vec::new(),
             damage_source_context: None,
             proposed: expected.clone(),
             sacrifice_provenance: None,
@@ -41294,6 +42207,7 @@ mod tests {
     /// produces (Inkshield's tokens) inside a batch that then parks.
     fn parked_combat_lifelink(record: ZoneChangeRecord) -> Box<PendingCombatLifelink> {
         Box::new(PendingCombatLifelink {
+            replacement_work: None,
             remaining: VecDeque::from(vec![PendingLifelinkGain {
                 controller: PlayerId(1),
                 amount: 3,
@@ -53890,5 +54804,206 @@ mod replacement_subtree_boundary_tests {
             boundary.is_retired(&state.resolution_stack),
             "the subtree retires with the nested child"
         );
+    }
+}
+
+#[cfg(test)]
+mod damage_source_canonical_admission_tests {
+    use super::*;
+    use crate::types::ability::*;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::zones::Zone;
+
+    fn completed_materializer(selected: bool) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(23);
+        let installer = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Finished installer".into(),
+            Zone::Stack,
+        );
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Chosen or native source".into(),
+            Zone::Battlefield,
+        );
+        let capture = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let source_filter = if selected {
+            TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            }
+        } else {
+            TargetFilter::SpecificObject { id: source }
+        };
+        let mut program = ResolvedAbility::new(
+            Effect::PreventDamage {
+                lifetime: RedirectionLifetime::Continuous,
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(source_filter),
+                prevention_duration: None,
+            },
+            vec![],
+            installer,
+            PlayerId(0),
+        );
+        if selected {
+            program.context.damage_source_choice = Some(ChosenDamageSource {
+                source: Some(capture),
+                candidate_filter: TargetFilter::Any,
+            });
+        }
+        crate::game::effects::prevent_damage::resolve(&mut state, &program, &mut Vec::new())
+            .unwrap();
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        crate::game::zones::move_to_zone(&mut state, installer, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+        assert!(state.last_chosen_damage_source.is_none());
+        (state, source)
+    }
+
+    fn legacy_materialized_wire(state: &GameState) -> serde_json::Value {
+        let mut raw = serde_json::to_value(
+            crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+        )
+        .unwrap();
+        raw["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        let object = raw.as_object_mut().unwrap();
+        object.remove("resolved_rules_journal");
+        for key in ["source_controller", "source_object", "origin"] {
+            object.get_mut("pending_damage_replacements").unwrap()[0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+        }
+        raw
+    }
+
+    #[test]
+    fn authentic_no_role_direct_and_selected_common_image_both_refuse_precisely_and_preserve_input()
+    {
+        let (direct, _) = completed_materializer(false);
+        let (selected, _) = completed_materializer(true);
+        let direct_wire = legacy_materialized_wire(&direct);
+        let selected_wire = legacy_materialized_wire(&selected);
+        assert_eq!(direct_wire, selected_wire, "actual native-clone and selected materializers converge after the authentic old field erasure");
+        for wire in [direct_wire, selected_wire] {
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            for decode_wire in [false, true] {
+                let error = if decode_wire {
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        wire.clone(),
+                    )
+                    .unwrap_err()
+                    .to_string()
+                } else {
+                    GameStateDecode::decode(wire.clone(), GameStateDecodeMode::DirectCurrentRaw)
+                        .unwrap_err()
+                };
+                assert!(
+                    error.contains("pending_damage_replacements/0")
+                        && error.contains("source-origin ambiguity"),
+                    "precise owning ambiguity, not selected-role inference: {error}"
+                );
+                assert_eq!(serde_json::to_vec(&wire).unwrap(), bytes);
+                assert_eq!(
+                    serde_json::to_value(&direct).unwrap()["pending_damage_replacements"][0]
+                        ["selected_damage_source"],
+                    serde_json::Value::Null
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn current_native_null_after_movement_and_exact_selected_capture_restore_without_reselection() {
+        for selected in [false, true] {
+            let (state, source) = completed_materializer(selected);
+            let expected = state.pending_damage_replacements[0].clone();
+            let raw = serde_json::to_value(&state).unwrap();
+            assert_eq!(
+                raw["pending_damage_replacements"][0]["selected_damage_source"].is_null(),
+                !selected
+            );
+            let direct: GameState = serde_json::from_value(raw).unwrap();
+            let wire: crate::types::resolution::ResolutionStateWire = serde_json::from_value(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for restored in [direct, wire.into_game_state()] {
+                assert_eq!(restored.pending_damage_replacements, vec![expected.clone()]);
+                assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+                if selected {
+                    let capture = restored.pending_damage_replacements[0]
+                        .selected_damage_source
+                        .as_ref()
+                        .unwrap();
+                    assert_ne!(
+                        capture.identity.reference.incarnation,
+                        restored.objects[&source].incarnation,
+                        "the old exact birth never rebounds after actual movement"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn current_capture_predicate_mismatch_is_incoherence_not_legacy_ambiguity() {
+        let (state, _) = completed_materializer(true);
+        for wire_owner in [false, true] {
+            for zero_birth in [false, true] {
+                let mut wire = if wire_owner {
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(
+                            state.clone(),
+                        ),
+                    )
+                    .unwrap()
+                } else {
+                    serde_json::to_value(&state).unwrap()
+                };
+                if zero_birth {
+                    wire["pending_damage_replacements"][0]["selected_damage_source"]["identity"]
+                        ["reference"]["incarnation"] = serde_json::json!(0);
+                } else {
+                    wire["pending_damage_replacements"][0]["damage_source_filter"] =
+                        serde_json::json!({"type":"SpecificObject", "id":999});
+                }
+                let bytes = serde_json::to_vec(&wire).unwrap();
+                let error = if wire_owner {
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        wire.clone(),
+                    )
+                    .unwrap_err()
+                    .to_string()
+                } else {
+                    serde_json::from_value::<GameState>(wire.clone())
+                        .unwrap_err()
+                        .to_string()
+                };
+                assert!(error.contains("incoherent selected damage-source capture"));
+                assert!(!error.contains("source-origin ambiguity"));
+                assert_eq!(serde_json::to_vec(&wire).unwrap(), bytes);
+            }
+        }
     }
 }

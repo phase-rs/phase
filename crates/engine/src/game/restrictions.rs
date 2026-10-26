@@ -645,6 +645,56 @@ pub fn record_zone_change(
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     record.recorded_turn_number = state.turn_number;
     record.turn_zone_change_index = turn_zone_change_index;
+    // CR 608.2h + CR 609.7a: capture exit properties before any later cleanup
+    // discards the turn ledger. Only an exact matching source is refreshed.
+    if let Some(exit) = record.trigger_source_context() {
+        let mut refreshed = exit.clone();
+        let completed_spell = state.resolving_stack_entry.as_ref().is_some_and(|entry| {
+            entry.id == object_id
+                && matches!(
+                    entry.kind,
+                    crate::types::game_state::StackEntryKind::Spell { .. }
+                )
+        });
+        if completed_spell
+            && record.from_zone == Some(Zone::Stack)
+            && record.to_zone == Zone::Battlefield
+        {
+            if let Some(incarnation) = record.entered_incarnation {
+                refreshed.identity = crate::types::identifiers::ObjectIdentityBinding::new(
+                    crate::types::identifiers::ObjectIncarnationRef::of(object_id, incarnation),
+                    Zone::Battlefield,
+                );
+            }
+        }
+        for definition in &mut state.pending_damage_replacements {
+            if definition
+                .selected_damage_source
+                .as_ref()
+                .is_some_and(|source| source.identity == exit.identity)
+            {
+                definition.selected_damage_source = Some(refreshed.clone());
+            }
+        }
+        let hosts: Vec<_> = state.objects.keys().copied().collect();
+        for host in hosts {
+            if let Some(object) = state.objects.get_mut(&host) {
+                for index in 0..object.replacement_definitions.len() {
+                    let definition = object
+                        .replacement_definitions
+                        .get_mut(index)
+                        .expect("existing replacement index");
+                    if definition
+                        .selected_damage_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity == exit.identity)
+                    {
+                        definition.selected_damage_source = Some(refreshed.clone());
+                    }
+                }
+            }
+        }
+    }
     state.zone_changes_this_turn.push_back(record.clone());
     state.record_zone_change_library_knowledge_stamp(record);
 

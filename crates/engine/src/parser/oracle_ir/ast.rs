@@ -3680,6 +3680,7 @@ mod duration_distribution_tests_7923 {
 
     fn prevent_damage(prevention_duration: Option<Duration>) -> Effect {
         Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::Any,

@@ -258,7 +258,10 @@ fn choose_source(b: &mut Board) {
     source_prompt(b);
     b.runner
         .act(GameAction::ChooseDamageSource {
-            source: b.sources[1],
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                b.sources[1],
+                b.runner.state().objects[&b.sources[1]].incarnation,
+            ),
         })
         .expect("resume Jade with the selected source");
     assert!(b.runner.state().stack.is_empty());

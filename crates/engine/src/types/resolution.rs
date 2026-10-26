@@ -134,6 +134,8 @@ pub enum PendingCoinFlipKind {
 /// representation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlipBranchContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_players: Vec<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +148,7 @@ impl FlipBranchContext {
     /// branch through its `targets`.
     pub fn from_ability(ability: &ResolvedAbility) -> Self {
         Self {
+            damage_source_choice: ability.context.damage_source_choice.clone(),
             chosen_players: ability.chosen_players.clone(),
             forwarded_result_context: ability
                 .context
@@ -159,7 +162,9 @@ impl FlipBranchContext {
 
     /// `true` when the branch inherits nothing (the serialized default).
     pub fn is_empty(&self) -> bool {
-        self.chosen_players.is_empty() && self.forwarded_result_context.is_none()
+        self.chosen_players.is_empty()
+            && self.forwarded_result_context.is_none()
+            && self.damage_source_choice.is_none()
     }
 }
 
@@ -10063,6 +10068,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_opportunity: Vec::new(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
@@ -10548,6 +10554,7 @@ mod tests {
 
     fn non_empty_branch_context(state: &GameState) -> FlipBranchContext {
         FlipBranchContext {
+            damage_source_choice: None,
             chosen_players: vec![PlayerId(1)],
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 state,

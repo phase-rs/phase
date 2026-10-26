@@ -1962,6 +1962,54 @@ pub(super) fn handle_resolution_choice(
     action: GameAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionChoiceOutcome, EngineError> {
+    let event_start = events.len();
+    let mut outcome =
+        handle_resolution_choice_with_result_occurrence(state, waiting_for, action, events)?;
+    // A combat replacing action can itself make a normal resolution choice.
+    // Its survivor is already retained, so only the unstarted batch tail resumes.
+    let ready = state
+        .pending_combat_lifelink
+        .as_ref()
+        .and_then(|record| record.replacement_work.as_ref())
+        .is_some_and(|work| work.entries.len() == work.survivors.len() + work.remaining.len());
+    if ready {
+        match &mut outcome {
+            ResolutionChoiceOutcome::WaitingFor(waiting)
+            | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(waiting) => {
+                if matches!(waiting, WaitingFor::Priority { .. }) {
+                    state.waiting_for = waiting.clone();
+                    if let Some(resumed) = super::combat_damage::resume_pending_combat_lifelink(
+                        state,
+                        event_start,
+                        events,
+                    ) {
+                        *waiting = resumed;
+                    }
+                }
+            }
+            ResolutionChoiceOutcome::ActionResult(result) => {
+                if matches!(result.waiting_for, WaitingFor::Priority { .. }) {
+                    state.waiting_for = result.waiting_for.clone();
+                    if let Some(resumed) = super::combat_damage::resume_pending_combat_lifelink(
+                        state,
+                        0,
+                        &mut result.events,
+                    ) {
+                        result.waiting_for = resumed;
+                    }
+                }
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+fn handle_resolution_choice_with_result_occurrence(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    action: GameAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionChoiceOutcome, EngineError> {
     effects::validate_definition_waiting_for_result_owner(state, &waiting_for)
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     if let WaitingFor::EffectZoneChoice {
@@ -8271,20 +8319,38 @@ fn handle_resolution_choice_in_occurrence(
             },
             GameAction::ChooseDamageSource { source },
         ) => {
-            if !options.contains(&source) {
-                return Err(EngineError::InvalidAction(
-                    "Invalid damage source choice".to_string(),
-                ));
-            }
-
-            state.last_chosen_damage_source = Some(ChosenDamageSource {
-                source_id: source,
-                source_filter,
+            let offered = options
+                .iter()
+                .find(|option| option.identity.reference == source)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("Invalid exact damage source choice".to_string())
+                })?;
+            let pending = state
+                .active_ability_continuation_frame_mut()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "damage source choice has no owning continuation".to_string(),
+                    )
+                })?;
+            let capture = pending
+                .pending
+                .damage_source_candidates
+                .iter()
+                .find(|capture| offered.matches_trigger_source(capture))
+                .cloned()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "damage source choice does not match its private candidate".to_string(),
+                    )
+                })?;
+            pending.pending.chain.context.damage_source_choice = Some(ChosenDamageSource {
+                source: Some(capture),
+                candidate_filter: source_filter,
             });
+            pending.pending.damage_source_candidates.clear();
             set_priority(state, player);
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled damage-source choice must resume its continuation");
-            state.last_chosen_damage_source = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -11271,6 +11337,7 @@ mod tests {
             ),
             (
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Any,

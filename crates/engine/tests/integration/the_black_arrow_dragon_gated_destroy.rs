@@ -190,6 +190,7 @@ fn cast_the_black_arrow(target: ArrowTarget, prevent_damage: bool) -> (Zone, u32
         // CR 615.1: Prevention effects apply as damage events happen.
         let prevention = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,

@@ -70285,7 +70285,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
             filters.iter().any(filter_has_chosen_color)
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_has_chosen_color(filter),
-        TargetFilter::ChosenDamageSource { filter } => {
+        TargetFilter::ChosenDamageSource { filter, .. } => {
             filter.as_deref().is_some_and(filter_has_chosen_color)
         }
         TargetFilter::PlayerMatching { player } => player_filter_has_chosen_color(player),
@@ -94905,5 +94905,52 @@ fn duration_repair_local_metadata_does_not_escape_into_an_independent_instructio
         };
         assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
         assert!(matches!(*definition.effect, Effect::GenericEffect { .. }));
+    }
+}
+
+#[test]
+fn source_conjunction_and_coin_tail_are_complete_instructions_and_hostile_tails_stay_red() {
+    let source = "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
+    let chain = parse_effect_chain(source, AbilityKind::Spell);
+    assert!(!has_unimplemented_ability(&chain));
+    assert!(matches!(
+        chain.effect.as_ref(),
+        Effect::ChooseDamageSource { .. }
+    ));
+    let flip = chain.sub_ability.as_deref().unwrap();
+    let Effect::FlipCoins {
+        flips,
+        win_effect: Some(win),
+        lose_effect: Some(lose),
+        ..
+    } = flip.effect.as_ref()
+    else {
+        panic!("complete actual coin and both branches: {chain:#?}");
+    };
+    assert_eq!(*flips, crate::types::ability::CoinFlipRun::single());
+    assert!(matches!(
+        win.effect.as_ref(),
+        Effect::CreateDamageReplacement { .. }
+    ));
+    assert!(matches!(lose.effect.as_ref(), Effect::PreventDamage { .. }));
+    for malformed in [
+        "Choose a red source inexplicably.",
+        "Choose a source you control and flip a coin inexplicably.",
+        "Choose a source you control and dance.",
+        "Flip a coin inexplicably.",
+    ] {
+        let parsed = parse_effect_chain(malformed, AbilityKind::Spell);
+        assert!(
+            has_unimplemented_ability(&parsed),
+            "a successful prefix cannot discard a rules-bearing tail: {malformed}: {parsed:#?}"
+        );
+    }
+    for ordinary in ["You flip a coin.", "That player flips a coin."] {
+        let parsed = parse_effect_chain(ordinary, AbilityKind::Spell);
+        assert!(
+            !has_unimplemented_ability(&parsed),
+            "neighboring ordinary subject agreement is retained: {parsed:#?}"
+        );
+        assert!(matches!(parsed.effect.as_ref(), Effect::FlipCoins { .. }));
     }
 }

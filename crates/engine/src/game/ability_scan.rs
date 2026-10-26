@@ -1687,6 +1687,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         // read happens at scan time, so NONE stays correct.
         Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => Axes::NONE,
         Effect::PreventDamage {
+            lifetime: _,
             amount_dynamic,
             target,
             damage_source_filter,
@@ -3799,7 +3800,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
         TargetFilter::HasChosenName => Axes::NONE,
-        TargetFilter::ChosenDamageSource { filter } => {
+        TargetFilter::ChosenDamageSource { filter, .. } => {
             let mut acc = Axes {
                 event: true,
                 sibling: false,
@@ -6710,6 +6711,8 @@ fn replacement_definition_axes(
 ) -> Axes {
     use crate::types::ability::{DamageModification, PreventionFormula, ReplacementMode};
     let crate::types::ability::ReplacementDefinition {
+        // Frozen identity/LKI contributes no dynamic or history read axes.
+        selected_damage_source: _,
         execute,
         runtime_execute,
         mode: replacement_mode,
@@ -11885,5 +11888,88 @@ mod cost_source_scan_tests {
         assert!(!axes.sibling);
         assert!(!axes.projected);
         assert_eq!(axes.history, HistoryReads::NONE);
+    }
+}
+
+#[cfg(test)]
+mod selected_damage_capture_axis_tests {
+    use super::*;
+    use crate::types::ability::{DamageModification, ReplacementDefinition};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn capture_is_frozen_while_independent_damage_quantities_still_read_live_resources() {
+        let object = crate::game::game_object::GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Frozen source".into(),
+            Zone::Battlefield,
+        );
+        let capture = object
+            .snapshot_for_zone_change(object.id, Some(object.zone), object.zone)
+            .trigger_source_context()
+            .unwrap()
+            .clone();
+        let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        def.selected_damage_source = Some(capture);
+        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        assert!(!axes.event && !axes.sibling && !axes.projected);
+        assert_eq!(axes.history, HistoryReads::NONE);
+        def.damage_modification = Some(DamageModification::Plus {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+        });
+        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        assert!(
+            axes.projected,
+            "independently live sink formula still reads its resource"
+        );
+        def.damage_modification = None;
+        let live = TargetFilter::Typed(TypedFilter::default().prop(FilterProp::Cmc {
+            comparator: crate::types::ability::Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+        }));
+        def.damage_source_filter = Some(live.clone());
+        assert!(
+            replacement_definition_axes(&def, ScanMode::LoopFirewall).projected,
+            "a sink qualifier remains live independently of its frozen capture"
+        );
+        def.damage_source_filter = None;
+        def.mode = crate::types::ability::ReplacementMode::MayCost {
+            cost: crate::types::ability::AbilityCost::Sacrifice(
+                crate::types::ability::SacrificeCost::count(live, 1),
+            ),
+            decline: None,
+        };
+        assert!(
+            replacement_definition_axes(&def, ScanMode::LoopFirewall).projected,
+            "an independently evaluated payment filter keeps its live operand"
+        );
+        def.mode = crate::types::ability::ReplacementMode::Mandatory;
+        def.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            },
+        )));
+        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        assert!(axes.projected);
+        assert_ne!(axes.history, HistoryReads::NONE, "a nested execute reads its actual life-gain journal; capture storage does not suppress that read");
     }
 }

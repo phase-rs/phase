@@ -1907,8 +1907,8 @@ pub fn candidate_actions_broad_with_probe(
             player, options, ..
         } => options
             .iter()
-            .copied()
-            .map(|source| {
+            .map(|option| {
+                let source = option.identity.reference;
                 candidate(
                     GameAction::ChooseDamageSource { source },
                     TacticalClass::Selection,

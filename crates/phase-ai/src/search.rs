@@ -1884,7 +1884,7 @@ pub fn fallback_action(
         // Damage source choice: pick the first option.
         WaitingFor::DamageSourceChoice { options, .. } => options
             .first()
-            .map(|&source| GameAction::ChooseDamageSource { source }),
+            .map(|option| GameAction::ChooseDamageSource { source: option.identity.reference }),
 
         // CR 709.5f-g: room-door choice — pick the first offered (op, door).
         WaitingFor::ChooseRoomDoor {

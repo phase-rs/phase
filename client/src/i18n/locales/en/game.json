@@ -1864,7 +1864,11 @@
     },
     "damageSource": {
       "title": "Damage Source",
-      "subtitle": "Choose a source"
+      "subtitle": "Choose a source",
+      "identity": "Source #{{objectId}}, incarnation {{incarnation}}",
+      "unnamed": "Unnamed source",
+      "optionLabel": "{{name}} — {{identity}} — player {{controller}}, {{zone}}",
+      "controllerZone": "Player {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Manifest Dread",

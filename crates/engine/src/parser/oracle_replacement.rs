@@ -7,9 +7,9 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value,
 };
-use nom::multi::{many_till, separated_list1};
+use nom::multi::{many0, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -8843,6 +8843,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
 
     if is_complete_oneshot_prevention_result(result_clause) {
         return Some(Effect::PreventDamage {
+            lifetime: RedirectionLifetime::OneOpportunity,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             // CR 615.1a + CR 602.2a: prevention shield recipient scope; for an
@@ -9012,6 +9013,7 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     };
 
     Some(Effect::PreventDamage {
+        lifetime: RedirectionLifetime::OneOpportunity,
         amount: PreventionAmount::All,
         amount_dynamic: None,
         // CR 115.1: the target slot is hosted by `damage_source_filter`'s `And`
@@ -9763,45 +9765,67 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
 /// the "the next time" spine ([`parse_oneshot_source_filter`]) and the active
 /// next-N production ([`parse_oneshot_next_n_source_damage_redirect`]).
 fn parse_chosen_damage_source_subject(subject: &str) -> Option<TargetFilter> {
-    value(
-        TargetFilter::ChosenDamageSource { filter: None },
-        all_consuming(alt((
-            tag::<_, _, OracleError<'_>>("that source"),
-            tag("a source of your choice"),
-        ))),
-    )
+    all_consuming(alt((
+        value(
+            TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            },
+            tag("that source"),
+        ),
+        map(
+            terminated(parse_damage_source_nominal, tag(" of your choice")),
+            |filter| TargetFilter::ChosenDamageSource {
+                chooser: Some(crate::types::ability::Chooser::Controller),
+                filter: (!matches!(filter, TargetFilter::Any)).then(|| Box::new(filter)),
+            },
+        ),
+    )))
     .parse(subject)
     .ok()
     .map(|(_, filter)| filter)
-    .or_else(|| parse_qualified_chosen_damage_source(subject))
 }
 
-/// CR 609.7 + CR 609.7b: "a <color/type> source of your choice" (Circle of
-/// Protection cycle, Rune of Protection cycle) — the qualifier restricts which
-/// source may be chosen and is retained on the variant so the resolver can (a)
-/// offer only matching candidates when prompting the choice and (b) recheck
-/// source qualities at damage time. Parses the qualifier with `parse_type_phrase_folding`
-/// directly (the shared color/type/supertype phrase combinator used throughout
-/// this file), which resolves a bare core type word like "land" to the correct
-/// `TypeFilter::Land` — so any future color/type/supertype word `parse_type_phrase_folding`
-/// recognizes is covered for free, not just the 13 Circle/Rune of Protection cards.
-fn parse_qualified_chosen_damage_source(subject: &str) -> Option<TargetFilter> {
-    let (rest, _) = nom_primitives::parse_article.parse(subject).ok()?;
-    let (filter, rest) = parse_type_phrase_folding(rest.trim_start());
-    if matches!(filter, TargetFilter::Any) {
-        // Bare "source" — not a qualifier; the caller's bare-anaphor branch
-        // handles "a source of your choice" directly.
-        return None;
-    }
-    let (rest, _) = tag::<_, _, OracleError<'_>>("source of your choice")
-        .parse(rest.trim_start())
-        .ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-    Some(TargetFilter::ChosenDamageSource {
-        filter: Some(Box::new(filter)),
-    })
+/// CR 609.7b: source adjectives are local to the Source noun domain.
+fn parse_source_quality(input: &str) -> OracleResult<'_, TargetFilter> {
+    use super::oracle_nom::target::{parse_non_prefix, parse_supertype_word};
+    let (input, negative) = opt(parse_non_prefix).parse(input)?;
+    let (input, filter) = alt((
+        map(nom_primitives::parse_color, |color| {
+            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasColor { color }))
+        }),
+        map(parse_supertype_word, |supertype| {
+            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasSupertype { supertype }))
+        }),
+        map(parse_type_filter_word, |kind| {
+            TargetFilter::Typed(TypedFilter::default().with_type(kind))
+        }),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        if negative.is_some() {
+            TargetFilter::Not {
+                filter: Box::new(filter),
+            }
+        } else {
+            filter
+        },
+    ))
+}
+
+fn parse_damage_source_nominal(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(nom_primitives::parse_article).parse(input)?;
+    let (input, qualifiers) = many0(terminated(parse_source_quality, tag(" "))).parse(input)?;
+    let (input, _) = tag("source").parse(input)?;
+    let filter = match qualifiers.len() {
+        0 => TargetFilter::Any,
+        1 => qualifiers.into_iter().next().expect("one qualifier"),
+        _ => TargetFilter::And {
+            filters: qualifiers,
+        },
+    };
+    Ok((input, filter))
 }
 
 /// CR 614.9: Parse the redirection recipient from the result clause by scanning
@@ -9921,49 +9945,47 @@ fn parse_continuous_source_damage_redirect(norm_lower: &str) -> Option<Effect> {
     })
 }
 
-pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<TargetFilter> {
-    let input = input.trim();
-    // CR 609.7a: interactive "Choose a source …" — only the leading clause
-    // (Desperate Gambit: "Choose a source you control. Flip a coin. …").
-    // Must NOT reuse `parse_damage_source_subject_filter`'s typed-target fallback
-    // (`parse_type_phrase_folding`), which would misroute "choose a creature …" /
-    // "choose a creature or land" to damage-source selection.
-    let first_clause = nom_primitives::split_once_on(input, ".")
-        .map(|(_, (before, _))| before.trim().trim_end_matches('.'))
-        .unwrap_or_else(|_| input.trim());
-    let subject = match alt((
-        preceded(tag::<_, _, OracleError<'_>>("choose "), rest),
-        preceded(tag::<_, _, OracleError<'_>>("Choose "), rest),
+/// CR 609.7a: preserve the actual remainder for conjunction composition.
+pub(crate) fn parse_choose_damage_source_candidate_prefix(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
+    let (input, mut filter) = parse_damage_source_nominal(input)?;
+    let (input, controller) = opt(preceded(
+        tag(" "),
+        alt((
+            value(ControllerRef::You, tag("you control")),
+            value(
+                ControllerRef::Opponent,
+                alt((tag("you don't control"), tag("an opponent controls"))),
+            ),
+        )),
     ))
-    .parse(first_clause)
-    {
-        Ok((_, rest)) => rest.trim(),
-        Err(_) => first_clause,
-    };
-    // Strip the article so "a source you control" does not treat "a" as subtype A.
-    let subject = nom_primitives::parse_article
-        .parse(subject)
-        .map(|(rest, _)| rest.trim())
-        .unwrap_or(subject);
-
-    if let Ok((rest, filter)) = parse_attached_host_subject(subject) {
-        if rest.trim().is_empty() {
-            return Some(filter);
-        }
+    .parse(input)?;
+    if let Some(controller) = controller {
+        let owner = TargetFilter::Typed(TypedFilter::default().controller(controller));
+        filter = if matches!(filter, TargetFilter::Any) {
+            owner
+        } else {
+            TargetFilter::And {
+                filters: vec![filter, owner],
+            }
+        };
     }
-    if let Some(filter) = parse_damage_source_subject(subject) {
-        return Some(filter);
-    }
+    Ok((input, filter))
+}
 
-    let stripped = nom_primitives::parse_article
-        .parse(subject)
-        .map(|(rest, _)| rest.trim())
-        .unwrap_or(subject);
-    if matches!(stripped, "source" | "sources") {
-        return Some(TargetFilter::Any);
-    }
-
-    None
+pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<TargetFilter> {
+    let lower = input.to_lowercase();
+    all_consuming(terminated(
+        preceded(
+            opt(tag("choose ")),
+            parse_choose_damage_source_candidate_prefix,
+        ),
+        opt(char('.')),
+    ))
+    .parse(lower.trim())
+    .ok()
+    .map(|(_, filter)| filter)
 }
 
 /// Shared subject-postprocessing tail for damage-source subject extraction,
@@ -10241,6 +10263,9 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+    if let Some(filter) = parse_chosen_damage_source_subject(subject) {
+        return Some(filter);
+    }
     // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
     // "enchanted creature") resolve to the attached object before the generic
     // typed-source grammar, which would otherwise treat "creature" as a type.
@@ -33068,7 +33093,10 @@ mod snapshot_tests {
         };
         assert_eq!(
             *source_filter,
-            Some(TargetFilter::ChosenDamageSource { filter: None })
+            Some(TargetFilter::ChosenDamageSource {
+                chooser: Some(crate::types::ability::Chooser::Controller),
+                filter: None
+            })
         );
         assert_eq!(
             *target_filter,
@@ -33107,7 +33135,7 @@ mod snapshot_tests {
         assert!(ability.sub_ability.is_none());
         assert!(
             matches!(ability.effect.as_ref(), Effect::CreateDamageReplacement {
-            source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+            source_filter: Some(TargetFilter::ChosenDamageSource { chooser: Some(crate::types::ability::Chooser::Controller), filter: None }),
             target_filter: None,
             redirect_to: Some(DamageRedirectTarget::Controller),
             redirect_object_filter: None,
@@ -33235,7 +33263,11 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: Some(DamageModification::Double),
                 redirect_to: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                source_filter:
+                    Some(TargetFilter::ChosenDamageSource {
+                        chooser: None,
+                        filter: None,
+                    }),
                 combat_scope: None,
                 ..
             } => {}
@@ -33312,7 +33344,11 @@ mod snapshot_tests {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::SourceObject),
                 redirect_amount: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                source_filter:
+                    Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(crate::types::ability::Chooser::Controller),
+                        filter: None,
+                    }),
                 ..
             } => {}
             other => panic!("expected redirect-to-source, got {other:?}"),
@@ -33331,7 +33367,11 @@ mod snapshot_tests {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
                 redirect_amount: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                source_filter:
+                    Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(crate::types::ability::Chooser::Controller),
+                        filter: None,
+                    }),
                 // CR 614.9: "would deal damage to target creature" — the
                 // protected creature is a chosen original-recipient target, not
                 // a broad scope (Defect 3). `target_filter` must stay None.
@@ -33405,6 +33445,7 @@ mod snapshot_tests {
                 ..
             } => {
                 let Some(TargetFilter::ChosenDamageSource {
+                    chooser: Some(crate::types::ability::Chooser::Controller),
                     filter: Some(inner),
                 }) = damage_source_filter
                 else {
@@ -33443,6 +33484,7 @@ mod snapshot_tests {
                 ..
             } => {
                 let Some(TargetFilter::ChosenDamageSource {
+                    chooser: Some(crate::types::ability::Chooser::Controller),
                     filter: Some(inner),
                 }) = damage_source_filter
                 else {
@@ -33893,7 +33935,10 @@ mod snapshot_tests {
             matches!(
                 &harms_way,
                 Effect::CreateDamageReplacement {
-                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(crate::types::ability::Chooser::Controller),
+                        filter: None
+                    }),
                     combat_scope: None,
                     target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                         player: DamageTargetPlayerScope::Controller,
@@ -33946,7 +33991,10 @@ mod snapshot_tests {
             matches!(
                 &synthetic,
                 Effect::CreateDamageReplacement {
-                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: Some(_) }),
+                    source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(crate::types::ability::Chooser::Controller),
+                        filter: Some(_)
+                    }),
                     target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                         permanent_type: Some(_),
                         ..
@@ -34696,6 +34744,7 @@ mod snapshot_tests {
             } => {
                 assert_eq!(target, TargetFilter::Controller);
                 let Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
                     filter: Some(inner),
                 }) = damage_source_filter
                 else {
@@ -35572,5 +35621,71 @@ mod damage_source_union {
             vec![TypeFilter::Subtype("Giant".to_string())]
         );
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+}
+
+#[cfg(test)]
+mod local_source_nominal_tests {
+    use super::*;
+    #[test]
+    fn source_owns_nominal_qualities_without_relaxing_ordinary_creature_grammar() {
+        let red = TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasColor {
+            color: ManaColor::Red,
+        }));
+        let land = TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Land));
+        let legendary =
+            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasSupertype {
+                supertype: Supertype::Legendary,
+            }));
+        for (source, expected) in [
+            ("a source", TargetFilter::Any),
+            ("a red source", red.clone()),
+            ("a land source", land.clone()),
+            ("a legendary source", legendary.clone()),
+            (
+                "a red legendary land source",
+                TargetFilter::And {
+                    filters: vec![red.clone(), legendary, land],
+                },
+            ),
+            (
+                "a nonred source",
+                TargetFilter::Not {
+                    filter: Box::new(red),
+                },
+            ),
+        ] {
+            assert_eq!(parse_choose_damage_source_candidate(source), Some(expected));
+            assert!(
+                parse_chosen_damage_source_subject(&format!("{source} of your choice")).is_some()
+            );
+        }
+        for source in [
+            "a red",
+            "a source inexplicably",
+            "a source you control accidentally",
+            "a mysterious source",
+            "a red source and",
+            "a red source of their choice",
+            "enchanted creature",
+            "a creature",
+        ] {
+            assert_eq!(
+                parse_choose_damage_source_candidate(source),
+                None,
+                "a complete Source noun and tail are mandatory: {source}"
+            );
+        }
+        assert_eq!(
+            parse_chosen_damage_source_subject("that source"),
+            Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None
+            })
+        );
+        assert!(
+            parse_type_phrase("red").is_err(),
+            "ordinary nounless color grammar remains unchanged"
+        );
     }
 }

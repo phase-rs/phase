@@ -13437,6 +13437,7 @@ mod tests {
         );
         for (index, broad, expected) in [(0, true, vec![artifact.clone()]), (1, false, vec![])] {
             let prevention = Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -14108,6 +14109,7 @@ mod tests {
         cases.push((
             "source prevention",
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -14524,6 +14526,7 @@ mod tests {
         ));
         assert!(filter_needs_trigger_source(
             &TargetFilter::ChosenDamageSource {
+                chooser: None,
                 filter: Some(Box::new(bare.clone())),
             }
         ));
@@ -14534,6 +14537,7 @@ mod tests {
         // Negative control at the same depths: nesting alone does not route.
         assert!(!filter_needs_trigger_source(
             &TargetFilter::ChosenDamageSource {
+                chooser: None,
                 filter: Some(Box::new(typed_with(vec![attacking(
                     ControllerRef::Opponent
                 )]))),
@@ -25790,7 +25794,10 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
                 redirect_lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                }),
                 combat_scope: None,
                 target_filter: None,
                 modification: None,
@@ -25920,7 +25927,10 @@ mod tests {
         };
         let redirect = Effect::CreateDamageReplacement {
             redirect_lifetime: RedirectionLifetime::OneOpportunity,
-            source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+            source_filter: Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            }),
             combat_scope: None,
             target_filter: None,
             modification: None,
@@ -26816,6 +26826,7 @@ mod tests {
         };
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,

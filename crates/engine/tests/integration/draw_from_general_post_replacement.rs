@@ -476,7 +476,12 @@ fn new_way_forward_combat(db: &CardDatabase, shield: Shield) -> CombatDeltas {
             cast.final_waiting_for()
         );
         runner
-            .act(GameAction::ChooseDamageSource { source: attacker })
+            .act(GameAction::ChooseDamageSource {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(
+                    attacker,
+                    runner.state().objects[&attacker].incarnation,
+                ),
+            })
             .expect("choose P0's attacker as the damage source");
     }
 

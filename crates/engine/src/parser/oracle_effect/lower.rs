@@ -4178,7 +4178,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
                 filter_reads(filter)
             }
-            TargetFilter::ChosenDamageSource { filter } => {
+            TargetFilter::ChosenDamageSource { filter, .. } => {
                 filter.as_deref().is_some_and(filter_reads)
             }
             TargetFilter::None
@@ -4280,7 +4280,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             filter_tree_has_chosen_card(filter)
         }
-        TargetFilter::ChosenDamageSource { filter } => {
+        TargetFilter::ChosenDamageSource { filter, .. } => {
             filter.as_deref().is_some_and(filter_tree_has_chosen_card)
         }
         TargetFilter::None
@@ -4823,73 +4823,6 @@ pub(super) fn effect_publishes_revealed_subject(effect: &Effect) -> bool {
 /// `ChangeZone` is included because Inalla-style "Exile it at the beginning
 /// of the next end step" lowers to `ChangeZone { destination: Exile,
 /// target: ParentTarget }`.
-fn definition_contains_choose_damage_source(def: &AbilityDefinition) -> bool {
-    if matches!(&*def.effect, Effect::ChooseDamageSource { .. }) {
-        return true;
-    }
-    def.sub_ability
-        .as_deref()
-        .is_some_and(definition_contains_choose_damage_source)
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(definition_contains_choose_damage_source)
-}
-
-/// CR 609.7a + CR 608.2c (#5601): A resolution chain that chose a damage source
-/// but whose head `Effect::ChooseDamageSource` was flattened away during
-/// lowering still leaves a bound `ChosenDamageSource` anaphor in whichever
-/// branch spelled the source out. Desperate Gambit ("Choose a source you
-/// control and flip a coin. … the next time *that source* would deal damage …,
-/// it deals double … . … the next time *it* would deal damage …, prevent that
-/// damage.") lowers the head choice to a bare target selection, so the win
-/// branch's `CreateDamageReplacement { source_filter: ChosenDamageSource }` is
-/// the only surviving marker of the chosen-source context. That surviving
-/// binding is the signal that a *sibling* bare-"it" prevention/replacement in
-/// the SAME chain co-refers with the chosen source (the two "it"s share one
-/// antecedent, CR 608.2c) and must be threaded too. Detecting it lets the
-/// existing `SelfRef` → `ChosenDamageSource` rewrite fire even though the head
-/// no longer matches [`definition_contains_choose_damage_source`].
-fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> bool {
-    fn effect_binds_chosen(effect: &Effect) -> bool {
-        match effect {
-            Effect::CreateDamageReplacement { source_filter, .. } => {
-                matches!(source_filter, Some(TargetFilter::ChosenDamageSource { .. }))
-            }
-            Effect::PreventDamage {
-                damage_source_filter,
-                ..
-            } => matches!(
-                damage_source_filter,
-                Some(TargetFilter::ChosenDamageSource { .. })
-            ),
-            // Branch recursion is mode-agnostic (single, N and until-loss runs).
-            Effect::FlipCoins {
-                win_effect,
-                lose_effect,
-                ..
-            } => {
-                win_effect
-                    .as_deref()
-                    .is_some_and(definition_contains_chosen_damage_source_binding)
-                    || lose_effect
-                        .as_deref()
-                        .is_some_and(definition_contains_chosen_damage_source_binding)
-            }
-            _ => false,
-        }
-    }
-    effect_binds_chosen(&def.effect)
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(definition_contains_chosen_damage_source_binding)
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(definition_contains_chosen_damage_source_binding)
-}
-
 /// CR 609.7a + CR 608.2c: When a resolution chain begins with
 /// `ChooseDamageSource`, bare "it" in a coin-flip one-shot prevention branch
 /// co-refers with the chosen source — rewrite `SelfRef` to `ChosenDamageSource`.
@@ -4899,12 +4832,18 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
             damage_source_filter,
             ..
         } if matches!(damage_source_filter, Some(TargetFilter::SelfRef)) => {
-            *damage_source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            });
         }
         Effect::CreateDamageReplacement { source_filter, .. }
             if matches!(source_filter, Some(TargetFilter::SelfRef)) =>
         {
-            *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
+            *source_filter = Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            });
         }
         // Branch recursion is mode-agnostic (single, N and until-loss runs).
         Effect::FlipCoins {
@@ -4934,23 +4873,14 @@ fn rewrite_oneshot_selfref_to_chosen_in_def(def: &mut AbilityDefinition) {
 }
 
 pub(super) fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinition]) {
-    // CR 609.7a (#5601): fire when either the head `ChooseDamageSource` survives
-    // OR a `ChosenDamageSource` anaphor was already bound in a branch (the head
-    // was flattened during lowering, Desperate Gambit) — both prove the chain
-    // chose a damage source, so a sibling bare-"it" `SelfRef` must be threaded.
-    if !defs.iter().any(|def| {
-        definition_contains_choose_damage_source(def)
-            || definition_contains_chosen_damage_source_binding(def)
-    }) {
-        return;
-    }
+    let mut has_producer = false;
     for def in defs.iter_mut() {
-        rewrite_oneshot_selfref_to_chosen_in_effect(&mut def.effect);
-        if let Some(sub) = def.sub_ability.as_deref_mut() {
-            rewrite_oneshot_selfref_to_chosen_in_def(sub);
+        if matches!(&*def.effect, Effect::ChooseDamageSource { .. }) {
+            has_producer = true;
+            continue;
         }
-        if let Some(else_def) = def.else_ability.as_deref_mut() {
-            rewrite_oneshot_selfref_to_chosen_in_def(else_def);
+        if has_producer {
+            rewrite_oneshot_selfref_to_chosen_in_def(def);
         }
     }
 }
@@ -9953,6 +9883,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount,
             amount_dynamic,
             target,
@@ -10028,6 +9959,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     // CR 615: the recipient ("to") shield — scoped to the chosen creature as
     // the damage RECIPIENT (target: ParentTarget, no source restriction).
     let to_effect = Effect::PreventDamage {
+        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
         amount,
         amount_dynamic: None,
         target: anaphor_filter.clone(),
@@ -10057,6 +9989,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     let mut by_ability = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount,
             amount_dynamic: None,
             target: TargetFilter::Any,
@@ -14185,6 +14118,7 @@ mod tests {
                 caused_by: None,
             },
             TargetFilter::ChosenDamageSource {
+                chooser: None,
                 filter: Some(Box::new(TargetFilter::LastCreated)),
             },
         ];

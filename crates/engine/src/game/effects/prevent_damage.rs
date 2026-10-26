@@ -57,25 +57,20 @@ pub(crate) fn resolve_source_filter(
                 .map(|id| TargetFilter::SpecificObject { id })
                 .unwrap_or(TargetFilter::None)
         }
-        TargetFilter::ChosenDamageSource { .. } => state
-            .last_chosen_damage_source
+        TargetFilter::ChosenDamageSource { filter, .. } => ability
+            .context
+            .damage_source_choice
             .as_ref()
-            .map(|choice| {
+            .and_then(|choice| choice.source.as_ref())
+            .map(|source| {
                 let identity = TargetFilter::SpecificObject {
-                    id: choice.source_id,
+                    id: source.identity.reference.object_id,
                 };
-                match &choice.source_filter {
-                    TargetFilter::ChosenDamageSource { .. } | TargetFilter::Any => identity,
-                    other => {
-                        let recheck = resolve_source_filter(other, state, ability);
-                        if matches!(recheck, TargetFilter::Any) {
-                            identity
-                        } else {
-                            TargetFilter::And {
-                                filters: vec![identity, recheck],
-                            }
-                        }
-                    }
+                match filter.as_deref() {
+                    None | Some(TargetFilter::Any) => identity,
+                    Some(qualifier) => TargetFilter::And {
+                        filters: vec![identity, resolve_source_filter(qualifier, state, ability)],
+                    },
                 }
             })
             .unwrap_or(TargetFilter::None),
@@ -303,6 +298,7 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let (
+        lifetime,
         amount,
         amount_dynamic,
         target,
@@ -312,6 +308,7 @@ pub fn resolve(
         prevention_duration,
     ) = match &ability.effect {
         Effect::PreventDamage {
+            lifetime,
             amount,
             amount_dynamic,
             target,
@@ -320,6 +317,7 @@ pub fn resolve(
             damage_source_filter,
             prevention_duration,
         } => (
+            *lifetime,
             *amount,
             amount_dynamic.clone(),
             target.clone(),
@@ -431,8 +429,9 @@ pub fn resolve(
     // creature] would deal damage this turn, prevent that damage" shield (Awe
     // Strike) is recognized by its EXACT source-filter shape — the shared
     // `is_oneshot_target_source_prevent_shape` predicate (the single authority,
-    // also consumed by the parser-side bare-rider gate in assembly.rs). Only
-    // this shape is one-shot: Dromoka's Command's source-scoped shield
+    // also consumed by the parser-side bare-rider gate in assembly.rs). The
+    // explicit OneOpportunity lifetime covers other next-time sources below.
+    // Dromoka's Command's source-scoped shield
     // (`Typed(instant|sorcery)` leaf) is a duration-bound continuous
     // `Prevention { All }` that must keep re-firing, so it does NOT match here.
     //
@@ -443,7 +442,9 @@ pub fn resolve(
     let oneshot_source_shape = effect_source_filter
         .as_ref()
         .is_some_and(crate::types::ability::is_oneshot_target_source_prevent_shape);
-    if oneshot_source_shape {
+    if oneshot_source_shape
+        || lifetime == crate::types::ability::RedirectionLifetime::OneOpportunity
+    {
         // CR 615.3: the single opportunity is bounded by the "the next time"
         // qualifier — consumed on apply; CR 514.2: expires at cleanup.
         shield.consume_on_apply = true;
@@ -524,50 +525,32 @@ pub fn resolve(
         }
     }
 
-    // CR 609.7 + CR 609.7a: "prevent that damage" from "a <color/type> source of
-    // your choice" (Circle/Rune of Protection cycles) — the source is a player
-    // choice. Unlike `create_damage_replacement::resolve`, this resolver had no
-    // self-prompt path, so the choice was never offered. Prompt it now and
-    // re-enter as a continuation; the recorded choice (with its qualifier stored
-    // on `last_chosen_damage_source.source_filter`) is then resolved into a
-    // durable `SpecificObject` + qualifier `And` shield by `resolve_source_filter`
-    // below. A single `prompt_filter` drives both candidate enumeration and the
-    // `WaitingFor` prompt so they cannot diverge.
-    let effect_source_filter = match &effect_source_filter {
-        Some(TargetFilter::ChosenDamageSource { filter: qualifier }) => {
-            if state.last_chosen_damage_source.is_none() {
-                let prompt_filter = qualifier.as_deref().cloned().unwrap_or(TargetFilter::Any);
-                let options =
-                    choose_damage_source::damage_source_options(state, ability, &prompt_filter);
-                if !options.is_empty() {
-                    state.park_ability_continuation(PendingContinuation::new(
-                        Box::new(ability.clone()),
-                        state,
-                    ));
-                    state.waiting_for = WaitingFor::DamageSourceChoice {
-                        player: ability.controller,
-                        source_filter: prompt_filter,
-                        options,
-                    };
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::PreventDamage,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(());
-                }
-                // CR 609.7a: no legal candidate — falls through with the record
-                // still absent; the post-choice logic below then resolves
-                // `resolve_source_filter`'s ChosenDamageSource arm against an empty
-                // `last_chosen_damage_source`, producing a `TargetFilter::None`
-                // shield that matches nothing (this activation does nothing).
-                effect_source_filter.clone()
-            } else {
-                effect_source_filter.clone()
+    // CR 609.7a: only a fresh producer opens a prompt. Anaphors never reselect.
+    if let Some(TargetFilter::ChosenDamageSource { chooser, filter }) = &effect_source_filter {
+        if ability.context.damage_source_choice.is_none() {
+            if chooser.is_some() {
+                let prompt_filter = filter.as_deref().unwrap_or(&TargetFilter::Any);
+                choose_damage_source::open_source_choice(state, ability, prompt_filter, events)?;
             }
+            return Ok(());
         }
-        other => other.clone(),
-    };
+        if ability
+            .context
+            .damage_source_choice
+            .as_ref()
+            .and_then(|choice| choice.source.as_ref())
+            .is_none()
+        {
+            return Ok(());
+        }
+        shield.source_controller = Some(ability.controller);
+        shield.selected_damage_source = ability
+            .context
+            .damage_source_choice
+            .as_ref()
+            .and_then(|choice| choice.source.as_ref())
+            .map(|source| choose_damage_source::refresh_selected_source(state, source));
+    }
 
     // CR 615 + CR 614.1a: Resolve damage source filter from effect definition.
     // Filters using IsChosenColor need the chosen color resolved from the source object
@@ -618,10 +601,10 @@ pub fn resolve(
     // which has three arms. (1) An explicit `when|whenever|if … is prevented
     // this way,` prelude — shape-unrestricted. (2) AWE STRIKE — "You gain life
     // equal to the damage prevented this way" is a BARE rider (no prelude), and
-    // folds only when the chain root's prevention carries the
-    // `And{[ParentTargetSlot, Typed(creature)]}` source filter; for every other
-    // chain root (e.g. Reverse Damage's `ChosenDamageSource` shape) the bare
-    // rider stays a `SequentialSibling` and must NOT install here. (3) The
+    // folds for the exact `And{[ParentTargetSlot, Typed(creature)]}` source
+    // filter or the explicit next-time chosen-source prevention used by
+    // Reverse Damage. Other bare life-gain instructions remain independent.
+    // (3) The
     // DISTRIBUTIVE rider "For each 1 damage prevented this way, <effect>",
     // recognized by its clause-level `repeat_for` reading `EventContextAmount`
     // plus the anaphor (#8777). Arm 3 has NO shape gate whatsoever — not on the
@@ -853,6 +836,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -956,6 +940,7 @@ mod tests {
             );
             let ability = ResolvedAbility::new(
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Controller,
@@ -1001,6 +986,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
                 target: TargetFilter::Any,
@@ -1058,19 +1044,26 @@ mod tests {
                     color: ManaColor::Red,
                 }]),
             );
-        state.last_chosen_damage_source = Some(ChosenDamageSource {
-            source_id: chosen,
-            source_filter: source_filter.clone(),
-        });
+        let selected_choice = ChosenDamageSource {
+            source: Some(crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&chosen],
+            )),
+            candidate_filter: source_filter.clone(),
+        };
 
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: Some(Box::new(source_filter.clone())),
+                }),
                 prevention_duration: None,
             },
             vec![],
@@ -1078,6 +1071,7 @@ mod tests {
             PlayerId(0),
         );
         let mut events = Vec::new();
+        ability.context.damage_source_choice = Some(selected_choice);
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.pending_damage_replacements.len(), 1);
@@ -1104,12 +1098,14 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: Some(crate::types::ability::Chooser::Controller),
                     filter: qualifier.map(Box::new),
                 }),
                 prevention_duration: None,
@@ -1178,9 +1174,16 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::DamageSourceChoice { options, .. } => {
-                assert!(options.contains(&red), "red source must be a legal choice");
                 assert!(
-                    !options.contains(&blue),
+                    options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == red),
+                    "red source must be a legal choice"
+                );
+                assert!(
+                    !options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == blue),
                     "blue source must NOT be offered for Circle of Protection: Red"
                 );
             }
@@ -1211,11 +1214,15 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::DamageSourceChoice { options, .. } => {
                 assert!(
-                    options.contains(&red),
+                    options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == red),
                     "bare form must offer the red source"
                 );
                 assert!(
-                    options.contains(&blue),
+                    options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == blue),
                     "bare form must offer the blue source"
                 );
             }
@@ -1247,9 +1254,15 @@ mod tests {
         // Drive the real choice through the engine resolution pipeline (this
         // exercises `engine_resolution_choices` + the pending-continuation
         // re-entry that builds the durable shield).
+        let selected_reference = crate::types::identifiers::ObjectIncarnationRef::of(
+            red1,
+            state.objects[&red1].incarnation,
+        );
         crate::game::engine::apply_as_current(
             &mut state,
-            crate::types::actions::GameAction::ChooseDamageSource { source: red1 },
+            crate::types::actions::GameAction::ChooseDamageSource {
+                source: selected_reference,
+            },
         )
         .expect("submit damage source choice");
 
@@ -1285,9 +1298,15 @@ mod tests {
         let ability = source_choice_prevent_ability(cop, Some(color_qualifier(ManaColor::Red)));
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
+        let selected_reference = crate::types::identifiers::ObjectIncarnationRef::of(
+            red,
+            state.objects[&red].incarnation,
+        );
         crate::game::engine::apply_as_current(
             &mut state,
-            crate::types::actions::GameAction::ChooseDamageSource { source: red },
+            crate::types::actions::GameAction::ChooseDamageSource {
+                source: selected_reference,
+            },
         )
         .expect("submit damage source choice");
         // CR 113.7a (issue #8485): the untargeted shield lives in the floating
@@ -1400,11 +1419,15 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::DamageSourceChoice { options, .. } => {
                 assert!(
-                    options.contains(&land),
+                    options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == land),
                     "land source must be a legal choice"
                 );
                 assert!(
-                    !options.contains(&creature),
+                    !options
+                        .iter()
+                        .any(|option| option.identity.reference.object_id == creature),
                     "creature source must NOT be offered for Rune of Protection: Lands"
                 );
             }
@@ -1515,6 +1538,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -1636,11 +1660,18 @@ mod tests {
             is_combat: true,
             applied: std::collections::HashSet::new(),
         };
-        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
-            &mut state,
-            &mut events,
-            vec![proposed],
+        let mut work = crate::types::game_state::PendingCombatReplacementWork::new(vec![proposed]);
+        state.combat_prevention_tally = Some(std::collections::HashMap::new());
+        assert_eq!(
+            crate::game::replacement::replace_combat_damage_batch(
+                &mut state,
+                &mut events,
+                &mut work,
+            ),
+            None
         );
+        let survivors = work.survivors;
+        let tally = state.combat_prevention_tally.take().unwrap();
         assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
@@ -1693,6 +1724,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
@@ -1794,6 +1826,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::SelfRef,
@@ -1920,6 +1953,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Player,
@@ -2053,6 +2087,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Typed(
@@ -2168,6 +2203,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::TrackedSet {
@@ -2751,6 +2787,7 @@ mod tests {
         // ability.targets propagated from the parent TargetOnly.
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
@@ -2919,6 +2956,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -3209,6 +3247,7 @@ mod tests {
             );
             let ability = ResolvedAbility::new(
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::ParentTarget,
@@ -3268,6 +3307,7 @@ mod tests {
             );
             let ability = ResolvedAbility::new(
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::ParentTarget,
@@ -3334,6 +3374,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
@@ -3396,6 +3437,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -3448,6 +3490,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
@@ -3547,6 +3590,7 @@ mod tests {
         // Pigeon's exact activated-ability shape.
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
@@ -3618,6 +3662,7 @@ mod tests {
             );
             let ability2 = ResolvedAbility::new(
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::ParentTarget,
@@ -3659,6 +3704,7 @@ mod tests {
     ) {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount,
                 amount_dynamic: None,
                 target,
@@ -4013,6 +4059,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Player,
@@ -4157,6 +4204,7 @@ mod tests {
         // the CR 616.1 loop ends before the second becomes applicable again.
         let targeted = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -4314,6 +4362,7 @@ mod tests {
             // Object-hosted shield on the recipient (the targeted arm).
             let targeted = ResolvedAbility::new(
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::Next(1),
                     amount_dynamic: None,
                     target: TargetFilter::Any,
@@ -4524,6 +4573,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -4573,6 +4623,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Typed(TypedFilter::creature()),

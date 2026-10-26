@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::player_counter;
@@ -28,6 +30,8 @@ use crate::types::proposed_event::ProposedEvent;
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
 #[derive(Clone)]
 pub(crate) struct DamageContext {
+    /// One operation shares this bounded map; serialized parks copy the owned values.
+    pub(crate) opportunity: Rc<RefCell<crate::types::ability::DamageOpportunity>>,
     pub(crate) trigger_source: Option<TriggerSourceContext>,
     pub(crate) source_id: ObjectId,
     /// CR 400.7: The source incarnation observed before the damage event is
@@ -372,6 +376,7 @@ impl DamageContext {
                 .any(|keyword| keyword.kind() == kind)
         };
         let context = Self {
+            opportunity: Rc::default(),
             source_id: source.identity.reference.object_id,
             source_incarnation: Some(source.identity.reference.incarnation),
             controller: if matches!(
@@ -407,6 +412,7 @@ impl DamageContext {
     /// Returns None if source doesn't exist in state.
     pub(crate) fn from_source(state: &GameState, source_id: ObjectId) -> Option<Self> {
         state.objects.get(&source_id).map(|obj| Self {
+            opportunity: Rc::default(),
             trigger_source: None,
             source_id,
             source_incarnation: Some(obj.incarnation),
@@ -455,6 +461,7 @@ impl DamageContext {
     /// source is truly gone with no LKI available, defaulting to false is safe.
     pub(crate) fn fallback(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
+            opportunity: Rc::default(),
             trigger_source: None,
             source_id,
             source_incarnation: None,
@@ -475,6 +482,7 @@ impl DamageContext {
 impl From<DamageContextSnapshot> for DamageContext {
     fn from(snapshot: DamageContextSnapshot) -> Self {
         Self {
+            opportunity: Rc::default(),
             trigger_source: None,
             source_id: snapshot.source_id,
             source_incarnation: snapshot.source_incarnation,
@@ -672,12 +680,17 @@ pub(crate) fn apply_damage_to_target(
         return Ok(DamageResult::Applied(0));
     };
 
-    match replacement::replace_event_with_damage_source_context(
-        state,
-        proposed,
-        ctx.trigger_source.clone(),
-        events,
-    ) {
+    let result = {
+        let mut opportunity = ctx.opportunity.borrow_mut();
+        replacement::replace_damage_in_opportunity(
+            state,
+            proposed,
+            ctx.trigger_source.clone(),
+            events,
+            &mut opportunity,
+        )
+    };
+    match result {
         ReplacementResult::Execute(event) => Ok(apply_damage_after_replacement(
             state, ctx, event, is_combat, events,
         )),
@@ -754,6 +767,10 @@ pub(crate) fn apply_damage_after_replacement(
             || current.source_incarnation != ctx.source_incarnation
         {
             return DamageResult::Applied(0);
+        }
+        current.opportunity = Rc::clone(&ctx.opportunity);
+        if is_combat {
+            current.has_lifelink = ctx.has_lifelink;
         }
         current.excess_recipient = ctx.excess_recipient;
         current.lifelink_bonus = ctx.lifelink_bonus;
@@ -1221,6 +1238,27 @@ pub(crate) fn apply_damage_after_replacement(
 /// to the original damage-source id so `DamageContext::from_source` reproduces the
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
+fn ability_with_opportunity(
+    ability: &ResolvedAbility,
+    opportunity: &Rc<RefCell<crate::types::ability::DamageOpportunity>>,
+) -> ResolvedAbility {
+    let mut owned = ability.clone();
+    owned.context.damage_opportunity = Some(opportunity.borrow().clone());
+    owned
+}
+
+fn owned_parked_opportunity(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<crate::types::ability::DamageOpportunity> {
+    state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::Damage { .. }))
+        .map(|pending| pending.damage_opportunity.clone())
+        .or_else(|| ability.context.damage_opportunity.clone())
+}
+
 fn build_remaining_damage_node(
     damage_source_id: ObjectId,
     controller: PlayerId,
@@ -1275,6 +1313,7 @@ fn build_post_replacement_damage_node(
         ctx.source_id,
         ctx.controller,
     );
+    node.context.damage_opportunity = Some(ctx.opportunity.borrow().clone());
     node.trigger_source = ctx.trigger_source.clone();
     node.source_incarnation = ctx.source_incarnation;
     Some(node)
@@ -1338,9 +1377,11 @@ fn stash_remaining_damage_chain(
     let mut head =
         build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
     carry_remaining_own_source(&mut head, ability, damage_source_id);
+    head.context.damage_opportunity = owned_parked_opportunity(state, ability);
     for (target, amount) in iter {
         let mut node = build_remaining_damage_node(damage_source_id, controller, target, amount);
         carry_remaining_own_source(&mut node, ability, damage_source_id);
+        node.context.damage_opportunity = owned_parked_opportunity(state, ability);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1354,6 +1395,7 @@ fn carry_remaining_own_source(
     original: &ResolvedAbility,
     source_id: ObjectId,
 ) {
+    node.context.damage_opportunity = original.context.damage_opportunity.clone();
     if matches!(
         original.effect,
         Effect::DealDamage {
@@ -1423,7 +1465,8 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let mut node = build_remaining_damage_node(source_id, controller, target, amount);
+        node.context.damage_opportunity = owned_parked_opportunity(state, ability);
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1478,8 +1521,10 @@ fn stash_remaining_each_source_damage(
 
     let mut head =
         build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    head.context.damage_opportunity = owned_parked_opportunity(state, ability);
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let mut node = build_remaining_damage_node(source_id, controller, target, amount);
+        node.context.damage_opportunity = owned_parked_opportunity(state, ability);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1554,6 +1599,14 @@ pub fn resolve(
         return Ok(());
     };
 
+    ctx.opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
+
     // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
     // this DealDamage so `apply_damage_after_replacement` can redirect excess to
     // the target's controller. Keyword-gated riders read the resolved damage
@@ -1586,7 +1639,12 @@ pub fn resolve(
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(
+                        state,
+                        &ability_with_opportunity(ability, &ctx.opportunity),
+                        ctx.source_id,
+                        remaining,
+                    );
                     return Ok(());
                 }
             }
@@ -1601,7 +1659,12 @@ pub fn resolve(
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(
+                        state,
+                        &ability_with_opportunity(ability, &ctx.opportunity),
+                        ctx.source_id,
+                        remaining,
+                    );
                     return Ok(());
                 }
             }
@@ -1651,6 +1714,13 @@ pub fn resolve_post_replacement(
     } else {
         DamageContext::from(context)
     };
+    ctx.opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
     ctx.excess_recipient = context.excess_recipient;
     ctx.lifelink_bonus = context.lifelink_bonus;
     let event = ProposedEvent::Damage {
@@ -2031,7 +2101,7 @@ fn resolve_each_target_power_damage(
     // NOTHING to the batch. Without this gate the fallback context would keep it
     // in the batch and `Power{Target}` would read its last known power off LKI,
     // so a source that left the battlefield would still deal damage.
-    let batch: Vec<(ObjectId, DamageContext, u32)> = source_ids
+    let mut batch: Vec<(ObjectId, DamageContext, u32)> = source_ids
         .iter()
         .filter(|&&source_id| damage_source_eligible(state, source_id))
         .filter_map(|&source_id| {
@@ -2050,6 +2120,17 @@ fn resolve_each_target_power_damage(
             Some((source_id, ctx, amt))
         })
         .collect();
+
+    let opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
+    for (_, ctx, _) in &mut batch {
+        ctx.opportunity = Rc::clone(&opportunity);
+    }
 
     // --- Phase A: Collect proposed damage events (no application yet). ---
     // CR 120.8 / CR 702.16: per-source pre-replacement gate. Fully gated sources
@@ -2072,7 +2153,17 @@ fn resolve_each_target_power_damage(
     // replacement perspective, matching the combat batch's two-pass structure).
     let mut survivors: Vec<(&DamageContext, ProposedEvent)> = Vec::with_capacity(entries.len());
     for (&(idx, ctx), proposed) in entries.iter().zip(proposed_events) {
-        match replacement::replace_event(state, proposed, events) {
+        let result = {
+            let mut opportunity = ctx.opportunity.borrow_mut();
+            replacement::replace_damage_in_opportunity(
+                state,
+                proposed,
+                ctx.trigger_source.clone(),
+                events,
+                &mut opportunity,
+            )
+        };
+        match result {
             ReplacementResult::Execute(event) => survivors.push((ctx, event)),
             ReplacementResult::Prevented => {
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
@@ -2081,6 +2172,23 @@ fn resolve_each_target_power_damage(
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        let settled: Vec<_> = survivors
+                            .iter()
+                            .map(|(ctx, event)| ((*ctx).clone(), event.clone()))
+                            .collect();
+                        let remaining = batch
+                            .iter()
+                            .skip(idx + 1)
+                            .map(|(src, _, amount)| (*src, recipient.clone(), *amount));
+                        stash_each_source_combined_continuation(
+                            state,
+                            &ability_with_opportunity(ability, &opportunity),
+                            &settled,
+                            remaining,
+                        );
+                        return Ok(());
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -2292,7 +2400,7 @@ pub fn resolve_all(
     // class). CR 120.3h: Damage to a battle in `matching_objects` is routed
     // through `apply_damage_to_target` below, which removes defense counters
     // rather than marking damage.
-    let ctx = match damage_source {
+    let mut ctx = match damage_source {
         // CR 120.1 + CR 608.2b: already resolved above (and already bailed when
         // the declared subject was illegal), so the recipient filter and the
         // damage source share one answer.
@@ -2314,6 +2422,14 @@ pub fn resolve_all(
             unreachable!("EachTarget is only produced for DealDamage, not DamageAll")
         }
     };
+
+    ctx.opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
 
     // CR 120.3 + CR 609.7: Assemble the full simultaneous recipient list as a
     // uniform stream of `TargetRef`s. Objects first, then players — CR 120.3
@@ -2349,7 +2465,12 @@ pub fn resolve_all(
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
                 let remaining = recipient_amounts[i + 1..].iter().cloned();
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                stash_remaining_damage_chain(
+                    state,
+                    &ability_with_opportunity(ability, &ctx.opportunity),
+                    ctx.source_id,
+                    remaining,
+                );
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
@@ -2960,7 +3081,12 @@ pub fn resolve_each_player(
                             (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
                         })
                         .collect();
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_damage_chain(
+                        state,
+                        &ability_with_opportunity(ability, &ctx.opportunity),
+                        ctx.source_id,
+                        remaining,
+                    );
                     // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
                     // so the drain re-emits the parent event the non-pause tail fires.
                     mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
@@ -3029,6 +3155,13 @@ pub fn resolve_each_deals_equal_to_power(
         return Ok(());
     };
 
+    let opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
     for (i, &source_id) in source_ids.iter().enumerate() {
         // CR 113.7a + CR 208.3: power from the live object, falling back to LKI
         // when the source left the battlefield after targets were chosen.
@@ -3037,8 +3170,9 @@ pub fn resolve_each_deals_equal_to_power(
             continue;
         }
         // CR 120.1: each source creature is the source of its own damage.
-        let ctx = DamageContext::from_source(state, source_id)
+        let mut ctx = DamageContext::from_source(state, source_id)
             .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        ctx.opportunity = Rc::clone(&opportunity);
         match apply_damage_to_target(
             state,
             &ctx,
@@ -3056,7 +3190,7 @@ pub fn resolve_each_deals_equal_to_power(
                 // parent sub_ability tail.
                 stash_remaining_each_deals_chain(
                     state,
-                    ability,
+                    &ability_with_opportunity(ability, &ctx.opportunity),
                     &source_ids[i + 1..],
                     recipient_id,
                 );
@@ -3235,6 +3369,17 @@ pub fn resolve_each_source_deals_damage(
     // on a shared recipient before any Phase-C consequence (lifelink, excess)
     // is resolved.
     //
+    let opportunity = Rc::new(RefCell::new(
+        ability
+            .context
+            .damage_opportunity
+            .clone()
+            .unwrap_or_default(),
+    ));
+    for (_, ctx, _, _) in &mut entries {
+        ctx.opportunity = Rc::clone(&opportunity);
+    }
+
     // Phase B — apply replacements for every source, collecting
     // (DamageContext, ProposedEvent) pairs for Phase C. If any source's
     // replacement needs a player choice, the sources already collected in
@@ -3250,7 +3395,17 @@ pub fn resolve_each_source_deals_damage(
             // Gate prevented this source's damage — skip, no stash entry needed.
             continue;
         };
-        match replacement::replace_event(state, proposed, events) {
+        let result = {
+            let mut opportunity = ctx.opportunity.borrow_mut();
+            replacement::replace_damage_in_opportunity(
+                state,
+                proposed,
+                ctx.trigger_source.clone(),
+                events,
+                &mut opportunity,
+            )
+        };
+        match result {
             ReplacementResult::Execute(event) => {
                 replaced.push((ctx.clone(), event));
             }
@@ -3262,6 +3417,19 @@ pub fn resolve_each_source_deals_damage(
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        let remaining = entries[i + 1..]
+                            .iter()
+                            .map(|(src, _, target, amount)| (*src, target.clone(), *amount));
+                        stash_each_source_combined_continuation(
+                            state,
+                            &ability_with_opportunity(ability, &opportunity),
+                            &replaced,
+                            remaining,
+                        );
+                        mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
+                        return Ok(());
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -3355,12 +3523,13 @@ fn stash_remaining_each_deals_chain(
         if power <= 0 {
             continue;
         }
-        let node = build_remaining_damage_node(
+        let mut node = build_remaining_damage_node(
             source_id,
             ability.controller,
             TargetRef::Object(recipient_id),
             power as u32,
         );
+        node.context.damage_opportunity = owned_parked_opportunity(state, ability);
         match head.as_mut() {
             Some(h) => append_to_sub_chain(h, node),
             None => head = Some(node),
@@ -8680,5 +8849,267 @@ mod u13_post_replacement_exact_source_tests {
         assert_eq!(state.players[0].life, 20);
         assert_eq!(state.players[2].life, 16);
         assert!(!state.objects_that_dealt_damage.contains(&source));
+    }
+}
+
+#[cfg(test)]
+mod damage_opportunity_public_remainder_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::*;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::TrustedGameStateEnvelope;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+    use crate::types::replacements::ReplacementEvent;
+
+    #[test]
+    fn all_actual_source_batch_raw_and_post_remainders_restore_their_map_but_ordinary_children_do_not(
+    ) {
+        // Typed production witnesses cover all three retained runtime input
+        // formats, including the authentic EachTarget program. No printed
+        // card is claimed by these deliberately constructed ability bodies.
+        for family in 0..3 {
+            for life_pause in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let first = if life_pause {
+                    scenario
+                        .add_creature(P0, "First source", 1, 5)
+                        .with_keyword(Keyword::Lifelink)
+                        .id()
+                } else {
+                    scenario.add_creature(P0, "First source", 1, 5).id()
+                };
+                let middle = scenario.add_creature(P0, "Middle source", 2, 5).id();
+                let last = scenario.add_creature(P0, "Last source", 3, 5).id();
+                let recipient = scenario.add_creature(P1, "Shared recipient", 0, 30).id();
+                let sources =
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+                let body = match family {
+                    0 => Effect::EachSourceDealsDamage {
+                        sources: sources.clone(),
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::BatchSource,
+                            },
+                        },
+                        recipient: EachDamageRecipient::Shared(TargetFilter::Typed(
+                            TypedFilter::creature(),
+                        )),
+                    },
+                    1 => Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Target,
+                            },
+                        },
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        damage_source: Some(DamageSource::EachTarget),
+                        excess: None,
+                    },
+                    2 => Effect::EachDealsDamageEqualToPower {
+                        sources,
+                        recipient: TargetFilter::Typed(TypedFilter::creature()),
+                        extra_source: None,
+                    },
+                    _ => unreachable!(),
+                };
+                let mut definition = AbilityDefinition::new(AbilityKind::Activated, body)
+                    .cost(AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    })
+                    .sub_ability(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::DamageEachPlayer {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player_filter: PlayerFilter::All,
+                        },
+                    ));
+                if family == 1 {
+                    definition.multi_target = Some(MultiTargetSpec::fixed(4, 4));
+                }
+                if family == 2 {
+                    definition.multi_target = Some(MultiTargetSpec::fixed(3, 3));
+                }
+                let driver = scenario
+                    .add_artifact_from_oracle(P0, "Typed damage batch witness", "")
+                    .with_ability_definition(definition)
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(
+                        ManaType::Colorless,
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )],
+                );
+                let mut runner = scenario.build();
+                runner.state_mut().pending_damage_replacements.push(
+                    ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                        .damage_modification(DamageModification::Double)
+                        .damage_replacement_oneshot_shield(),
+                );
+                if life_pause {
+                    runner.state_mut().pending_damage_replacements.push(
+                        ReplacementDefinition::new(ReplacementEvent::GainLife)
+                            .mode(ReplacementMode::Optional { decline: None }),
+                    );
+                } else {
+                    runner.state_mut().pending_damage_replacements.push(
+                        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                            .damage_source_filter(TargetFilter::SpecificObject { id: middle })
+                            .damage_modification(DamageModification::Plus {
+                                value: QuantityExpr::Fixed { value: 1 },
+                            })
+                            .mode(ReplacementMode::Optional { decline: None }),
+                    );
+                }
+                if family == 0 {
+                    runner
+                        .activate(driver, 0)
+                        .target_object(recipient)
+                        .resolve();
+                } else {
+                    runner
+                        .activate(driver, 0)
+                        .target_object(first)
+                        .target_object(middle)
+                        .target_object(last)
+                        .target_object(recipient)
+                        .resolve();
+                }
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ),
+                    "actual paid family {family} reaches its required pause"
+                );
+                assert!(runner.state().pending_damage_replacements[0].is_consumed);
+                let continuation = runner
+                    .state()
+                    .active_ability_continuation()
+                    .expect("actual batch remainder is parked");
+                assert_eq!(
+                    continuation
+                        .chain
+                        .context
+                        .damage_opportunity
+                        .as_ref()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let post = matches!(
+                    continuation.chain.effect,
+                    Effect::ApplyPostReplacementDamage { .. }
+                );
+                assert_eq!(
+                    post,
+                    family == 0 || (life_pause && family == 1),
+                    "phase-B complete survivors use post nodes and unstarted sources use raw nodes"
+                );
+                if life_pause {
+                    assert!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .damage_opportunity
+                            .is_empty(),
+                        "an independent life-gain event owns no outer damage map"
+                    );
+                } else {
+                    assert_eq!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .damage_opportunity
+                            .len(),
+                        1
+                    );
+                    assert_eq!(
+                        runner.state().objects[&recipient].damage_marked,
+                        if family == 0 { 0 } else { 2 }
+                    );
+                }
+                let paused = runner.state().clone();
+                for trusted in [false, true] {
+                    let restored = if trusted {
+                        serde_json::from_value::<TrustedGameStateEnvelope>(
+                            serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else {
+                        serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                    };
+                    let mut resumed = GameRunner::from_state(restored);
+                    if life_pause {
+                        assert!(
+                            resumed
+                                .state()
+                                .pending_replacement
+                                .as_ref()
+                                .unwrap()
+                                .is_optional
+                        );
+                        resumed
+                            .act(GameAction::ChooseReplacement { index: 1 })
+                            .unwrap();
+                    } else {
+                        let pending = resumed.state().pending_replacement.as_ref().unwrap();
+                        let index = pending
+                            .candidates
+                            .iter()
+                            .position(|rid| rid.source == ObjectId(0) && rid.index == 1)
+                            .unwrap();
+                        assert!(index > 0, "nondefault middle-source modifier is chosen before the retained double");
+                        resumed
+                            .act(GameAction::ChooseReplacement { index })
+                            .unwrap();
+                        assert!(matches!(
+                            resumed.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ));
+                        assert!(
+                            resumed
+                                .state()
+                                .pending_replacement
+                                .as_ref()
+                                .unwrap()
+                                .is_optional
+                        );
+                        *resumed.state_mut() =
+                            serde_json::from_value(serde_json::to_value(resumed.state()).unwrap())
+                                .unwrap();
+                        resumed
+                            .act(GameAction::ChooseReplacement { index: 0 })
+                            .unwrap();
+                    }
+                    resumed.advance_until_stack_empty();
+                    assert_eq!(resumed.state().objects[&recipient].damage_marked, if life_pause { 12 } else { 14 }, "all three sources retain exactly one double; post survivors never repeat replacement");
+                    assert_eq!((resumed.life(P0), resumed.life(P1)), (if life_pause { 21 } else { 19 }, 19), "the ordinary following damage instruction starts a fresh opportunity and lifelink occurs once");
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(resumed.state().pending_replacement.is_none());
+                    assert!(
+                        resumed.state().stack.is_empty()
+                            && resumed.state().resolution_stack.is_empty()
+                            && resumed.state().deferred_triggers.is_empty()
+                    );
+                    assert!(resumed.state().owed_spell_final_part().is_none());
+                }
+            }
+        }
     }
 }

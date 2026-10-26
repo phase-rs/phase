@@ -830,10 +830,16 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
-        TargetFilter::ChosenDamageSource { filter: Some(f) } => {
+        TargetFilter::ChosenDamageSource {
+            chooser: _,
+            filter: Some(f),
+        } => {
             format!("chosen damage source matching {}", fmt_target(f))
         }
-        TargetFilter::ChosenDamageSource { filter: None } => "chosen damage source".into(),
+        TargetFilter::ChosenDamageSource {
+            chooser: _,
+            filter: None,
+        } => "chosen damage source".into(),
         TargetFilter::Named { name } => format!("card named {name}"),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters
@@ -16113,6 +16119,7 @@ mod tests {
         // it is omitted so unqualified prevention's signature is unchanged.
         let signature_keys = |dsf: Option<TargetFilter>| -> Vec<String> {
             effect_details(&Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -16146,6 +16153,7 @@ mod tests {
     fn prevent_damage_signature_keys_recipient_by_scope() {
         let keys = |recipient_scope: EffectScope| -> Vec<String> {
             effect_details(&Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -16323,12 +16331,16 @@ mod tests {
         let lose = Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope: PreventionScope::AllDamage,
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                }),
                 prevention_duration: None,
             },
         ));
@@ -22089,6 +22101,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Any,

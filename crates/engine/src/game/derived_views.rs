@@ -1065,6 +1065,10 @@ fn redact_private_trigger_firing(value: &mut serde_json::Value) {
                 "trigger_firing",
                 "stack_trigger_firings",
                 "resolving_trigger_firing",
+                "damage_source_candidates",
+                "damage_source_choice",
+                "selected_damage_source",
+                "damage_opportunity",
             ] {
                 object.remove(key);
             }

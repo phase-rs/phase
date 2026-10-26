@@ -7922,6 +7922,7 @@ fn parse_normalized_oracle_ir(
             .sub_ability(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Any,

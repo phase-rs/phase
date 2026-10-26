@@ -97,6 +97,7 @@ fn cast_play_with_fire(at_player: bool, prevent_player_damage: bool) -> (bool, i
         );
         let prevention = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,

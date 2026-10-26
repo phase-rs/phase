@@ -106,7 +106,12 @@ fn answer_prompts(state: &mut GameState, answers: &Answers) {
                 None => panic!("no object to pay {:?} with", state.waiting_for),
             },
             WaitingFor::DamageSourceChoice { .. } => match answers.aimed() {
-                Some(source) => GameAction::ChooseDamageSource { source },
+                Some(source) => GameAction::ChooseDamageSource {
+                    source: engine::types::identifiers::ObjectIncarnationRef::of(
+                        source,
+                        state.objects[&source].incarnation,
+                    ),
+                },
                 None => panic!("no source to choose at {:?}", state.waiting_for),
             },
             // The pool holds the payment.

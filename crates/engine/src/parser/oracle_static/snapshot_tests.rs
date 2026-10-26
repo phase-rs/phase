@@ -1716,3 +1716,130 @@ fn locket_name_population() {
     let def = parse_static_line("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard.").unwrap();
     insta::assert_json_snapshot!("locket_name_population", &def);
 }
+
+#[test]
+fn source_choice_full_twelve_static_route_complete_ir_lower_and_static_positive() {
+    use crate::parser::oracle_ir::doc::{
+        OracleItemId, OracleNodeIr, OracleSourceSpan, OracleUnitId,
+    };
+    use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseId};
+    use crate::types::ability::*;
+    let expected_faces = crate::database::card_db::source_choice_expected_faces();
+    for face in expected_faces {
+        let source = face.oracle_text.as_deref().unwrap();
+        let types = vec![if face.power.is_some() {
+            "Creature".into()
+        } else {
+            "Enchantment".into()
+        }];
+        let mut expected = crate::parser::oracle::ParsedAbilities {
+            abilities: vec![face.abilities[0].clone()],
+            extracted_keywords: face.keywords.clone(),
+            ..Default::default()
+        };
+        // Cycling's activated form is produced by ordinary synthesis, after
+        // this complete keyword-bearing parser result; its expected form is
+        // asserted separately by the full CardFace publication test.
+        if source.lines().count() == 1 {
+            expected.extracted_keywords.clear();
+        }
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            source,
+            &face.name,
+            &[],
+            &types,
+            &face.card_type.subtypes,
+        );
+        assert_eq!(doc.source_text, source);
+        assert_eq!(doc.items.len(), source.lines().count());
+        let mut offset = 0;
+        for (line_index, (item, line)) in doc.items.iter().zip(source.lines()).enumerate() {
+            assert_eq!(item.id, OracleItemId(line_index as u32));
+            assert_eq!(
+                item.source.id(),
+                OracleUnitId {
+                    item: OracleItemId(line_index as u32),
+                    ordinal: 0
+                }
+            );
+            assert_eq!(item.source.fragment(), Some(line));
+            assert_eq!(
+                item.source.span(),
+                &OracleSourceSpan::exact(line_index, line_index, offset, offset + line.len(), 0)
+            );
+            match &item.node {
+                OracleNodeIr::Spell(ability) => {
+                    let (_, body) = line.split_once(": ").expect("printed activated envelope");
+                    assert_eq!(ability.source_text, body);
+                    assert_eq!(ability.shell.cost, expected.abilities[0].cost);
+                    assert_eq!(ability.shell.description.as_deref(), Some(line));
+                    assert_eq!(ability.body.clauses.len(), 1);
+                    let clause = &ability.body.clauses[0];
+                    let fragment = body.trim_end_matches('.');
+                    assert_eq!(clause.id, ClauseId(0));
+                    assert_eq!(clause.source.fragment(), Some(fragment));
+                    assert_eq!(
+                        clause.source.span(),
+                        &OracleSourceSpan::chain_relative(0, 0, 0, fragment.len(), 0)
+                    );
+                    assert_eq!(clause.parsed.effect, *expected.abilities[0].effect);
+                    assert_eq!(clause.parsed.duration, None);
+                    assert_eq!(clause.parsed.sub_ability, None);
+                    assert_eq!(
+                        clause.disposition,
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None
+                        }
+                    );
+                    assert_eq!(clause.declares_chosen_clause, None);
+                    assert_eq!(clause.reads_chosen_clause, None);
+                    assert_eq!(clause.declares_instruction_result, None);
+                    assert_eq!(clause.reads_return_result, None);
+                    assert_eq!(clause.target_reads, TargetReadOrigin::OwnAnnouncement);
+                    assert!(!clause.is_optional);
+                }
+                OracleNodeIr::Keyword(keyword) => {
+                    assert!(expected.extracted_keywords.contains(keyword))
+                }
+                other => panic!(
+                    "complete printed source body must retain its actual category: {other:?}"
+                ),
+            }
+            offset += line.len() + 1;
+        }
+        let lowered = crate::parser::oracle::lower_oracle_ir(&mut doc);
+        assert_eq!(
+            serde_json::to_value(&lowered).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(lowered.statics.is_empty());
+        assert!(!crate::parser::oracle::has_unimplemented(
+            &lowered.abilities[0]
+        ));
+        insta::assert_json_snapshot!(
+            format!(
+                "source_choice_full_twelve_static_route_{}_ir",
+                face.name.replace(':', "")
+            ),
+            doc
+        );
+        insta::assert_json_snapshot!(
+            format!(
+                "source_choice_full_twelve_static_route_{}_lowered",
+                face.name.replace(':', "")
+            ),
+            lowered
+        );
+    }
+    let ordinary = crate::types::ability::StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(TypedFilter::creature()))
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: crate::types::keywords::Keyword::Flying,
+        }])
+        .description("Creatures have flying.".into());
+    assert_eq!(
+        crate::parser::oracle_static::parse_static_line("Creatures have flying."),
+        Some(ordinary)
+    );
+}

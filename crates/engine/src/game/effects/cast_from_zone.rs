@@ -1747,7 +1747,8 @@ pub(crate) fn freeze_resolution_cast_filter(
             )),
             caused_by,
         },
-        TargetFilter::ChosenDamageSource { filter } => TargetFilter::ChosenDamageSource {
+        TargetFilter::ChosenDamageSource { chooser, filter } => TargetFilter::ChosenDamageSource {
+            chooser,
             filter: filter.map(|filter| {
                 Box::new(freeze_resolution_cast_filter(
                     state,
@@ -3106,9 +3107,13 @@ mod tests {
                     caused_by: Some(ThisWayCause::Exiled),
                 },
                 TargetFilter::ChosenDamageSource {
+                    chooser: None,
                     filter: Some(Box::new(source_power_cmc_filter())),
                 },
-                TargetFilter::ChosenDamageSource { filter: None },
+                TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                },
             ],
         };
 
@@ -3153,6 +3158,7 @@ mod tests {
         assert_cmc_was_frozen(filter, 4);
 
         let TargetFilter::ChosenDamageSource {
+            chooser: None,
             filter: Some(filter),
         } = &filters[3]
         else {
@@ -3165,7 +3171,10 @@ mod tests {
         assert!(
             matches!(
                 filters[4],
-                TargetFilter::ChosenDamageSource { filter: None }
+                TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None
+                }
             ),
             "ChosenDamageSource(None) must remain an unqualified leaf"
         );

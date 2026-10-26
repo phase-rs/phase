@@ -3468,6 +3468,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,

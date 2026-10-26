@@ -1409,10 +1409,11 @@ fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
                 &*d.effect,
                 Effect::PreventDamage {
                     damage_source_filter: Some(source_filter),
+                    lifetime,
                     ..
-                } if crate::types::ability::is_oneshot_target_source_prevent_shape(
-                    source_filter
-                )
+                } if crate::types::ability::is_oneshot_target_source_prevent_shape(source_filter)
+                    || (*lifetime == crate::types::ability::RedirectionLifetime::OneOpportunity
+                        && matches!(source_filter, TargetFilter::ChosenDamageSource { .. }))
             )
         })
 }
@@ -1475,15 +1476,9 @@ fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
 ///    rider folds and works (`tests/integration/awe_strike_prevention.rs`,
 ///    +3 through a real combat step). What this conjunct leaves out is the bare
 ///    scalar rider, which is already owned by the adjacent
-///    `is_oneshot_target_source_prevent_chain` arm — whose coverage is narrower
-///    than the class: Reverse Damage's `ChosenDamageSource` chain root is
-///    refused there and the card consequently never pays off its CR 615.5 life
-///    gain (measured broken in
-///    `tests/integration/printed_damage_prevention_survives_turn.rs`, the
-///    assertion "the shield must prevent the chosen source's damage in its own
-///    turn"). Fixing that is separate work; this predicate must not change its
-///    behaviour. Deliberately NOT `damage_amount_reads_event_context`, which
-///    walks EFFECT quantities and would therefore admit Reverse Damage.
+///    `is_oneshot_target_source_prevent_chain` arm. Its explicit OneOpportunity
+///    source-choice case includes Reverse Damage's bare gain-life rider;
+///    the distributive path still requires its own leading quantifier.
 /// 2. TEXTUAL — the quantifier is BOUND to the prevention anaphor, not merely
 ///    co-located with it (#8849). Conjunct 1 reads a `repeat_for` that
 ///    `lower::strip_for_each_prefix_with_difference` produced from a

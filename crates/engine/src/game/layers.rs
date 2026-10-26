@@ -5159,7 +5159,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
             filters.iter().any(target_filter_reads_life_total)
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => target_filter_reads_life_total(filter),
-        TargetFilter::ChosenDamageSource { filter } => filter
+        TargetFilter::ChosenDamageSource { filter, .. } => filter
             .as_deref()
             .is_some_and(target_filter_reads_life_total),
         // CR 102.1 + CR 119 + CR 611.3a: the player-axis crossing. A

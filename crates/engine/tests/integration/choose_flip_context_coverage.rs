@@ -293,6 +293,7 @@ fn round_trip_isolated_context(empty_result_only: bool) {
         // Isolate the other half of the serde predicate on a real parked frame.
         // This is a wire fixture, not a claim that changing the live choice is legal.
         FlipBranchContext {
+            damage_source_choice: None,
             chosen_players: vec![],
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 game.runner.state(),
@@ -559,4 +560,175 @@ fn branch_local_player_choice_follows_the_enclosing_choice_inline() {
 #[test]
 fn branch_local_player_choice_follows_the_enclosing_choice_after_krark() {
     branch_local_player_choice(true);
+}
+
+#[test]
+fn paid_actual_flip_branch_fresh_source_producer_cannot_consume_the_earlier_selection() {
+    use engine::types::ability::*;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    for seed in [0, 1] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let own = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Vulshok Sorcerer",
+                1,
+                1,
+                "Haste\n{T}: This creature deals 1 damage to any target.",
+            )
+            .id();
+        let other = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Vulshok Sorcerer",
+                1,
+                1,
+                "Haste\n{T}: This creature deals 1 damage to any target.",
+            )
+            .id();
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PreventDamage {
+                lifetime: RedirectionLifetime::OneOpportunity,
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                }),
+                prevention_duration: None,
+            },
+        ));
+        let program = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ),
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        })
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                win_effect: Some(Box::new(branch.clone())),
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        let driver = scenario
+            .add_artifact_from_oracle(P0, "Typed nested source ownership witness", "")
+            .with_ability_definition(program)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().rng_seed = seed;
+        runner.state_mut().rng_word_pos = 0;
+        runner.state_mut().rng = GameRng::seed_from_u64(seed);
+        runner.activate(driver, 0).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("first paid source producer");
+        };
+        let first = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == own)
+            .unwrap()
+            .identity
+            .reference;
+        let answer = runner
+            .act(GameAction::ChooseDamageSource { source: first })
+            .unwrap();
+        assert_eq!(
+            answer
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CoinFlipped { .. }))
+                .count(),
+            1
+        );
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!(
+                "the fresh producer at the actual selected flip branch must prompt independently"
+            );
+        };
+        assert!(!options
+            .iter()
+            .any(|option| option.identity.reference == first));
+        let second = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == other)
+            .unwrap()
+            .identity
+            .reference;
+        assert!(runner.state().pending_damage_replacements.is_empty());
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+            .unwrap()
+            .into_game_state();
+        runner
+            .act(GameAction::ChooseDamageSource { source: second })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().pending_damage_replacements[0]
+                .selected_damage_source
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference,
+            second
+        );
+        runner.activate(own, 0).target_player(P0).resolve();
+        assert_eq!(runner.state().players[0].life, 19);
+        for _ in 0..4 {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        runner.activate(other, 0).target_player(P0).resolve();
+        assert_eq!(
+            runner.state().players[0].life,
+            19,
+            "only the nested producer's source is prevented"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+        );
+        assert!(runner.state().owed_spell_final_part().is_none());
+    }
 }

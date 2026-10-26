@@ -104,7 +104,7 @@ pub(crate) fn retarget_dependencies(filter: &TargetFilter) -> RetargetDeps {
             .as_ref()
             .map_or(RetargetDeps::Independent, controller_deps),
         TargetFilter::TrackedSetFiltered { filter, .. } => retarget_dependencies(filter),
-        TargetFilter::ChosenDamageSource { filter } => filter
+        TargetFilter::ChosenDamageSource { filter, .. } => filter
             .as_deref()
             .map_or(RetargetDeps::Independent, retarget_dependencies),
         // Untraversed payload: fail closed.

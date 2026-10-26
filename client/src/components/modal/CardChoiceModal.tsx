@@ -3092,38 +3092,23 @@ function RepeatDecisionModal({
 function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-
-  if (!objects) return null;
-
   return (
-    <ChoiceOverlay
-      title={t("cardChoice.damageSource.title")}
-      subtitle={t("cardChoice.damageSource.subtitle")}
-    >
+    <ChoiceOverlay title={t("cardChoice.damageSource.title")} subtitle={t("cardChoice.damageSource.subtitle")}>
       <ScrollableCardStrip>
-        {data.options.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
+        {data.options.map((option, index) => {
+          const reference = option.identity.reference;
+          const identity = t("cardChoice.damageSource.identity", { objectId: reference.object_id, incarnation: reference.incarnation });
+          const name = option.display_name || t("cardChoice.damageSource.unnamed");
+          const label = t("cardChoice.damageSource.optionLabel", { name, identity, controller: option.controller, zone: option.identity.expected_zone });
           return (
-            <motion.button
-              key={id}
-              className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: 0.85, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() =>
-                dispatch({ type: "ChooseDamageSource", data: { source: id } })
-              }
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
+            <motion.button key={`${reference.object_id}:${reference.incarnation}`}
+              className="relative rounded-lg border p-4 transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }} animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }} whileHover={{ scale: 1.05, y: -6 }}
+              aria-label={label} onClick={() => dispatch({ type: "ChooseDamageSource", data: { source: reference } })}>
+              <span className="block">{name}</span>
+              <span className="block">{identity}</span>
+              <span className="block">{t("cardChoice.damageSource.controllerZone", { controller: option.controller, zone: option.identity.expected_zone })}</span>
             </motion.button>
           );
         })}

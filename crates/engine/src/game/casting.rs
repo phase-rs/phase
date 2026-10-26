@@ -32225,7 +32225,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         TargetFilter::StackAbility { controller, .. } => controller
             .as_ref()
             .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),
-        TargetFilter::ChosenDamageSource { filter } => filter
+        TargetFilter::ChosenDamageSource { filter, .. } => filter
             .as_deref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
         // Fixed, source-, event-, trigger-, replacement- and resolution-relative

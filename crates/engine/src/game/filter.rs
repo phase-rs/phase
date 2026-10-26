@@ -2322,7 +2322,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         // the optional inner filter is the "red source"-style quality the shield
         // rechecks, so it is a real nested filter. The `None` case ("a source of
         // your choice", unqualified) is a leaf.
-        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
+        TargetFilter::ChosenDamageSource { filter, .. } => filter.as_deref().is_some_and(recurse),
         // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
         // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
         // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
@@ -2707,7 +2707,7 @@ fn filter_grammar_any(
             filter_grammar_any(filter, visit)
         }
         TargetFilter::PlayerMatching { player } => player_filter_grammar_any(player, visit),
-        TargetFilter::ChosenDamageSource { filter } => filter
+        TargetFilter::ChosenDamageSource { filter, .. } => filter
             .as_deref()
             .is_some_and(|inner| filter_grammar_any(inner, visit)),
         TargetFilter::Typed(typed) => typed
@@ -3230,7 +3230,7 @@ fn filter_contains_input(
             object_information_available,
             slot_context,
         ),
-        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(|inner| {
+        TargetFilter::ChosenDamageSource { filter, .. } => filter.as_deref().is_some_and(|inner| {
             filter_contains_input(
                 inner,
                 predicate,
@@ -4896,7 +4896,7 @@ pub(crate) fn rewrite_filter_props(
             object_information_available,
             slot_context,
         ),
-        TargetFilter::ChosenDamageSource { filter } => {
+        TargetFilter::ChosenDamageSource { filter, .. } => {
             filter.as_deref_mut().into_iter().for_each(|inner| {
                 rewrite_filter_props(
                     inner,
@@ -8946,39 +8946,13 @@ fn filter_object_known(
             });
             chosen_name.is_some_and(|name| obj.name.eq_ignore_ascii_case(name))
         }
-        // CR 609.7a: "the chosen source" — match the ObjectId selected by
-        // the prior damage-source choice while its continuation resolves.
-        TargetFilter::ChosenDamageSource { .. } => {
-            let recheck_ctx = FilterContext {
-                source_id,
-                source_controller,
-                ability,
-                trigger_source,
-                recipient_id,
-                scoped_iteration_player,
-                triggering_object,
-                declared_slot_view,
-                granting_object,
-                casting_spell,
-            };
-            state
-                .last_chosen_damage_source
-                .as_ref()
-                .is_some_and(|choice| {
-                    // CR 609.7b: An effect that would prevent or replace damage from a
-                    // chosen source applies only to damage from that source.
-                    choice.source_id == object_id
-                        && (matches!(
-                            &choice.source_filter,
-                            TargetFilter::Any | TargetFilter::ChosenDamageSource { .. }
-                        ) || matches_target_filter(
-                            state,
-                            object_id,
-                            &choice.source_filter,
-                            &recheck_ctx,
-                        ))
-                })
-        }
+        // CR 609.7a/b: this reader owns its later qualifier; initial eligibility is not a predicate.
+        TargetFilter::ChosenDamageSource { filter, .. } => ability.and_then(|ability| ability.context.damage_source_choice.as_ref())
+            .and_then(|choice| choice.source.as_ref()).is_some_and(|source| {
+                source.identity.reference.object_id == object_id
+                    && source.identity.reference.incarnation == obj.incarnation
+                    && filter.as_deref().is_none_or(|qualifier| matches_target_filter_on_exact_source(state, source, qualifier, &FilterContext::from_source_with_controller(source_id, source_controller)))
+            }),
         // "card named [literal]" — static name match.
         TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of
@@ -21296,6 +21270,7 @@ mod tests {
     #[test]
     fn filter_contains_recurses_through_a_chosen_damage_sources_inner_filter() {
         let nested = |inner: TargetFilter| TargetFilter::ChosenDamageSource {
+            chooser: None,
             filter: Some(Box::new(inner)),
         };
 
@@ -21322,7 +21297,10 @@ mod tests {
             TypedFilter::creature()
         ))));
         assert!(!filter_contains_last_created(
-            &TargetFilter::ChosenDamageSource { filter: None }
+            &TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None
+            }
         ));
     }
 
@@ -21821,6 +21799,7 @@ mod tests {
                     caused_by: None,
                 },
                 TargetFilter::ChosenDamageSource {
+                    chooser: None,
                     filter: Some(Box::new(owned())),
                 },
                 TargetFilter::PlayerMatching {
@@ -22117,6 +22096,7 @@ mod tests {
                 caused_by: None,
             },
             TargetFilter::ChosenDamageSource {
+                chooser: None,
                 filter: Some(Box::new(chosen())),
             },
             TargetFilter::PlayerMatching {
@@ -28267,7 +28247,10 @@ mod entry_projection_tests {
             // read anything.
             for reader in [
                 TargetFilter::HasChosenName,
-                TargetFilter::ChosenDamageSource { filter: None },
+                TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                },
             ] {
                 assert!(
                     has(&consumer(reader.clone()), ENTRY_CONSUMER_GAP),
@@ -28298,8 +28281,11 @@ mod entry_projection_tests {
             CharacteristicKinds::NAME_TEXT
         );
         assert!(
-            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource { filter: None })
-                .is_all()
+            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None
+            })
+            .is_all()
         );
         let rename = [self_static(ContinuousModification::SetTextName {
             name: "Projected".to_string(),
@@ -28310,11 +28296,17 @@ mod entry_projection_tests {
         ));
         assert!(!entry_projection_proven_for(
             &[self_static(ContinuousModification::AddPower { value: 1 })],
-            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource { filter: None })
+            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None
+            })
         ));
         assert!(entry_projection_proven_for(
             &[chosen_subtype()],
-            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource { filter: None })
+            target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None
+            })
         ));
     }
 
@@ -28482,6 +28474,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            damage_opportunity: Vec::new(),
             damage_source_context: None,
             proposed,
             sacrifice_provenance: None,

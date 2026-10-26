@@ -1357,6 +1357,46 @@ fn parse_exile_one_of_them_face_down(lower: &str) -> Option<Vec<(CounterType, Qu
     }
 }
 
+/// CR 608.2c: split a real source choice and its conjoined single coin atom.
+pub(super) fn split_source_choice_conjunctions(chunks: Vec<ClauseChunk>) -> Vec<ClauseChunk> {
+    chunks
+        .into_iter()
+        .flat_map(|chunk| {
+            let lower = chunk.text.to_lowercase();
+            let parsed = nom_on_lower(&chunk.text, &lower, |input| {
+                let (input, choice) = recognize(preceded(
+                    tag("choose "),
+                    crate::parser::oracle_replacement::parse_choose_damage_source_candidate_prefix,
+                ))
+                .parse(input)?;
+                let (input, _) = tag(" and ").parse(input)?;
+                let (input, flip) =
+                    recognize(super::imperative::parse_single_coin_atom).parse(input)?;
+                let (input, _) = (opt(tag(".")), eof).parse(input)?;
+                Ok((input, (choice.len(), flip.len())))
+            });
+            match parsed {
+                Some(((choice_len, flip_len), _)) => {
+                    let start = choice_len + " and ".len();
+                    vec![
+                        ClauseChunk {
+                            text: chunk.text[..choice_len].to_string(),
+                            boundary_after: Some(ClauseBoundary::Comma),
+                            leading_duration: chunk.leading_duration.clone(),
+                        },
+                        ClauseChunk {
+                            text: chunk.text[start..start + flip_len].to_string(),
+                            boundary_after: chunk.boundary_after,
+                            leading_duration: chunk.leading_duration,
+                        },
+                    ]
+                }
+                None => vec![chunk],
+            }
+        })
+        .collect()
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();

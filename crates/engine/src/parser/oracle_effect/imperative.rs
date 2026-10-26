@@ -4797,6 +4797,25 @@ pub(super) fn parse_choose_ast<'a>(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Result<Option<ChooseImperativeAst>, OracleError<'a>> {
+    // A recognized Source noun commits this whole instruction, including tails.
+    if preceded(
+        tag::<_, _, OracleError<'_>>("choose "),
+        crate::parser::oracle_replacement::parse_choose_damage_source_candidate_prefix,
+    )
+    .parse(lower)
+    .is_ok()
+    {
+        let (_, source_filter) = nom::combinator::cut(all_consuming(terminated(
+            preceded(
+                tag("choose "),
+                crate::parser::oracle_replacement::parse_choose_damage_source_candidate_prefix,
+            ),
+            opt(tag(".")),
+        )))
+        .parse(lower)
+        .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?;
+        return Ok(Some(ChooseImperativeAst::DamageSource { source_filter }));
+    }
     let mut trial = ctx.clone();
     let selected = if super::parse_hand_choice_command(lower).is_ok() {
         super::parse_hand_choice_filter(lower, &mut trial)
@@ -5100,6 +5119,17 @@ fn try_parse_choose_cost_paid_exiled_cards(
         selection: CardSelectionMode::Chosen,
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::CostPaidObjects,
     })
+}
+
+/// The ordinary coin atom is shared with Source-conjunction splitting.
+pub(super) fn parse_single_coin_atom(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    value(
+        ImperativeFamilyAst::FlipCoins {
+            flips: CoinFlipRun::single(),
+        },
+        alt((tag("flip a coin"), tag("flips a coin"))),
+    )
+    .parse(input)
 }
 
 /// CR 609.7a: "choose a source [you control|...]" lowers to `ChooseDamageSource`.
@@ -8136,6 +8166,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         // `ability.targets[0]` (the recipient `Any` surfaces no slot), so the
         // shield captures it via `ParentTargetSlot { index: 0 }`.
         return Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount,
             amount_dynamic: None,
             target: TargetFilter::Any,
@@ -8156,6 +8187,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     if let Some(dealt_by) = parse_prevent_dealt_by_target_source(text, &lower) {
         return match dealt_by {
             Ok(source_filter) => Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
@@ -8253,6 +8285,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     // sees it. `amount` is the Next(1) fallback used when no dynamic clause
     // is present (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
+        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
         amount,
         amount_dynamic: None,
         target,
@@ -13974,18 +14007,8 @@ fn parse_imperative_family_ast_inner<'a>(
             if let Some(ast) = try_parse_flip_n_coins(lower) {
                 return Ok(Some(ast));
             }
-            value::<_, _, OracleError<'_>, _>(
-                ImperativeFamilyAst::FlipCoins {
-                    flips: CoinFlipRun::single(),
-                },
-                alt((
-                    tag::<_, _, OracleError<'_>>("flip a coin"),
-                    tag("flips a coin"),
-                )),
-            )
-            .parse(lower)
-            .ok()
-            .map(|(_, ast)| ast)
+            all_consuming(terminated(parse_single_coin_atom, opt(tag("."))))
+                .parse(lower).ok().map(|(_, ast)| ast)
             // CR 710.4 vs CR 705.1: every coin-flip form is tried first, so the
             // Kamigawa flip-card instruction ("flip this creature" / "flip it" /
             // "flip <name>") can only reach this fallback once no coin arm has
@@ -25478,7 +25501,10 @@ mod tests {
             matches!(
                 win,
                 Effect::CreateDamageReplacement {
-                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: None,
+                        filter: None
+                    }),
                     ..
                 }
             ),
@@ -25494,7 +25520,10 @@ mod tests {
             matches!(
                 lose,
                 Effect::PreventDamage {
-                    damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: None,
+                        filter: None
+                    }),
                     ..
                 }
             ),

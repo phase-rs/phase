@@ -89,11 +89,18 @@ fn choose_source(runner: &mut GameRunner, outcome_wait: &WaitingFor, source: Obj
     };
     assert_eq!(*player, P0);
     assert!(
-        options.contains(&source),
+        options
+            .iter()
+            .any(|option| option.identity.reference.object_id == source),
         "the chosen source must be offered: {options:?}"
     );
     runner
-        .act(GameAction::ChooseDamageSource { source })
+        .act(GameAction::ChooseDamageSource {
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                source,
+                runner.state().objects[&source].incarnation,
+            ),
+        })
         .expect("the selected source binds the pending redirection");
 }
 
@@ -390,11 +397,18 @@ fn harms_way_redirects_a_lightning_strike_on_the_stack_to_a_chosen_creature() {
         );
     };
     assert!(
-        options.contains(&strike),
+        options
+            .iter()
+            .any(|option| option.identity.reference.object_id == strike),
         "CR 609.7a: the spell on the stack is offered as a source: {options:?}"
     );
     strike_commit
-        .act(GameAction::ChooseDamageSource { source: strike })
+        .act(GameAction::ChooseDamageSource {
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                strike,
+                runner.state().objects[&strike].incarnation,
+            ),
+        })
         .expect("P0 chooses Lightning Strike as the source");
 
     let outcome = strike_commit.resolve();

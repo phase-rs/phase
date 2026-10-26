@@ -11109,6 +11109,7 @@ fn departure_source_only_bolster_prevention_step_and_player_thresholds_refuse_be
                         count: amount.clone(),
                     },
                     1 => Effect::PreventDamage {
+                        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                         amount: PreventionAmount::All,
                         amount_dynamic: Some(amount.clone()),
                         target: TargetFilter::Controller,
@@ -11336,6 +11337,7 @@ fn departure_direct_damage_shields_validate_later_formulas_and_both_filter_axes_
                     }
                 } else {
                     Effect::PreventDamage {
+                        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                         amount: PreventionAmount::All,
                         amount_dynamic: None,
                         target: if slot == 4 {
@@ -11507,6 +11509,7 @@ fn departure_prevention_rider_installs_unbound_and_gets_a_fresh_process_on_actua
                         let mut shield = AbilityDefinition::new(
                             AbilityKind::Spell,
                             Effect::PreventDamage {
+                                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                                 amount: PreventionAmount::All,
                                 amount_dynamic: None,
                                 target: TargetFilter::Controller,
@@ -11619,6 +11622,7 @@ fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_
                 });
             } else {
                 body.effect = Box::new(Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Controller,
@@ -11694,9 +11698,13 @@ fn departure_direct_shield_source_choice_latches_identity_for_actual_later_damag
             .add_creature(P0, "Supplemental other damage source", 1, 9)
             .with_ability_definition(damage)
             .id();
-        let filter = Some(TargetFilter::ChosenDamageSource { filter: None });
+        let filter = Some(TargetFilter::ChosenDamageSource {
+            chooser: Some(engine::types::ability::Chooser::Controller),
+            filter: None,
+        });
         let effect = if prevention {
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
@@ -11735,12 +11743,21 @@ fn departure_direct_shield_source_choice_latches_identity_for_actual_later_damag
         let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
             panic!("ordinary chosen-source constructor reaches its actual public choice");
         };
-        assert!(options.contains(&chosen));
-        assert!(options.contains(&other));
+        assert!(options
+            .iter()
+            .any(|option| option.identity.reference.object_id == chosen));
+        assert!(options
+            .iter()
+            .any(|option| option.identity.reference.object_id == other));
         let saved = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() = serde_json::from_value(saved).unwrap();
         runner
-            .act(GameAction::ChooseDamageSource { source: chosen })
+            .act(GameAction::ChooseDamageSource {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(
+                    chosen,
+                    runner.state().objects[&chosen].incarnation,
+                ),
+            })
             .unwrap();
         departure_assert_program_complete(&runner, spell, 0, 0);
         assert_eq!(

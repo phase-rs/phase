@@ -359,7 +359,12 @@ pub(crate) fn resume_pending_combat_lifelink(
         .extend_from_slice(&events[action_event_start..]);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
-    match drain_combat_lifelink(state, record) {
+    let batch = if record.replacement_work.is_some() {
+        finish_combat_replacements(state, record)
+    } else {
+        drain_combat_lifelink(state, record)
+    };
+    match batch {
         CombatDamageBatch::Paused {
             events: batch,
             waiting_for,
@@ -1489,10 +1494,10 @@ pub fn lethal_damage_needed(
 /// damage context, commander flag, and original assignment, carried alongside
 /// the source's `ProposedEvent` so Phase C can apply the post-replacement
 /// survivor and run combat-only bookkeeping.
-struct BatchEntry<'a> {
+struct BatchEntry {
     ctx: DamageContext,
     source_is_commander: bool,
-    assignment: &'a DamageAssignment,
+    assignment: DamageAssignment,
     /// CR 119.3 + CR 702.15b: when the source has lifelink, the controller it
     /// gains life for. `ctx.has_lifelink` is forced off so the per-assignment
     /// apply path does NOT emit a life-gain event; instead the whole batch from
@@ -1567,17 +1572,6 @@ pub(crate) fn apply_combat_damage(
     // double-strike attacker must be caught at the first, not only the second. See
     // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
     let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
-    // CR 510.2: accumulates per-player, per-source damage for this step only.
-    // `(player, [(source_id, amount)], step_total)`.
-    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
-    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
-    // CR 400.7: each source's incarnation as it dealt combat damage this step.
-    let mut source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef> = Vec::new();
-    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
-    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
-    // per source after the batch so "whenever you gain life" triggers once.
-    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
-
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
     // and are dropped here; the gate already emitted any required DamagePrevented.
@@ -1612,6 +1606,10 @@ pub(crate) fn apply_combat_damage(
             None
         };
         ctx.has_lifelink = false;
+        ctx.trigger_source = state
+            .objects
+            .get(source_id)
+            .map(|object| crate::game::triggers::trigger_source_context_for_latch(state, object));
 
         let target_ref = match &assignment.target {
             DamageTarget::Object(id) => TargetRef::Object(*id),
@@ -1629,16 +1627,108 @@ pub(crate) fn apply_combat_damage(
             entries.push(BatchEntry {
                 ctx,
                 source_is_commander,
-                assignment,
+                assignment: assignment.clone(),
                 lifelink_controller,
             });
             proposed_events.push(proposed);
         }
     }
 
-    // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
-    let (survivors, prevention_tally) =
-        replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
+    let mut work = crate::types::game_state::PendingCombatReplacementWork::new(proposed_events);
+    work.entries = entries
+        .into_iter()
+        .map(|entry| crate::types::game_state::PendingCombatDamageEntry {
+            context: crate::types::ability::DamageContextSnapshot::from(&entry.ctx),
+            source: entry.ctx.trigger_source,
+            assignment: entry.assignment,
+            source_is_commander: entry.source_is_commander,
+            lifelink_controller: entry.lifelink_controller,
+        })
+        .collect();
+    finish_combat_replacements(
+        state,
+        PendingCombatLifelink {
+            replacement_work: Some(Box::new(work)),
+            remaining: Default::default(),
+            batch_events: events,
+            damage_to_players: Vec::new(),
+            prevention_tally: Vec::new(),
+            lives_before,
+            sub_step,
+        },
+    )
+}
+
+fn finish_combat_replacements(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+) -> CombatDamageBatch {
+    let mut work = *record
+        .replacement_work
+        .take()
+        .expect("replacement work is owned");
+    let restore_tally = state.combat_prevention_tally.take();
+    state.combat_prevention_tally = Some(record.prevention_tally.iter().copied().collect());
+    let pause =
+        replacement::replace_combat_damage_batch(state, &mut record.batch_events, &mut work);
+    let prevention_tally = state.combat_prevention_tally.take().unwrap_or_default();
+    state.combat_prevention_tally = restore_tally;
+    if let Some(waiting_for) = pause {
+        record.prevention_tally = prevention_tally.into_iter().collect();
+        record.prevention_tally.sort_by_key(|(key, _)| *key);
+        record.replacement_work = Some(Box::new(work));
+        state.waiting_for = waiting_for.clone();
+        let events = record.batch_events.clone();
+        state.pending_combat_lifelink = Some(Box::new(record));
+        return CombatDamageBatch::Paused {
+            events,
+            waiting_for: Box::new(waiting_for),
+        };
+    }
+    let entries = work
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let mut ctx = DamageContext::from(entry.context);
+            ctx.trigger_source = entry.source;
+            BatchEntry {
+                ctx,
+                source_is_commander: entry.source_is_commander,
+                assignment: entry.assignment,
+                lifelink_controller: entry.lifelink_controller,
+            }
+        })
+        .collect();
+    finish_combat_damage_entries(
+        state,
+        entries,
+        work.survivors,
+        prevention_tally,
+        record.batch_events,
+        record.lives_before,
+        record.sub_step,
+    )
+}
+
+fn finish_combat_damage_entries(
+    state: &mut GameState,
+    entries: Vec<BatchEntry>,
+    survivors: Vec<Option<ProposedEvent>>,
+    prevention_tally: std::collections::HashMap<AppliedReplacementKey, i32>,
+    mut events: Vec<GameEvent>,
+    lives_before: Vec<i32>,
+    sub_step: CombatDamageSubStep,
+) -> CombatDamageBatch {
+    // CR 510.2: accumulates per-player, per-source damage for this step only.
+    // `(player, [(source_id, amount)], step_total)`.
+    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
+    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
+    // CR 400.7: each source's incarnation as it dealt combat damage this step.
+    let mut source_incarnations: Vec<crate::types::identifiers::ObjectIncarnationRef> = Vec::new();
+    // CR 119.3 + CR 702.15b: per-source lifelink life gain summed across this
+    // simultaneous batch — `(source_id, controller, total_dealt)`. Applied once
+    // per source after the batch so "whenever you gain life" triggers once.
+    let mut lifelink_by_source: Vec<(ObjectId, PlayerId, u32)> = Vec::new();
 
     // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
     debug_assert_eq!(
@@ -1658,10 +1748,10 @@ pub(crate) fn apply_combat_damage(
                 &mut events,
             ) {
                 DamageResult::Applied(amt) => amt,
-                // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
-                // player gets priority between combat damage being assigned and
-                // dealt — combat cannot pause, so the deferred portion is dropped
-                // (mirrors the legacy `apply_damage_to_target` combat behavior).
+                // Pre-existing delivery-stage limitation: a later life-loss or
+                // poison replacement can suspend after Damage replacement has
+                // settled. This is separate from the pre-delivery combat batch
+                // ordering choice retained by replacement_work above.
                 DamageResult::NeedsChoice => 0,
             },
             // Fully prevented or skipped — no damage applied.
@@ -1787,6 +1877,7 @@ pub(crate) fn apply_combat_damage(
     drain_combat_lifelink(
         state,
         PendingCombatLifelink {
+            replacement_work: None,
             remaining: lifelink_by_source
                 .into_iter()
                 .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
@@ -4628,6 +4719,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,
@@ -5709,5 +5801,279 @@ mod tests {
         assert_eq!(runner.state().objects[&cadet_1].zone, Zone::Graveyard);
         assert_eq!(runner.state().objects[&cadet_2].zone, Zone::Graveyard);
         assert_eq!(combat_damage_steps(&runner), 2);
+    }
+
+    #[test]
+    fn paid_pilgrim_combat_order_pause_restores_all_survivors_and_lifelink_once() {
+        use crate::types::ability::{
+            DamageModification, DamageTargetFilter, DamageTargetPlayerScope, ReplacementDefinition,
+            ReplacementMode,
+        };
+        use crate::types::game_state::TrustedGameStateEnvelope;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::replacements::ReplacementEvent;
+        for rider_choice in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let chosen = scenario
+                .add_creature(P0, "Chosen red combat source", 4, 6)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .with_keyword(Keyword::Trample)
+                .with_keyword(Keyword::Lifelink)
+                .id();
+            let other = scenario
+                .add_creature(P0, "Independent lifelink attacker", 1, 3)
+                .with_keyword(Keyword::Lifelink)
+                .id();
+            let blocker = scenario.add_creature(P1, "Protected blocker", 1, 1).id();
+            let pilgrim = scenario.add_creature_from_oracle(P1, "Pilgrim of Justice", 1, 3,
+            "Protection from red\n{W}, Sacrifice this creature: The next time a red source of your choice would deal damage this turn, prevent that damage.").id();
+            scenario.with_mana_pool(
+                P1,
+                vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+            );
+            let mut runner = scenario.build();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.activate(pilgrim, 0).resolve();
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("the printed paid sacrifice reaches the actual source prompt");
+            };
+            let reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == chosen)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&pilgrim].zone, Zone::Graveyard);
+            let optional_index = runner.state().pending_damage_replacements.len();
+            let mut optional = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_source_filter(TargetFilter::SpecificObject { id: chosen })
+                .damage_target_filter(DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::Specific(P1),
+                })
+                .damage_modification(DamageModification::Double)
+                .mode(ReplacementMode::Optional { decline: None });
+            if rider_choice {
+                optional.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    Effect::Choose {
+                        choice_type: crate::types::ability::ChoiceType::Color { excluded: vec![] },
+                        persist: false,
+                        selection: crate::types::ability::TargetSelectionMode::Chosen,
+                    },
+                )));
+            }
+            optional.source_controller = Some(P1);
+            optional.description = Some("Competing combat double".into());
+            runner
+                .state_mut()
+                .pending_damage_replacements
+                .push(optional);
+            drive_to_combat_damage(&mut runner, &[chosen, other], vec![(blocker, chosen)]);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::AssignCombatDamage { attacker_id, .. } if attacker_id == chosen)
+            );
+            runner
+                .act(GameAction::AssignCombatDamage {
+                    mode: CombatDamageAssignmentMode::Normal,
+                    assignments: vec![(blocker, 1)],
+                    trample_damage: 3,
+                    controller_damage: 0,
+                })
+                .unwrap();
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "actual combat damage replacement ordering must park"
+            );
+            let batch = runner.state().pending_combat_lifelink.as_ref().unwrap();
+            let work = batch.replacement_work.as_ref().unwrap();
+            assert!(!work.survivors.is_empty() && !work.remaining.is_empty());
+            assert_eq!(work.opportunity.len(), 1);
+            assert!(runner.state().pending_replacement.is_some());
+            assert_eq!(
+            (runner.life(P0), runner.life(P1)),
+            (20, 20),
+            "no survivor is delivered before the simultaneous batch's replacement pass completes"
+        );
+            let parked = runner.state().clone();
+            for trusted in [false, true] {
+                let restored = if trusted {
+                    let wire =
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(parked.clone()))
+                            .unwrap();
+                    serde_json::from_value::<TrustedGameStateEnvelope>(wire)
+                        .unwrap()
+                        .into_game_state()
+                } else {
+                    serde_json::from_value(serde_json::to_value(&parked).unwrap()).unwrap()
+                };
+                let mut resumed = GameRunner::from_state(restored);
+                let pending = resumed.state().pending_replacement.as_ref().unwrap();
+                let choice = pending
+                    .candidates
+                    .iter()
+                    .position(|rid| rid.source == ObjectId(0) && rid.index == optional_index)
+                    .unwrap();
+                assert!(choice > 0, "answer the nondefault competing modifier");
+                resumed
+                    .act(GameAction::ChooseReplacement { index: choice })
+                    .unwrap();
+                assert!(
+                    matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ),
+                    "the ordered optional competitor prompts separately"
+                );
+                assert!(
+                    resumed
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .unwrap()
+                        .is_optional
+                );
+                let optional_pause = serde_json::to_value(resumed.state()).unwrap();
+                *resumed.state_mut() = serde_json::from_value(optional_pause).unwrap();
+                let mut result = resumed
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+                if rider_choice {
+                    assert!(matches!(resumed.state().waiting_for, WaitingFor::NamedChoice { .. }), "the actual replacing action parks a separate public color choice before combat delivery");
+                    let work = resumed
+                        .state()
+                        .pending_combat_lifelink
+                        .as_ref()
+                        .unwrap()
+                        .replacement_work
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(
+                        work.entries.len(),
+                        work.survivors.len() + work.remaining.len()
+                    );
+                    assert!(resumed.state().pending_replacement.is_none());
+                    assert_eq!((resumed.life(P0), resumed.life(P1)), (20, 20));
+                    let current = resumed.state().clone();
+                    *resumed.state_mut() = if trusted {
+                        serde_json::from_value::<TrustedGameStateEnvelope>(
+                            serde_json::to_value(TrustedGameStateEnvelope::capture(current))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else {
+                        serde_json::from_value(serde_json::to_value(current).unwrap()).unwrap()
+                    };
+                    result = resumed
+                        .act(GameAction::ChooseOption {
+                            choice: "Black".into(),
+                        })
+                        .unwrap();
+                }
+                assert_eq!(
+                    (resumed.life(P0), resumed.life(P1)),
+                    (21, 19),
+                    "only the independent attacker's one damage and one lifelink gain survive"
+                );
+                assert_eq!(resumed.state().objects[&blocker].damage_marked, 0);
+                assert_eq!(resumed.state().objects[&chosen].damage_marked, 1);
+                assert_eq!(result.events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { source_id, amount: 1, .. } if *source_id == other)).count(), 1);
+                assert!(
+                    resumed.state().pending_replacement.is_none()
+                        && resumed.state().pending_combat_lifelink.is_none()
+                );
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    resumed.state().stack.is_empty()
+                        && resumed.state().resolution_stack.is_empty()
+                        && resumed.state().deferred_triggers.is_empty()
+                );
+                assert!(resumed.state().owed_spell_final_part().is_none());
+                assert!(combat(&resumed).regular_damage_done);
+            }
+        }
+    }
+
+    #[test]
+    fn paid_awe_strike_trample_opportunity_gains_the_whole_prevented_amount_once() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, "Trampling source", 4, 6)
+            .with_keyword(Keyword::Trample)
+            .id();
+        let other = scenario
+            .add_creature(P0, "Independent lifelink", 1, 3)
+            .with_keyword(Keyword::Lifelink)
+            .id();
+        let blocker = scenario.add_creature(P1, "Protected blocker", 1, 1).id();
+        let awe = scenario.add_spell_to_hand_from_oracle(P1, "Awe Strike", true,
+            "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+        scenario.with_mana_pool(
+            P1,
+            vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.cast(awe).target_object(source).resolve();
+        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+        assert!(runner.state().pending_damage_replacements[0]
+            .runtime_execute
+            .is_some());
+        drive_to_combat_damage(&mut runner, &[source, other], vec![(blocker, source)]);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::AssignCombatDamage { attacker_id, .. } if attacker_id == source)
+        );
+        let result = runner
+            .act(GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 1)],
+                trample_damage: 3,
+                controller_damage: 0,
+            })
+            .unwrap();
+        assert_eq!((runner.life(P0), runner.life(P1)), (21, 23));
+        let gains: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } if *player_id == P1 && *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gains, vec![4], "one source's complete simultaneous opportunity gives one aggregate four-life rider, not separate one/three gains");
+        assert_eq!(runner.state().objects[&blocker].damage_marked, 0);
+        assert!(
+            runner.state().pending_combat_lifelink.is_none()
+                && runner.state().pending_replacement.is_none()
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+        );
+        assert!(runner.state().owed_spell_final_part().is_none());
     }
 }

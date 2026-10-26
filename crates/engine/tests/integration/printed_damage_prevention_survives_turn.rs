@@ -850,17 +850,17 @@ fn reverse_damage_shield_expires_at_cleanup_with_no_duration_on_either_carrier()
         "reach-guard: the ChosenDamageSource branch under test must be reached"
     );
     runner
-        .act(GameAction::ChooseDamageSource { source: bear })
+        .act(GameAction::ChooseDamageSource {
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                bear,
+                runner.state().objects[&bear].incarnation,
+            ),
+        })
         .expect("choosing the damage source must succeed");
 
     let pending = &runner.state().pending_damage_replacements;
     assert_eq!(pending.len(), 1, "the shield must exist after the choice");
-    assert_eq!(
-        pending[0].shield_kind,
-        ShieldKind::Prevention {
-            amount: PreventionAmount::All
-        }
-    );
+    assert_eq!(pending[0].shield_kind, ShieldKind::PreventionOneShot);
     assert_eq!(
         pending[0].damage_source_filter,
         Some(TargetFilter::SpecificObject { id: bear }),
@@ -882,8 +882,8 @@ fn reverse_damage_shield_expires_at_cleanup_with_no_duration_on_either_carrier()
     );
     assert_eq!(
         runner.state().players[0].life,
-        life_before,
-        "the shield must prevent the chosen source's damage in its own turn"
+        life_before + 3,
+        "the shield prevents three and immediately gains exactly three life"
     );
 
     // Cross two boundaries back to P1's next turn.
@@ -1132,4 +1132,229 @@ fn urzas_result_rows_are_die_table_branches_not_printed_shields() {
         life_before - 3,
         "no shield exists, so ordinary combat damage lands"
     );
+}
+
+fn assert_reverse_terminal(runner: &GameRunner) {
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(runner.state().owed_spell_final_part().is_none());
+    assert!(runner.state().pending_replacement.is_none());
+}
+
+#[test]
+fn full_paid_reverse_damage_prevents_three_and_gains_three_immediately_once() {
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let reverse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reverse Damage", true, REVERSE_DAMAGE_TEXT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 1,
+        })
+        .id();
+    let first = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let second = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::White,
+            ManaType::White,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(first).target_player(P0).commit();
+    runner.cast(reverse).resolve();
+    let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+        panic!("full Reverse Damage must choose the actual spell source");
+    };
+    let reference = options
+        .iter()
+        .find(|option| option.identity.reference.object_id == first)
+        .unwrap()
+        .identity
+        .reference;
+    let saved = serde_json::to_value(runner.state()).unwrap();
+    *runner.state_mut() = serde_json::from_value(saved).unwrap();
+    runner
+        .act(GameAction::ChooseDamageSource { source: reference })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[0].life,
+        23,
+        "prevent3/gain3, before any later event or turn"
+    );
+    assert_reverse_terminal(&runner);
+    runner.cast(second).target_player(P0).resolve();
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "no replayed gain on an independent damage event"
+    );
+    assert_reverse_terminal(&runner);
+}
+
+#[test]
+fn full_paid_reverse_damage_unused_shield_expires_without_gaining_life() {
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let reverse = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reverse Damage", true, REVERSE_DAMAGE_TEXT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 1,
+        })
+        .id();
+    let bear = scenario.add_creature(P1, "Unused chosen source", 3, 3).id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::White, ManaType::White, ManaType::Colorless]
+            .into_iter()
+            .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(reverse).resolve();
+    let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+        panic!("source choice required");
+    };
+    let reference = options
+        .iter()
+        .find(|option| option.identity.reference.object_id == bear)
+        .unwrap()
+        .identity
+        .reference;
+    runner
+        .act(GameAction::ChooseDamageSource { source: reference })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert!(!runner.state().pending_damage_replacements[0].is_consumed);
+    assert_eq!(runner.state().players[0].life, 20);
+    cross_boundary(&mut runner);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        runner.state().pending_damage_replacements.is_empty(),
+        "UNUSED shield expires at real cleanup"
+    );
+    assert!(run_combat(&mut runner, P1, bear, P0, None));
+    assert_eq!(
+        runner.state().players[0].life,
+        17,
+        "later matching source deals damage and grants no stale gain"
+    );
+    assert_reverse_terminal(&runner);
+}
+
+#[test]
+fn paid_reverse_damage_unpreventable_actual_combat_does_not_spend_or_gain_with_preventable_reach_control(
+) {
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    for unpreventable in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = if unpreventable {
+            scenario
+                .add_creature_from_oracle(
+                    P1,
+                    "Excruciator",
+                    7,
+                    7,
+                    "Damage that would be dealt by this creature can't be prevented.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                    generic: 6,
+                })
+                .id()
+        } else {
+            scenario
+                .add_creature(P1, "Preventable seven-power control", 7, 7)
+                .id()
+        };
+        let reverse = scenario
+            .add_spell_to_hand_from_oracle(P0, "Reverse Damage", true, REVERSE_DAMAGE_TEXT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::White, ManaType::White, ManaType::Colorless]
+                .into_iter()
+                .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P1;
+        runner.state_mut().priority_player = P1;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.cast(reverse).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("full paid source prompt");
+        };
+        let reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == source)
+            .unwrap()
+            .identity
+            .reference;
+        runner
+            .act(GameAction::ChooseDamageSource { source: reference })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+        assert!(
+            run_combat(&mut runner, P1, source, P0, None),
+            "the actual seven-power attack is the negative's nonvacuous reach guard"
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            if unpreventable { 13 } else { 27 }
+        );
+        assert_eq!(
+            runner.state().pending_damage_replacements[0].is_consumed,
+            !unpreventable,
+            "zero prevented damage neither spends the next opportunity nor grants life"
+        );
+        assert_reverse_terminal(&runner);
+    }
 }

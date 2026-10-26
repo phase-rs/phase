@@ -369,6 +369,7 @@ fn illegal_declared_player_searches_no_library() {
 fn illegal_declared_player_gets_no_damage_shield() {
     let (legal, illegal) = legal_and_illegal(
         Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: declared(G),

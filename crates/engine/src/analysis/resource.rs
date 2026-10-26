@@ -5512,6 +5512,7 @@ fn floating_replacement_can_name_object(
     frames: [&GameState; 2],
 ) -> bool {
     let crate::types::ability::ReplacementDefinition {
+        selected_damage_source,
         execute,
         runtime_execute,
         mode,
@@ -5552,7 +5553,8 @@ fn floating_replacement_can_name_object(
         origin: _,
         counter_replacement_subject: _,
     } = def;
-    execute.is_some()
+    selected_damage_source.is_some()
+        || execute.is_some()
         || runtime_execute.is_some()
         || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
         || valid_card.is_some()
@@ -27975,5 +27977,66 @@ mod tests {
             certify(&prior, &stray).is_none(),
             "a stray id in the non-holder container refuses"
         );
+    }
+}
+
+#[cfg(test)]
+mod chosen_damage_capture_resource_tests {
+    use super::*;
+    use crate::types::ability::{ReplacementDefinition, TargetFilter};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn selected_capture_names_an_object_and_full_equality_controls_unread_lki_growth() {
+        let mut prior = GameState::new_two_player(23);
+        let id = crate::game::zones::create_object(
+            &mut prior,
+            CardId(1),
+            PlayerId(0),
+            "Selected source".into(),
+            Zone::Battlefield,
+        );
+        let capture =
+            crate::game::triggers::trigger_source_context_for_latch(&prior, &prior.objects[&id]);
+        let bare = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        assert!(!floating_replacement_can_name_object(
+            &bare,
+            [&prior, &prior]
+        ));
+        let native = bare
+            .clone()
+            .damage_source_filter(TargetFilter::SpecificObject { id });
+        assert!(floating_replacement_can_name_object(
+            &native,
+            [&prior, &prior]
+        ));
+        let mut captured = bare;
+        captured.selected_damage_source = Some(capture.clone());
+        assert!(
+            floating_replacement_can_name_object(&captured, [&prior, &prior]),
+            "stored exact capture is explicitly object/LKI-naming"
+        );
+        captured.damage_source_filter = native.damage_source_filter;
+        prior.pending_damage_replacements.push(captured);
+        let mut current = prior.clone();
+        current.lki_cache.insert(ObjectId(900), capture.lki.clone());
+        assert!(last_known_records_grow_unread(&prior, &current));
+        assert!(
+            history_covers(&prior, &current),
+            "equal naming definitions admit otherwise valid unread gone-object LKI growth"
+        );
+        current.pending_damage_replacements[0]
+            .selected_damage_source
+            .as_mut()
+            .unwrap()
+            .lki
+            .name = "Different captured facts".into();
+        assert!(
+            !last_known_records_grow_unread(&prior, &current),
+            "complete selected capture participates in definition equality"
+        );
+        assert!(!history_covers(&prior, &current));
     }
 }

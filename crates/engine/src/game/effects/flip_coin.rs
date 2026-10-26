@@ -206,6 +206,9 @@ fn run_flip_branch(
                 targets.to_vec(),
                 chain_root_targets.to_vec(),
             );
+        if !sub.effect.is_fresh_damage_source_producer() {
+            sub.context.damage_source_choice = branch_context.damage_source_choice.clone();
+        }
         sub.bind_return_result_process(expected_return_result_process);
         // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
         // they include the branch's OWN announced targets ("if you win the flip,

@@ -391,7 +391,8 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
             filter: Box::new(member_pool_filter(filter)),
             caused_by: *caused_by,
         },
-        TargetFilter::ChosenDamageSource { filter } => TargetFilter::ChosenDamageSource {
+        TargetFilter::ChosenDamageSource { chooser, filter } => TargetFilter::ChosenDamageSource {
+            chooser: *chooser,
             filter: filter
                 .as_ref()
                 .map(|filter| Box::new(member_pool_filter(filter))),
@@ -745,11 +746,15 @@ mod tests {
                     caused_by: Some(ThisWayCause::Exiled),
                 },
                 TargetFilter::ChosenDamageSource {
+                    chooser: None,
                     filter: Some(Box::new(TargetFilter::Not {
                         filter: Box::new(consumed_binding),
                     })),
                 },
-                TargetFilter::ChosenDamageSource { filter: None },
+                TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                },
             ],
         };
 
@@ -763,11 +768,15 @@ mod tests {
                         caused_by: Some(ThisWayCause::Exiled),
                     },
                     TargetFilter::ChosenDamageSource {
+                        chooser: None,
                         filter: Some(Box::new(TargetFilter::Not {
                             filter: Box::new(retained),
                         })),
                     },
-                    TargetFilter::ChosenDamageSource { filter: None },
+                    TargetFilter::ChosenDamageSource {
+                        chooser: None,
+                        filter: None
+                    },
                 ],
             },
             "only the already-consumed TargetPlayer binding is removed inside the direct carriers"

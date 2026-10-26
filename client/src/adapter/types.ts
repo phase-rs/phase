@@ -1790,6 +1790,13 @@ export interface ObjectIncarnationRef {
   incarnation: number;
 }
 
+export interface PromptSourceBinding {
+  identity: { reference: ObjectIncarnationRef; expected_zone: Zone };
+  controller: PlayerId;
+  display_name: string;
+}
+
+
 export type ManaSourcePenalty =
   | "None"
   | "HasIrreversibleContinuation"
@@ -2754,7 +2761,7 @@ export type WaitingFor =
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
-  | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
+  | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: PromptSourceBinding[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; activation_cost_snapshot?: ActivationCostSnapshot; activation_payment_mode?: CastPaymentMode; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
@@ -3343,7 +3350,7 @@ export type GameAction =
   | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
   | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
-  | { type: "ChooseDamageSource"; data: { source: ObjectId } }
+  | { type: "ChooseDamageSource"; data: { source: ObjectIncarnationRef } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
   | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }

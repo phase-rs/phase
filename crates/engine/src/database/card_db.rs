@@ -124,15 +124,18 @@ impl CardDatabase {
     /// Keeps compressed test fixtures on the same deserialization path as the
     /// production file loader without changing production's buffered-file flow.
     pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
-        let entries: HashMap<String, CardExportEntry> =
-            serde_json::from_reader(BufReader::new(reader))?;
+        let mut raw: serde_json::Value = serde_json::from_reader(BufReader::new(reader))?;
+        crate::types::ability::normalize_legacy_damage_source_program(&mut raw);
+        let entries: HashMap<String, CardExportEntry> = serde_json::from_value(raw)?;
         Ok(Self::from_export_entries(entries))
     }
 
     /// Load from a card-data export JSON string.
     /// Used by the WASM bridge to receive card data from the frontend.
     pub fn from_json_str(json: &str) -> Result<Self, serde_json::Error> {
-        let entries: HashMap<String, CardExportEntry> = serde_json::from_str(json)?;
+        let mut raw: serde_json::Value = serde_json::from_str(json)?;
+        crate::types::ability::normalize_legacy_damage_source_program(&mut raw);
+        let entries: HashMap<String, CardExportEntry> = serde_json::from_value(raw)?;
         Ok(Self::from_export_entries(entries))
     }
 
@@ -2444,5 +2447,995 @@ mod tests {
         let sig = db.bracket_signals_for("demonic tutor");
         assert!(sig.efficient_tutor);
         assert!(sig.game_changer);
+    }
+}
+
+#[cfg(test)]
+pub(crate) const SOURCE_CHOICE_TWELVE_ATOMIC: &str = r###"{
+  "meta": {
+    "date": "2026-10-04",
+    "version": "5.3.0+20261004"
+  },
+  "data": {
+    "Circle of Protection: Black": [
+      {
+        "name": "Circle of Protection: Black",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{1}: The next time a black source of your choice would deal damage to you this turn, prevent that damage.",
+        "identifiers": {
+          "scryfallOracleId": "7a5a8414-4da4-4dd0-93ae-210d50f4d6f6"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn’t need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "8ED",
+          "9ED",
+          "CED",
+          "CEI",
+          "FBB",
+          "ICE",
+          "ITP",
+          "LEB",
+          "PTC",
+          "RQS",
+          "SUM",
+          "TMP",
+          "WC00",
+          "WC97"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Circle of Protection: Blue": [
+      {
+        "name": "Circle of Protection: Blue",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{1}: The next time a blue source of your choice would deal damage to you this turn, prevent that damage.",
+        "identifiers": {
+          "scryfallOracleId": "d7572f17-f85d-45c0-ac64-43aac760eafe"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn’t need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "8ED",
+          "CED",
+          "CEI",
+          "FBB",
+          "ICE",
+          "LEA",
+          "LEB",
+          "SUM",
+          "TMP"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Circle of Protection: Green": [
+      {
+        "name": "Circle of Protection: Green",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{1}: The next time a green source of your choice would deal damage to you this turn, prevent that damage.",
+        "identifiers": {
+          "scryfallOracleId": "41b0f347-1398-4778-bf3f-4007d8a77162"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn’t need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "8ED",
+          "CED",
+          "CEI",
+          "FBB",
+          "ICE",
+          "LEA",
+          "LEB",
+          "PTC",
+          "SUM",
+          "TMP"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Circle of Protection: Red": [
+      {
+        "name": "Circle of Protection: Red",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{1}: The next time a red source of your choice would deal damage to you this turn, prevent that damage.",
+        "identifiers": {
+          "scryfallOracleId": "df2738fe-9cd1-4347-8808-105fcfde1190"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn’t need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "8ED",
+          "9ED",
+          "CED",
+          "CEI",
+          "F05",
+          "FBB",
+          "ICE",
+          "ITP",
+          "LEA",
+          "LEB",
+          "PRM",
+          "PTC",
+          "RQS",
+          "SUM",
+          "TMP",
+          "WC04",
+          "WC97"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Circle of Protection: White": [
+      {
+        "name": "Circle of Protection: White",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{1}: The next time a white source of your choice would deal damage to you this turn, prevent that damage.",
+        "identifiers": {
+          "scryfallOracleId": "5f46f86a-9779-4ed3-99cb-76a03d380598"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn’t need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "8ED",
+          "CED",
+          "CEI",
+          "FBB",
+          "ICE",
+          "LEA",
+          "LEB",
+          "SUM",
+          "TMP"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Rune of Protection: Black": [
+      {
+        "name": "Rune of Protection: Black",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{W}: The next time a black source of your choice would deal damage to you this turn, prevent that damage.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        "keywords": [
+          "Cycling"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "b027302f-80c2-441d-a9fd-bbe64bf5cf8a"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn't need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "USG"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Rune of Protection: Blue": [
+      {
+        "name": "Rune of Protection: Blue",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{W}: The next time a blue source of your choice would deal damage to you this turn, prevent that damage.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        "keywords": [
+          "Cycling"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "092dd5be-da62-4198-b7fa-0813f075047c"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn't need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "USG"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Rune of Protection: Green": [
+      {
+        "name": "Rune of Protection: Green",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{W}: The next time a green source of your choice would deal damage to you this turn, prevent that damage.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        "keywords": [
+          "Cycling"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "c7fca3f3-b48e-4ac5-be31-ce7ae3c7432c"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn't need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "USG"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Rune of Protection: Red": [
+      {
+        "name": "Rune of Protection: Red",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{W}: The next time a red source of your choice would deal damage to you this turn, prevent that damage.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        "keywords": [
+          "Cycling"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "9b3f6b29-675a-4153-9582-03318851b20e"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn't need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "USG"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Rune of Protection: White": [
+      {
+        "name": "Rune of Protection: White",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Enchantment",
+        "types": [
+          "Enchantment"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{W}: The next time a white source of your choice would deal damage to you this turn, prevent that damage.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        "keywords": [
+          "Cycling"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "6f214a42-e38f-4923-8afc-832efdde7975"
+        },
+        "rulings": [
+          {
+            "date": "2004-10-04",
+            "text": "A source of damage is a permanent, a spell on the stack (including one that creates a permanent), or any object referred to by an object on the stack. A source doesn't need to be capable of dealing damage to be a legal choice."
+          },
+          {
+            "date": "2004-10-04",
+            "text": "Can be used even when there is no damage to prevent. It prevents the next damage (if any) from the source this turn."
+          }
+        ],
+        "printings": [
+          "USG"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Pilgrim of Justice": [
+      {
+        "name": "Pilgrim of Justice",
+        "manaCost": "{2}{W}",
+        "manaValue": 3.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Creature — Human Cleric",
+        "types": [
+          "Creature"
+        ],
+        "subtypes": [
+          "Human",
+          "Cleric"
+        ],
+        "supertypes": [],
+        "power": "1",
+        "toughness": "3",
+        "text": "Protection from red\n{W}, Sacrifice this creature: The next time a red source of your choice would deal damage this turn, prevent that damage.",
+        "keywords": [
+          "Protection"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "959b672e-d4e4-49a1-874a-5148f040fadd"
+        },
+        "printings": [
+          "ODY"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ],
+    "Pilgrim of Virtue": [
+      {
+        "name": "Pilgrim of Virtue",
+        "manaCost": "{2}{W}",
+        "manaValue": 3.0,
+        "colors": [
+          "W"
+        ],
+        "colorIdentity": [
+          "W"
+        ],
+        "layout": "normal",
+        "type": "Creature — Human Cleric",
+        "types": [
+          "Creature"
+        ],
+        "subtypes": [
+          "Human",
+          "Cleric"
+        ],
+        "supertypes": [],
+        "power": "1",
+        "toughness": "3",
+        "text": "Protection from black\n{W}, Sacrifice this creature: The next time a black source of your choice would deal damage this turn, prevent that damage.",
+        "keywords": [
+          "Protection"
+        ],
+        "identifiers": {
+          "scryfallOracleId": "e2f73743-95e7-4f03-9b98-5ab5ebc4b724"
+        },
+        "printings": [
+          "ODY"
+        ],
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        }
+      }
+    ]
+  }
+}"###;
+
+#[cfg(test)]
+pub(crate) fn source_choice_expected_faces() -> Vec<CardFace> {
+    use crate::types::ability::*;
+    use crate::types::card_type::CardType;
+    use crate::types::keywords::{CyclingCost, Keyword, ProtectionTarget};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::zones::Zone;
+    let rows: serde_json::Value = serde_json::from_str(SOURCE_CHOICE_TWELVE_ATOMIC).unwrap();
+    let mut faces = Vec::new();
+    for (name, rows) in rows["data"].as_object().unwrap() {
+        let source = &rows[0];
+        let pilgrim = name == "Pilgrim of Justice" || name == "Pilgrim of Virtue";
+        let rune = name.starts_with("Rune");
+        let color = if name.ends_with("Black") || name.ends_with("Virtue") {
+            ManaColor::Black
+        } else if name.ends_with("Blue") {
+            ManaColor::Blue
+        } else if name.ends_with("Green") {
+            ManaColor::Green
+        } else if name.ends_with("Red") || name.ends_with("Justice") {
+            ManaColor::Red
+        } else {
+            ManaColor::White
+        };
+        let oracle = source["text"].as_str().unwrap();
+        let activation_line = if pilgrim {
+            oracle.lines().nth(1).unwrap()
+        } else {
+            oracle.lines().next().unwrap()
+        };
+        let activation_cost = if pilgrim {
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::White],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            }
+        } else {
+            AbilityCost::Mana {
+                cost: if rune {
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::White],
+                        generic: 0,
+                    }
+                } else {
+                    ManaCost::generic(1)
+                },
+            }
+        };
+        let prevention = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::PreventDamage {
+                lifetime: RedirectionLifetime::OneOpportunity,
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: if pilgrim {
+                    TargetFilter::Any
+                } else {
+                    TargetFilter::Controller
+                },
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    chooser: Some(Chooser::Controller),
+                    filter: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+                    ))),
+                }),
+                prevention_duration: None,
+            },
+        )
+        .cost(activation_cost)
+        .description(activation_line.into());
+        let mut face = CardFace {
+            name: name.clone(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: if pilgrim { 2 } else { 1 },
+            },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![if pilgrim {
+                    CoreType::Creature
+                } else {
+                    CoreType::Enchantment
+                }],
+                subtypes: if pilgrim {
+                    vec!["Human".into(), "Cleric".into()]
+                } else {
+                    vec![]
+                },
+            },
+            power: pilgrim.then_some(PtValue::Fixed(1)),
+            toughness: pilgrim.then_some(PtValue::Fixed(3)),
+            oracle_text: Some(oracle.into()),
+            color_identity: vec![ManaColor::White],
+            scryfall_oracle_id: Some(
+                source["identifiers"]["scryfallOracleId"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            ),
+            abilities: vec![prevention],
+            ..CardFace::default()
+        };
+        if pilgrim {
+            face.keywords
+                .push(Keyword::Protection(ProtectionTarget::Color(color)));
+        }
+        if rune {
+            face.keywords
+                .push(Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(2))));
+            let mut cycling = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2),
+                    },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::SourceCard,
+                    },
+                ],
+            });
+            cycling.activation_zone = Some(Zone::Hand);
+            cycling.ability_tag = Some(AbilityTag::Cycling);
+            face.abilities.push(cycling);
+        }
+        faces.push(face);
+    }
+    faces
+}
+
+#[cfg(test)]
+mod complete_source_choice_publication_tests {
+    use super::*;
+    #[test]
+    fn complete_twelve_faces_and_metadata_survive_identical_current_and_authentic_legacy_normal_loaders(
+    ) {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(input.path(), SOURCE_CHOICE_TWELVE_ATOMIC.as_bytes()).unwrap();
+        let raw = CardDatabase::from_mtgjson(input.path()).unwrap();
+        let expected = source_choice_expected_faces();
+        assert_eq!(expected.len(), 12);
+        assert_eq!(
+            raw.faces_in_scan_order().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        let names = expected.iter().map(|face| face.name.clone()).collect();
+        let fixture: serde_json::Value = serde_json::from_str(SOURCE_CHOICE_TWELVE_ATOMIC).unwrap();
+        // The ordinary MTGJSON library loader returns rules, while native
+        // publication also writes these complete AtomicCards metadata fields.
+        // export_subset_json intentionally drops that native-only metadata;
+        // restore it from the independent pinned fixture for BOTH normal
+        // complete export readers, rather than testing an AI-worker subset.
+        let mut complete: serde_json::Value =
+            serde_json::from_str(&raw.export_subset_json(&names)).unwrap();
+        for face in &expected {
+            let source = &fixture["data"][&face.name][0];
+            let entry = &mut complete[face.name.to_lowercase()];
+            entry["legalities"] = source["legalities"].clone();
+            entry["printings"] = source["printings"].clone();
+            entry["rulings"] = source
+                .get("rulings")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            entry["layout"] = serde_json::json!("normal");
+            entry["face_index"] = serde_json::json!(0);
+        }
+        let current = serde_json::to_string(&complete).unwrap();
+        let mut legacy = complete;
+        fn omit_legacy_chooser(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if object.get("type").and_then(serde_json::Value::as_str)
+                        == Some("ChosenDamageSource")
+                    {
+                        object.remove("chooser");
+                    }
+                    if object.get("type").and_then(serde_json::Value::as_str)
+                        == Some("PreventDamage")
+                    {
+                        object.remove("lifetime");
+                    }
+                    object.remove("selected_damage_source");
+                    for child in object.values_mut() {
+                        omit_legacy_chooser(child);
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for child in array {
+                        omit_legacy_chooser(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        omit_legacy_chooser(&mut legacy);
+        let assert_database = |db: &CardDatabase, expected: &[CardFace]| {
+            assert_eq!(db.face_index.len(), 12);
+            assert_eq!(
+                db.faces_in_scan_order().cloned().collect::<Vec<_>>(),
+                expected
+            );
+            for face in expected {
+                assert_eq!(db.get_face_by_name(&face.name), Some(face));
+                assert_eq!(
+                    db.get_face_by_oracle_id(face.scryfall_oracle_id.as_deref().unwrap()),
+                    Some(face)
+                );
+                assert_eq!(db.face_order_index[&face.name.to_lowercase()], 0);
+                assert!(db.is_front_face_key(&face.name.to_lowercase()));
+                let source = &fixture["data"][&face.name][0];
+                assert_eq!(
+                    serde_json::to_value(db.rulings_for(&face.name)).unwrap(),
+                    source
+                        .get("rulings")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([]))
+                );
+                assert_eq!(
+                    serde_json::to_value(db.printings_for(&face.name).unwrap()).unwrap(),
+                    source["printings"]
+                );
+                assert_eq!(
+                    db.get_layout_kind(face.scryfall_oracle_id.as_deref().unwrap()),
+                    Some(LayoutKind::Single)
+                );
+                for format in LegalityFormat::ALL {
+                    let expected = match source["legalities"]
+                        .get(format.as_key())
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("Legal") => Some(LegalityStatus::Legal),
+                        Some("Restricted") => Some(LegalityStatus::Restricted),
+                        Some("Banned") => Some(LegalityStatus::Banned),
+                        None => None,
+                        other => panic!("pinned unexpected legality {other:?}"),
+                    };
+                    assert_eq!(db.legality_status(&face.name, format), expected);
+                }
+                assert_eq!(
+                    face.mana_cost.mana_value(),
+                    if face.power.is_some() { 3 } else { 2 }
+                );
+            }
+        };
+        let mut old_expected = expected.clone();
+        for face in &mut old_expected {
+            if let crate::types::ability::Effect::PreventDamage { lifetime, .. } =
+                face.abilities[0].effect.as_mut()
+            {
+                *lifetime = crate::types::ability::RedirectionLifetime::Continuous;
+            }
+        }
+        for (complete, expected) in [
+            (current, expected),
+            (serde_json::to_string(&legacy).unwrap(), old_expected),
+        ] {
+            let normal_file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(normal_file.path(), complete.as_bytes()).unwrap();
+            assert_eq!(
+                std::fs::read(normal_file.path()).unwrap(),
+                complete.as_bytes()
+            );
+            assert_database(&CardDatabase::from_json_str(&complete).unwrap(), &expected);
+            assert_database(
+                &CardDatabase::from_export(normal_file.path()).unwrap(),
+                &expected,
+            );
+        }
     }
 }

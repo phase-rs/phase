@@ -1706,6 +1706,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             search_attach_host,
             trigger_context,
             trigger_firing,
+            damage_source_candidates: _,
             attachment_choice,
             attachment_remainder: _,
             player_scope_tail,
@@ -4252,6 +4253,7 @@ fn prepend_to_pending_continuation_with_producer(
             search_attach_host,
             trigger_context,
             trigger_firing,
+            damage_source_candidates,
             attachment_choice,
             attachment_remainder,
             player_scope_tail,
@@ -4275,6 +4277,7 @@ fn prepend_to_pending_continuation_with_producer(
                 // re-latched to whatever is live at splice time.
                 trigger_context,
                 trigger_firing,
+                damage_source_candidates,
                 attachment_choice,
                 attachment_remainder,
                 player_scope_tail,
@@ -5805,7 +5808,15 @@ pub(crate) fn apply_parent_chain_context(
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
+    let child_damage_opportunity = child.context.damage_opportunity.take();
     child.context = parent.context.clone();
+    // Only explicitly marked remaining members inherit this operation.
+    child.context.damage_opportunity = child_damage_opportunity
+        .and_then(|owned| parent.context.damage_opportunity.clone().or(Some(owned)));
+    // A fresh producer cannot consume its parent's completed selection.
+    if child.effect.is_fresh_damage_source_producer() {
+        child.context.damage_source_choice = None;
+    }
     // An instruction's ticket belongs only to its generated concrete branch;
     // ordinary descendants cannot spend that producer's capability.
     child.context.counter_removal_result = None;
@@ -10577,6 +10588,8 @@ fn replacement_matchers_read_filter_population(
     use crate::types::ability::ReplacementMode;
     let has_filter = |filter: &TargetFilter| filter::filter_operands_contain(filter, leaf);
     let crate::types::ability::ReplacementDefinition {
+        // Captured values contain no live population expressions.
+        selected_damage_source: _,
         event: _,
         execute: _,
         runtime_execute: _,
@@ -51199,6 +51212,7 @@ mod tests {
             (
                 "PreventDamage All",
                 effect_row(|target| Effect::PreventDamage {
+                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target,
@@ -65372,5 +65386,117 @@ mod untargeted_target_only_choice_tests {
                     .map(|context| context.targets.is_empty())
             });
         assert_eq!(stamped, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod selected_damage_capture_population_tests {
+    use super::*;
+    use crate::types::ability::ReplacementDefinition;
+    use crate::types::replacements::ReplacementEvent;
+
+    #[test]
+    fn captured_facts_are_inert_but_real_sink_and_nested_cost_population_reads_survive() {
+        let mut state = GameState::new_two_player(23);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Frozen".into(),
+            Zone::Battlefield,
+        );
+        let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        def.selected_damage_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&id],
+        ));
+        let leaf = |filter: &TargetFilter| matches!(filter, TargetFilter::LastCreated);
+        assert!(!replacement_matchers_read_filter_population(&def, &leaf));
+        def.damage_source_filter = Some(TargetFilter::And {
+            filters: vec![TargetFilter::Any, TargetFilter::LastCreated],
+        });
+        assert!(
+            replacement_matchers_read_filter_population(&def, &leaf),
+            "a genuine nested sink predicate is independently live"
+        );
+        def.damage_source_filter = None;
+        def.mode = crate::types::ability::ReplacementMode::MayCost {
+            cost: AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::count(
+                TargetFilter::LastCreated,
+                1,
+            )),
+            decline: None,
+        };
+        assert!(
+            replacement_matchers_read_filter_population(&def, &leaf),
+            "an independently paid mode cost still reads its population"
+        );
+        def.mode = crate::types::ability::ReplacementMode::Mandatory;
+        def.damage_modification = Some(crate::types::ability::DamageModification::Plus {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::LastCreated,
+                },
+            },
+        });
+        assert!(
+            replacement_matchers_read_filter_population(&def, &leaf),
+            "a real damage formula still reads its selected population"
+        );
+        def.damage_modification = None;
+        let token = crate::types::proposed_event::TokenSpec {
+            characteristics: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Control".into(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![],
+                subtypes: vec![],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "control".into(),
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::LastCreated)
+            ],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: id,
+            controller: PlayerId(0),
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+        };
+        def.additional_token_spec = Some(Box::new(token.clone()));
+        assert!(
+            replacement_matchers_read_filter_population(&def, &leaf),
+            "a nested additional token's live static predicate is read"
+        );
+        def.additional_token_spec = None;
+        def.ensure_token_specs = Some(vec![token]);
+        assert!(
+            replacement_matchers_read_filter_population(&def, &leaf),
+            "the ensure-token sibling receives the same operand walk"
+        );
+        def.ensure_token_specs = None;
+        let nested = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::LastCreated,
+                    },
+                },
+            },
+        );
+        def.mode = crate::types::ability::ReplacementMode::Optional {
+            decline: Some(Box::new(nested)),
+        };
+        assert!(
+            replacement_reads_created_referent(&def),
+            "the separate nested decline walk retains its actual LastCreated read"
+        );
     }
 }

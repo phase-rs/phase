@@ -20,6 +20,8 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.damage_source_choice = None;
+    ability.context.damage_opportunity = None;
     ability.context.counter_removal_result = None;
     ability.context.parent_target_iteration_members = None;
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -52,6 +54,7 @@ pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameStat
     let mut projected = state.clone();
     if let Some(pending) = projected.pending_replacement.as_mut() {
         pending.damage_source_context = None;
+        pending.damage_opportunity.clear();
         if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
             result_binding, ..
         } = &mut pending.proposed
@@ -2041,6 +2044,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     }
     if let Some(pending) = filtered.pending_replacement.as_mut() {
         pending.damage_source_context = None;
+        pending.damage_opportunity.clear();
         if let crate::types::proposed_event::ProposedEvent::RemoveCounter {
             result_binding, ..
         } = &mut pending.proposed
@@ -4973,7 +4977,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     }
     if let Some(choice) = &mut state.last_chosen_damage_source {
         choice
-            .source_filter
+            .candidate_filter
             .clear_typed_return_result_processes(&mut |_| {});
     }
     for phase in &mut state.extra_phases {
@@ -12918,6 +12922,7 @@ mod tests {
         );
         state.pending_combat_lifelink =
             Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                replacement_work: None,
                 remaining: std::collections::VecDeque::from(vec![
                     crate::types::game_state::PendingLifelinkGain {
                         controller: PlayerId(0),

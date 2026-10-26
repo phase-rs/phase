@@ -426,10 +426,17 @@ fn reflect_damage_choice_redirects_only_the_chosen_sources_next_event() {
         );
     };
     assert_eq!(*player, P0);
-    assert!(options.contains(&chosen));
+    assert!(options
+        .iter()
+        .any(|option| option.identity.reference.object_id == chosen));
     assert!(options.contains(&other));
     runner
-        .act(GameAction::ChooseDamageSource { source: chosen })
+        .act(GameAction::ChooseDamageSource {
+            source: engine::types::identifiers::ObjectIncarnationRef::of(
+                chosen,
+                runner.state().objects[&chosen].incarnation,
+            ),
+        })
         .expect("the selected source must bind the pending replacement");
 
     let p0_before = runner.life(P0);
