@@ -168,6 +168,14 @@ pub fn resolve(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
         });
     }
+    // CR 608.2b: an unavailable announcement cannot become an unrestricted
+    // event condition. Check before contextual binding erases ParentTarget;
+    // genuinely unassigned empty bindings keep their existing behavior.
+    let references_unavailable_parent = ability.has_authoritative_empty_binding()
+        && filter_groups
+            .iter()
+            .flatten()
+            .any(|filter| reaches_bare_parent_target_bind(filter));
     let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
@@ -183,17 +191,9 @@ pub fn resolve(
         // `match` over fallback defaults"), so a future variant must make this
         // decision instead of inheriting a silent skip.
         //
-        // These return nothing because this guard reads `TriggerDefinition`
-        // filter slots and they carry none — NOT because they are safe. Said
-        // plainly, because an earlier version of this comment claimed they were:
-        // the four `filter: TargetFilter` variants below go through the SAME
-        // `bind_parent_target_filter` call and degrade a bare `ParentTarget` to
-        // `TargetFilter::Any` identically. MEASURED over the corpus, 79 such
-        // filters exist across 76 cards (29 `WhenDies`, 38 `WhenDiesOrExiled`,
-        // 10 `WhenLeavesPlayFiltered`, 2 `WhenEntersBattlefield`). Whether any of
-        // them can reach this call with an empty `ability.targets` is UNMEASURED.
-        // It is not a regression — these arms skip the guard on main too — and it
-        // is out of scope for #8721, which is why they stay `Vec::new()` here.
+        // These conditions carry no TriggerDefinition filter slots. Their
+        // authoritative-empty references are guarded above through the shared
+        // condition-filter enumeration; unassigned-empty behavior is unchanged.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
@@ -214,7 +214,7 @@ pub fn resolve(
             .iter()
             .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
         });
-    if references_empty_parent || no_alternative_can_match {
+    if references_unavailable_parent || references_empty_parent || no_alternative_can_match {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateDelayedTrigger,
             source_id: ability.source_id,
@@ -4281,6 +4281,79 @@ mod tests {
             Zone::Battlefield,
             "a later incarnation must not be matched through the tracked set"
         );
+    }
+
+    #[test]
+    fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
+        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
+
+        for condition in [
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            for reason in [
+                None,
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::OwnAnnouncement,
+                }),
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::ParentAnnouncement,
+                }),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let mut ability = ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: condition.clone(),
+                        effect: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 3 },
+                                player: TargetFilter::Controller,
+                            },
+                        )),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.delayed_triggers.len(),
+                    usize::from(reason.is_none()),
+                    "condition={condition:?}, provenance={reason:?}"
+                );
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CreateDelayedTrigger,
+                        ..
+                    }
+                )));
+                if reason.is_none() {
+                    let groups = condition_filter_groups(&mut state.delayed_triggers[0].condition);
+                    assert!(
+                        groups
+                            .into_iter()
+                            .flatten()
+                            .all(|filter| *filter == TargetFilter::Any),
+                        "ordinary unassigned-empty binding keeps its existing wildcard"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -15463,7 +15463,7 @@ fn filter_refs_parent_target_metadata(filter: &TargetFilter) -> bool {
         TargetFilter::Typed(typed) => {
             matches!(
                 typed.controller,
-                Some(ControllerRef::ParentTargetController)
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
             )
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -15714,8 +15714,8 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
     matches!(effect, Effect::SearchLibrary { filter, .. } if filter_refs_same_name_as_parent_target(filter))
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+/// Recurse into compound filters so parent-object, controller, and owner
+/// dependencies remain visible to inheritance and delayed snapshotting.
 pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
@@ -15727,7 +15727,10 @@ pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
+            )
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -28408,6 +28411,23 @@ mod tests {
             }
         ));
         assert!(*reduced.sub_ability.unwrap() == tail);
+    }
+
+    #[test]
+    fn typed_parent_controller_and_owner_are_metadata_dependencies() {
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::creature().controller(controller));
+            assert!(filter_refs_parent_target(&filter), "{filter:?}");
+            assert!(filter_refs_parent_target_metadata(&filter), "{filter:?}");
+            assert!(!filter_requires_parent_target_object(&filter), "{filter:?}");
+        }
+        let independent =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        assert!(!filter_refs_parent_target(&independent));
+        assert!(!filter_refs_parent_target_metadata(&independent));
     }
 
     #[test]

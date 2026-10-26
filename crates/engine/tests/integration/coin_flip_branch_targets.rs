@@ -891,6 +891,397 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
     }
 }
 
+// Synthetic building-block fixture: a typed owner scope reads B, not the
+// controller of the source or the owner of its distinct attached host.
+fn typed_owner_coin_binding_scenario(remove_b: bool, delayed_phase: Option<Phase>) {
+    use engine::game::game_object::AttachTarget;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, QuantityExpr,
+        TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    use engine::types::player::PlayerId;
+
+    let mass = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounterAll {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::ParentTargetOwner),
+            ),
+        },
+    );
+    let payload = match delayed_phase {
+        Some(phase) => AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect: Box::new(mass),
+                uses_tracked_set: false,
+            },
+        ),
+        None => AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(mass),
+    };
+    let flip = |win| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+    };
+    let creature = TargetFilter::Typed(TypedFilter::creature());
+    let definition = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::TargetOnly {
+            target: creature.clone(),
+        },
+    )
+    .sub_ability(
+        flip(
+            AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target: creature })
+                .sub_ability(flip(payload)),
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )),
+    );
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PostCombatMain);
+    let a = scenario.add_creature(P0, "Outer A", 2, 2).id();
+    let b = scenario.add_creature(P1, "Owner referent B", 2, 2).id();
+    let ally = scenario.add_creature(P1, "B owner population", 2, 2).id();
+    let h = scenario
+        .add_creature(PlayerId(2), "Hostile attached host H", 2, 2)
+        .id();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Synthetic typed-owner Equipment", "")
+        .with_subtypes(vec!["Equipment"])
+        .with_ability_definition(definition)
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic exile response",
+            true,
+            "Exile target creature.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(h));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&h)
+        .unwrap()
+        .attachments
+        .push(source);
+    runner.state_mut().layers_dirty.mark_full();
+    pin_outcomes(&mut runner, &[true, true]);
+    let life = runner.life(P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for id in [a, b] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(id)),
+            })
+            .unwrap();
+    }
+    assert_eq!(runner.state().stack.len(), 1, "reach: A and B announced");
+    if remove_b {
+        runner.cast(response).target_object(b).commit();
+    }
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        vec![true, true],
+        "reach: both selected wins"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life + if delayed_phase.is_some() { 2 } else { 3 }
+    );
+    assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&b].zone,
+        if remove_b {
+            Zone::Exile
+        } else {
+            Zone::Battlefield
+        }
+    );
+    assert_eq!(
+        runner.state().objects[&source].attached_to,
+        Some(AttachTarget::Object(h)),
+        "reach: source remains attached to the hostile third-seat host"
+    );
+    assert_finished(&runner);
+    if let Some(phase) = delayed_phase {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CreateDelayedTrigger,
+                    ..
+                }
+            )),
+            "reach: delayed instruction executed"
+        );
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            1,
+            "reach: installation"
+        );
+        let expected = if remove_b {
+            vec![]
+        } else {
+            vec![TargetRef::Object(b)]
+        };
+        assert_eq!(
+            runner.state().delayed_triggers[0].ability.targets,
+            expected,
+            "typed-owner creation snapshot; illegal B={remove_b}"
+        );
+        for _ in 0..18 {
+            if !runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, phase, "reach: firing phase");
+        let placed = runner
+            .state()
+            .stack
+            .back()
+            .expect("reach: delayed trigger placed")
+            .ability()
+            .unwrap();
+        assert_eq!(
+            placed.trigger_source.as_ref().unwrap().attached_to,
+            Some(AttachTarget::Object(h))
+        );
+        assert_eq!(placed.targets, expected, "typed-owner stack binding");
+        finish(&mut runner, &mut events);
+        assert!(
+            runner.state().delayed_triggers.is_empty(),
+            "one-shot consumed"
+        );
+    }
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutCounterAll,
+                ..
+            }
+        )),
+        "reach: mass payoff executed"
+    );
+    for id in [a, b, ally, h] {
+        assert_eq!(
+            runner.state().objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            u32::from(!remove_b && [b, ally].contains(&id)),
+            "only B owner's population receives counters; object={id:?}, illegal B={remove_b}"
+        );
+    }
+    assert_finished(&runner);
+}
+
+#[test]
+fn nested_coin_typed_owner_scope_preserves_its_announced_binding() {
+    for remove_b in [true, false] {
+        typed_owner_coin_binding_scenario(remove_b, None);
+    }
+}
+
+#[test]
+fn delayed_coin_typed_owner_scope_snapshots_its_announced_binding() {
+    for remove_b in [true, false] {
+        typed_owner_coin_binding_scenario(remove_b, Some(Phase::End));
+    }
+}
+
+#[test]
+fn delayed_death_condition_never_widens_an_unavailable_announcement() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
+    };
+
+    for remove_b in [true, false] {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let delayed = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: creature.clone(),
+            },
+        )
+        .sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::TargetOnly { target: creature },
+                        )
+                        .sub_ability(delayed),
+                    )),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let a = scenario.add_creature(P0, "Outer A", 2, 2).id();
+        let b = scenario.add_creature(P1, "Announced B", 2, 2).id();
+        let c = scenario.add_creature(P1, "Unrelated C", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic delayed death condition", true)
+            .with_ability_definition(definition)
+            .id();
+        let exile = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic exile response",
+                true,
+                "Exile target creature.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let kill_c = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic unrelated death",
+                true,
+                "Destroy target creature.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let kill_b = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic bound death",
+                true,
+                "Destroy target creature.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true]);
+        let life = runner.life(P0);
+        runner.cast(spell).target_objects(&[a, b]).commit();
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "reach: public A/B announcement"
+        );
+        if remove_b {
+            runner.cast(exile).target_object(b).commit();
+        }
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true]);
+        assert_eq!(runner.life(P0), life + 2, "reach: independent tail");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CreateDelayedTrigger,
+                    ..
+                }
+            )),
+            "reach: delayed creation instruction"
+        );
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            usize::from(!remove_b),
+            "an unavailable announcement installs no wildcard death watch"
+        );
+        assert_finished(&runner);
+        runner.cast(kill_c).target_object(c).commit();
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            runner.state().objects[&c].zone,
+            Zone::Graveyard,
+            "reach: unrelated creature actually died"
+        );
+        assert_eq!(runner.life(P0), life + 2, "unrelated death never pays");
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            usize::from(!remove_b)
+        );
+        if !remove_b {
+            runner.cast(kill_b).target_object(b).commit();
+            finish(&mut runner, &mut events);
+            assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+            assert_eq!(runner.life(P0), life + 5, "B death pays exactly once");
+            assert!(runner.state().delayed_triggers.is_empty());
+        } else {
+            assert_eq!(runner.state().objects[&b].zone, Zone::Exile);
+        }
+        assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&a].counters.is_empty());
+        assert_finished(&runner);
+    }
+}
+
 // Synthetic building-block fixtures: independent B must remain the antecedent
 // after validation, coin selection, detachment, and trigger placement.
 #[derive(Clone, Copy)]
