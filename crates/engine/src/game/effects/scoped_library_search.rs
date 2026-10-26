@@ -1006,7 +1006,56 @@ mod tests {
             // CR 400.7: numeric membership cannot substitute for prepared identity.
             match stale_case {
                 0 => state.objects.get_mut(&cards[0]).unwrap().incarnation += 1,
-                1 => state.objects.get_mut(&cards[0]).unwrap().zone = Zone::Graveyard,
+                1 => {
+                    let pending = state.pending_scoped_library_search.as_ref().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    let prepared_identity = *prepared_choices[0]
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.object_id == cards[0])
+                        .unwrap();
+                    assert_eq!(
+                        prepared_identity,
+                        ObjectIncarnationRef::from_object(&state.objects[&cards[0]])
+                    );
+                    assert_eq!(state.objects[&cards[0]].zone, Zone::Library);
+                    assert!(state.library_of(PlayerId(0)).contains(&cards[0]));
+                    // CR 400.7: a real zone departure changes incarnation as well
+                    // as zone containers; keep the already-published prompt stale.
+                    crate::game::zones::move_to_zone(
+                        &mut state,
+                        cards[0],
+                        Zone::Graveyard,
+                        &mut Vec::new(),
+                    );
+                    // Finish the staged move's action-scoped sidecars before
+                    // snapshotting rejection: apply clears these before its
+                    // rollback snapshot, without changing active search authority.
+                    state.clear_completed_hidden_search_audiences();
+                    assert_eq!(state.objects[&cards[0]].zone, Zone::Graveyard);
+                    assert!(!state.library_of(PlayerId(0)).contains(&cards[0]));
+                    assert!(state.graveyard_of(PlayerId(0)).contains(&cards[0]));
+                    let current = ObjectIncarnationRef::from_object(&state.objects[&cards[0]]);
+                    assert_eq!(current.object_id, prepared_identity.object_id);
+                    assert_ne!(current.incarnation, prepared_identity.incarnation);
+                    let pending = state.pending_scoped_library_search.as_ref().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    assert!(prepared_choices[0].candidates.contains(&prepared_identity));
+                    assert!(
+                        matches!(&state.waiting_for, WaitingFor::SearchChoice { player: PlayerId(0), cards: offered, .. }
+                        if offered.contains(&cards[0]) && offered.contains(&sibling))
+                    );
+                }
                 2 => {
                     state.objects.remove(&cards[0]);
                 }
@@ -1025,10 +1074,14 @@ mod tests {
                 _ => unreachable!(),
             }
             let before = serde_json::to_value(&state).unwrap();
-            assert!(matches!(
-                apply_as_current(&mut state, legal),
-                Err(crate::game::engine::EngineError::InvalidAction(_))
-            ));
+            let result = apply_as_current(&mut state, legal);
+            assert!(
+                matches!(
+                    &result,
+                    Err(crate::game::engine::EngineError::InvalidAction(_))
+                ),
+                "stale case {stale_case}: expected rejection, got {result:?}"
+            );
             assert_eq!(serde_json::to_value(&state).unwrap(), before);
             apply_as_current(
                 &mut state,
