@@ -72,12 +72,19 @@ export async function testLlmEndpoint(
   }
 
   // Status travels with the body: a non-2xx reply is refused however it parses.
-  const verdict = (await getSharedAdapter().query(
-    "validateLlmProbeResponse",
-    profile.provider,
-    response.status,
-    response.body,
-  )) as ProbeValidation;
+  // The engine worker can stop answering during the network wait above, so a
+  // refused query is the engine's failure, not the endpoint's.
+  let verdict: ProbeValidation;
+  try {
+    verdict = (await getSharedAdapter().query(
+      "validateLlmProbeResponse",
+      profile.provider,
+      response.status,
+      response.body,
+    )) as ProbeValidation;
+  } catch (error) {
+    return { ok: false, code: "engineUnavailable", detail: describe(error) };
+  }
   if (verdict?.ok) return { ok: true };
   // The vendor's own message ("Incorrect API key provided", "models/x is not
   // found") is the most useful half and survives untranslated.
