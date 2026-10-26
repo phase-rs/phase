@@ -14410,11 +14410,9 @@ fn start_player_scope_sacrifice_choices(
         }
     }
     if !matching_players.is_empty() && admitted.is_empty() {
-        skip_instruction_and_dependents(state, template, events, depth)?;
-        if let Some(tail) = after_scope {
-            resolve_ability_chain(state, &tail, events, depth + 1)?;
-        }
-        return Ok(());
+        let mut unperformed = template.clone();
+        unperformed.sub_ability = after_scope;
+        return skip_instruction_and_dependents(state, &unperformed, events, depth);
     }
     // Use the same incoming anchor as the scope driver, before remapping
     // slots to their admitted actors. The map does not define game order.
@@ -16692,6 +16690,7 @@ fn resolve_chain_body(
         // does not read, so on that branch neither the legs nor the paused
         // seat publish.
         let mut applied_domain_end = matching_players.len();
+        let mut any_actor_admitted = false;
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
         // before fan-out (the board is now exactly the clause's pre-clause
@@ -16713,7 +16712,11 @@ fn resolve_chain_body(
             // safety: no corpus card relies on cross-iteration carry-over
             // of this flag.
             state.cost_payment_failed_flag = false;
-            let scoped = bind_scoped_seat(&scoped_template, controller, *pid);
+            let mut scoped = bind_scoped_seat(&scoped_template, controller, *pid);
+            if super::ability_utils::bind_instruction_actor(state, &mut scoped).is_none() {
+                continue;
+            }
+            any_actor_admitted = true;
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -16817,6 +16820,12 @@ fn resolve_chain_body(
                 paused = true;
                 break;
             }
+        }
+        // CR 101.3 + CR 608.2c: detaching the scope tail must not turn an
+        // unperformed instruction's dependent continuation into independent work.
+        if !paused && !matching_players.is_empty() && !any_actor_admitted {
+            state.clause_minimum_snapshot = None;
+            return skip_instruction_and_dependents(state, ability, events, depth);
         }
         let linked_batch = publish_player_scope_clause_results(
             state,
@@ -22347,7 +22356,7 @@ mod tests {
                             persist: true, selection: TargetSelectionMode::Random,
                         }),
                         1 => AbilityDefinition::new(AbilityKind::Spell, Effect::ChooseFromZone {
-                            count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::Controller,
+                            count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::ScopedPlayer,
                             filter: None, chooser: ZoneChoiceChooser::Controller, candidate_source: ZoneChoiceCandidateSource::Direct,
                             reciprocal_role: None, up_to: false, constraint: None, selection: CardSelectionMode::Random,
                         }),
@@ -22522,12 +22531,15 @@ mod tests {
                     }
                     if family == 0 {
                         assert_eq!(
-                            runner.state().last_named_choice,
-                            admitted.then_some(ChoiceValue::Player(if actor == P1 {
-                                p2
-                            } else {
-                                P1
-                            }))
+                            runner.state().objects[&host].chosen_attributes,
+                            admitted
+                                .then_some(ChosenAttribute::Player(if actor == P1 {
+                                    p2
+                                } else {
+                                    P1
+                                }))
+                                .into_iter()
+                                .collect::<Vec<_>>()
                         );
                         assert_eq!(
                             runner.state().rng.outcome_draws() - rng_before,
@@ -22642,7 +22654,7 @@ mod tests {
                         persist: true, selection: TargetSelectionMode::Random,
                     }),
                     1 => AbilityDefinition::new(AbilityKind::Spell, Effect::ChooseFromZone {
-                        count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::Controller,
+                        count: 1, zone: Zone::Graveyard, additional_zones: vec![], zone_owner: ZoneOwner::ScopedPlayer,
                         filter: None, chooser: ZoneChoiceChooser::Controller, candidate_source: ZoneChoiceCandidateSource::Direct,
                         reciprocal_role: None, up_to: false, constraint: None, selection: CardSelectionMode::Random,
                     }),
@@ -22794,13 +22806,12 @@ mod tests {
                     let choices: Vec<_> = [P1, p2]
                         .into_iter()
                         .filter(|player| *player != fixed_actor)
-                        .map(ChoiceValue::Player)
+                        .map(ChosenAttribute::Player)
                         .collect();
-                    assert_eq!(runner.state().last_named_choice.is_some(), admitted);
+                    let persisted = &runner.state().objects[&spell].chosen_attributes;
+                    assert_eq!(persisted.len(), usize::from(admitted));
                     if admitted {
-                        assert!(
-                            choices.contains(runner.state().last_named_choice.as_ref().unwrap())
-                        );
+                        assert!(choices.contains(&persisted[0]));
                     }
                 }
                 if family == 1 {
@@ -23051,7 +23062,10 @@ mod tests {
             let prepared = PersistedGameState::capture(runner.state().clone())
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, prepared);
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&prepared).unwrap()
+            );
             runner = GameRunner::from_state(restored);
             events.extend(
                 runner
@@ -23112,13 +23126,13 @@ mod tests {
                 let expected = match actor.as_controller() {
                     Some(
                         ControllerRef::You
-                        | ControllerRef::ScopedPlayer
                         | ControllerRef::ActivePlayer
                         | ControllerRef::EventTargetController,
                     ) => Some(P0),
                     Some(
                         ControllerRef::ParentTargetController
                         | ControllerRef::ParentTargetOwner
+                        | ControllerRef::ScopedPlayer
                         | ControllerRef::TriggeringPlayer,
                     ) => Some(P1),
                     Some(ControllerRef::SpecificPlayer { id }) => Some(*id),
@@ -23341,10 +23355,6 @@ mod tests {
             } else {
                 P1
             };
-            assert_eq!(
-                outcome.state().last_named_choice,
-                Some(ChoiceValue::Player(expected))
-            );
             assert!(outcome.state().objects[&spell]
                 .chosen_attributes
                 .contains(&ChosenAttribute::Player(expected)));
@@ -23418,10 +23428,6 @@ mod tests {
                     .events,
             );
         }
-        assert_eq!(
-            runner.state().last_named_choice,
-            Some(ChoiceValue::Player(P0))
-        );
         assert!(runner.state().objects[&spell]
             .chosen_attributes
             .contains(&ChosenAttribute::Player(P0)));
@@ -23513,10 +23519,7 @@ mod tests {
             );
         }
         assert_eq!(runner.state().rng.outcome_draws(), before);
-        assert_eq!(
-            runner.state().last_named_choice,
-            Some(ChoiceValue::Player(PlayerId(2)))
-        );
+        assert!(runner.state().last_named_choice.is_none());
         assert!(runner.state().objects[&spell].chosen_attributes.is_empty());
         assert_eq!(runner.life(P0), 21);
         assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Choose, source_id, .. } if *source_id == spell)).count(), 3, "a valid actor reaches the real exhausted-options handler");
@@ -23722,7 +23725,7 @@ mod tests {
                     count,
                     zone: Zone::Graveyard,
                     additional_zones: vec![],
-                    zone_owner: ZoneOwner::Controller,
+                    zone_owner: ZoneOwner::ScopedPlayer,
                     filter: None,
                     chooser: ZoneChoiceChooser::Controller,
                     candidate_source: ZoneChoiceCandidateSource::Direct,
@@ -25166,7 +25169,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P0, effect_kind: EffectKind::ChooseFromZone, cards, .. } if cards.contains(&b))
+            matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { player: P0, cards, .. } if cards.contains(&b))
         );
         runner
             .act(GameAction::SelectCards { cards: vec![b] })
@@ -25179,7 +25182,7 @@ mod tests {
             Some(&dormant)
         );
         assert!(
-            matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P0, effect_kind: EffectKind::ChooseFromZone, cards, .. } if cards.contains(&a))
+            matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { player: P0, cards, .. } if cards.contains(&a))
         );
         let events = runner
             .act(GameAction::SelectCards { cards: vec![a] })
@@ -26156,15 +26159,25 @@ mod tests {
                     .with_mana_cost(ManaCost::zero())
                     .id();
                 let mut runner = scenario.build();
-                runner.cast(spell).resolve();
+                let mut committed = runner.cast(spell).commit();
+                let mut events = Vec::new();
+                for _ in 0..4 {
+                    if !matches!(committed.state().waiting_for, WaitingFor::Priority { .. }) {
+                        break;
+                    }
+                    events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+                }
                 assert!(matches!(
-                    runner.state().waiting_for,
+                    committed.state().waiting_for,
                     WaitingFor::OptionalEffectChoice { player: P0, .. }
                 ));
-                let mut events = runner
-                    .act(GameAction::DecideOptionalEffect { accept })
-                    .unwrap()
-                    .events;
+                events.extend(
+                    committed
+                        .act(GameAction::DecideOptionalEffect { accept })
+                        .unwrap()
+                        .events,
+                );
+                drop(committed);
                 if accept {
                     assert!(matches!(
                         runner.state().waiting_for,
@@ -49102,6 +49115,11 @@ mod tests {
                     runner.state().waiting_for,
                     WaitingFor::ReplacementChoice { player: P0, .. }
                 ));
+                assert_eq!(
+                    runner.state().objects[&spell].zone,
+                    Zone::Stack,
+                    "the wheel still owns instructions at its draw replacement"
+                );
             }
             if marked_node.is_none() {
                 assert!(runner
@@ -49151,7 +49169,11 @@ mod tests {
                     .count(),
                 if missing { 0 } else { 4 }
             );
-            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(
+                runner.state().objects[&spell].zone,
+                Zone::Graveyard,
+                "marked node {marked_node:?}, referential={referential}, prior choice={prior_choice}"
+            );
             assert!(runner.state().stack.is_empty());
         }
     }

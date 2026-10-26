@@ -52,6 +52,19 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
 /// counterparts use the ordinary cast and optional-choice pipeline.
 #[test]
 fn instruction_actor_defaults_preserve_explicit_scoped_and_controller_subjects() {
+    let simple = parse_effect_chain(
+        "Each opponent may draw a card. For each opponent who doesn't, put a +1/+1 counter and a lifelink counter on target creature you control.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&simple);
+    let simple_counters: Vec<_> =
+        std::iter::successors(Some(&simple), |def| def.sub_ability.as_deref())
+            .filter(|def| matches!(def.effect.as_ref(), Effect::PutCounter { .. }))
+            .collect();
+    assert_eq!(simple_counters.len(), 2);
+    for counter in simple_counters {
+        assert_eq!(counter.instruction_actor, Some(ControllerRef::You.into()));
+    }
     let def = parse_effect_chain("Each opponent may draw a card. For each opponent who doesn't, put a +1/+1 counter and a lifelink counter on target creature you control, then that player puts a +1/+1 counter on a creature they control.", AbilityKind::Spell);
     assert_attachment_chain_has_no_unimplemented(&def);
     let counters: Vec<_> = std::iter::successors(Some(&def), |d| d.sub_ability.as_deref())
@@ -110,6 +123,64 @@ fn instruction_actor_defaults_preserve_explicit_scoped_and_controller_subjects()
         "not an instruction",
     ] {
         assert_eq!(instruction_consumer_actor(text), ConsumerActor::Other);
+    }
+}
+
+/// SHAPE: CR 608.2c + CR 115.10a + CR 608.2d: the targeted object
+/// identifies its controller/owner, while the predicate owns its own recipient.
+#[test]
+fn instruction_actor_possessive_wrappers_keep_object_anaphors_and_predicate_choices() {
+    for (subject, expected) in [
+        ("controller", ControllerRef::ParentTargetController),
+        ("owner", ControllerRef::ParentTargetOwner),
+    ] {
+        let mut context = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..ParseContext::default()
+        };
+        let clause = parse_effect_clause(
+            &format!(
+                "Target creature's {subject} puts a +1/+1 counter and a lifelink counter on it."
+            ),
+            &mut context,
+        );
+        assert!(matches!(clause.effect, Effect::TargetOnly { .. }));
+        let counters: Vec<_> = std::iter::successors(clause.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .collect();
+        assert_eq!(counters.len(), 2);
+        for counter in counters {
+            assert!(matches!(
+                counter.effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ));
+            assert_eq!(counter.instruction_actor, Some(expected.clone().into()));
+        }
+        assert_eq!(
+            context.relative_player_scope,
+            Some(ControllerRef::ScopedPlayer)
+        );
+        assert!(context.object_pronoun_ref.is_none());
+
+        let choice = parse_effect_clause(
+            &format!(
+                "Target creature's {subject} puts a +1/+1 counter on a creature they control."
+            ),
+            &mut context,
+        );
+        assert!(matches!(choice.effect, Effect::TargetOnly { .. }));
+        let body = choice.sub_ability.as_deref().expect("possessive predicate");
+        assert_eq!(
+            body.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Resolution
+        );
+        assert!(
+            matches!(body.effect.as_ref(), Effect::PutCounter { target: TargetFilter::Typed(filter), .. } if filter.controller == Some(expected.clone()))
+        );
     }
 }
 

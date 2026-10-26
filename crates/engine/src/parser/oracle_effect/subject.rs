@@ -2670,6 +2670,15 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
     if subject.multi_target.is_some() {
         return None;
     }
+    // CR 608.2c: a possessive player subject is the antecedent of its own
+    // predicate's "they", regardless of the targeted object's controller.
+    match subject.affected.as_ref() {
+        Some(TargetFilter::ParentTargetController) => {
+            return Some(ControllerRef::ParentTargetController);
+        }
+        Some(TargetFilter::ParentTargetOwner) => return Some(ControllerRef::ParentTargetOwner),
+        _ => {}
+    }
     let target = subject.target.as_ref()?;
     if let Some(declared) = super::declared_player_controller_ref(target) {
         return Some(declared);

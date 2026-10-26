@@ -7575,7 +7575,12 @@ mod tests {
                 |reference| {
                     (
                         true,
-                        false,
+                        matches!(
+                            reference,
+                            TargetFilter::PostReplacementSourceController
+                                | TargetFilter::PostReplacementDamageTarget
+                                | TargetFilter::PostReplacementDamageTargetOwner
+                        ),
                         *reference == TargetFilter::TriggeringSpellController,
                     )
                 },
@@ -7669,10 +7674,11 @@ mod tests {
                 let mut profile = ability_rw_profile(&ability);
                 let mut exact = RwProfile::empty();
                 exact.reads_event_live = true;
+                exact.reads_member_bound = true;
                 assert_eq!(profile, exact);
                 assert!(
-                    !profiles_conflict(&profile, &batch_uniform()),
-                    "read-only positive"
+                    profiles_conflict(&profile, &batch_uniform()),
+                    "each member's owning replacement event remains a distinct authority"
                 );
                 profile.writes_reentry_hazard = true;
                 assert!(

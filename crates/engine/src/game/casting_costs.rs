@@ -12515,7 +12515,20 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // payment, while the cast owns this atomic payment/finalization interval.
     let resulting_kind = StackEntryKind::Spell {
         card_id,
-        ability: stack_ability.map(Box::new),
+        ability: stack_ability.map(|mut ability| {
+            // CR 400.7 + CR 608.2h: the announcement had no executable ability;
+            // capture the finalized spell's stack occurrence before resolution
+            // can move it and pause on a later instruction.
+            if let Some(source) = state.objects.get(&object_id) {
+                ability.capture_source_identity_recursive(
+                    crate::types::identifiers::ObjectIdentityBinding::new(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(source),
+                        Zone::Stack,
+                    ),
+                );
+            }
+            Box::new(ability)
+        }),
         casting_variant,
         actual_mana_spent,
     };

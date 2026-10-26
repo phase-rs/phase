@@ -851,10 +851,37 @@ mod tests {
         ));
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut marked = plain.clone();
-            marked.instruction_actor = Some(actor);
+            marked.instruction_actor = Some(actor.clone());
+            let recipient = actor.classify(
+                |reference| match reference {
+                    crate::types::ability::ControllerRef::You
+                    | crate::types::ability::ControllerRef::ActivePlayer => Some(PlayerId(0)),
+                    crate::types::ability::ControllerRef::Opponent => Some(PlayerId(1)),
+                    crate::types::ability::ControllerRef::SpecificPlayer { id } => Some(*id),
+                    crate::types::ability::ControllerRef::ScopedPlayer
+                    | crate::types::ability::ControllerRef::TargetPlayer
+                    | crate::types::ability::ControllerRef::TargetOpponent
+                    | crate::types::ability::ControllerRef::DeclaredPlayer { .. }
+                    | crate::types::ability::ControllerRef::ParentTargetController
+                    | crate::types::ability::ControllerRef::ParentTargetOwner
+                    | crate::types::ability::ControllerRef::EventTargetController
+                    | crate::types::ability::ControllerRef::DefendingPlayer
+                    | crate::types::ability::ControllerRef::ChosenPlayer { .. }
+                    | crate::types::ability::ControllerRef::SourceChosenPlayer
+                    | crate::types::ability::ControllerRef::TriggeringPlayer
+                    | crate::types::ability::ControllerRef::EnchantedPlayer => None,
+                },
+                |_| None,
+            );
+            let expected = recipient.map_or(ResolutionChoiceFreedom::MayPrompt, |recipient| {
+                let mut admitted = plain.clone();
+                admitted.controller = recipient;
+                ability_resolution_choice_freedom(&state, &admitted, &mut budget())
+            });
             assert_eq!(
                 ability_resolution_choice_freedom(&state, &marked, &mut budget()),
-                expected
+                expected,
+                "{actor:?}"
             );
             for branch in [false, true] {
                 let mut choice = plain.clone();

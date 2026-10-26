@@ -2130,7 +2130,11 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     }
 
     if starts_prefix_clause(&current_lower) {
-        return None;
+        // CR 118.12 + CR 608.2c: the consequence header stays attached to its
+        // first action, but later commas belong to the ordinary body grammar.
+        return super::lower::strip_for_each_opponent_who_doesnt(&current_lower)
+            .filter(|(body, _)| !body.is_empty())
+            .and_then(|(body, _)| split_comma_clause_boundary(&body, remainder));
     }
 
     // CR 205.2a + CR 205.3a + CR 608.2c: keep an "exile all/each A, all B, and
@@ -10791,6 +10795,20 @@ mod tests {
             .into_iter()
             .map(|c| c.text)
             .collect()
+    }
+
+    #[test]
+    fn decline_consequence_keeps_its_header_and_splits_later_body_actions() {
+        for outcome in ["doesn't", "does not", "can't", "cannot"] {
+            let head = format!("For each opponent who {outcome}, put a flying counter, a lifelink counter, and a vigilance counter on target creature you control");
+            assert_eq!(clause_texts(&head), vec![head.clone()]);
+            let tail = "that player puts a +1/+1 counter on a creature they control";
+            let chunks = split_clause_sequence(&format!("{head}, then {tail}."));
+            assert_eq!(chunks.len(), 2, "{chunks:?}");
+            assert_eq!(chunks[0].text, head);
+            assert_eq!(chunks[0].boundary_after, Some(ClauseBoundary::Then));
+            assert_eq!(chunks[1].text, tail);
+        }
     }
 
     // CR 707.9a: a copy-effect except clause that ends in ", and has <keyword>"

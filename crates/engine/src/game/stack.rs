@@ -1149,8 +1149,8 @@ fn finish_spell_stack_exit(
 }
 
 /// CR 608.2n + CR 608.2g: deliver a spell whose move was held back while it was
-/// paused on its own free-cast window (`DeferredSpellDelivery`), once that
-/// window and the instructions behind it are done and its carrier is about to
+/// paused during its instructions (`DeferredSpellDelivery`), once those
+/// instructions are done and its carrier is about to
 /// settle. A spell its own instructions already moved off the stack ("Exile
 /// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
 /// runs, as in `resolve_top`.
@@ -2398,6 +2398,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             ..
         }
     );
+    // CR 608.2n: every resolution-owned choice or continuation precedes the
+    // spell's final move, including a draw replacement inside a scoped process.
+    let spell_instructions_pending = state
+        .resolving_stack_entry
+        .as_ref()
+        .is_some_and(|carrier| carrier.id == entry.id)
+        && !super::engine::resolution_instructions_are_done(state);
     if is_spell {
         let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
             matches!(ability.effect, Effect::EndTheTurn)
@@ -2479,13 +2486,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 608.2n: Non-permanent spells are put into owner's graveyard.
             Zone::Graveyard
         };
-        // CR 608.2n + CR 608.2g: the spell is put into its zone "as the final
-        // part" of its resolution, which its open free-cast window and the
-        // instructions parked behind it have not reached. Record the
+        // CR 608.2n: the spell is put into its zone as the final part of its
+        // resolution, after every parked instruction has completed. Record the
         // destination selected above; the continuation's completion delivers
         // it (`deliver_deferred_spell`). A permanent spell keeps its earlier
         // handling: it stays where it is.
-        if paused_on_free_cast_window && dest != Zone::Battlefield {
+        let defer_stack_exit =
+            paused_on_free_cast_window || (dest != Zone::Battlefield && spell_instructions_pending);
+        if defer_stack_exit && dest != Zone::Battlefield {
             state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
                 object_id: entry.id,
                 destination: dest,
@@ -3016,7 +3024,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // the source via `SelfRef`), the post-resolution default move must
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
-            if !paused_on_free_cast_window && spell_still_on_stack(state, entry.id) {
+            if !defer_stack_exit && spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
                 // default move through the pipeline — see
                 // `deliver_resolved_spell_off_stack`.
@@ -3050,7 +3058,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        if !paused_on_free_cast_window {
+        if !defer_stack_exit {
             finish_spell_stack_exit(state, entry.id, casting_variant, events);
         }
 
@@ -10377,6 +10385,18 @@ mod tests {
                     }
                     let life_before = [state.players[0].life, state.players[1].life];
                     assert_eq!(state.stack.len(), 2);
+                    let specialized_run = match family {
+                        0 => self_counter_run_len(&state),
+                        1 => fixed_controller_gain_life_run_len(&state),
+                        2 | 3 => fixed_opponent_effect_run_len(&state),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(
+                        specialized_run,
+                        (!marked).then_some(2),
+                        "family {family}: a bound actor excludes the effect-specific shortcut"
+                    );
+                    assert_eq!(batch_run_len(&state), Some(2));
                     let mut events = crate::game::engine::apply(
                         &mut state,
                         PlayerId(0),
@@ -10406,11 +10426,13 @@ mod tests {
                             .events,
                         );
                     }
-                    assert_eq!(
-                        crate::game::perf_counters::snapshot().stack_batched_entries,
-                        if marked { 0 } else { 2 },
-                        "family {family}: actor-bearing entries use normal single-entry resolution"
-                    );
+                    if !marked {
+                        assert_eq!(
+                            crate::game::perf_counters::snapshot().stack_batched_entries,
+                            2,
+                            "family {family}: the plain positive still batches"
+                        );
+                    }
                     assert!(state.stack.is_empty());
                     assert_eq!(
                         events

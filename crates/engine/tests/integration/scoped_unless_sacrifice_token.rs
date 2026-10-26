@@ -150,14 +150,14 @@ fn assert_one_terminal_batch(
         })
         .collect();
     assert_eq!(births.len(), count, "exact journaled births");
-    if let Some(first) = births.first() {
-        assert!(
-            births.iter().all(|birth| birth.cause == first.cause),
-            "one terminal instruction cause owns the whole batch"
-        );
-        for birth in births {
-            assert_eq!(runner.state().objects[&birth.object.object_id].owner, P0);
-        }
+    let created: Vec<_> = births.iter().map(|birth| birth.object.object_id).collect();
+    assert_eq!(
+        runner.state().last_created_token_ids,
+        created,
+        "the terminal instruction publishes exactly its whole token batch"
+    );
+    for birth in births {
+        assert_eq!(runner.state().objects[&birth.object.object_id].owner, P0);
     }
     assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Token, source_id, .. } if *source_id == spell)).count(), usize::from(count > 0));
     assert_eq!(
@@ -699,42 +699,51 @@ fn instruction_actor_aggregate_keeps_a_real_outer_seat_or_prior_player_choice() 
 
 #[test]
 fn instruction_actor_aggregate_repeats_the_whole_poll_without_consuming_its_future_template() {
-    let (mut runner, spell, _) = payment_fixture(Some(ControllerRef::You), false);
-    let object = runner.state_mut().objects.get_mut(&spell).unwrap();
-    let mut definition = object.abilities[0].clone();
-    definition.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
-    std::sync::Arc::make_mut(&mut object.abilities)[0] = definition.clone();
-    std::sync::Arc::make_mut(&mut object.base_abilities)[0] = definition;
-    runner.cast(spell).resolve();
-    let mut events = Vec::new();
-    for process in 0..2 {
-        for payer in [P1, P2, PlayerId(3)] {
-            expect_unless(&runner, payer);
-            assert_eq!(zombie_count(&runner), process * 3);
-            let pending = runner
-                .state()
-                .pending_player_scope_unless_payment
-                .as_ref()
-                .unwrap();
-            assert_eq!(pending.pending_effect.instruction_actor, None);
-            assert_eq!(pending.pending_effect.original_controller, Some(P0));
-            events.extend(
-                runner
-                    .act(GameAction::PayUnlessCost { pay: false })
-                    .unwrap()
-                    .events,
-            );
+    for pay_first in [false, true] {
+        let (mut runner, spell, creatures) = payment_fixture(Some(ControllerRef::You), false);
+        let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+        let mut definition = object.abilities[0].clone();
+        definition.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        std::sync::Arc::make_mut(&mut object.abilities)[0] = definition.clone();
+        std::sync::Arc::make_mut(&mut object.base_abilities)[0] = definition;
+        runner.cast(spell).resolve();
+        let mut events = Vec::new();
+        for process in 0..2 {
+            for (payer, creature) in [P1, P2, PlayerId(3)].into_iter().zip(creatures) {
+                expect_unless(&runner, payer);
+                assert_eq!(
+                    zombie_count(&runner),
+                    if pay_first { 0 } else { process * 3 }
+                );
+                let pending = runner
+                    .state()
+                    .pending_player_scope_unless_payment
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(pending.pending_effect.instruction_actor, None);
+                assert_eq!(pending.pending_effect.original_controller, Some(P0));
+                if process == 0 && pay_first {
+                    pay_sacrifice(&mut runner, creature);
+                } else {
+                    events.extend(
+                        runner
+                            .act(GameAction::PayUnlessCost { pay: false })
+                            .unwrap()
+                            .events,
+                    );
+                }
+            }
         }
+        assert_eq!(zombie_count(&runner), if pay_first { 3 } else { 6 });
+        assert_eq!(runner.life(P0), 22);
+        assert_eq!(
+            runner.state().objects[&spell].abilities[0].instruction_actor,
+            Some(ControllerRef::You.into())
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Token, source_id, .. } if *source_id == spell)).count(), if pay_first { 1 } else { 2 });
+        expect_aggregate_payment_finished(&runner);
+        assert!(runner.state().stack.is_empty());
     }
-    assert_eq!(zombie_count(&runner), 6);
-    assert_eq!(runner.life(P0), 22);
-    assert_eq!(
-        runner.state().objects[&spell].abilities[0].instruction_actor,
-        Some(ControllerRef::You.into())
-    );
-    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Token, source_id, .. } if *source_id == spell)).count(), 2);
-    expect_aggregate_payment_finished(&runner);
-    assert!(runner.state().stack.is_empty());
 }
 
 #[test]

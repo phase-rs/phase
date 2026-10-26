@@ -7679,9 +7679,20 @@ mod tests {
                     }
                     _ => unreachable!(),
                 }
-                for actual in [
-                    resolved_ability_axes(&enclosing, ScanMode::Conservative),
-                    ability_definition_axes(&enclosing_definition, ScanMode::Conservative),
+                let resolved_expected = if branch == 2 {
+                    Axes::CONSERVATIVE
+                } else {
+                    expected
+                };
+                for (actual, expected) in [
+                    (
+                        resolved_ability_axes(&enclosing, ScanMode::Conservative),
+                        resolved_expected,
+                    ),
+                    (
+                        ability_definition_axes(&enclosing_definition, ScanMode::Conservative),
+                        expected,
+                    ),
                 ] {
                     assert_eq!(
                         (

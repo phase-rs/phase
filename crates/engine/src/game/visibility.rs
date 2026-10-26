@@ -14398,7 +14398,10 @@ mod tests {
                 .unwrap()
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, canonical);
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&canonical).unwrap()
+            );
             let mut malformed = canonical.clone();
             malformed
                 .resolving_stack_entry

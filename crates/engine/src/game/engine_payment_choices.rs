@@ -1029,7 +1029,11 @@ pub(crate) fn advance_player_scope_token_unless_payment(
         return Ok(state.waiting_for.clone());
     }
 
-    settle_player_scope_token_unless_payment(state, pending, events)
+    settle_player_scope_token_unless_payment(state, pending, events)?;
+    // CR 608.2c: the completed poll is one iteration of any enclosing process.
+    // Resume it through the same priority-gated authority as ordinary payments.
+    resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 101.4 + CR 118.12a: Close the aggregate only after every still-in-game

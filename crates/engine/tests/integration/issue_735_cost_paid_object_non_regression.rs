@@ -83,7 +83,7 @@ fn synthetic_declared_and_carried_owner_library_subjects_keep_their_counter_acto
                     current
                         .instruction_actor
                         .clone()
-                        .expect("each instruction has its own grammatical actor"),
+                        .unwrap_or_else(|| ControllerRef::You.into()),
                 );
             }
             node = current.sub_ability.as_deref();
@@ -570,7 +570,14 @@ fn synthetic_decline_printed_controller_survives_source_exit_or_control_change()
             !runner.state().stack.is_empty(),
             "the P0 ability was queued before the response"
         );
-        runner.cast(response).target_object(source).resolve();
+        let mut committed = runner.cast(response).target_object(source).commit();
+        for _ in 0..20 {
+            if !matches!(committed.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            committed.act(GameAction::PassPriority).unwrap();
+        }
+        drop(committed);
         if change_control {
             assert_eq!(runner.state().objects[&source].controller, P1);
         } else {

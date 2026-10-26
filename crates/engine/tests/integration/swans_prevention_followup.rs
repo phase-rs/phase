@@ -37,6 +37,40 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+fn assert_restored_state(restored: &GameState, prepared: &GameState) {
+    let mut expected = prepared.clone();
+    // This runtime invalidation counter is deliberately omitted from saved games.
+    // Every persisted authority and all other state still compare exactly.
+    expected.state_revision = restored.state_revision;
+    assert_eq!(restored, &expected);
+}
+
+fn install_turn_replacement(
+    runner: &mut engine::game::scenario::GameRunner,
+    host: ObjectId,
+    replacement: engine::types::ability::ReplacementDefinition,
+) {
+    let mut installation = ResolvedAbility::new(
+        Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::SelfRef,
+        },
+        vec![],
+        host,
+        runner.state().objects[&host].controller,
+    );
+    // CR 611.2a + CR 615.3: these surrounding runtime shields last this turn,
+    // retaining consumed state through the real resolution-install authority.
+    installation.duration = Some(engine::types::ability::Duration::UntilEndOfTurn);
+    effects::resolve_ability_chain(runner.state_mut(), &installation, &mut Vec::new(), 0)
+        .expect("install the surrounding turn-bound replacement");
+    assert!(runner.state().objects[&host]
+        .replacement_definitions
+        .last()
+        .unwrap()
+        .is_resolution_installed());
+}
+
 #[test]
 fn swans_followup_draws_for_damage_sources_controller() {
     let mut state = GameState::new_two_player(42);
@@ -278,7 +312,7 @@ fn real_twincast_birth_binds_the_new_spell_source_before_saved_retarget_and_swan
         let prepared = PersistedGameState::capture(canonical)
             .into_game_state()
             .unwrap();
-        assert_eq!(restored, prepared);
+        assert_restored_state(&restored, &prepared);
         runner = GameRunner::from_state(restored);
         events.extend(
             runner
@@ -476,7 +510,7 @@ fn real_lithoform_ability_copy_keeps_the_sacrificed_moggs_exact_source_at_saved_
     let prepared = PersistedGameState::capture(runner.state().clone())
         .into_game_state()
         .unwrap();
-    assert_eq!(restored, prepared);
+    assert_restored_state(&restored, &prepared);
     runner = GameRunner::from_state(restored);
     events.extend(runner.act(GameAction::KeepAllCopyTargets).unwrap().events);
     for _ in 0..40 {
@@ -685,7 +719,7 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
         let prepared = PersistedGameState::capture(runner.state().clone())
             .into_game_state()
             .unwrap();
-        assert_eq!(restored, prepared);
+        assert_restored_state(&restored, &prepared);
         runner = GameRunner::from_state(restored);
         events.extend(
             runner
@@ -814,22 +848,7 @@ fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_s
             })
             .runtime_execute(parent);
         shield.consume_on_apply = true;
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&host)
-            .unwrap()
-            .replacement_definitions
-            .push(shield.clone());
-        std::sync::Arc::make_mut(
-            &mut runner
-                .state_mut()
-                .objects
-                .get_mut(&host)
-                .unwrap()
-                .base_replacement_definitions,
-        )
-        .push(shield);
+        install_turn_replacement(&mut runner, host, shield);
         let mut committed = runner.cast(spell).target_player(P1).commit();
         let mut events = Vec::new();
         for _ in 0..20 {
@@ -863,7 +882,7 @@ fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_s
             let prepared = PersistedGameState::capture(runner.state().clone())
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, prepared);
+            assert_restored_state(&restored, &prepared);
             runner = GameRunner::from_state(restored);
             events.extend(
                 runner
@@ -1466,7 +1485,7 @@ fn combat_lifelink_saved_choice_keeps_the_chosen_source_for_the_fresh_aggregate_
         let prepared = PersistedGameState::capture(runner.state().clone())
             .into_game_state()
             .unwrap();
-        assert_eq!(restored, prepared);
+        assert_restored_state(&restored, &prepared);
         for viewer in [P0, P1, PlayerId(2), p3] {
             let view = engine::game::visibility::filter_state_for_viewer(&restored, viewer);
             assert!(
@@ -1720,22 +1739,7 @@ fn owned_missing_damage_recipients_skip_nonempty_decoys_after_nested_saved_dispa
                     })
                     .runtime_execute(head);
                 shield.consume_on_apply = true;
-                runner
-                    .state_mut()
-                    .objects
-                    .get_mut(&host)
-                    .unwrap()
-                    .replacement_definitions
-                    .push(shield.clone());
-                std::sync::Arc::make_mut(
-                    &mut runner
-                        .state_mut()
-                        .objects
-                        .get_mut(&host)
-                        .unwrap()
-                        .base_replacement_definitions,
-                )
-                .push(shield);
+                install_turn_replacement(&mut runner, host, shield);
                 runner.act(GameAction::PassPriority).unwrap();
                 let outcome = runner.activate(outer, 0).target_player(p2).resolve();
                 assert!(
@@ -1776,7 +1780,7 @@ fn owned_missing_damage_recipients_skip_nonempty_decoys_after_nested_saved_dispa
                 let prepared = PersistedGameState::capture(runner.state().clone())
                     .into_game_state()
                     .unwrap();
-                assert_eq!(restored, prepared);
+                assert_restored_state(&restored, &prepared);
                 runner = GameRunner::from_state(restored);
                 let mut events = outcome.events().to_vec();
                 events.extend(
@@ -1955,22 +1959,7 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
             }
             last.sub_ability = Some(Box::new(tail));
             replacement.runtime_execute = Some(Box::new(runtime));
-            runner
-                .state_mut()
-                .objects
-                .get_mut(&host)
-                .unwrap()
-                .replacement_definitions
-                .push(replacement.clone());
-            std::sync::Arc::make_mut(
-                &mut runner
-                    .state_mut()
-                    .objects
-                    .get_mut(&host)
-                    .unwrap()
-                    .base_replacement_definitions,
-            )
-            .push(replacement);
+            install_turn_replacement(&mut runner, host, replacement);
             let outcome = runner.cast(spell).target_player(p2).resolve();
             assert!(matches!(
                 outcome.final_waiting_for(),
@@ -1994,7 +1983,7 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
             let prepared = PersistedGameState::capture(runner.state().clone())
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, prepared);
+            assert_restored_state(&restored, &prepared);
             runner = GameRunner::from_state(restored);
             let mut events = outcome.events().to_vec();
             events.extend(
@@ -2306,22 +2295,7 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 // Fixture construction installs a typed surrounding replacement;
                 // the reflected body and both source-type gates are the real
                 // Comeuppance parser/owner output, not recreated conditions.
-                runner
-                    .state_mut()
-                    .objects
-                    .get_mut(&host)
-                    .unwrap()
-                    .replacement_definitions
-                    .push(shield.clone());
-                std::sync::Arc::make_mut(
-                    &mut runner
-                        .state_mut()
-                        .objects
-                        .get_mut(&host)
-                        .unwrap()
-                        .base_replacement_definitions,
-                )
-                .push(shield);
+                install_turn_replacement(&mut runner, host, shield);
                 runner.act(GameAction::PassPriority).unwrap();
                 let outcome = runner.activate(outer, 0).target_player(P0).resolve();
                 assert!(
@@ -2378,7 +2352,7 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 let prepared = PersistedGameState::capture(runner.state().clone())
                     .into_game_state()
                     .unwrap();
-                assert_eq!(restored, prepared);
+                assert_restored_state(&restored, &prepared);
                 runner = GameRunner::from_state(restored);
                 let mut events = outcome.events().to_vec();
                 events.extend(
@@ -2747,7 +2721,7 @@ fn template_and_fresh_resolved_source_followups_keep_the_outer_event_after_neste
             let prepared = PersistedGameState::capture(runner.state().clone())
                 .into_game_state()
                 .unwrap();
-            assert_eq!(restored, prepared);
+            assert_restored_state(&restored, &prepared);
             runner = GameRunner::from_state(restored);
             let mut events = outcome.events().to_vec();
             events.extend(

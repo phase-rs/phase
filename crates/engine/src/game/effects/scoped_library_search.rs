@@ -1072,7 +1072,21 @@ mod tests {
                     },
                 );
                 tail.sub_link = SubAbilityLink::SequentialSibling;
-                head.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(tail));
+                // CR 608.2c: the batchable search shape preserves a shuffle for
+                // each searcher before the independent once-after-all tail.
+                let mut shuffle = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Shuffle {
+                        target: TargetFilter::ScopedPlayer,
+                    },
+                );
+                shuffle.player_scope = Some(PlayerFilter::PerformedActionThisWay {
+                    relation: crate::types::ability::PlayerRelation::All,
+                    action: PlayerActionKind::SearchedLibrary,
+                });
+                shuffle.sub_link = SubAbilityLink::SequentialSibling;
+                shuffle.sub_ability = Some(Box::new(tail));
+                head.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(shuffle));
                 let referential = matches!(child_actor, Some(ControllerRef::ChosenPlayer { .. }));
                 if referential {
                     let child = head.sub_ability.as_mut().unwrap();
@@ -1249,6 +1263,19 @@ mod tests {
                 }
                 assert_eq!(runner.life(P0), 21);
                 assert_eq!(runner.life(P1), if prior_choice { 26 } else { 20 });
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            GameEvent::PlayerPerformedAction {
+                                action: PlayerActionKind::ShuffledLibrary,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    if controller_head { 1 } else { 3 }
+                );
                 assert!(runner.state().pending_scoped_library_search.is_none());
                 assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), if prior_choice { 4 } else { 1 });
                 assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);

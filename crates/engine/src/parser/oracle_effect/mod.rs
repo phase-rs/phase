@@ -27397,9 +27397,9 @@ fn instruction_actor_for_subject(
 }
 
 /// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
-/// antecedent of the predicate's "that player" / "they". The seed only fills an
-/// empty relative scope: a scope an enclosing trigger, mode or for-each already
-/// pinned is the nearer antecedent and is kept.
+/// antecedent of the predicate's "that player" / "they". An explicit possessive
+/// player subject supplies its predicate's own antecedent; otherwise a seed
+/// fills only an empty relative scope, retaining an enclosing trigger or frame.
 ///
 /// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
 /// the binder's declared rungs (`declared_player_scope` +
@@ -27414,11 +27414,19 @@ fn lower_subject_predicate_ast(
 ) -> ParsedEffectClause {
     let instruction_actor =
         instruction_actor_for_subject(subject.affected.as_ref(), subject.target.as_ref());
-    let seed = if ctx.relative_player_scope.is_none() {
+    let possessive_player_subject = matches!(
+        subject.affected,
+        Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
+    );
+    let seed = if ctx.relative_player_scope.is_none() || possessive_player_subject {
         subject::subject_player_antecedent(&subject)
     } else {
         None
     };
+    // CR 608.2c: the object declared by this possessive subject is the
+    // predicate's "it", rather than the spell or a previous instruction's object.
+    let previous_object_pronoun = (possessive_player_subject && subject.target.is_some())
+        .then(|| ctx.object_pronoun_ref.replace(TargetFilter::ParentTarget));
     let mut lowered = match seed {
         Some(seed @ (ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)) => {
             let prev_declared = ctx.declared_player_scope.replace(seed.clone());
@@ -27454,6 +27462,9 @@ fn lower_subject_predicate_ast(
             instruction_actor.as_ref(),
         ),
     };
+    if let Some(previous) = previous_object_pronoun {
+        ctx.object_pronoun_ref = previous;
+    }
     if let Some(actor) = instruction_actor {
         lower::default_clause_instruction_actor(&mut lowered, actor);
     }
@@ -27827,8 +27838,17 @@ fn lower_subject_predicate_ast_body(
             ) {
                 if let Some(object_target) = subject.target.clone() {
                     bind_player_recipient_to_possessive_actor(&mut clause.effect, &affected);
+                    let inner_timing = lower::target_choice_timing_for_parsed(
+                        &clause,
+                        &text,
+                        None,
+                        clause.multi_target.is_some(),
+                    );
                     let mut inner = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
                     inner.instruction_actor = clause.instruction_actor.clone();
+                    // CR 115.10a + CR 608.2d: only the predicate determines
+                    // whether its object is targeted or chosen at resolution.
+                    inner.target_choice_timing = inner_timing;
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
                     return ParsedEffectClause {
@@ -28021,9 +28041,16 @@ fn lower_subject_predicate_ast_body(
                         }
                     }
                     sync_player_into_nested_shuffle_sub(&mut clause, &TargetFilter::ParentTarget);
+                    let inner_timing = lower::target_choice_timing_for_parsed(
+                        &clause,
+                        &text,
+                        None,
+                        clause.multi_target.is_some(),
+                    );
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
                     sub_ability.instruction_actor = clause.instruction_actor.clone();
+                    sub_ability.target_choice_timing = inner_timing;
                     sub_ability.sub_ability = clause.sub_ability;
                     // CR 115.1d: an "up to N target" count on the moved-object
                     // clause (Memory's Journey — "shuffles up to three target

@@ -10383,7 +10383,17 @@ fn parse_draw_replacement(
         if optional_modal_present {
             def = def.mode(ReplacementMode::Optional { decline: None });
         }
-        let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+        // CR 614.6 + CR 608.2c: the replaced drawer is already the antecedent
+        // of "they" before a reveal's patient is normalized below.
+        let mut execute_context = ParseContext {
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..ParseContext::default()
+        };
+        let mut execute = parse_effect_chain_with_context(
+            effect_after_modal,
+            AbilityKind::Spell,
+            &mut execute_context,
+        );
         rewrite_draw_replacement_execute_referents(&mut execute, effect_after_modal);
         def = def.execute(execute);
     }
@@ -31848,6 +31858,14 @@ mod snapshot_tests {
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
 
         let execute = def.execute.as_ref().expect("execute chain must be present");
+        assert_eq!(
+            execute
+                .instruction_actor
+                .as_ref()
+                .and_then(|actor| actor.as_event()),
+            Some(&TargetFilter::PostReplacementDamageTarget),
+            "the replaced drawer performs the reveal independently of its patient"
+        );
         assert!(
             matches!(
                 *execute.effect,
