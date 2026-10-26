@@ -1,10 +1,11 @@
 //! Controller-relative damage populations use the sole target's live controller.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{GameRestriction, PreventionAmount, ShieldKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -417,4 +418,357 @@ fn alpha_brawl_preserves_source_relative_other_without_self_damage() {
     assert_eq!(runner.state().objects[&peer].damage_marked, 3);
     assert_eq!(runner.state().objects[&source].damage_marked, 2);
     assert_eq!(runner.state().objects[&unrelated].damage_marked, 0);
+}
+
+// Synthetic Oracle probes mirror the parser's independent-body fixtures.
+const ABILITY_DAMAGE: &str = "~ deals 2 damage to target creature and 1 damage to each other creature with the same controller.";
+
+fn ability_population(scenario: &mut GameScenario) -> [ObjectId; 3] {
+    [
+        scenario.add_creature(P1, "Selected creature", 0, 9).id(),
+        scenario.add_creature(P0, "P0 population", 0, 9).id(),
+        scenario.add_creature(P1, "P1 population", 0, 9).id(),
+    ]
+}
+
+fn assert_ability_population(
+    runner: &GameRunner,
+    target: ObjectId,
+    hit: ObjectId,
+    spared: ObjectId,
+) {
+    finished(runner);
+    // CR 120.3e: the targeted instruction marks two; "other" excludes it from splash.
+    assert_eq!(runner.state().objects[&target].damage_marked, 2);
+    assert_eq!(
+        runner.state().objects[&hit].damage_marked,
+        1,
+        "positive reach: the target controller's other creature took splash"
+    );
+    assert_eq!(
+        runner.state().objects[&spared].damage_marked,
+        0,
+        "the other controller's creature is outside the population"
+    );
+}
+
+fn choose_trigger_population_target(runner: &mut GameRunner, source: ObjectId, target: ObjectId) {
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("dispatch the queued trigger");
+    }
+    // CR 603.3d: announce the creature target when this trigger goes on the stack.
+    let WaitingFor::TriggerTargetSelection {
+        player,
+        source_id,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected trigger target announcement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, Some(source));
+    assert_eq!(target_slots.len(), 1, "the splash has no additional target");
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target)),
+        "the selected creature is offered by the trigger's target prompt"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only the trigger being announced is on the stack"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("the selected creature is a legal trigger target");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the targeted trigger is on the stack"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn activate_population(runner: &mut GameRunner, source: ObjectId, target: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the parsed tap ability");
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected activation target announcement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(target_slots.len(), 1);
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(target)),
+        "the selected creature is offered by the activation's target prompt"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("choose the activation's creature target");
+    assert!(
+        runner.state().objects[&source].tapped,
+        "the tap cost was paid"
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    runner.advance_until_stack_empty();
+}
+
+#[test]
+fn activated_ability_runtime_population() {
+    // oracle.rs: parse_activated_ability_ir_with_self_ref_fallback starts the body.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Activated Population Probe",
+            0,
+            9,
+            &format!("{{T}}: {ABILITY_DAMAGE}"),
+        )
+        .id();
+    let mut runner = scenario.build();
+    activate_population(&mut runner, source, target);
+    assert_ability_population(&runner, target, opposing_peer, own_peer);
+    assert_eq!(runner.state().objects[&source].damage_marked, 0);
+}
+
+#[test]
+fn granted_activated_ability_runtime_population() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature(P0, "Granted Ability Recipient", 0, 9)
+        .id();
+    // oracle_static/grammar.rs:1761 starts a root at the quoted cost/effect separator.
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Population Grant",
+        &format!("Creatures you control have \"{{T}}: {ABILITY_DAMAGE}\""),
+    );
+    let mut runner = scenario.build();
+    // Scenario seeding does not evaluate continuous grants. A real priority
+    // action runs the layer engine before the recipient can activate its grant.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("apply the continuous grant");
+    priority(&mut runner, P0);
+    activate_population(&mut runner, source, target);
+    assert_ability_population(&runner, target, opposing_peer, own_peer);
+    assert_eq!(runner.state().objects[&source].damage_marked, 0);
+}
+
+fn upkeep_population(override_sentence: &str) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Upkeep Population Probe",
+            0,
+            9,
+            &format!("At the beginning of your upkeep, {ABILITY_DAMAGE}{override_sentence}"),
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_upkeep();
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    choose_trigger_population_target(&mut runner, source, target);
+    runner.advance_until_stack_empty();
+    assert_ability_population(&runner, target, opposing_peer, own_peer);
+    assert_eq!(runner.state().objects[&source].damage_marked, 0);
+}
+
+#[test]
+fn upkeep_trigger_runtime_population() {
+    // oracle_trigger.rs:2054: ordinary DoesNotResolve trigger-body branch.
+    upkeep_population("");
+}
+
+#[test]
+fn still_resolving_trigger_runtime_population() {
+    // oracle_trigger.rs:2064: StillResolves parses the stripped body on its own context.
+    upkeep_population(" This ability still resolves if its target becomes illegal.");
+}
+
+fn split_reflexive_population(change_controller: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Split Reflexive Population Probe",
+            0,
+            9,
+            &format!(
+                "At the beginning of your upkeep, you may pay {{R}}. When you do, {ABILITY_DAMAGE}"
+            ),
+        )
+        .id();
+    let ray = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ray of Command", true, RAY)
+        .with_mana_cost(cost(vec![ManaCostShard::Blue], 3))
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_upkeep();
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    add_mana(&mut runner, P0, ManaType::Red, 1);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only the parent upkeep ability exists"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source
+        ),
+        "the parent offers payment before the reflexive trigger has targets: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("pay the parent ability's red mana cost");
+    // CR 603.12 + CR 603.3d: payment finishes the parent; only then announce
+    // the separate reflexive trigger's target, not a target of the parent.
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("finish the parent and enqueue its reflexive trigger");
+    }
+    assert_eq!(
+        runner.state().objects[&target].damage_marked,
+        0,
+        "the reflexive trigger has not resolved while announcing its target"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .units()
+            .count(),
+        0,
+        "the parent actually paid"
+    );
+    choose_trigger_population_target(&mut runner, source, target);
+    if change_controller {
+        add_mana(&mut runner, P0, ManaType::Blue, 4);
+        priority(&mut runner, P0);
+        let _ = runner.cast(ray).target_object(target).commit();
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&ray].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&target].controller, P0);
+        assert_eq!(runner.state().objects[&target].owner, P1);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the reflexive trigger waits below Ray"
+        );
+    }
+    runner.advance_until_stack_empty();
+    // CR 608.2h: determine the population using current information on resolution.
+    let (hit, spared) = if change_controller {
+        (own_peer, opposing_peer)
+    } else {
+        (opposing_peer, own_peer)
+    };
+    assert_ability_population(&runner, target, hit, spared);
+    assert_eq!(
+        runner.state().objects[&source].damage_marked,
+        u32::from(change_controller)
+    );
+}
+
+#[test]
+fn split_reflexive_trigger_runtime_population() {
+    // oracle_trigger.rs:1940: split_reflexive_optional_payment's independent body.
+    split_reflexive_population(false);
+}
+
+#[test]
+fn split_reflexive_trigger_reads_current_controller_on_resolution() {
+    split_reflexive_population(true);
+}
+
+#[test]
+fn exert_reflexive_trigger_runtime_population() {
+    // oracle.rs:6894: the exert payoff is an independent "When you do" body.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Exert Population Probe",
+            0,
+            9,
+            &format!("You may exert ~ as it attacks. When you do, {ABILITY_DAMAGE}"),
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(source, AttackTarget::Player(P1))])
+        .expect("attack with the exert creature");
+    // CR 701.43d: pay the optional attack cost through its real combat prompt.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ExertChoice { player: P0, attacker, .. } if attacker == source
+    ));
+    runner
+        .act(GameAction::ChooseExert { exert: true })
+        .expect("exert as this creature attacks");
+    assert!(runner.state().exerted_this_turn.contains(&source));
+    choose_trigger_population_target(&mut runner, source, target);
+    runner.advance_until_stack_empty();
+    assert_ability_population(&runner, target, opposing_peer, own_peer);
+    assert_eq!(runner.state().objects[&source].damage_marked, 0);
 }
