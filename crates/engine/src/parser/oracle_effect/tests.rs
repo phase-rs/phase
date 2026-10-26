@@ -95046,10 +95046,14 @@ fn sarulf_exile_sentence_keeps_bound_numeric_threshold() {
                     }
                 )
             }),
-            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-                filters.iter().any(binds_removed_counter_threshold)
-            }
-            TargetFilter::Not { filter } => binds_removed_counter_threshold(filter),
+            // A ceiling in one conjunct bounds the whole conjunction, but a
+            // ceiling in one disjunct leaves the other branches unbounded —
+            // so every `Or` branch must bind it. A ceiling beneath `Not` is
+            // inverted (it admits permanents ABOVE the count), so `Not`
+            // never binds.
+            TargetFilter::And { filters } => filters.iter().any(binds_removed_counter_threshold),
+            TargetFilter::Or { filters } => filters.iter().all(binds_removed_counter_threshold),
+            TargetFilter::Not { .. } => false,
             _ => false,
         }
     }
@@ -95073,6 +95077,33 @@ fn sarulf_exile_sentence_keeps_bound_numeric_threshold() {
     assert!(
         binds_removed_counter_threshold(target),
         "Sarulf's exile must cap MV at the removed-counters amount, got {lowered:?}"
+    );
+    // The helper must discriminate: a ceiling beneath `Not` is inverted and
+    // a ceiling in one `Or` branch leaves the other unbounded — both shapes
+    // must fail, while a fully-bounded `Or` and a narrowed `And` pass.
+    assert!(
+        !binds_removed_counter_threshold(&TargetFilter::Not {
+            filter: Box::new(target.clone())
+        }),
+        "an inverted (Not-wrapped) ceiling must not count as bound"
+    );
+    assert!(
+        !binds_removed_counter_threshold(&TargetFilter::Or {
+            filters: vec![target.clone(), TargetFilter::Any]
+        }),
+        "a ceiling in one Or branch must not cover the unbounded branch"
+    );
+    assert!(
+        binds_removed_counter_threshold(&TargetFilter::Or {
+            filters: vec![target.clone(), target.clone()]
+        }),
+        "a ceiling on every Or branch must count as bound"
+    );
+    assert!(
+        binds_removed_counter_threshold(&TargetFilter::And {
+            filters: vec![target.clone(), TargetFilter::Any]
+        }),
+        "a ceiling in one And conjunct bounds the whole conjunction"
     );
 }
 
