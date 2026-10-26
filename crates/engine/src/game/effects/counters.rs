@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::engine_replacement::CopyEntryResumption;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
@@ -518,8 +519,44 @@ fn park_counter_completion_outside_active_direct_choice(
     }
 }
 
+/// CR 614.1c + CR 122.6 + CR 614.5: all entry contributions of one kind
+/// form one placement, so a counter replacement gets one opportunity.
+pub(crate) fn coalesce_entry_counters(
+    counters: impl IntoIterator<Item = (CounterType, u32)>,
+) -> Vec<(CounterType, u32)> {
+    let mut merged: Vec<(CounterType, u32)> = Vec::new();
+    for (counter_type, count) in counters {
+        if count == 0 {
+            continue;
+        }
+        if let Some((_, total)) = merged.iter_mut().find(|(kind, _)| *kind == counter_type) {
+            *total = total.saturating_add(count);
+        } else {
+            merged.push((counter_type, count));
+        }
+    }
+    merged
+}
+
+fn ready_copy_entry_completion(
+    queue: &PendingCounterAdditionQueue,
+) -> Option<ObjectIncarnationRef> {
+    if !queue.remaining.is_empty() {
+        return None;
+    }
+    match queue.completion.as_ref()?.post_actions.first()? {
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => Some(*entrant),
+        _ => None,
+    }
+}
+
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.active_counter_additions().cloned() {
+    // Leave a ready fallible action resident without cloning or re-parking it.
+    while let Some(mut queue) = state
+        .active_counter_additions()
+        .filter(|queue| ready_copy_entry_completion(queue).is_none())
+        .cloned()
+    {
         let Some(next) = queue.remaining.first().cloned() else {
             state
                 .take_active_counter_additions()
@@ -534,6 +571,27 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             }) = queue.completion.take()
             {
                 while let Some(action) = post_actions.first().cloned() {
+                    // The boolean effects layer cannot propagate entry replay's
+                    // EngineError. Leave this action at the head for the
+                    // result-aware engine boundary, including when earlier
+                    // post-actions ran before it.
+                    if matches!(
+                        action,
+                        PendingCounterPostAction::FinishCopyTargetChoiceEntry { .. }
+                    ) {
+                        stash_pending_counter_additions(
+                            state,
+                            Vec::new(),
+                            PendingEffectResolved {
+                                kind,
+                                source_id,
+                                resolution_event,
+                                post_actions,
+                                player_action,
+                            },
+                        );
+                        return;
+                    }
                     post_actions.remove(0);
                     if !apply_pending_counter_post_action(state, action, events) {
                         merge_pending_counter_completion_after_nested_pause(
@@ -607,6 +665,90 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             return;
         }
     }
+}
+
+/// CR 614.12 + CR 616.1: whether the active counter frame has settled every
+/// addition and owes only a fallible copy-entry tail for the engine boundary.
+pub(crate) fn copy_entry_completion_is_ready(state: &GameState) -> bool {
+    state
+        .active_counter_additions()
+        .and_then(ready_copy_entry_completion)
+        .is_some()
+}
+
+/// CR 614.12 + CR 616.1: consume fallible copy-entry tails at the engine boundary.
+/// Each iteration consumes a head action. Ordinary drains stop before it;
+/// popping the frame before replay exposes its real parent and prevents repeats.
+pub(crate) fn resume_copy_target_entry_completions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::game::engine::EngineError> {
+    // Nothing is drained until this function has consumed a tail. Once it has,
+    // `drain_pending_counter_additions` runs over whatever counter frame is on
+    // top: the remainder the tail left behind, or an exposed parent counter
+    // frame. The latter is benign because the due-root check above runs first
+    // and the ordinary drains would take the same frame anyway. A frame this
+    // function never reached belongs to the ordinary drains, which also defer to
+    // a due counter-cost root; draining it first would reorder the boundary for
+    // every card, not just copy entries.
+    let mut consumed_tail = false;
+    while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if state.counter_cost_root_is_due() {
+            return Ok(());
+        }
+        if consumed_tail {
+            drain_pending_counter_additions(state, events);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                return Ok(());
+            }
+        }
+        let Some(entrant) = state
+            .active_counter_additions()
+            .and_then(ready_copy_entry_completion)
+        else {
+            return Ok(());
+        };
+        let mut completion = state
+            .take_active_counter_additions()
+            .ok()
+            .flatten()
+            .and_then(|mut queue| queue.completion.take())
+            .ok_or_else(|| {
+                crate::game::engine::EngineError::InvalidAction(
+                    "Copy entry completion lost its counter frame".to_string(),
+                )
+            })?;
+        completion.post_actions.remove(0);
+        match crate::game::engine_replacement::resume_copy_target_choice_entry(
+            state, entrant, events,
+        )? {
+            CopyEntryResumption::Paused => {
+                if !completion.is_noop() {
+                    merge_pending_counter_completion_after_nested_pause(state, completion);
+                }
+                return Ok(());
+            }
+            CopyEntryResumption::Completed => {}
+        }
+        consumed_tail = true;
+        // Emit the completion event only AFTER its post-actions. A non-noop
+        // remainder is drained on the next iteration; no empty frame survives.
+        if completion.is_noop() {
+            continue;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            stash_pending_counter_additions(state, Vec::new(), completion);
+        } else {
+            // CR 608.2c + CR 616.1: the tail's deferred-event replay can raise a
+            // parent continuation's prompt and still return `Completed`. A plain
+            // push would bury a direct-choice owner under this remainder, so
+            // park it the way the paused branch does and stop; the remainder
+            // runs once the prompt is consumed.
+            merge_pending_counter_completion_after_nested_pause(state, completion);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn apply_pending_counter_post_action(
@@ -886,6 +1028,17 @@ fn apply_pending_counter_post_action(
                 state, object_id, *tail, events,
             )
         }
+        PendingCounterPostAction::ContinueNonLiminalCopyTokenAfterEntryPayment {
+            object_id,
+            tail,
+        } => {
+            // CR 614.12a + CR 707.2: the copied entry payment is answered and
+            // latched; journal the birth with the answer, run the rest of this
+            // token's entry, plus the rest of the batch.
+            super::token_copy::continue_copy_token_after_entry_payment(
+                state, object_id, *tail, events,
+            )
+        }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
             name,
@@ -893,6 +1046,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
             object_id,
@@ -901,6 +1055,7 @@ fn apply_pending_counter_post_action(
             source_id,
             controller,
             remaining_modifications,
+            donor,
             events,
         ),
         action @ PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry { .. } => {
@@ -959,6 +1114,26 @@ fn apply_pending_counter_post_action(
                 pending.created_ids = created_ids;
             }
             true
+        }
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
+            // The drain parks this fallible action for the result-aware engine
+            // boundary (`resume_copy_target_entry_completions`) and never
+            // dispatches it here. Should a caller reach this arm anyway, re-park
+            // the action rather than dropping the entry it still owes.
+            debug_assert!(
+                false,
+                "fallible copy entry action must be consumed at the engine boundary"
+            );
+            stash_pending_counter_additions(
+                state,
+                Vec::new(),
+                PendingEffectResolved::with_post_actions_without_effect(
+                    EffectKind::BecomeCopy,
+                    entrant.object_id,
+                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }],
+                ),
+            );
+            false
         }
         PendingCounterPostAction::FinishMeldEntry { context } => {
             crate::game::meld::finish_deferred_meld_entry(state, context, events);
@@ -2580,7 +2755,7 @@ pub fn resolve_move(
             _ => return Ok(()),
         };
 
-    let source_ids = resolve_counter_transfer_sources(state, ability, source_filter);
+    let source_ids = resolve_counter_transfer_sources(state, ability, source_filter, mode);
     if mode == CounterTransferMode::Move {
         match selection {
             CounterMoveSelection::StackTargetAnyNumber => {
@@ -2640,7 +2815,7 @@ pub fn resolve_move(
                 source_id,
                 mode,
                 counter_type_filter,
-                ability.context.creation_lookback_event.as_deref(),
+                ability,
             );
             if source_counters.is_empty() {
                 continue;
@@ -2682,13 +2857,8 @@ pub fn resolve_move(
     }
 
     for source_id in source_ids {
-        let source_counters = counter_transfer_source_counters(
-            state,
-            source_id,
-            mode,
-            counter_type_filter,
-            ability.context.creation_lookback_event.as_deref(),
-        );
+        let source_counters =
+            counter_transfer_source_counters(state, source_id, mode, counter_type_filter, ability);
 
         if source_counters.is_empty() {
             continue;
@@ -2759,7 +2929,7 @@ fn resolve_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
-        ability.context.creation_lookback_event.as_deref(),
+        ability,
     );
     let destinations =
         resolution_counter_move_destinations(state, ability, target_filter, source_id);
@@ -2810,7 +2980,7 @@ fn resolve_stack_target_move_distribution(
         source_id,
         CounterTransferMode::Move,
         counter_type_filter,
-        ability.context.creation_lookback_event.as_deref(),
+        ability,
     );
 
     if available.is_empty() || destinations.is_empty() {
@@ -2925,9 +3095,25 @@ fn resolve_counter_transfer_sources(
     state: &GameState,
     ability: &ResolvedAbility,
     source_filter: &TargetFilter,
+    mode: CounterTransferMode,
 ) -> Vec<ObjectId> {
     if matches!(source_filter, TargetFilter::SelfRef | TargetFilter::None) {
-        return ability.self_ref_binding(state).into_iter().collect();
+        return match mode {
+            // CR 122.8 + CR 608.2h: a triggered ability that puts "this
+            // creature's counters" on another object reads the counters the
+            // source had (its departure's last known information once it has
+            // left); it does not act on the source, so the source need not be
+            // found.
+            CounterTransferMode::Put if ability.trigger_source.is_some() => {
+                vec![ability.source_id]
+            }
+            // CR 400.7: moving counters (CR 122.5) removes them from the source,
+            // which acts on it, so the source must still be found; any other
+            // ability's put keeps the same binding.
+            CounterTransferMode::Move | CounterTransferMode::Put => {
+                ability.self_ref_binding(state).into_iter().collect()
+            }
+        };
     }
 
     if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
@@ -2998,41 +3184,112 @@ fn counter_transfer_source_counters(
     source_id: ObjectId,
     mode: CounterTransferMode,
     counter_type_filter: Option<&CounterType>,
-    creation_lookback_event: Option<&GameEvent>,
+    ability: &ResolvedAbility,
 ) -> Vec<(CounterType, u32)> {
-    let departure_counters = (mode == CounterTransferMode::Put)
-        .then(|| {
-            departure_counters_for_counter_reproduction(state, source_id, creation_lookback_event)
-        })
-        .flatten();
-    let mut counters = if mode == CounterTransferMode::Put {
-        departure_counters.clone().unwrap_or_else(|| {
-            state
-                .objects
-                .get(&source_id)
-                .map(|obj| obj.counters.clone())
-                .unwrap_or_default()
-        })
-    } else {
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.counters.clone())
-            .unwrap_or_default()
+    let counters = match mode {
+        // CR 122.5: moving a counter removes it from the object it is on, so
+        // only the live object's counters can move.
+        CounterTransferMode::Move => live_counters(state, source_id),
+        CounterTransferMode::Put => put_source_counters(state, source_id, ability),
     };
-
-    if counters.is_empty() && mode == CounterTransferMode::Put && departure_counters.is_none() {
-        counters = state
-            .lki_cache
-            .get(&source_id)
-            .map(|lki| lki.counters.clone())
-            .unwrap_or_default();
-    }
 
     counters
         .into_iter()
         .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
         .collect()
+}
+
+fn live_counters(
+    state: &GameState,
+    object_id: ObjectId,
+) -> std::collections::HashMap<CounterType, u32> {
+    state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.counters.clone())
+        .unwrap_or_default()
+}
+
+/// CR 122.8 + CR 608.2h + CR 400.7: the counters a "put its counters on"
+/// instruction reproduces from `source_id`, in precedence order:
+///
+/// 1. The departure that fired (or created) this ability, when it is the
+///    source's battlefield departure: that event's record is the departed
+///    object's last known information.
+/// 2. This triggered ability's own source, when `source_id` is it. While the
+///    ability can find that source in the public zone it was expected to be
+///    in, its current counters answer (CR 608.2h): the captured incarnation
+///    itself, or the object this same effect moved back into that zone, which
+///    the effect can find (CR 400.7j). Otherwise — this effect moved it into
+///    another zone, or it left that zone some other way, whether or not it
+///    came back as a new object (CR 400.7) — the answer is that incarnation's
+///    last known information, never the live same-id object and never the
+///    ObjectId-keyed LKI cache, which a later incarnation may have overwritten.
+/// 3. Any other source: its live counters, else the ObjectId-keyed LKI cache.
+fn put_source_counters(
+    state: &GameState,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> std::collections::HashMap<CounterType, u32> {
+    if let Some(counters) = departure_counters_for_counter_reproduction(
+        state,
+        source_id,
+        ability.context.creation_lookback_event.as_deref(),
+    ) {
+        return counters;
+    }
+
+    if let Some(source) = ability.trigger_source.as_ref().filter(|source| {
+        source_id == ability.source_id && source.identity.reference.object_id == source_id
+    }) {
+        // CR 608.2h + CR 400.7j: current information only for the object the
+        // ability can find, and only in its expected zone.
+        let found_in_expected_zone = ability.source_is_current(state)
+            && state
+                .objects
+                .get(&source_id)
+                .is_some_and(|object| object.zone == source.identity.expected_zone);
+        return if found_in_expected_zone {
+            live_counters(state, source_id)
+        } else {
+            captured_source_last_known_counters(state, source)
+        };
+    }
+
+    let counters = live_counters(state, source_id);
+    if !counters.is_empty() {
+        return counters;
+    }
+    state
+        .lki_cache
+        .get(&source_id)
+        .map(|lki| lki.counters.clone())
+        .unwrap_or_default()
+}
+
+/// CR 608.2h + CR 400.7: the last known counters of a triggered ability's
+/// captured source incarnation after it left its expected zone. An incarnation
+/// leaves a zone only once, so the latest zone change recorded with that exact
+/// identity is the move it left by, and that record's snapshot is its last
+/// known information; without one this turn, the ability's own capture is the
+/// latest information the engine holds.
+fn captured_source_last_known_counters(
+    state: &GameState,
+    source: &crate::types::game_state::TriggerSourceContext,
+) -> std::collections::HashMap<CounterType, u32> {
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find_map(|record| {
+            record
+                .trigger_source_context()
+                .filter(|departed| departed.identity.reference == source.identity.reference)
+        })
+        .unwrap_or(source)
+        .lki
+        .counters
+        .clone()
 }
 
 /// CR 122.8 + CR 603.7 + CR 603.10a: the departure a counter reproduction reads.
@@ -3103,7 +3360,8 @@ pub(crate) fn move_counters_optional_is_infeasible(
         return true;
     }
 
-    let source_ids = resolve_counter_transfer_sources(state, ability, source);
+    let source_ids =
+        resolve_counter_transfer_sources(state, ability, source, CounterTransferMode::Move);
     let destination_ids = resolve_counter_transfer_destinations(state, ability, source, target);
     let Some(destination_id) = destination_ids.first().copied() else {
         return true;
@@ -3114,7 +3372,7 @@ pub(crate) fn move_counters_optional_is_infeasible(
             source_id,
             CounterTransferMode::Move,
             counter_type.as_ref(),
-            ability.context.creation_lookback_event.as_deref(),
+            ability,
         )
         .into_iter()
         .any(|(counter_type, available)| {
@@ -3151,22 +3409,30 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 107.1c + CR 608.2d: "remove any number of counters" is a resolution-time
-    // interactive choice; the parser encodes it as `UpTo { Fixed{-1} }`.
-    // Discriminate on the peel FLAG (never on the scalar): if the count wrapper is
-    // present, route to the interactive per-type selection. We MUST NOT numerically
-    // resolve the inner `Fixed{-1}` — the board-derived per-type `available` counts
-    // ARE the legal domain (each type 0..=available; total 0..=Σ, incl. zero,
-    // CR 107.1c). Resolving the scalar would collapse into the non-interactive
-    // "remove all" branch below and skip the player's choice.
+    // CR 107.1c + CR 608.2d: "remove any number of counters" and "remove up to N
+    // counters" are resolution-time interactive choices; the parser encodes them
+    // as `UpTo { Fixed{-1} }` and `UpTo { N }`. Discriminate on the peel FLAG
+    // (never on the scalar): if the count wrapper is present, route to the
+    // interactive per-type selection. The board-derived per-type `available`
+    // counts ARE the legal domain (each type 0..=available; total 0..=Σ, incl.
+    // zero, CR 107.1c), further capped at N for "up to N" — see
+    // `remove_counter_choice_cap`. Resolving the scalar here would collapse into
+    // the non-interactive branch below and skip the player's choice.
     if let Effect::RemoveCounter {
         count,
         counter_type,
         ..
     } = &ability.effect
     {
-        if count.is_up_to() {
-            return resolve_remove_interactive(state, ability, counter_type.clone(), events);
+        if let (max, true) = count.peel_up_to() {
+            let max_total = remove_counter_choice_cap(state, max, ability);
+            return resolve_remove_interactive(
+                state,
+                ability,
+                counter_type.clone(),
+                max_total,
+                events,
+            );
         }
     }
 
@@ -3260,14 +3526,47 @@ pub fn resolve_remove(
     Ok(())
 }
 
+/// CR 608.2d + CR 608.2h: the total cap of an interactive counter removal, read
+/// from the inner maximum of its `UpTo` count. The legacy "remove all" sentinel
+/// (`Fixed { value: -1 }`, wrapped for "any number of counters") is uncapped
+/// (`None`, CR 107.1c); any other maximum — a printed N or the announced X of
+/// "remove up to X counters" (CR 107.3a) — is determined once, as the effect is
+/// applied, and floors at zero.
+fn remove_counter_choice_cap(
+    state: &GameState,
+    max: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> Option<u32> {
+    match max {
+        QuantityExpr::Fixed { value } if *value < 0 => None,
+        _ => Some(
+            crate::game::quantity::resolve_quantity_with_targets(state, max, ability).max(0) as u32,
+        ),
+    }
+}
+
+/// CR 608.2c + CR 608.2h: publish how many counters an interactive removal
+/// removed, for both "this way" channels a later instruction can read: the
+/// `EventContextAmount` count ("create that many", Tetravus) and the
+/// `PreviousEffectAmount` amount ("for each counter removed this way", Hex
+/// Parasite). A removal that paused for the controller's choice finishes after
+/// the chain walker's own amount stamp has already run, so the removal itself
+/// is the authority for its result.
+fn publish_counter_removal_total(state: &mut GameState, total: u32) {
+    let total = crate::game::arithmetic::u32_to_i32_saturating(total);
+    state.last_effect_count = Some(total);
+    state.last_effect_amount = Some(total);
+}
+
 /// CR 107.1c + CR 608.2d: Resolve "remove any number of counters from [source]"
-/// as a resolution-time interactive choice. Derives the public per-type counter
-/// budget from the single removal source (the ability's target for Rhys, the
-/// Evermore; `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice`
-/// so the controller picks any per-type subset (0..=available, incl. the empty
-/// set). When no counters are available the only legal selection is empty, so we
-/// resolve immediately with `last_effect_count = Some(0)` (CR 608.2h) and no
-/// prompt.
+/// and "remove up to N counters from [source]" as a resolution-time interactive
+/// choice. Derives the public per-type counter budget from the single removal
+/// source (the ability's target for Rhys, the Evermore and Hex Parasite;
+/// `SelfRef` for Tetravus) and raises `WaitingFor::RemoveCountersChoice` so the
+/// controller picks any per-type subset (0..=available, incl. the empty set)
+/// totalling at most `max_total` when the removal is capped. When no counters
+/// are available, or the cap is zero, the only legal selection is empty, so we
+/// resolve immediately with a published total of 0 (CR 608.2h) and no prompt.
 ///
 /// ponytail: single-source only — multi-source "from among" removals (Galloping
 /// Lizrog, Eventide's Shadow) are out of scope and keep hitting the parser's
@@ -3276,6 +3575,7 @@ fn resolve_remove_interactive(
     state: &mut GameState,
     ability: &ResolvedAbility,
     counter_type: Option<CounterType>,
+    max_total: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let Some(source_id) = resolve_defined_or_targets(state, ability)
@@ -3308,11 +3608,21 @@ fn resolve_remove_interactive(
         })
         .unwrap_or_default();
 
-    // CR 107.1c: "any number" includes zero — an empty board means the only legal
-    // choice is the empty set. Resolve without a prompt and stamp 0 so a
-    // downstream "create that many" rider (Tetravus) reads 0, not a stale count.
-    if available.is_empty() {
-        state.last_effect_count = Some(0);
+    // CR 608.2d: "up to N" bounds the total across every kind; the per-kind
+    // bounds stay the counters actually there. Publishing the cap already
+    // bounded by what is available keeps every consumer on one number.
+    let available_total = available
+        .iter()
+        .fold(0u32, |total, (_, count)| total.saturating_add(*count));
+    let max_total = max_total.map(|cap| cap.min(available_total));
+
+    // CR 107.1c: "any number" includes zero — an empty board (or an "up to 0"
+    // cap, Hex Parasite with X = 0) means the only legal choice is the empty
+    // set. Resolve without a prompt and publish 0 so a downstream "create that
+    // many" / "for each counter removed this way" rider reads 0, not a stale
+    // count.
+    if available.is_empty() || max_total == Some(0) {
+        publish_counter_removal_total(state, 0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -3326,6 +3636,7 @@ fn resolve_remove_interactive(
         source_id,
         counter_type,
         available,
+        max_total,
         pending_effect: Box::new(ability.clone()),
     };
     Ok(())
@@ -3373,9 +3684,11 @@ pub(crate) fn validate_counter_selection(
     Ok(total)
 }
 
-/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and park the
-/// per-type removals in the typed `CounterRemovals` frame for
-/// `drain_pending_counter_removals` to apply. Mirrors
+/// CR 107.1c + CR 608.2d: Validate a submitted `RemoveCountersChoice` answer
+/// and park the per-type removals in the typed `CounterRemovals` frame for
+/// `drain_pending_counter_removals` to apply. Beyond the shared per-kind
+/// constraints, a capped "remove up to N counters" prompt refuses a selection
+/// totalling more than its `max_total`. Mirrors
 /// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
 /// a thin dispatcher.
 pub(crate) fn validate_and_queue_counter_removal(
@@ -3383,9 +3696,15 @@ pub(crate) fn validate_and_queue_counter_removal(
     selections: &[CounterRemoveChoice],
     source_id: ObjectId,
     available: &[(CounterType, u32)],
+    max_total: Option<u32>,
     pending_effect: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     let total = validate_counter_selection(available, selections)?;
+    if max_total.is_some_and(|cap| total > cap) {
+        return Err(EffectError::InvalidParam(
+            "counter removal request exceeds the most counters the effect may remove".to_string(),
+        ));
+    }
     let remaining: Vec<PendingCounterRemoval> = selections
         .iter()
         .map(|s| PendingCounterRemoval {
@@ -3440,9 +3759,11 @@ pub(crate) fn settled_in_flight_counter_removal(
 /// single-authority remove pipeline so prevention/modification replacements
 /// apply. Mirrors `drain_pending_counter_moves`: re-parks the queue (returning
 /// early) when a per-removal replacement surfaces a `ReplacementChoice`, and when
-/// the queue empties stamps `last_effect_count = applied_total` BEFORE emitting
-/// `EffectResolved` so a downstream "create that many" / "add that much" rider
-/// reading `QuantityRef::EventContextAmount` picks up the removed count.
+/// the queue empties publishes `applied_total` (`publish_counter_removal_total`)
+/// BEFORE emitting `EffectResolved` so a downstream "create that many" / "add
+/// that much" rider reading `QuantityRef::EventContextAmount`, or a "for each
+/// counter removed this way" rider reading `QuantityRef::PreviousEffectAmount`,
+/// picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(mut queue) = state.active_counter_removals().cloned() {
         if let Some(in_flight) = queue.in_flight.take() {
@@ -3462,7 +3783,7 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
         else {
             // CR 608.2h: ordering invariant — stamp the actual removed total before the
             // terminating EffectResolved (and thus before the continuation drains).
-            state.last_effect_count = Some(queue.applied_total as i32);
+            publish_counter_removal_total(state, queue.applied_total);
             state
                 .take_active_counter_removals()
                 .expect("settled counter-removals queue must own the active frame")
@@ -6334,6 +6655,7 @@ mod tests {
                 counters: lki_counters,
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -6363,6 +6685,171 @@ mod tests {
                 .unwrap_or(0),
             3,
             "destination should receive counters from LKI cache"
+        );
+    }
+
+    /// CR 608.2h + CR 400.7j: a triggered ability that moved its own source out
+    /// of its expected zone earlier in the same effect can still find the moved
+    /// object (the resolution relatch), but "put its counters" must read the
+    /// captured incarnation's last known counters — the live graveyard object
+    /// has none.
+    #[test]
+    fn put_its_counters_reads_relatched_self_source_last_known_counters() {
+        use crate::types::game_state::ResolutionSourceRelatch;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: None,
+                count: None,
+                mode: CounterTransferMode::Put,
+                selection: CounterMoveSelection::StackTarget,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(dest_id)],
+            source_id,
+            PlayerId(0),
+        );
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source_id],
+        ));
+        let captured = state.objects[&source_id].incarnation;
+
+        // The same effect sacrificed its own source before the counter clause.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source_id, Zone::Graveyard, &mut events);
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id: source_id,
+            original_stamp: captured,
+            current_incarnation: state.objects[&source_id].incarnation,
+        });
+        assert!(
+            ability.source_is_current(&state),
+            "reach guard: the relatch must let the effect find its moved source"
+        );
+        assert!(
+            state.objects[&source_id].counters.is_empty(),
+            "reach guard: the live graveyard object carries no counters"
+        );
+
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "the recipient gets the departed source's last known counters"
+        );
+    }
+
+    /// CR 608.2h + CR 400.7j: a triggered ability whose own effect exiled its
+    /// source and returned it to the battlefield can find the returned object
+    /// there, its expected zone, so "put its counters" reads that object's
+    /// current counters, not the departed incarnation's.
+    #[test]
+    fn put_its_counters_reads_source_returned_to_expected_zone_by_same_effect_live() {
+        use crate::types::game_state::ResolutionSourceRelatch;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: None,
+                count: None,
+                mode: CounterTransferMode::Put,
+                selection: CounterMoveSelection::StackTarget,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(dest_id)],
+            source_id,
+            PlayerId(0),
+        );
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source_id],
+        ));
+        let captured = state.objects[&source_id].incarnation;
+
+        // The same effect exiled its own source and returned it before the
+        // counter clause; the returned object has one counter of its own.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source_id, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, source_id, Zone::Battlefield, &mut events);
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id: source_id,
+            original_stamp: captured,
+            current_incarnation: state.objects[&source_id].incarnation,
+        });
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        assert_ne!(
+            state.objects[&source_id].incarnation, captured,
+            "reach guard: the returned source is a new object"
+        );
+        assert!(
+            ability.source_is_current(&state),
+            "reach guard: the relatch lets the effect find its returned source"
+        );
+
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "the recipient gets the returned source's current counters, not the departed 2"
         );
     }
 
@@ -6667,6 +7154,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -6783,6 +7271,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -6887,6 +7376,7 @@ mod tests {
             source_id,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            max_total: None,
             pending_effect: Box::new(make_counter_ability(
                 Effect::RemoveCounter {
                     counter_type: None,
@@ -8647,6 +9137,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
                 Route::LiminalEntryEmit => {
@@ -8912,6 +9403,7 @@ mod tests {
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
+                        donor: None,
                     }
                 }
             };
@@ -9253,5 +9745,21 @@ mod tests {
             "CR 608.2k: an undeparted cost-paid referent is still the counter \
              subject, and the inherited parent target does not displace it"
         );
+    }
+
+    #[test]
+    fn entry_counter_contributions_coalesce_by_kind_in_first_occurrence_order() {
+        let counters = coalesce_entry_counters([
+            (CounterType::Loyalty, 3),
+            (CounterType::Plus1Plus1, 3),
+            (CounterType::Loyalty, 1),
+            (CounterType::Plus1Plus1, 1),
+            (CounterType::Loyalty, 0),
+        ]);
+        assert_eq!(
+            counters,
+            vec![(CounterType::Loyalty, 4), (CounterType::Plus1Plus1, 4),]
+        );
+        assert!(coalesce_entry_counters([(CounterType::Loyalty, 0)]).is_empty());
     }
 }

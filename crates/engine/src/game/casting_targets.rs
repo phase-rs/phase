@@ -688,11 +688,17 @@ pub(super) fn extract_distribution_total(
 ///
 /// `stack_entry` is the stack object a stack-using activation created (CR
 /// 602.2a); a mana-ability activation passes `None` (CR 605.3b).
+///
+/// `activation_cost` is the activation's cost bound before payment (CR
+/// 602.1a): the record's for a stack activation, the pending snapshot's for a
+/// mana activation, `{T}` for an intrinsic land tap (CR 305.6).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_ability_activated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     kind: crate::types::events::ActivatedAbilityKind,
+    activation_cost: crate::types::events::BoundActivationCost,
     stack_entry: Option<ObjectId>,
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
@@ -712,6 +718,7 @@ pub(crate) fn emit_ability_activated(
         departed_source_lki,
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
         stack_entry,
+        activation_cost,
     });
     events.len() - 1
 }

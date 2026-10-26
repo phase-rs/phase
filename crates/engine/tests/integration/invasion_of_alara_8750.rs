@@ -553,6 +553,7 @@ fn codie_bottoms_every_card_but_the_found_one() {
         .act(GameAction::ActivateAbility {
             source_id: codie,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Codie must succeed");
     runner.advance_until_stack_empty();
@@ -893,6 +894,7 @@ fn x_loop(x: u32) -> [Zone; 4] {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the X loop must succeed");
     assert!(

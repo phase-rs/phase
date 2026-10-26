@@ -1792,6 +1792,9 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         // which is what made a granted "Sacrifice <granter>" print as the equipped
         // creature's name.
         def.description = Some(text.to_string());
+        crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
+            &mut def, text,
+        );
         def
     } else {
         // No cost separator — treat as spell-like ability text

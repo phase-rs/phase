@@ -20,6 +20,7 @@ use engine::game::interaction::{
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
     GameState, ManaChoice, PayCostKind, PersistedGameState, WaitingFor,
 };
@@ -73,7 +74,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the real 4p dump's `["gameState"]` and route it through the REAL production restore
@@ -141,6 +143,7 @@ pub(crate) fn drive_one_live_cycle(state: &mut GameState, ids: &LoopIds) {
         GameAction::ActivateAbility {
             source_id: ids.relic,
             ability_index: RELIC_TAP_MANA,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("activate Relic's tap-a-legendary mana ability");
@@ -199,6 +202,7 @@ pub(crate) fn drive_one_live_cycle(state: &mut GameState, ids: &LoopIds) {
                         GameAction::ActivateAbility {
                             source_id: ids.freed,
                             ability_index: FREED_UNTAP,
+                            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                         },
                     )
                     .expect("activate Freed's {U}: untap Kilo");
@@ -273,6 +277,7 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
         Some(GameAction::ActivateAbility {
             source_id: RELIC,
             ability_index: RELIC_TAP_MANA,
+            payment_mode: CastPaymentMode::Auto,
         }),
         "the window's first play is the Relic mana activation"
     );
@@ -304,6 +309,7 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
                         GameAction::ActivateAbility {
                             source_id: RELIC,
                             ability_index: RELIC_TAP_MANA,
+                            payment_mode: CastPaymentMode::Auto,
                         }
                     ),
                     (
@@ -311,6 +317,7 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
                         GameAction::ActivateAbility {
                             source_id: FREED,
                             ability_index: FREED_UNTAP,
+                            payment_mode: CastPaymentMode::Auto,
                         }
                     ),
                 ],

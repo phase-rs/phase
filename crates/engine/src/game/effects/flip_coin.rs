@@ -14,9 +14,7 @@ use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
-
-use super::resolve_ability_chain;
+use crate::types::resolution::{FlipBranchContext, PendingCoinFlip, PendingCoinFlipKind};
 
 /// CR 705.1 + CR 614.1a: Outcome of routing a single logical coin flip through
 /// the replacement pipeline.
@@ -61,8 +59,21 @@ fn flip_through_replacement(
         ReplacementResult::Execute(_) => 1,
         ReplacementResult::Prevented => return CoinFlipOutcome::Prevented,
         ReplacementResult::NeedsChoice(choice_player) => {
-            // CR 614 interactive replacement (none ship for CoinFlip today, but
-            // stay correct if one is added): defer to the replacement-choice UI.
+            // CR 616.1: unreachable for every shipped coin-flip replacement.
+            // Krark's Thumb — the only parsed one — is a count multiplier that
+            // `candidate_materiality` classifies as a commuting `Count` writer,
+            // and its mode is Mandatory, so competing Thumbs auto-apply and no
+            // ordering or optional choice is ever opened.
+            //
+            // This arm is NOT a correct suspension either, so do not lean on it
+            // if such a choice ever appears: the callers below push a `CoinFlip`
+            // keep frame whose `DirectChoiceGate::CoinFlipKeep` does not match
+            // `WaitingFor::ReplacementChoice`, which the resolution-stack prompt
+            // invariant rejects, and `handle_replacement_choice` has no CoinFlip
+            // delivery. A non-commuting coin-flip replacement needs its flip
+            // context parked OUTSIDE the resolution stack (the
+            // `pending_die_roll_instruction` precedent in `roll_die::resolve_step`) plus a
+            // delivery in `engine_replacement`, not this arm.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
             return CoinFlipOutcome::Suspended;
@@ -107,6 +118,13 @@ fn flip_through_replacement(
 
 /// CR 705.2: Execute a flip's win/lose branch, preserving its
 /// `optional`/`sub_ability`/`condition`/`duration` via the canonical converter.
+///
+/// CR 608.2c: the branch is part of the same resolution as the flip, so it
+/// inherits what that resolution produced earlier (`branch_context`): the
+/// players it chose, and a completed-but-empty result for an object it was
+/// asked to choose when none existed (CR 609.3). This is the single place both
+/// the inline and the resumed (Krark's Thumb) paths build a branch.
+#[allow(clippy::too_many_arguments)]
 fn run_flip_branch(
     state: &mut GameState,
     branch: Option<&AbilityDefinition>,
@@ -114,20 +132,71 @@ fn run_flip_branch(
     controller: PlayerId,
     targets: &[TargetRef],
     chain_root_targets: &[TargetRef],
+    branch_context: &FlipBranchContext,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if let Some(def) = branch {
         // CR 608.2h: propagate so a counter-gated "that many" nested in the
         // branch still resolves against the live chain-root target (see
         // `build_resolved_from_def_with_chain_root`'s doc).
-        let sub = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-            def,
-            source_id,
-            controller,
-            targets.to_vec(),
-            chain_root_targets.to_vec(),
-        );
-        resolve_ability_chain(state, &sub, events, 0)?;
+        let mut sub =
+            crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                def,
+                source_id,
+                controller,
+                targets.to_vec(),
+                chain_root_targets.to_vec(),
+            );
+        // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
+        // they include the branch's OWN announced targets ("if you win the flip,
+        // ~ deals 2 damage to target opponent"). Only an untargeted
+        // resolution-time chooser at the branch root is denied them: it makes
+        // its own pick ("choose a creature you control and an opponent"), and
+        // handing it an object chosen before the flip would answer that choice
+        // with the wrong object.
+        if !targets.is_empty() {
+            let mut probe = sub.clone();
+            probe.clear_targets();
+            if super::awaits_resolution_object_choice(&probe) {
+                sub.clear_targets();
+            }
+        }
+        // CR 608.2c: "that opponent" in the branch names the player chosen
+        // earlier in this resolution.
+        if !branch_context.chosen_players.is_empty() {
+            sub.set_chosen_players_recursive(&branch_context.chosen_players);
+        }
+        // CR 608.2c + CR 609.3: an instruction naming an object the resolution
+        // chose and found none of does nothing, while the rest of the branch
+        // still happens. The shared missing-forward-result authority drops
+        // exactly the dependent nodes; if the whole branch depended on the
+        // absent object, there is nothing left to run.
+        let named_nothing = targets.is_empty()
+            && branch_context
+                .forwarded_result_context
+                .as_deref()
+                .is_some_and(|context| context.targets.is_empty());
+        if named_nothing {
+            let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
+                return Ok(());
+            };
+            sub = pruned;
+            // CR 608.2c + CR 609.3: the surviving instructions are still part of
+            // the resolution that found nothing, so they keep that fact: a
+            // nested flip inside this branch captures it
+            // (`FlipBranchContext::from_ability`) and prunes ITS dependent
+            // branch the same way, instead of falling back to the ability's own
+            // source. The pruning above only reaches this branch's own node
+            // chain, not the payloads of a nested coin effect.
+            sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
+        }
+        // The one branch entry, with or without that fact. It keeps the root's
+        // forwarded result (the ordinary chain entry would discard it as stale
+        // resumed-root state) and is otherwise the ordinary depth-0 entry, so a
+        // branch root that repeats ("repeat this process") behaves the same
+        // either way. Children receive the fact through the parent-to-child
+        // context hand-off.
+        super::resolve_flip_branch_chain(state, &sub, events)?;
     }
     Ok(())
 }
@@ -144,6 +213,9 @@ struct FlipRun<'a> {
     chain_root_targets: &'a [TargetRef],
     win_effect: Option<&'a AbilityDefinition>,
     lose_effect: Option<&'a AbilityDefinition>,
+    /// CR 608.2c: what the branches inherit from the flipping resolution (chosen players,
+    /// completed-empty result), carried across a Krark's Thumb suspension.
+    branch_context: &'a FlipBranchContext,
 }
 
 impl FlipRun<'_> {
@@ -160,6 +232,7 @@ impl FlipRun<'_> {
             lose_effect: self.lose_effect.map(|d| Box::new(d.clone())),
             kind,
             chain_root_targets: self.chain_root_targets.to_vec(),
+            branch_context: self.branch_context.clone(),
         }
     }
 
@@ -183,6 +256,7 @@ impl FlipRun<'_> {
             self.controller,
             self.targets,
             self.chain_root_targets,
+            self.branch_context,
             events,
         )
     }
@@ -438,6 +512,10 @@ pub fn resolve(
         RunCompletionTest::NoResolutionChoicePending
     };
 
+    // CR 608.2c: every flip's branch inherits this resolution's chosen players and
+    // completed-empty result, inline or across a Krark's Thumb suspension.
+    let branch_context = FlipBranchContext::from_ability(ability);
+
     let run = FlipRun {
         source_id: ability.source_id,
         controller: ability.controller,
@@ -446,6 +524,7 @@ pub fn resolve(
         chain_root_targets: &ability.context.chain_root_targets,
         win_effect: win_effect.as_deref(),
         lose_effect: lose_effect.as_deref(),
+        branch_context: &branch_context,
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
     Ok(())
@@ -482,6 +561,7 @@ pub fn resume_after_keep(
         lose_effect,
         kind,
         chain_root_targets,
+        branch_context,
     } = pending;
 
     // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
@@ -510,6 +590,7 @@ pub fn resume_after_keep(
         chain_root_targets: &chain_root_targets,
         win_effect: win_effect.as_deref(),
         lose_effect: lose_effect.as_deref(),
+        branch_context: &branch_context,
     };
     // CR 608.2c: every resumed path completes once no interactive resolution choice is pending.
     match drive_flip_run(
@@ -2189,6 +2270,7 @@ mod tests {
             lose_effect: None,
             kind: PendingCoinFlipKind::UntilLoss { wins_so_far },
             chain_root_targets: vec![],
+            branch_context: FlipBranchContext::default(),
         }
     }
 
@@ -2332,5 +2414,656 @@ mod tests {
             "the until-loss run ends on a loss"
         );
         assert_eq!(coin_run_markers(&events, source), 1, "until-loss run");
+    }
+}
+
+#[cfg(test)]
+mod branch_context_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityKind, ControllerRef, ForwardedResultContext, QuantityExpr, SubAbilityLink,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameRng;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+
+    /// A three-player game whose first coin flip is a LOSS (seed 1; see
+    /// `ral_loses_flip_takes_one_damage`), with P0's creature and P0's source.
+    fn game_losing_the_flip() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 1);
+        state.rng = GameRng::seed_from_u64(1);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Risky Gamble".to_string(),
+            Zone::Battlefield,
+        );
+        (state, creature, source)
+    }
+
+    fn give_to(recipient: TargetFilter) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient,
+            },
+        )
+    }
+
+    /// "that opponent gains control of that creature": the Nth chosen player.
+    fn chosen_player() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+        )
+    }
+
+    /// A lose branch that hands "that creature" to P1, followed by an
+    /// instruction independent of it (P0 gains 3 life).
+    fn handoff_then_independent_life_gain() -> AbilityDefinition {
+        let mut life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        life.sub_link = SubAbilityLink::SequentialSibling;
+        let mut handoff = give_to(TargetFilter::SpecificPlayer { id: P1 });
+        handoff.sub_ability = Some(Box::new(life));
+        handoff
+    }
+
+    fn flip_ability(
+        lose_effect: AbilityDefinition,
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(lose_effect)),
+                flipper: TargetFilter::Controller,
+            },
+            targets,
+            source,
+            P0,
+        )
+    }
+
+    /// The Krark's-Thumb-parked image of `ability`'s flip, as `resolve` would
+    /// push it.
+    fn parked(ability: &ResolvedAbility) -> PendingCoinFlip {
+        let Effect::FlipCoins { lose_effect, .. } = &ability.effect else {
+            unreachable!("fixture is a FlipCoins");
+        };
+        PendingCoinFlip {
+            source_id: ability.source_id,
+            controller: ability.controller,
+            flipper: ability.controller,
+            targets: ability.targets.clone(),
+            win_effect: None,
+            lose_effect: lose_effect.clone(),
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: ability.context.chain_root_targets.clone(),
+            branch_context: FlipBranchContext::from_ability(ability),
+        }
+    }
+
+    fn lost_flip(events: &[GameEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::CoinFlipped {
+                    player_id: P0,
+                    won: false
+                }
+            )
+        })
+    }
+
+    fn controller_changed(events: &[GameEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. }))
+    }
+
+    /// U-E1: the branch reads "that opponent" from the players chosen earlier in
+    /// the flipping resolution, inline and across a Krark's Thumb suspension.
+    #[test]
+    fn branch_inherits_the_chosen_player_inline_and_resumed() {
+        for resumed in [false, true] {
+            let (mut state, creature, source) = game_losing_the_flip();
+            let mut ability = flip_ability(
+                give_to(chosen_player()),
+                vec![TargetRef::Object(creature)],
+                source,
+            );
+            ability.chosen_players = vec![P2];
+
+            let mut events = Vec::new();
+            if resumed {
+                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+            } else {
+                resolve(&mut state, &ability, &mut events).unwrap();
+            }
+            crate::game::layers::evaluate_layers(&mut state);
+
+            assert!(lost_flip(&events), "reach: resumed={resumed}");
+            assert_eq!(
+                state.objects[&creature].controller, P2,
+                "resumed={resumed}: the chosen opponent, not another one"
+            );
+        }
+    }
+
+    /// U-E3 (B1): when the flipping node's result is completed-but-empty ("choose
+    /// a creature" found none), a lost flip's handoff of "that creature" does
+    /// nothing, inline and resumed, while an independent instruction in the same
+    /// branch still resolves.
+    #[test]
+    fn completed_empty_result_prunes_the_dependent_branch_node() {
+        for resumed in [false, true] {
+            let (mut state, creature, source) = game_losing_the_flip();
+            let mut ability =
+                flip_ability(handoff_then_independent_life_gain(), Vec::new(), source);
+            ability.context.forwarded_result_context = Some(Box::new(
+                ForwardedResultContext::from_object_ids(&state, &[]),
+            ));
+            let life_before = state.players[0].life;
+
+            let mut events = Vec::new();
+            if resumed {
+                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+            } else {
+                resolve(&mut state, &ability, &mut events).unwrap();
+            }
+            crate::game::layers::evaluate_layers(&mut state);
+
+            assert!(lost_flip(&events), "reach: resumed={resumed}");
+            assert_eq!(
+                state.players[0].life,
+                life_before + 3,
+                "reach: the independent sibling still resolves (resumed={resumed})"
+            );
+            assert!(!controller_changed(&events), "resumed={resumed}");
+            assert_eq!(
+                state.objects[&source].controller, P0,
+                "the resolving source is not handed over (resumed={resumed})"
+            );
+            assert_eq!(state.objects[&creature].controller, P0);
+        }
+    }
+
+    /// U-E3 control: without the completed-empty marker the same handoff names
+    /// the flip's own target, so the prune is what stops the transfer above.
+    #[test]
+    fn without_the_marker_the_branch_hands_over_its_target() {
+        let (mut state, creature, source) = game_losing_the_flip();
+        let ability = flip_ability(
+            handoff_then_independent_life_gain(),
+            vec![TargetRef::Object(creature)],
+            source,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert!(lost_flip(&events));
+        assert_eq!(state.objects[&creature].controller, P1);
+    }
+
+    /// A nested "flip a coin" whose BOTH outcomes hand "that creature" to P1, so
+    /// no nested outcome can be the one that happens to be harmless.
+    fn nested_flip() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 }))),
+                lose_effect: Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 }))),
+                flipper: TargetFilter::Controller,
+            },
+        )
+    }
+
+    /// Where the nested flip sits in the surviving lose branch.
+    #[derive(Clone, Copy, Debug)]
+    enum NestedAt {
+        /// The branch is itself the nested flip.
+        BranchRoot,
+        /// An independent instruction (P0 gains 3 life), then the nested flip.
+        AfterIndependentInstruction,
+    }
+
+    fn lose_branch_with_nested_flip(at: NestedAt) -> AbilityDefinition {
+        match at {
+            NestedAt::BranchRoot => nested_flip(),
+            NestedAt::AfterIndependentInstruction => {
+                let mut flip = nested_flip();
+                flip.sub_link = SubAbilityLink::SequentialSibling;
+                let mut life = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: TargetFilter::Controller,
+                    },
+                );
+                life.sub_ability = Some(Box::new(flip));
+                life
+            }
+        }
+    }
+
+    /// A seed whose first Outcome draws are exactly `draws`.
+    fn seed_for(draws: &[bool]) -> u64 {
+        use crate::types::game_state::RandomDraw;
+        (0u64..100_000)
+            .find(|&seed| {
+                let mut rng = GameRng::seed_from_u64(seed);
+                draws
+                    .iter()
+                    .all(|&want| rng.draw(RandomDraw::Outcome).random_bool(0.5) == want)
+            })
+            .expect("a seed exists for the wanted draw prefix")
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Path {
+        /// The outer flip is lost inline and the nested flip follows.
+        Inline,
+        /// The outer flip's lost branch resumes from a parked frame.
+        Resumed,
+        /// As `Resumed`, and the NESTED flip is doubled by the flipper's own
+        /// Krark's Thumb, so it parks a frame of its own before it resumes.
+        NestedKrark,
+    }
+
+    /// Everything the empty-result rows assert on.
+    struct NestedRun {
+        source_controller: PlayerId,
+        creature_controller: PlayerId,
+        life_gained: i32,
+        events: Vec<GameEvent>,
+        control_effects: usize,
+        flip_results: Vec<bool>,
+    }
+
+    /// Resolve an outer lost flip whose branch holds a nested flip, in a
+    /// resolution whose chooser found nothing (`marker`) or in one that did not.
+    fn run_nested(at: NestedAt, path: Path, nested_won: bool, marker: bool) -> NestedRun {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        let creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let source = scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green);
+        if matches!(path, Path::NestedKrark) {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
+        let mut runner = scenario.build();
+
+        let mut ability = flip_ability(lose_branch_with_nested_flip(at), Vec::new(), source);
+        if marker {
+            ability.context.forwarded_result_context = Some(Box::new(
+                ForwardedResultContext::from_object_ids(runner.state(), &[]),
+            ));
+        }
+        let life_before = runner.state().players[0].life;
+        let control_before = runner.state().transient_continuous_effects.len();
+
+        let mut events = Vec::new();
+        match path {
+            Path::Inline => {
+                runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[false, nested_won]));
+                resolve(runner.state_mut(), &ability, &mut events).unwrap();
+            }
+            Path::Resumed => {
+                runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[nested_won]));
+                resume_after_keep(
+                    runner.state_mut(),
+                    parked(&ability),
+                    vec![false],
+                    &mut events,
+                )
+                .unwrap();
+            }
+            Path::NestedKrark => {
+                runner.state_mut().rng =
+                    GameRng::seed_from_u64(seed_for(&[nested_won, !nested_won]));
+                resume_after_keep(
+                    runner.state_mut(),
+                    parked(&ability),
+                    vec![false],
+                    &mut events,
+                )
+                .unwrap();
+                let WaitingFor::CoinFlipKeepChoice { results, .. } =
+                    runner.state().waiting_for.clone()
+                else {
+                    panic!(
+                        "reach: the nested flip must be doubled, got {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(results[0], nested_won);
+                let frame = runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .expect("the doubled nested flip parked a frame");
+                assert_eq!(
+                    frame.branch_context.forwarded_result_context.is_some(),
+                    marker,
+                    "the nested frame carries the enclosing completed-empty result"
+                );
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![0],
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+        }
+        crate::game::layers::evaluate_layers(runner.state_mut());
+
+        // Every path records the lost outer flip, then the nested one.
+        let flip_results: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect();
+        NestedRun {
+            source_controller: runner.state().objects[&source].controller,
+            creature_controller: runner.state().objects[&creature].controller,
+            life_gained: runner.state().players[0].life - life_before,
+            events,
+            control_effects: runner.state().transient_continuous_effects.len() - control_before,
+            flip_results,
+        }
+    }
+
+    /// B1 through a NESTED flip: the enclosing resolution's chooser found
+    /// nothing, so a nested flip inside the surviving lost branch must hand over
+    /// nothing, whichever way it lands, whether the nested flip is the branch
+    /// itself or follows an independent instruction, and whether the whole thing
+    /// runs inline, resumes from a parked frame, or parks again under the
+    /// flipper's Krark's Thumb. The independent instruction still happens.
+    #[test]
+    fn nested_flip_in_an_empty_result_branch_hands_over_nothing() {
+        for at in [NestedAt::BranchRoot, NestedAt::AfterIndependentInstruction] {
+            for path in [Path::Inline, Path::Resumed, Path::NestedKrark] {
+                for nested_won in [false, true] {
+                    let run = run_nested(at, path, nested_won, true);
+                    let label = format!("{at:?} {path:?} nested_won={nested_won}");
+                    assert_eq!(
+                        run.flip_results,
+                        vec![false, nested_won],
+                        "reach: the lost outer flip, then the nested flip ({label})"
+                    );
+                    assert!(!controller_changed(&run.events), "{label}");
+                    assert_eq!(run.control_effects, 0, "{label}");
+                    assert_eq!(run.source_controller, P0, "{label}");
+                    assert_eq!(run.creature_controller, P0, "{label}");
+                    let expected_life = match at {
+                        NestedAt::BranchRoot => 0,
+                        NestedAt::AfterIndependentInstruction => 3,
+                    };
+                    assert_eq!(run.life_gained, expected_life, "{label}");
+                }
+            }
+        }
+    }
+
+    /// Control for the row above: with no completed-empty result the very same
+    /// nested handoff falls back to the ability's own source, which is the defect
+    /// the marker prevents. Without this the row above could pass vacuously.
+    #[test]
+    fn nested_flip_without_the_marker_reaches_the_source_fallback() {
+        let run = run_nested(NestedAt::BranchRoot, Path::Inline, false, false);
+        assert_eq!(run.flip_results, vec![false, false]);
+        assert!(controller_changed(&run.events));
+        assert_eq!(run.source_controller, P1);
+    }
+
+    /// CR 608.2c: a surviving branch root that repeats ("repeat this
+    /// process") must keep its repeat dispatch when the branch carries the
+    /// enclosing completed-empty result: it offers the repeat decision, runs
+    /// another iteration when accepted, and settles when declined.
+    #[test]
+    fn repeatable_root_of_an_empty_result_branch_offers_the_repeat_decision() {
+        use crate::types::ability::RepeatContinuation;
+        use crate::types::actions::GameAction;
+
+        let (mut state, creature, source) = game_losing_the_flip();
+        let mut handoff = give_to(TargetFilter::SpecificPlayer { id: P1 });
+        let mut repeatable = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        repeatable.sub_link = SubAbilityLink::SequentialSibling;
+        repeatable.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        handoff.sub_ability = Some(Box::new(repeatable));
+        let mut ability = flip_ability(handoff, Vec::new(), source);
+        ability.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&state, &[]),
+        ));
+        let life_before = state.players[0].life;
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(lost_flip(&events), "reach: the lost branch ran");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "the repeatable root must offer the repeat decision, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.players[0].life, life_before + 3);
+
+        crate::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        assert_eq!(
+            state.players[0].life,
+            life_before + 6,
+            "another iteration ran"
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "declining settles the loop, got {:?}",
+            state.waiting_for
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.players[0].life, life_before + 6);
+        assert_eq!(state.objects[&source].controller, P0);
+        assert_eq!(state.objects[&creature].controller, P0);
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    /// CR 608.2d + CR 115.10: an object the flipping resolution selected BEFORE
+    /// the flip must not answer an independent choice that begins the branch
+    /// ("choose a creature you control ..."): the root makes its own pick, and
+    /// "that creature" names that pick, not the earlier object.
+    #[test]
+    fn branch_root_chooser_is_not_answered_by_the_flips_earlier_object() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        let artifact = scenario.add_artifact_from_oracle(P0, "Trinket", "").id();
+        let bear = scenario.add_creature(P0, "Bear A", 2, 2).id();
+        let other_bear = scenario.add_creature(P0, "Bear B", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[false]));
+
+        let mut chooser = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        );
+        chooser.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        chooser.sub_ability = Some(Box::new(give_to(TargetFilter::SpecificPlayer { id: P1 })));
+        let ability = flip_ability(chooser, vec![TargetRef::Object(artifact)], artifact);
+
+        let mut events = Vec::new();
+        resolve(runner.state_mut(), &ability, &mut events).unwrap();
+
+        assert!(lost_flip(&events), "reach: the lost branch ran");
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "the branch root must prompt for its own pick, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(
+            cards.into_iter().collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([bear, other_bear])
+        );
+        runner
+            .act(GameAction::SelectCards { cards: vec![bear] })
+            .unwrap();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&bear].controller, P1);
+        assert_eq!(runner.state().objects[&artifact].controller, P0);
+        assert_eq!(runner.state().objects[&other_bear].controller, P0);
+    }
+
+    /// A winning-branch instruction that declares its own player target (the
+    /// shape of Goblin Lyre's and Ral Zarek's branches): the flip's targets
+    /// include the announced player, so the branch root must receive them even
+    /// though it declares a chosen group. Only an untargeted resolution-time
+    /// chooser at the branch root is denied the flip's targets.
+    fn declaring_branch(effect: Effect) -> AbilityDefinition {
+        let mut branch = AbilityDefinition::new(AbilityKind::Spell, effect);
+        branch.declares_chosen_group =
+            Some(crate::types::ability::ChosenGroupId::declared_player(0));
+        branch
+    }
+
+    fn opponent() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    /// Goblin Lyre shape: "If you win the flip, ~ deals 2 damage to target
+    /// opponent or planeswalker." with P2 (not the default first opponent) announced.
+    #[test]
+    fn announced_player_reaches_a_declaring_win_branch() {
+        let (mut state, _creature, source) = game_losing_the_flip();
+        state.rng = GameRng::seed_from_u64(seed_for(&[true]));
+        let win = declaring_branch(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: opponent(),
+            damage_source: None,
+            excess: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P2)],
+            source,
+            P0,
+        );
+        let before = state.players.iter().map(|p| p.life).collect::<Vec<_>>();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CoinFlipped { won: true, .. })),
+            "reach: a won flip"
+        );
+        assert_eq!(state.players[2].life, before[2] - 2, "the announced player");
+        assert_eq!(state.players[1].life, before[1]);
+    }
+
+    /// Ral Zarek, Guest Lecturer -7 shape: five flips, the announced opponent
+    /// skips one turn per heads.
+    #[test]
+    fn announced_player_reaches_every_declaring_win_branch_of_a_multi_flip() {
+        let (mut state, _creature, source) = game_losing_the_flip();
+        state.rng = GameRng::seed_from_u64(seed_for(&[true, true, true, true, false]));
+        let win = declaring_branch(Effect::SkipNextTurn {
+            target: opponent(),
+            count: QuantityExpr::Fixed { value: 1 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 5 },
+                },
+                win_effect: Some(Box::new(win)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P2)],
+            source,
+            P0,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let heads = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::CoinFlipped { won: true, .. }))
+            .count();
+        assert_eq!(heads, 4, "reach: four heads");
+        let skips = |player: usize| state.turns_to_skip.get(player).copied().unwrap_or(0);
+        assert_eq!(
+            skips(2),
+            4,
+            "the announced opponent skips one turn per heads"
+        );
+        assert_eq!(skips(1), 0);
     }
 }

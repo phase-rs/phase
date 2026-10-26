@@ -105,11 +105,27 @@ fn resolve_single_object_targets(
     // CR 722.3a: a self-referential "this creature becomes prepared" (e.g.
     // Stensian Sanguinist's combat-damage delayed trigger) carries no explicit
     // object target — the subject is the ability's own source.
+    //
+    // CR 400.7 + CR 110.1 + CR 722.3a: the SelfRef binding resolves only while
+    // the source is still its exact captured incarnation on the battlefield.
+    // A source that changed zones is a new object, so a pending trigger must
+    // not prepare the graveyard card, and a same-id blink return must not
+    // prepare the new permanent. `self_ref_is_current` is the shared
+    // incarnation authority; the battlefield gate enforces the
+    // permanent boundary on top.
+    if matches!(filter, TargetFilter::SelfRef) {
+        if !ability.self_ref_is_current(state) {
+            return Vec::new();
+        }
+        return ability
+            .self_ref_binding(state)
+            .into_iter()
+            .filter(|id| crate::game::targeting::is_phased_in_battlefield_permanent(state, *id))
+            .collect();
+    }
     // CR 608.2c: a triggered BecomePrepared bound to the source via ParentTarget
     // with no explicit target (e.g. Tam landfall) likewise resolves to source_id.
-    if matches!(filter, TargetFilter::SelfRef)
-        || (ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget))
-    {
+    if ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget) {
         return ability.self_ref_binding(state).into_iter().collect();
     }
     // CR 608.2k + CR 603.2: "that creature" / "it" in a triggered ability's effect
@@ -489,7 +505,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.face_down_cause = None;
     copy.phase_status = PhaseStatus::PhasedIn;
     copy.counters.clear();
-    copy.stickers.clear();
+    crate::game::stickers::remove_stickers_from_copy(copy);
 
     // CR 722.3c: only the prepare spell's characteristics — none of the
     // permanent's battlefield state (marked damage, attachment and pairing

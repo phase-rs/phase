@@ -41,9 +41,16 @@ test("publication fingerprint tracks registry, crates and data at the selected c
     writeFileSync(join(root, "crates/lib.rs"), "pub const VALUE: u32 = 2;\n");
     const crateKey = fingerprint(commit());
     assert.notEqual(crateKey, registryKey, "existing crate input remains tracked");
+    writeFileSync(join(root, "Cargo.lock"), '[[package]]\nname = "webpki-roots"\nversion = "1.0.9"\n');
+    const oldTrustRef = commit();
+    const oldTrustKey = fingerprint(oldTrustRef);
+    writeFileSync(join(root, "Cargo.lock"), '[[package]]\nname = "webpki-roots"\nversion = "1.0.10"\n');
+    const trustKey = fingerprint(commit());
+    assert.notEqual(trustKey, oldTrustKey, "trust-store-only update must invalidate native publication");
+    assert.equal(fingerprint(oldTrustRef), oldTrustKey, "selected ref owns the locked trust store");
     writeFileSync(join(root, "cards.json"), "[1]\n");
     const cardsKey = fingerprint("HEAD");
-    assert.notEqual(cardsKey, crateKey, "card data remains tracked");
+    assert.notEqual(cardsKey, trustKey, "card data remains tracked");
     writeFileSync(join(root, "pools.json"), "[1]\n");
     assert.notEqual(fingerprint("HEAD"), cardsKey, "draft pools remain tracked");
   } finally {

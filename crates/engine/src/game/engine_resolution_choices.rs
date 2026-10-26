@@ -7,15 +7,15 @@ use rand::seq::SliceRandom;
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
     ForwardedResultContext, GuessOutcome, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TargetRef,
+    QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, CopyChosenSelection,
-    GameState, OutsideGameChoiceSource, PayableResource, PendingContinuation,
-    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
-    ZoneOpponentChooserPurpose,
+    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
+    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
+    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
+    PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::resolved_commands::{
@@ -33,6 +33,23 @@ use super::{
     zone_pipeline,
 };
 
+/// CR 608.2c: does the parked zone-choice continuation `chain` treat
+/// the objects NOT picked as "the rest" for its next instruction (a
+/// `ChooseFromZone` partition)?
+///
+/// It does not for counter-placement continuations (Bolster, Gluntch: their
+/// `sub_ability` is an independent trailing clause), nor for a parked
+/// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
+/// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
+fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
+    use crate::types::ability::{Effect, TargetChoiceTiming};
+    !matches!(
+        chain.effect,
+        Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
+    ) && !(matches!(chain.effect, Effect::TargetOnly { .. })
+        && chain.target_choice_timing == TargetChoiceTiming::Resolution)
+}
+
 /// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
 /// an instruction's announced targets. Result-dependent instructions bind the
 /// settled selection, including clearing a previous result on an empty choice.
@@ -45,7 +62,9 @@ fn bind_dig_continuation_targets(chain: &mut ResolvedAbility, selected: &[Object
 /// A fresh mass library-order prompt is valid only for
 /// the exact member identities and origins frozen by its producer. Prompt cards
 /// and snapshot members remain lockstep so an arbitrary eligible id cannot be
-/// substituted into a persisted choice.
+/// substituted into a persisted choice. The answering player must be the
+/// batch's arranger (CR 401.4 + CR 101.1: its owner unless the instruction
+/// names one); member currency stays bound to the batch's owner.
 fn mass_library_order_batch_is_current(
     state: &GameState,
     player: crate::types::player::PlayerId,
@@ -53,16 +72,16 @@ fn mass_library_order_batch_is_current(
     batch: &crate::types::game_state::MassLibraryOrderBatch,
 ) -> bool {
     let unique_cards: HashSet<_> = cards.iter().copied().collect();
-    batch.owner == player
+    batch.chooser() == player
         && batch.members.len() == cards.len()
         && unique_cards.len() == cards.len()
         && batch.members.iter().zip(cards).all(|(member, card_id)| {
             member.identity.object_id == *card_id
-                && state.objects.get(card_id).is_some_and(|object| {
-                    object.incarnation == member.identity.incarnation
-                        && object.zone == member.origin
-                        && object.owner == batch.owner
-                })
+                && effects::change_zone::mass_library_order_member_is_current(
+                    state,
+                    batch.owner,
+                    member,
+                )
         })
 }
 
@@ -187,26 +206,86 @@ fn legacy_mass_library_order_prompt_is_current(
 
     match state.pending_mass_library_order_choice.as_ref() {
         Some(pending) => {
-            pending.source_id == source_id
-                && pending.library_position == *library_position.expect("checked above")
-                && pending.track_exiled_by_source == track_exiled_by_source
-                && pending.duration.as_ref() == duration
-                && matches!(
-                    &pending.remaining_batches,
-                    crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches)
-                        if !batches.is_empty() && batches.iter().all(|(owner, batch)| {
-                        !batch.is_empty()
-                            && batch.iter().all(|card_id| {
-                                all_members.insert(*card_id) && member_is_current(*card_id, *owner)
-                            })
+            effects::change_zone::owner_arrangement_carrier_binds(
+                state,
+                pending,
+                &effects::change_zone::OwnerArrangementInstruction {
+                    source_id,
+                    library_position: library_position.expect("checked above"),
+                    track_exiled_by_source,
+                    duration,
+                },
+            ) && matches!(
+                &pending.remaining_batches,
+                crate::types::game_state::PendingMassLibraryOrderBatches::Legacy(batches)
+                    if !batches.is_empty() && batches.iter().all(|(owner, batch)| {
+                    !batch.is_empty()
+                        && batch.iter().all(|card_id| {
+                            all_members.insert(*card_id) && member_is_current(*card_id, *owner)
                         })
-                )
+                    })
+            )
         }
         // The old producer did not write a continuation carrier when a single
         // owner had multiple cards to order. The exact resolving producer and
         // the mandatory current producer-origin owner/membership check above are
         // the only authority for that archived shape.
         None => cards.len() > 1,
+    }
+}
+
+/// CR 401.4 + CR 608.2c: whether a departure settled an open owner library
+/// arrangement (`settle_owner_library_arrangement_after_departure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerArrangementDepartureSettlement {
+    /// No arrangement was settled: none was open, its prompt still stands or
+    /// passed to the next owner, or its carrier was retired without
+    /// completion.
+    NotSettled,
+    /// The departure settled the arrangement through its handler — the
+    /// collected orders moved, or the instruction completed with nothing
+    /// moved — and the resolution went on to its remaining instructions
+    /// (CR 608.2m).
+    Settled,
+}
+
+/// CR 800.4a + CR 101.4 + CR 401.4: after a player leaves, continue an open
+/// owner library arrangement with the players and objects still in the game:
+/// republish or advance its prompt, or settle the last recorded order, or the
+/// instruction's empty completion when nothing is left (its last chooser may
+/// have left), through this handler so the collected arrangement moves as one
+/// event with one completion. Reports whether it settled the arrangement, so
+/// the elimination leaves a departed controller's instant or sorcery that the
+/// settlement finished to the action boundary's final-part convergence
+/// (CR 608.2n) instead of retiring it.
+pub(crate) fn settle_owner_library_arrangement_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<OwnerArrangementDepartureSettlement, EngineError> {
+    match effects::change_zone::reconcile_owner_library_arrangement(state) {
+        effects::change_zone::OwnerLibraryArrangementReconciliation::Unchanged
+        | effects::change_zone::OwnerLibraryArrangementReconciliation::Retired => {
+            Ok(OwnerArrangementDepartureSettlement::NotSettled)
+        }
+        effects::change_zone::OwnerLibraryArrangementReconciliation::Prompted(chooser) => {
+            state.priority_player = chooser;
+            Ok(OwnerArrangementDepartureSettlement::NotSettled)
+        }
+        effects::change_zone::OwnerLibraryArrangementReconciliation::Settle { chooser, cards } => {
+            state.priority_player = chooser;
+            let waiting_for = state.waiting_for.clone();
+            match handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards },
+                events,
+            )? {
+                ResolutionChoiceOutcome::WaitingFor(_)
+                | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
+                ResolutionChoiceOutcome::ActionResult(result) => events.extend(result.events),
+            }
+            Ok(OwnerArrangementDepartureSettlement::Settled)
+        }
     }
 }
 
@@ -3316,7 +3395,8 @@ pub(super) fn handle_resolution_choice(
                 let mut pending = pending_mana_ability.as_ref().clone();
                 // CR 107.1c / CR 107.3a: bind the announced amount to the
                 // correct mana-ability cost axis — a removed-counter count
-                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
+                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179f)
+                // or an `{X}` mana leg.
                 match resource {
                     // CR 107.3a + CR 107.3i: for a literal "Remove X counters"
                     // mana-ability cost (Saltcrusted Steppe class), CR 107.3i
@@ -3342,8 +3422,16 @@ pub(super) fn handle_resolution_choice(
                         }
                         pending.chosen_counter_counts.push(amount);
                     }
-                    PayableResource::Speed => pending.chosen_x = Some(amount),
-                    other => {
+                    // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a
+                    // mana ability's `Pay X speed` (CR 702.179f) or `{X}` mana
+                    // leg. The activation's own cost cursor pays the leg with X
+                    // concretized; nothing is deducted here.
+                    PayableResource::Speed | PayableResource::ManaGeneric { .. } => {
+                        pending.chosen_x = Some(amount)
+                    }
+                    other @ (PayableResource::Energy
+                    | PayableResource::Life
+                    | PayableResource::LoopCollapse { .. }) => {
                         return Err(EngineError::InvalidAction(format!(
                             "Unexpected pay-amount resource {other:?} for mana ability"
                         )));
@@ -3351,6 +3439,16 @@ pub(super) fn handle_resolution_choice(
                 }
                 let waiting_for =
                     mana_abilities::continue_mana_ability_activation(state, pending, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
+            // CR 614.12a: a pre-entry as-enters life payment answers the parked
+            // battlefield entry, not a resolving ability — no `last_effect_count`
+            // stamp, no continuation. Mirrors the `PendingEntry` branch of the
+            // `NamedChoice` arm; range validation is inherited from the shared
+            // guard above, so an over-cap submission fails closed there.
+            if super::replacement::pending_entry_payment_is_live(state) {
+                let waiting_for =
+                    super::engine_replacement::handle_entry_payment(state, amount, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
@@ -3428,11 +3526,11 @@ pub(super) fn handle_resolution_choice(
                                     count: growth.per_cycle_delta.saturating_mul(amount),
                                     copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
                                         values: growth.profile.clone(),
-                                        display_source:
-                                            crate::game::game_object::DisplaySource::Token,
-                                        printed_ref: None,
-                                        token_image_ref: None,
-                                        token_art: None,
+                                        display: crate::game::game_object::DisplayIdentity {
+                                            display_source:
+                                                crate::game::game_object::DisplaySource::Token,
+                                            ..Default::default()
+                                        },
                                         extra_keywords: vec![],
                                         additional_modifications: vec![],
                                         tapped: true,
@@ -3440,6 +3538,8 @@ pub(super) fn handle_resolution_choice(
                                         sacrifice_at: None,
                                         source_id: ObjectId(0),
                                         controller: player,
+                                        // Source-less growth mint from a fodder profile; empty mods are stamp-proof.
+                                        donor: None,
                                     }),
                                 };
                                 crate::game::effects::token_copy::drive_copy_token_batches(
@@ -3743,6 +3843,8 @@ pub(super) fn handle_resolution_choice(
                                     player,
                                     total: accumulated.saturating_add(amount),
                                     resume_at_resolution_depth,
+                                    // Resolution-time prompt: no parked entry.
+                                    pending_entry: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3924,84 +4026,90 @@ pub(super) fn handle_resolution_choice(
                     "Chosen zone-choice player {opponent:?} is not a legal candidate"
                 )));
             }
-            if matches!(purpose, ZoneOpponentChooserPurpose::PerPlayerChoiceOrder) {
-                // CR 101.4c: the chooser picked whose selection to make next.
-                // Candidates may include the chooser themself (each player).
-                effects::choose_from_zone::answer_per_player_order(
-                    state, &ability, opponent, events,
-                )
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                // A pool that emptied since the prompt re-advanced instead; if
-                // that disposed the whole iteration, its continuation resumes.
-                if state.active_per_player_zone_choice().is_none() {
-                    effects::choose_from_zone::settle_finished_per_player_iteration(
-                        state, &ability, events,
+            match purpose {
+                ZoneOpponentChooserPurpose::PerPlayerChoiceOrder => {
+                    // CR 101.4c: the chooser picked whose selection to make next.
+                    // Candidates may include the chooser themself (each player).
+                    effects::choose_from_zone::answer_per_player_order(
+                        state, &ability, opponent, events,
                     )
-                    .expect("a settled per-player iteration must resume its continuation");
-                }
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    state.waiting_for.clone(),
-                ));
-            }
-            if matches!(purpose, ZoneOpponentChooserPurpose::SubstituteChooser) {
-                // CR 800.4g: the elected player makes the pending pick only.
-                effects::choose_from_zone::answer_substitute_chooser(
-                    state, &ability, opponent, events,
-                )
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                if state.active_per_player_zone_choice().is_none() {
-                    effects::choose_from_zone::settle_finished_per_player_iteration(
-                        state, &ability, events,
-                    )
-                    .expect("a settled per-player iteration must resume its continuation");
-                }
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    state.waiting_for.clone(),
-                ));
-            }
-            if matches!(purpose, ZoneOpponentChooserPurpose::BindReciprocalConsume) {
-                effects::bind_reciprocal_consumer_from_picker(state, opponent)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                let consumer = state
-                    .active_ability_continuation()
-                    .ok_or_else(|| {
-                        EngineError::InvalidAction(
-                            "bound reciprocal consumer disappeared".to_string(),
+                    // A pool that emptied since the prompt re-advanced instead; if
+                    // that disposed the whole iteration, its continuation resumes.
+                    if state.active_per_player_zone_choice().is_none() {
+                        effects::choose_from_zone::settle_finished_per_player_iteration(
+                            state, &ability, events,
                         )
-                    })?
-                    .chain
-                    .as_ref()
-                    .clone();
-                effects::choose_from_zone::resolve_with_choosing_player(
-                    state, &consumer, opponent, events,
-                )
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    state.waiting_for.clone(),
-                ));
+                        .expect("a settled per-player iteration must resume its continuation");
+                    }
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                ZoneOpponentChooserPurpose::SubstituteChooser => {
+                    // CR 800.4g: the elected player makes the pending pick only.
+                    effects::choose_from_zone::answer_substitute_chooser(
+                        state, &ability, opponent, events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    if state.active_per_player_zone_choice().is_none() {
+                        effects::choose_from_zone::settle_finished_per_player_iteration(
+                            state, &ability, events,
+                        )
+                        .expect("a settled per-player iteration must resume its continuation");
+                    }
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                // CR 800.4g: the elected player arranges the batch whose named arranger left.
+                ZoneOpponentChooserPurpose::SubstituteArranger => {
+                    let chooser =
+                        effects::change_zone::answer_substitute_arranger(state, &ability, opponent)
+                            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    state.priority_player = chooser;
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                ZoneOpponentChooserPurpose::BindReciprocalConsume => {
+                    effects::bind_reciprocal_consumer_from_picker(state, opponent)
+                        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    let consumer = state
+                        .active_ability_continuation()
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction(
+                                "bound reciprocal consumer disappeared".to_string(),
+                            )
+                        })?
+                        .chain
+                        .as_ref()
+                        .clone();
+                    effects::choose_from_zone::resolve_with_choosing_player(
+                        state, &consumer, opponent, events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                ZoneOpponentChooserPurpose::Ordinary => {
+                    // CR 608.2d: Present the parked zone selection to the picked
+                    // opponent. This re-enters the standard `ChooseFromZoneChoice`
+                    // pause (or completes with no choice if the pool emptied), so the
+                    // already-parked continuation frame is untouched — exactly as if
+                    // the opponent had been the chooser from the start.
+                    effects::choose_from_zone::resolve_with_choosing_player(
+                        state, &ability, opponent, events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                    // With an empty pool the choose completed without a new pause —
+                    // hand priority back to the controller (mirroring the settled-clash
+                    // arm above) so the parked continuation can actually drain: the
+                    // drain helper is gated on `WaitingFor::Priority`, and without
+                    // `set_priority` the stale opponent-chooser pause would wedge the
+                    // resolution (CR 608.2d — the choice is skipped, not the rest of
+                    // the ability).
+                    if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
+                        set_priority(state, player);
+                        super::engine::resume_pending_continuation_if_priority(state, events)
+                            .expect("a settled opponent-chooser pick must resume its continuation");
+                    }
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
             }
-            // CR 608.2d: Present the parked zone selection to the picked
-            // opponent. This re-enters the standard `ChooseFromZoneChoice`
-            // pause (or completes with no choice if the pool emptied), so the
-            // already-parked continuation frame is untouched — exactly as if
-            // the opponent had been the chooser from the start.
-            effects::choose_from_zone::resolve_with_choosing_player(
-                state, &ability, opponent, events,
-            )
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            // With an empty pool the choose completed without a new pause —
-            // hand priority back to the controller (mirroring the settled-clash
-            // arm above) so the parked continuation can actually drain: the
-            // drain helper is gated on `WaitingFor::Priority`, and without
-            // `set_priority` the stale opponent-chooser pause would wedge the
-            // resolution (CR 608.2d — the choice is skipped, not the rest of
-            // the ability).
-            if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
-                set_priority(state, player);
-                super::engine::resume_pending_continuation_if_priority(state, events)
-                    .expect("a settled opponent-chooser pick must resume its continuation");
-            }
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
             WaitingFor::ClashCardPlacement {
@@ -5518,6 +5626,26 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
+            // CR 115.10a + CR 608.2d: this answer selects only a sticker
+            // recipient. It is neither a partition nor a completed placement.
+            let sticker_recipient = state
+                .active_ability_continuation()
+                .filter(|cont| {
+                    matches!(cont.chain.effect, Effect::PutSticker { .. })
+                        && effects::awaits_resolution_object_choice(&cont.chain)
+                })
+                .and_then(|_| chosen.first())
+                .and_then(|id| {
+                    state.objects.get(id).map(|object| {
+                        (
+                            *id,
+                            crate::types::identifiers::ObjectIncarnationRef::of(
+                                *id,
+                                object.incarnation,
+                            ),
+                        )
+                    })
+                });
             // CR 608.2c: When the parked continuation consumes the chain's
             // tracked set (a `GrantCastingPermission { target: TrackedSet }` /
             // any `TrackedSet`-referencing downstream effect — e.g. End-Blaze
@@ -5538,6 +5666,7 @@ pub(super) fn handle_resolution_choice(
                 state.active_ability_continuation().is_some_and(|cont| {
                     effects::chain_references_tracked_set(&cont.chain)
                         && !effects::resolution_choice_head_publishes_on_resume(&cont.chain)
+                        && sticker_recipient.is_none()
                 });
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
@@ -5582,7 +5711,9 @@ pub(super) fn handle_resolution_choice(
                 .then(|| Box::new(ForwardedResultContext::from_object_ids(state, &unchosen)));
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
-                if let Some(snapshot) = counter_kind_choice {
+                if let Some((id, pin)) = sticker_recipient {
+                    effects::stickers::bind_recipient(&mut cont.chain, id, pin);
+                } else if let Some(snapshot) = counter_kind_choice {
                     if let crate::types::ability::Effect::ChooseCounterKind { target, .. } =
                         &mut cont.chain.effect
                     {
@@ -5627,12 +5758,14 @@ pub(super) fn handle_resolution_choice(
                 // control") is NOT a partition — its `sub_ability` is an
                 // independent trailing clause (e.g. the next `Choose`) and
                 // must not have the non-picked objects forced into its target
-                // list. Gate the forward on the continuation's own effect.
-                let is_partition = !matches!(
-                    cont.chain.effect,
-                    crate::types::ability::Effect::PutCounter { .. }
-                        | crate::types::ability::Effect::ChooseCounterKind { .. }
-                );
+                // list. Neither is a parked untargeted `TargetOnly` chooser
+                // ("choose a creature you control", CR 115.10a): the pick is
+                // the whole choice, and the unchosen candidates are not "the
+                // rest". A sticker-recipient answer selects only that
+                // recipient, so it forwards nothing either. Gate the forward
+                // on the continuation's own effect.
+                let is_partition = continuation_forwards_unchosen_complement(&cont.chain)
+                    && sticker_recipient.is_none();
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
                         // CR 707.12a: A `CastCopyOfCard` continuation casts the
@@ -6412,6 +6545,45 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 101.4 + CR 401.4: owners arrange in APNAP order, then the
+            // arrangement happens as one simultaneous action. Collect this owner's
+            // order; only the last owner's submission moves cards, and it moves every
+            // owner's cards. The answered batch is keyed by its owner and the
+            // arranger the instruction named (CR 101.1); a legacy prompt carries no
+            // batch and was answered by its owner.
+            let chosen = if matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                && (typed_mass_library_order_is_current || legacy_mass_library_order_is_current)
+            {
+                let (batch_owner, batch_arranger) = mass_library_order
+                    .as_ref()
+                    .map_or((player, None), |batch| (batch.owner, batch.arranger));
+                let instruction = effects::change_zone::OwnerArrangementInstruction {
+                    source_id,
+                    library_position: library_position
+                        .as_ref()
+                        .expect("an owner arrangement prompt names its library position"),
+                    track_exiled_by_source,
+                    duration: duration.as_ref(),
+                };
+                match effects::change_zone::submit_owner_library_order(
+                    state,
+                    batch_owner,
+                    batch_arranger,
+                    &instruction,
+                    &chosen,
+                ) {
+                    effects::change_zone::OwnerLibraryOrderProgress::NextOwner(next_chooser) => {
+                        state.priority_player = next_chooser;
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::change_zone::OwnerLibraryOrderProgress::Complete(arranged) => arranged,
+                }
+            } else {
+                chosen
+            };
+
             if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {
                 // CR 608.2c: An empty selection at a hand-pick cast's
                 // `EffectZoneChoice` means the player did not cast ("you may cast
@@ -7037,6 +7209,8 @@ pub(super) fn handle_resolution_choice(
                 // selection order (first chosen = top). Expressive Iteration's
                 // tracked-set bottom step chains an exile `ParentTarget` tail —
                 // detect that continuation shape to honor bottom placement.
+                // CR 401.4 + CR 101.4: for an owner arrangement, `chosen` is the
+                // whole collected multi-owner arrangement, moved here at once.
                 EffectKind::PutAtLibraryPosition => {
                     let library_position = match library_position {
                         Some(LibraryPosition::Bottom) => LibraryPosition::Bottom,
@@ -7069,14 +7243,6 @@ pub(super) fn handle_resolution_choice(
                             &library_position,
                             events,
                         );
-                        if let Some(next_owner) =
-                            effects::change_zone::resume_next_mass_library_order_choice(state)
-                        {
-                            state.priority_player = next_owner;
-                            return Ok(ResolutionChoiceOutcome::WaitingFor(
-                                state.waiting_for.clone(),
-                            ));
-                        }
                     } else {
                         // The selected EffectZoneChoice is now consumed. Clear it
                         // before the pipeline may park a CR 616.1 prompt; otherwise
@@ -9186,6 +9352,8 @@ fn reposition_library_origins_after_batch_delivery(
     }
 }
 
+/// CR 401.4 + CR 101.4: the one completion of a (possibly multi-owner)
+/// arrangement: tracked set, count and EffectResolved cover the whole moved set.
 fn finish_effect_zone_put_at_library_position(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -9202,10 +9370,6 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
-    if let Some(next_owner) = effects::change_zone::resume_next_mass_library_order_choice(state) {
-        state.priority_player = next_owner;
-        return;
-    }
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
@@ -9500,6 +9664,79 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
+/// CR 107.3f + CR 118.12: the X announcement a just-paused resolution-time payment makes for
+/// the instructions that follow it, keyed by the prompt the payment opened:
+/// * a "tap X untapped ..." payment (`TapCreaturesSelectionMode::VariableX`) announces the
+///   count tapped; a fixed count or a power threshold (Crew/Saddle shape) announces nothing;
+/// * a "pay any amount of energy / life" or unannounced-X mana payment (CR 107.14, CR 119.4)
+///   announces the amount paid. A mana ability's own amount prompt (`pending_mana_ability`)
+///   and a loop-collapse count are not resolution-time payments of an effect.
+pub(crate) fn paused_payment_x_announcement(
+    paying: &ResolvedAbility,
+    waiting_for: &WaitingFor,
+) -> Option<ContinuationXAnnouncement> {
+    if !matches!(paying.effect, Effect::PayCost { .. }) {
+        return None;
+    }
+    match waiting_for {
+        WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { mode },
+            resume: CostResume::Resolution,
+            ..
+        } => match mode {
+            TapCreaturesSelectionMode::VariableX => Some(ContinuationXAnnouncement::TappedCount),
+            TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::Aggregate(_) => None,
+        },
+        WaitingFor::PayAmountChoice {
+            resource,
+            pending_mana_ability: None,
+            ..
+        } => match resource {
+            PayableResource::Energy
+            | PayableResource::Life
+            | PayableResource::ManaGeneric { .. } => Some(ContinuationXAnnouncement::PaidAmount),
+            PayableResource::Counters
+            | PayableResource::Speed
+            | PayableResource::LoopCollapse { .. } => None,
+        },
+        _ => None,
+    }
+}
+
+/// CR 107.3f + CR 107.3i + CR 608.2c: X announced by a resolution-time payment (a count of
+/// permanents tapped, an amount paid) is X for the instructions after that payment, and for no
+/// other chain. Finds the rider the paused payment parked (the frame marked with
+/// `announcement`, see `PendingContinuation::x_announcement`, located by
+/// `ResolutionStack::x_announcement_rider_mut` even when an unmarked chain was parked above
+/// it), consumes the mark, and stamps `value` on that rider's chain and every sub/else branch.
+/// No other frame is touched: a payment with no rider parked nothing, so an enclosing
+/// continuation keeps its own X, and a chain parked above the rider keeps its own X.
+///
+/// A paid amount is not stamped onto a rider that opens with its own unannounced-X payment
+/// prompt: that prompt asks for its X itself (the next `PayAmountChoice` accumulates).
+pub(crate) fn stamp_paused_payment_rider_x(
+    state: &mut GameState,
+    announcement: ContinuationXAnnouncement,
+    value: u32,
+) {
+    let Some(frame) = state
+        .resolution_stack
+        .x_announcement_rider_mut(announcement)
+    else {
+        return;
+    };
+    frame.pending.x_announcement = None;
+    let asks_for_its_own_x = match announcement {
+        ContinuationXAnnouncement::PaidAmount => {
+            starts_with_pay_amount_prompt(&frame.pending.chain)
+        }
+        ContinuationXAnnouncement::TappedCount => false,
+    };
+    if !asks_for_its_own_x {
+        frame.pending.chain.set_chosen_x_recursive(value);
+    }
+}
+
 /// CR 118.12 + CR 119.4 + CR 616.1: Complete the outer pay-amount action only
 /// after any interactive post-replacement child of the life payment has
 /// settled. Shared by the direct submit path and the deferred-life resumer.
@@ -9510,22 +9747,20 @@ pub(crate) fn finish_pay_amount_choice(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     state.last_effect_count = Some(total as i32);
-    let pending_starts_with_pay_amount = state
-        .active_ability_continuation()
-        .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
-    if !pending_starts_with_pay_amount {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
-            frame.pending.chain.set_chosen_x_recursive(total);
-        }
-    }
+    stamp_paused_payment_rider_x(state, ContinuationXAnnouncement::PaidAmount, total);
     let mut waiting_for = finish_with_continuation(state, player, events);
     if let WaitingFor::PayAmountChoice {
         accumulated: next_accumulated,
         ..
     } = &mut waiting_for
     {
-        *next_accumulated = total;
-        state.waiting_for = waiting_for.clone();
+        // CR 614.12a: a nested pre-entry payment is a FRESH, independent
+        // payment (Phyrexian Processor put onto the battlefield mid-chain) —
+        // the outer total must not leak into its accumulator.
+        if !super::replacement::pending_entry_payment_is_live(state) {
+            *next_accumulated = total;
+            state.waiting_for = waiting_for.clone();
+        }
     }
     waiting_for
 }
@@ -14772,5 +15007,55 @@ mod tests {
             vec![pile[1], pile[3], p1c, pile[5], pile[9]],
             "separate libraries place the card third from the top of its owner's"
         );
+    }
+
+    /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)
+    /// `TargetOnly` chooser, and the counter-placement continuations, decline the
+    /// unchosen-complement forward; a Stack-timed `TargetOnly` wrapper after a
+    /// `ChooseFromZone` and an ordinary partition head keep it.
+    #[test]
+    fn only_untargeted_choosers_and_counter_placements_skip_the_complement_forward() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetChoiceTiming, TargetFilter};
+        let chain = |effect: Effect, timing: TargetChoiceTiming| {
+            let mut chain = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            chain.target_choice_timing = timing;
+            chain
+        };
+        let target_only = || Effect::TargetOnly {
+            target: TargetFilter::Any,
+        };
+
+        assert!(
+            !continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Resolution
+            )),
+            "the Resolution-timed chooser's pick is the whole choice"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                target_only(),
+                TargetChoiceTiming::Stack
+            )),
+            "reach: the same effect Stack-timed still forwards the complement"
+        );
+        assert!(
+            continuation_forwards_unchosen_complement(&chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                TargetChoiceTiming::Resolution
+            )),
+            "an ordinary head keeps the forward"
+        );
+        assert!(!continuation_forwards_unchosen_complement(&chain(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            TargetChoiceTiming::Resolution
+        )));
     }
 }

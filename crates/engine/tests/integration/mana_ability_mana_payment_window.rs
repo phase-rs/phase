@@ -10,7 +10,8 @@ use engine::types::ability::{AbilityCost, AbilityKind};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    GameState, LoopDetectionMode, ManaAbilityResume, ManaChoice, PayCostKind, WaitingFor,
+    CastPaymentMode, GameState, LoopDetectionMode, ManaAbilityResume, ManaChoice, PayCostKind,
+    WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -41,6 +42,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId, mana: bool) {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 }
@@ -106,6 +108,7 @@ fn architect_activation(board: &Board) -> GameAction {
     GameAction::ActivateAbility {
         source_id: board.architect,
         ability_index: ability(board.runner.state(), board.architect, true),
+        payment_mode: CastPaymentMode::Auto,
     }
 }
 
@@ -215,6 +218,7 @@ fn no_window_opens_without_a_mana_ability_that_could_pay() {
     let refused = board.runner.act(GameAction::ActivateAbility {
         source_id: pili,
         ability_index,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         refused.is_err(),
@@ -396,6 +400,7 @@ fn mana_costed(state: &GameState, id: ObjectId) -> GameAction {
     GameAction::ActivateAbility {
         source_id: id,
         ability_index,
+        payment_mode: CastPaymentMode::Auto,
     }
 }
 
@@ -443,6 +448,7 @@ fn a_viewer_is_offered_a_costed_mana_ability_while_mana_floats_in_a_spell_paymen
     let signet_ability = GameAction::ActivateAbility {
         source_id: signet,
         ability_index: ability(runner.state(), signet, true),
+        payment_mode: CastPaymentMode::Auto,
     };
 
     // With the same {G} floating and no payment in progress the Signet is offered.
@@ -539,6 +545,7 @@ fn tap_costed(state: &GameState, id: ObjectId) -> GameAction {
     GameAction::ActivateAbility {
         source_id: id,
         ability_index: mana_ability_costing(state, id, |cost| *cost == AbilityCost::Tap),
+        payment_mode: CastPaymentMode::Auto,
     }
 }
 
@@ -549,6 +556,7 @@ fn composite_costed(state: &GameState, id: ObjectId) -> GameAction {
         ability_index: mana_ability_costing(state, id, |cost| {
             matches!(cost, AbilityCost::Composite { .. })
         }),
+        payment_mode: CastPaymentMode::Auto,
     }
 }
 
@@ -572,6 +580,7 @@ fn suspended(state: &GameState) -> Vec<GameAction> {
     .map(|pending| GameAction::ActivateAbility {
         source_id: pending.source_id,
         ability_index: pending.ability_index.expect("an enumerated ability"),
+        payment_mode: CastPaymentMode::Auto,
     })
     .collect()
 }
@@ -816,6 +825,7 @@ fn a_suspended_ancestor_is_not_ready_once_the_pool_could_pay_it() {
         GameAction::ActivateAbility {
             source_id: altar,
             ability_index: ability(state, altar, true),
+            payment_mode: CastPaymentMode::Auto,
         },
     ];
     for action in &still_legal {
@@ -1057,6 +1067,7 @@ fn sacrifice_to_altar(
     let activation = GameAction::ActivateAbility {
         source_id: altar,
         ability_index: ability(runner.state(), altar, true),
+        payment_mode: CastPaymentMode::Auto,
     };
     let pick = GameAction::SelectCards {
         cards: vec![creature],
@@ -1889,6 +1900,7 @@ fn a_selection_spent_inside_the_window_reverses_the_activation() {
     let altar = GameAction::ActivateAbility {
         source_id: phyrexian,
         ability_index: ability(runner.state(), phyrexian, true),
+        payment_mode: CastPaymentMode::Auto,
     };
     assert!(
         legal_actions(runner.state()).contains(&altar),
@@ -2089,6 +2101,7 @@ fn mimic_board_after_rishkar_leaves() -> Option<MimicBoard> {
     let begun = GameAction::ActivateAbility {
         source_id: marvin,
         ability_index: begun_at,
+        payment_mode: CastPaymentMode::Auto,
     };
     act(&mut runner, begun.clone());
     assert_eq!(
@@ -2127,6 +2140,7 @@ fn a_suspended_mana_ability_cannot_be_activated_again_where_it_has_moved() {
     let moved = GameAction::ActivateAbility {
         source_id: board.marvin,
         ability_index: board.moved_to,
+        payment_mode: CastPaymentMode::Auto,
     };
 
     assert_refused(&mut board.runner, &moved);
@@ -2142,6 +2156,7 @@ fn another_ability_where_the_suspended_one_was_is_activated_and_survives_its_can
     let other = GameAction::ActivateAbility {
         source_id: board.marvin,
         ability_index: board.begun_at,
+        payment_mode: CastPaymentMode::Auto,
     };
 
     act(&mut board.runner, other.clone());
@@ -2188,6 +2203,7 @@ fn an_identical_second_ability_is_activated_while_the_first_is_suspended() {
     let [first, second] = [0, 1].map(|ability_index| GameAction::ActivateAbility {
         source_id: marvin,
         ability_index,
+        payment_mode: CastPaymentMode::Auto,
     });
     act(&mut runner, first.clone());
     assert_eq!(

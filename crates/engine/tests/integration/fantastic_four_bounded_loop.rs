@@ -127,7 +127,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the tracked F4 dump's `["gameState"]` through the REAL production restore chokepoint
@@ -5602,6 +5603,7 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         GameAction::ActivateAbility {
             source_id: torch,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
     assert!(

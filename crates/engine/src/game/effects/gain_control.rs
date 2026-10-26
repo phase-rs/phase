@@ -418,6 +418,15 @@ fn unique_recipient_from_filter(
             .ok_or_else(|| EffectError::MissingParam("GiveControl scoped recipient".to_string()));
     }
 
+    // CR 608.2c + CR 608.2d: a resolution-time chosen player ("that opponent"
+    // after "choose … an opponent") is read from this resolution's chosen
+    // players. The generic scan below cannot resolve it: the stateless player
+    // matcher fails closed on `ControllerRef::ChosenPlayer`.
+    if filter.chosen_player_index().is_some() {
+        return crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
+            .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
+    }
+
     let source_controller = ability.controller;
 
     if let TargetFilter::SpecificPlayer { id } = filter {
@@ -1110,6 +1119,66 @@ mod tests {
             PlayerId(1),
             "ScopedPlayer recipient must resolve to the bound active player"
         );
+    }
+
+    /// CR 608.2c + CR 608.2d (U-F1): a `GiveControl` whose recipient is the Nth
+    /// player chosen earlier in the resolution ("that opponent" after "choose a
+    /// creature you control and an opponent") hands the object to exactly that
+    /// player, and does nothing when no player was chosen.
+    #[test]
+    fn give_control_recipient_reads_the_chosen_player() {
+        // A three-player game holding one creature of P0's, given by an ability
+        // whose resolution chose `chosen_players`.
+        let give_with_chosen = |chosen_players: Vec<PlayerId>| {
+            let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+            let creature = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let mut ability = ResolvedAbility::new(
+                Effect::GiveControl {
+                    target: TargetFilter::SpecificObject { id: creature },
+                    recipient: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.chosen_players = chosen_players;
+            let mut events = Vec::new();
+            let result = resolve_give(&mut state, &ability, &mut events);
+            crate::game::layers::evaluate_layers(&mut state);
+            let controller = state.objects.get(&creature).unwrap().controller;
+            let changed = events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ControllerChanged { .. }));
+            (result, controller, changed)
+        };
+
+        // Reach guard: with a chosen player the same ability transfers control
+        // to exactly that player, so the empty-list case below is a refusal and
+        // not a vacuous no-op.
+        let (result, controller, changed) = give_with_chosen(vec![PlayerId(2)]);
+        assert!(result.is_ok());
+        assert_eq!(
+            controller,
+            PlayerId(2),
+            "the recipient is the chosen player, not another opponent"
+        );
+        assert!(changed);
+
+        let (result, controller, changed) = give_with_chosen(Vec::new());
+        assert!(matches!(
+            result,
+            Err(EffectError::MissingParam(message)) if message == "GiveControl recipient"
+        ));
+        assert_eq!(controller, PlayerId(0));
+        assert!(!changed);
     }
 
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of

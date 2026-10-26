@@ -4616,6 +4616,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: source,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 },
             )
             .expect("the activation reaches its election");
@@ -6980,13 +6981,13 @@ mod tests {
     /// their own encoded string beside the payload, exactly as
     /// `load_active_full_sessions` carries `deck_pools_json` beside
     /// `session_state_json`. Carrying them inside the JSON would exercise a
-    /// shape no writer produces, since the field is `skip_serializing`.
+    /// shape no writer produces, since the field is `skip_serializing`. Both
+    /// strings are decoded by the production row decoder, `decode_row`.
     fn round_trip_through_disk(session: &GameSession, db: &Arc<CardDatabase>) -> GameSession {
         let snapshot = session.to_persisted();
         let pools_json = serde_json::to_string(&snapshot.deck_pools).unwrap();
         let json = serde_json::to_string(&snapshot).unwrap();
-        let mut persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
-        persisted.deck_pools = serde_json::from_str(&pools_json).unwrap();
+        let persisted = crate::persist::PersistedSession::decode_row(&json, &pools_json).unwrap();
         GameSession::from_persisted(persisted, db).expect("supported persisted format config")
     }
 
@@ -7264,6 +7265,7 @@ mod tests {
             source_id: bearer,
             counter_type: None,
             available: vec![(CounterType::Plus1Plus1, 3)],
+            max_total: None,
             pending_effect: Box::new(pending),
         };
         mgr.try_session(&code).unwrap().state = state;

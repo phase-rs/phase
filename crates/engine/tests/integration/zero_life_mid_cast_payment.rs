@@ -233,6 +233,7 @@ fn activate_confluence_paying_last_life(runner: &mut GameRunner, confluence: Obj
         .act(GameAction::ActivateAbility {
             source_id: confluence,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Mana Confluence");
     assert_eq!(runner.life(P0), 0);
@@ -373,6 +374,7 @@ fn activation_paid_down_to_zero_life_goes_on_the_stack_before_the_player_loses()
         .act(GameAction::ActivateAbility {
             source_id: yawgmoth,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Yawgmoth");
     assert!(
@@ -474,6 +476,7 @@ fn replacement_choice_after_a_mana_ability_paid_the_last_life_stays_open() {
         .act(GameAction::ActivateAbility {
             source_id: confluence,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Mana Confluence");
     // CR 605.3b + CR 616.1: the replacement's choice is part of paying the mana
@@ -537,6 +540,7 @@ fn mana_ability_life_cost_awaiting_replacement_ordering_is_paid_exactly_once() {
         .act(GameAction::ActivateAbility {
             source_id: confluence,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Mana Confluence")
         .events;
@@ -650,6 +654,7 @@ fn phyrexian_life_in_a_mana_ability_sub_cost_is_paid_once_around_a_replacement_r
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the witness")
         .events;

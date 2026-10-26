@@ -1032,93 +1032,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Discard a card" / "Discard N cards"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("discard ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
-        if rest_lower == "this card" {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
-            };
-        }
-        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
-            .parse(rest_lower.as_str())
-            .is_ok()
-        {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        if rest_lower == "your hand" {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
-                    },
-                },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        // CR 701.9b: Random is a selection mode on an otherwise ordinary
-        // hand-discard cost. Accept only the complete unfiltered grammar used
-        // by the measured card corpus. A typed or malformed random phrase must
-        // fail closed below instead of falling through to the chosen parser and
-        // silently giving the payer a choice.
-        if let Ok((_, count)) =
-            all_consuming(parse_random_discard_cost_body).parse(rest_lower.as_str())
-        {
-            return AbilityCost::Discard {
-                count,
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Random,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
-            .parse(rest_lower.as_str())
-            .is_ok()
-        {
-            return AbilityCost::Unimplemented {
-                description: text.to_string(),
-            };
-        }
-        // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
-        // card-type filter so only matching cards can pay the cost (Lotleth
-        // Troll: "Discard a creature card:"). Without this the typed
-        // restriction is dropped and any card pays the cost. Mirrors the
-        // effect-form discard and the trigger-side cost parser, which both
-        // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
-        // leading count token ("a "/"two ") and the remainder is the typed noun
-        // phrase. Ordered before the plain `parse_number` arm so "two creature
-        // cards" is not swallowed as an untyped count.
-        if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
-            let noun = after_count.trim_start();
-            if let Some(filter) = parse_discard_card_filter(noun) {
-                return AbilityCost::Discard {
-                    count,
-                    filter: Some(filter),
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                };
-            }
-            // CR 107.3a: an untyped "discard X cards" keeps X symbolic so the
-            // announced value is discarded, not the X→0 of `parse_number`.
-            if all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card"))))
-                .parse(noun)
-                .is_ok()
-            {
-                return AbilityCost::Discard {
-                    count,
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                };
-            }
+        if let Some(cost) = parse_discard_cost_body(text, &rest_lower) {
+            return cost;
         }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
@@ -1433,12 +1348,23 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Reveal {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: None,
         };
     }
 
-    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    // CR 701.20a + CR 107.3a: "Reveal <N|X> <card phrase> from your hand" — a
+    // counted, typed reveal. X stays symbolic so the value announced while
+    // casting or activating is the number revealed (Martyr cycle).
+    if let Ok((body, _)) = tag::<_, _, E<'_>>("reveal ").parse(lower.as_str()) {
+        if let Some(cost) = parse_reveal_from_hand_cost_body(body) {
+            return cost;
+        }
+    }
+
+    // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
+    // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
+    // reveals, trailing relative clauses such as "that share a color").
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
@@ -1451,7 +1377,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 .trim();
             let (filter, _) = parse_target(&format!("target {filter_raw}"));
             return AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
             };
         }
@@ -1561,6 +1487,133 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
+}
+
+/// CR 701.20a + CR 107.3a: Strict grammar for a counted reveal-from-hand
+/// cost body (the lowercase text after "reveal "):
+/// `<a|an|N|x> <card phrase> from your hand`. The card phrase delegates to
+/// `parse_discard_card_filter`, the shared hand-card noun authority, so a
+/// color ("red cards") or type ("Dragon card") restricts what can pay.
+/// `None` for an untyped noun, a trailing clause, or any other shape —
+/// the caller's fallback keeps handling those.
+fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (_, (count, noun)) = all_consuming((
+        terminated(
+            nom_quantity::parse_quantity_expr_number,
+            tag::<_, _, E<'_>>(" "),
+        ),
+        terminated(take_until(" from your hand"), tag(" from your hand")),
+    ))
+    .parse(body)
+    .ok()?;
+    let filter = parse_discard_card_filter(noun)?;
+    Some(AbilityCost::Reveal {
+        count,
+        filter: Some(filter),
+    })
+}
+
+/// CR 701.9a + CR 701.9b: Strict grammar for a hand-discard cost body (the
+/// lowercase text after "discard "). Single authority shared by
+/// `parse_single_cost` and the ward-cost reader. `None` when no modeled shape
+/// consumes the whole body; `Some(Unimplemented)` for the recognized-but-
+/// unmodeled typed random discard. `text` is the full original cost text,
+/// used only for that description.
+pub(crate) fn parse_discard_cost_body(text: &str, body: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
+    if all_consuming(tag::<_, _, E<'_>>("this card"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+        });
+    }
+    if all_consuming(tag::<_, _, E<'_>>("a card"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    if all_consuming(tag::<_, _, E<'_>>("your hand"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 701.9b: Random is a selection mode on an otherwise ordinary
+    // hand-discard cost. Accept only the complete unfiltered grammar used
+    // by the measured card corpus. A typed or malformed random phrase must
+    // fail closed below instead of falling through to the chosen parser and
+    // silently giving the payer a choice.
+    if let Ok((_, count)) = all_consuming(parse_random_discard_cost_body).parse(body) {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Random,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Unimplemented {
+            description: text.to_string(),
+        });
+    }
+    // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
+    // card-type filter so only matching cards can pay the cost (Lotleth
+    // Troll: "Discard a creature card:"). Without this the typed
+    // restriction is dropped and any card pays the cost. Mirrors the
+    // effect-form discard and the trigger-side cost parser, which both
+    // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
+    // leading count token ("a "/"two ") and the remainder is the typed noun
+    // phrase. Ordered before the plain `parse_number` arm so "two creature
+    // cards" is not swallowed as an untyped count.
+    let (count, after_count) = parse_count_expr(body)?;
+    let noun = after_count.trim_start();
+    if let Some(filter) = parse_discard_card_filter(noun) {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: Some(filter),
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 107.3a: an untyped "discard X cards" keeps X symbolic so the
+    // announced value is discarded, not the X→0 of `parse_number`.
+    if all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card"))))
+        .parse(noun)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    None
 }
 
 /// CR 701.9b: Complete grammar for the unfiltered random discard-cost body.
@@ -2357,16 +2410,7 @@ fn parse_life_equal_to_quantity_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
     let (i, _) = value((), tag("life equal to the number of colors in ")).parse(i)?;
-    let (i, _) = value(
-        (),
-        alt((
-            tag("your commander's "),
-            tag("your commanders' "),
-            tag("your commanders "),
-        )),
-    )
-    .parse(i)?;
-    let (i, _) = tag("color identity").parse(i)?;
+    let (i, ()) = nom_primitives::parse_your_commanders_color_identity(i)?;
     Ok((i, QuantityRef::ColorsInCommandersColorIdentity))
 }
 
@@ -4777,8 +4821,84 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Reveal this card from your hand"),
             AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None
+            }
+        );
+    }
+
+    /// CR 701.20a + CR 107.3a: the Martyr cycle's "Reveal X <color> cards
+    /// from your hand" keeps X symbolic (the announced value) and restricts
+    /// the reveal to the named color. Verbatim cost text for all five cards.
+    #[test]
+    fn cost_reveal_x_colored_cards_keeps_x_symbolic_and_color() {
+        use crate::types::mana::ManaColor;
+        let cases = [
+            (
+                "{2}, Reveal X red cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Red,
+            ),
+            (
+                "{1}, Reveal X black cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Black,
+            ),
+            (
+                "{2}, Reveal X blue cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Blue,
+            ),
+            (
+                "{1}, Reveal X white cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::White,
+            ),
+            (
+                "{1}, Reveal X green cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Green,
+            ),
+        ];
+        for (text, generic, color) in cases {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic,
+                            },
+                        },
+                        AbilityCost::Reveal {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name: "X".into() },
+                            },
+                            filter: Some(TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .properties(vec![FilterProp::HasColor { color }]),
+                            )),
+                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 701.20a: a fixed-count typed reveal keeps its count of one and its
+    /// type filter through the strict grammar.
+    #[test]
+    fn cost_reveal_typed_card_from_hand_keeps_fixed_count() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a Dragon card from your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Dragon".to_string())
+                )),
             }
         );
     }

@@ -258,7 +258,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             !done[k]
                 && (lands[k].is_some()
                     || flat.iter().any(|x| {
-                        matches!(x, GameAction::ActivateAbility { source_id, ability_index }
+                        matches!(x, GameAction::ActivateAbility { source_id, ability_index, .. }
                             if *source_id == source && *ability_index == index)
                     }))
         });
@@ -267,6 +267,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             Some(lands[p].clone().unwrap_or(GameAction::ActivateAbility {
                 source_id: b.acts[p].0,
                 ability_index: b.acts[p].1,
+                payment_mode: CastPaymentMode::Auto,
             }))
         } else {
             let fodder_only = |a: &&GameAction| {
@@ -392,6 +393,7 @@ fn drive(row: &Row) -> (bool, String) {
         let action = land_row(c.r.state(), act, &c.hint).unwrap_or(GameAction::ActivateAbility {
             source_id: act.0,
             ability_index: act.1,
+            payment_mode: CastPaymentMode::Auto,
         });
         if step(&mut c.r, action) {
             answer(&mut c, &mut done);
@@ -912,5 +914,6 @@ const UNCHANGED: &[Row] = &[
     ("h/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/Jack-o'-Lantern (2)#membergy", "Jack-o'-Lantern", "{1}, Exile this card from your graveyard: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", true, "ff/H"),
-    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/H"),
+    // Oracle-derived reading is "tt/BF" (X=1 from Wastes adds {G}); the end now matches it (BF), while "ff" pins the pre-existing castability gap for sources whose yield is sized by an announced amount.
+    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/BF"),
 ];
