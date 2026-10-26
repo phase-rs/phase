@@ -4180,10 +4180,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             count,
             position,
+            arranger,
         } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("count".into(), format!("{count:?}")));
             d.push(("position".into(), format!("{position:?}")));
+            if let Some(arranger) = arranger {
+                d.push(("arranger".into(), fmt_target(arranger)));
+            }
         }
         Effect::PutOnTopOrBottom { target, chooser } => {
             d.push(("target".into(), fmt_target(target)));

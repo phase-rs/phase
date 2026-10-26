@@ -2952,6 +2952,74 @@ class PrReviewTests(unittest.TestCase):
         self.assertNotIn("matched:standing_skip", packet["policy_trace"])
         self.assertNotEqual(packet["recommendation"]["reason"], "contributor_standing_skip")
 
+    def test_repository_writer_bypasses_contributor_gates(self) -> None:
+        enforced_admission = {"mode": "enforce", "enforced_after": "2026-07-10T00:00:00Z"}
+        cases = {
+            "hard_stop": (
+                {"hard_stops": {"patterns": [".github/workflows/**"]}},
+                ".github/workflows/ci.yml",
+                ("request_changes", "hard_stop"),
+            ),
+            "architecture_scope": (
+                {"architecture_scope": {"mode": "enforce", "patterns": ["crates/server-core/**"]}},
+                "crates/server-core/src/lib.rs",
+                ("decline", "architecture_scope_not_authorized"),
+            ),
+            "frontend_policy": (
+                {"path_classes": {"frontend": {"patterns": ["client/**"]}}},
+                "client/src/App.tsx",
+                ("defer", "frontend_policy"),
+            ),
+            "artifacts": (
+                {"admission": enforced_admission},
+                "crates/engine/src/lib.rs",
+                ("decline", "required_artifacts_current_head"),
+            ),
+        }
+        for gate, (raw_policy, path, contributor_route) in cases.items():
+            policy = pr_review.Policy(raw_policy)
+            pr = {
+                "number": 1,
+                "state": "OPEN",
+                "createdAt": "2026-08-01T00:00:00Z",
+                "headRefOid": "a" * 40,
+                "author": {"login": "writer"},
+                "closingIssuesReferencesComplete": True,
+                "files": [{"path": path}],
+                "changedFiles": 1,
+            }
+            with self.subTest(gate=gate):
+                contributor = pr_review.make_packet(pr, policy, "maintainer", "full", {})
+                recommendation = contributor["recommendation"]
+                self.assertEqual(
+                    (recommendation["advisory_action"], recommendation["reason"]),
+                    contributor_route,
+                )
+                writer = pr_review.make_packet(
+                    pr, policy, "maintainer", "full", {}, author_is_repository_writer=True
+                )
+                self.assertTrue(writer["author_policy"]["repository_writer"])
+                self.assertEqual(writer["recommendation"]["advisory_action"], "review")
+                self.assertNotIn("audit_would_decline", writer["recommendation"])
+
+    def test_repository_writer_logins_folds_pages_and_fails_closed(self) -> None:
+        pages = [[{"login": "LGray"}], [{"login": "ntindle"}]]
+        with mock.patch.object(pr_review, "run_json", return_value=pages) as run_json:
+            self.assertEqual(
+                pr_review.repository_writer_logins("phase-rs/phase"),
+                frozenset({"lgray", "ntindle"}),
+            )
+        command = run_json.call_args.args[0]
+        self.assertIn("repos/phase-rs/phase/collaborators", command)
+        self.assertIn("permission=push", command)
+
+        failure = subprocess.CalledProcessError(1, ["gh"])
+        with (
+            mock.patch.object(pr_review, "run_json", side_effect=failure),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(pr_review.repository_writer_logins("phase-rs/phase"), frozenset())
+
     @staticmethod
     def _artifact_body(
         head: str,
@@ -3853,6 +3921,8 @@ class IncrementalDashboardTests(unittest.TestCase):
     def github(self, command: list[str]) -> object:
         self.calls.append(command)
         endpoint = command[2]
+        if endpoint.endswith("/collaborators"):
+            return [[]]
         if endpoint != "graphql":
             rows = self.comments if endpoint.endswith("issues/comments") else self.issues
             page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))

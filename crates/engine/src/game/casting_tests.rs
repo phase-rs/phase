@@ -20711,6 +20711,7 @@ fn cast_from_exile_library_bottom_rider_bottoms_resolved_spell() {
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         },
         vec![],
         kylox,

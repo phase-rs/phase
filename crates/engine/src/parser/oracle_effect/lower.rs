@@ -905,6 +905,7 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -976,6 +977,7 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -1023,6 +1025,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position,
+            arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
             destination: Zone::Hand,
@@ -1438,6 +1441,7 @@ mod linked_exile_cleanup_tests {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     }
 

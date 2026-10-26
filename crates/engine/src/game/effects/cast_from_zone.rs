@@ -5491,6 +5491,7 @@ mod tests {
                     target: TargetFilter::ParentTarget,
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Bottom,
+                    arranger: None,
                 },
                 SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,
