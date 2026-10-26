@@ -2299,6 +2299,13 @@ fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
                 run.runner.state().waiting_for,
                 WaitingFor::DiscardChoice { .. }
             ));
+            if extra_die {
+                assert_eq!(
+                    run.runner.state().die_result_this_resolution,
+                    Some(1),
+                    "the first surviving die stays live after keep: {ingress:?}"
+                );
+            }
             restore_random_pause(&mut run, ingress);
             let WaitingFor::DiscardChoice { player, .. } = run.runner.state().waiting_for else {
                 panic!("first survivor must offer its discard")
@@ -2306,6 +2313,13 @@ fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
             assert_eq!(player, P0);
             let card = run.runner.state().players[0].hand[0];
             run.act(GameAction::SelectCards { cards: vec![card] });
+            // CR 608.2c: the completed aggregate stays live for later instructions,
+            // rather than reverting to the scope snapshot's entry value.
+            assert_eq!(
+                run.runner.state().die_result_this_resolution,
+                Some(3),
+                "the completed aggregate stays live after drain: {ingress:?}, keep={extra_die}"
+            );
             run.finish();
             assert_eq!(run.runner.state().players[0].life, 43);
             assert_eq!(
