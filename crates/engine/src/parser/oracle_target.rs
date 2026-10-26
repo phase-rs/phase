@@ -7839,9 +7839,11 @@ pub(crate) fn parse_cost_paid_object_noun(input: &str) -> OracleResult<'_, ()> {
 /// sacrificed <noun>", returning the `CostCategory` of the cost that would
 /// have paid for the object (`Discards` / `SacrificesPermanent`). The phrase
 /// alone does not prove a cost: the same participles describe an effect's
-/// discard or sacrifice. A reader that binds the phrase to the cost-paid
-/// object verifies the returned category against the enclosing ability's
-/// cost (`ParseContext::current_ability_cost_categories`).
+/// discard or sacrifice. The same-quality rider (`parse_same_quality_reference`)
+/// verifies the returned category against the enclosing ability's cost
+/// (`ParseContext::current_ability_cost_categories`);
+/// `parse_cost_paid_mana_value_reference` binds `ObjectScope::CostPaidObject`
+/// without that check.
 pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, CostCategory> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
     let (rest, category) = alt((
@@ -8835,8 +8837,9 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
-/// object referred to by this ability's cost. "sacrificed" is always a cost
-/// participle. "exiled" is a cost participle ONLY when the enclosing ability
+/// object referred to by this ability's cost. "sacrificed" is bound without
+/// checking the ability's cost (see `parse_cost_paid_participle_object`).
+/// "exiled" is a cost participle ONLY when the enclosing ability
 /// carries a non-self exile cost (`ctx.current_ability_exile_cost_zone`);
 /// otherwise it is an effect participle and the combinator returns
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
