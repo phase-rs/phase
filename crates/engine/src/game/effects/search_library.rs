@@ -917,7 +917,6 @@ mod tests {
         assert!(selection_is_distinct_subset(&[], &offered));
         let chosen = [c, a, b];
         assert!(selection_is_distinct_subset(&chosen, &offered));
-        assert_eq!(chosen, [c, a, b]);
         for invalid in [vec![a, a], vec![a, b, a], vec![a, foreign]] {
             assert!(!selection_is_distinct_subset(&invalid, &offered));
         }
