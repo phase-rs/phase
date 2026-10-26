@@ -2244,6 +2244,12 @@ pub(super) fn handle_resolution_choice(
                 effects::life::LifeAssignmentOutcome::Deferred => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
+                // The difference was unrepresentable: nothing was assigned. The
+                // open ingress window rejects the action at the boundary, which
+                // restores this prompt.
+                effects::life::LifeAssignmentOutcome::Unrepresentable => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
                 effects::life::LifeAssignmentOutcome::Applied => {
                     ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
                         state, player, events,
@@ -2287,15 +2293,22 @@ pub(super) fn handle_resolution_choice(
                 .ok_or_else(|| {
                     EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
                 })?;
+            let events_before_resume = events.len();
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
-            // CR 608.2c: re-suspended for another interactive choice, else the
-            // whole flip effect completed — drain back to Priority.
+            // CR 608.2c: resume the parent only after the coin run completes.
             let wf = match next {
                 Some(wf) => wf,
                 None => finish_with_continuation(state, player, events),
             };
+            // CR 603.2 + CR 603.3b: the coin branch or a later parent instruction
+            // can pause; preserve observers until priority returns.
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                events_before_resume,
+            );
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (
@@ -3617,12 +3630,21 @@ pub(super) fn handle_resolution_choice(
                                 // firewall rejected any life-gain replacement/observer
                                 // (`apply_life_gain` re-runs the replacement pipeline, so a
                                 // lump gain would fire an observer ONCE not N×).
-                                let _ = crate::game::effects::life::apply_life_gain(
+                                // The shortcut is an action-ingress edit: a gain the engine
+                                // cannot represent (the saturated amount never fits an `i32`
+                                // delta) rejects the action through the boundary rollback.
+                                // A deferral stays ignored — the firewall excludes life
+                                // replacements, so none can be pending here.
+                                if let Err(effects::life::LifeChangeError::Unrepresentable(
+                                    unrepresentable,
+                                )) = crate::game::effects::life::try_apply_life_gain(
                                     state,
                                     *p,
                                     per_cycle_delta.saturating_mul(amount),
                                     events,
-                                );
+                                ) {
+                                    return Err(unrepresentable.into());
+                                }
                             }
                         }
                         // Reaching here means the growth applied.

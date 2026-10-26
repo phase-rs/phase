@@ -22400,6 +22400,18 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
+    /// Open while an action-ingress life change settles synchronously (a `try_*`
+    /// entry's whole call, or the replacement-choice handler resuming a `Reject`
+    /// record). Any life settlement inside it that is unrepresentable is recorded
+    /// here and the ingress caller rejects. Transient — never serialized.
+    #[serde(skip)]
+    pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    /// A replacement's computed life quantity overflowed while the current life
+    /// event was being replaced (see `ReplacementQuantityOverflow`). Recorded by
+    /// the life appliers, taken by the life settle step of the same event inside
+    /// one synchronous action. Transient — never serialized.
+    #[serde(skip)]
+    pub(crate) replacement_quantity_overflow: Option<ReplacementQuantityOverflow>,
     /// CR 601.2g + CR 605.3b: the row policy of the automatic mana payment that
     /// is executing (see `casting_costs::AutoTapRowPolicy`). Set while a
     /// payment activates its selected sources, and to `AllRows` while a
@@ -27875,9 +27887,95 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
+    /// Whether an engine-unrepresentable final life edit on resume rejects the
+    /// public action and restores its entry state (`Reject`), or uses the
+    /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
+    /// Older payloads omit this field and retain that compatibility policy.
+    #[serde(
+        default,
+        skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
+    )]
+    pub unrepresentable_life_change: UnrepresentablePolicy,
+}
+
+/// Who owns a life change whose final result the engine cannot represent
+/// (final amount beyond an `i32` delta, life total overflow, or per-turn
+/// gained/lost counter overflow).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnrepresentablePolicy {
+    /// Action ingress: return the typed error so the caller rejects the
+    /// action through the boundary snapshot restore (nothing settles).
+    Reject,
+    /// Compatibility fallback for ordinary resolution outside a public action
+    /// boundary and for older serialized payloads. This is an engine numeric
+    /// capacity limit, not a rules outcome: the change cannot be recorded, so it
+    /// is logged once and skipped without a life mutation. An open ingress
+    /// window instead records failure so the public boundary rejects the action
+    /// and restores its entry state.
+    #[default]
+    IgnoreImpossible,
+}
+
+impl UnrepresentablePolicy {
+    /// Serde skip predicate: the ordinary policy is the wire default.
+    pub fn is_ignore_impossible(&self) -> bool {
+        matches!(self, Self::IgnoreImpossible)
+    }
+}
+
+/// State of the transient action-ingress life window (see
+/// `GameState::ingress_life_window`): the first player whose life settlement
+/// inside the window proved unrepresentable, if any.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IngressLifeWindow {
+    pub(crate) failed_player: Option<PlayerId>,
+}
+
+/// A replacement's computed life quantity overflowed the engine's numeric
+/// range, so the modified event cannot be represented. This is an engine
+/// capacity limit, NOT a CR 101.3 impossibility: the applier records the
+/// overflowing replacement's source (diagnostic) and the life settle step takes
+/// the record and routes it through the existing unrepresentable-life-change
+/// authority. A public action boundary rejects and restores; the ordinary
+/// fallback outside one skips the change for compatibility (never clamping,
+/// and never inventing a CR 119.3 amount).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplacementQuantityOverflow {
+    pub(crate) source: ObjectId,
+}
+
+impl GameState {
+    /// Record that a replacement's computed life quantity overflowed. The first
+    /// writer wins: the loop stops at the first overflow, so a later record can
+    /// only be the same event.
+    pub(crate) fn record_replacement_quantity_overflow(&mut self, source: ObjectId) {
+        if self.replacement_quantity_overflow.is_none() {
+            self.replacement_quantity_overflow = Some(ReplacementQuantityOverflow { source });
+        }
+    }
+
+    /// Take (and clear) the recorded overflow, if any.
+    pub(crate) fn take_replacement_quantity_overflow(
+        &mut self,
+    ) -> Option<ReplacementQuantityOverflow> {
+        self.replacement_quantity_overflow.take()
+    }
 }
 
 impl PendingReplacement {
+    /// CR 616.1f: a record re-parked while its predecessor (stamped with
+    /// `predecessor_policy`) was being answered keeps the ingress stamp. Copies
+    /// `Reject` onto a record still at the default and never downgrades a
+    /// `Reject` already on it.
+    pub(crate) fn inherit_unrepresentable_life_change(
+        &mut self,
+        predecessor_policy: UnrepresentablePolicy,
+    ) {
+        if predecessor_policy == UnrepresentablePolicy::Reject {
+            self.unrepresentable_life_change = UnrepresentablePolicy::Reject;
+        }
+    }
+
     /// The event the logical owner of this paused zone-change delivery parked
     /// on. The single authority every owner match reads — capture
     /// (`GameState::pending_zone_change_delivery_from_replacement`),
@@ -31669,6 +31767,8 @@ impl GameState {
             active_casting_permission_index: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
+            ingress_life_window: None,
+            replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
@@ -33343,6 +33443,19 @@ impl GameState {
         self.exiled_from_hand_this_resolution = 0;
         self.die_result_this_resolution = None;
         self.consumed_before_priority_trigger_events.clear();
+        self.ingress_life_window = None;
+        self.replacement_quantity_overflow = None;
+    }
+
+    /// The policy a life event parked right now must be stamped with: `Reject`
+    /// while an action-ingress window is open (the event belongs to that public
+    /// action), otherwise legacy/outside-boundary compatibility behavior.
+    pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
+        if self.ingress_life_window.is_some() {
+            UnrepresentablePolicy::Reject
+        } else {
+            UnrepresentablePolicy::IgnoreImpossible
+        }
     }
 
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
@@ -34704,6 +34817,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_casting_permission_index: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
+        ingress_life_window: _,
+        replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
         stack: _,
@@ -51933,6 +52048,169 @@ mod tests {
         assert_eq!(
             deserialized.active_auto_tap_row_policy, None,
             "deserialized active_auto_tap_row_policy must be None"
+        );
+    }
+
+    /// The ingress life window lives only inside one synchronous action: it is
+    /// never serialized, and the per-action reset closes it.
+    #[test]
+    fn ingress_life_window_is_skipped_by_serde_and_cleared_per_action() {
+        let mut state = GameState::new_two_player(7);
+        state.ingress_life_window = Some(IngressLifeWindow {
+            failed_player: Some(PlayerId(1)),
+        });
+        assert_eq!(
+            state.ingress_life_policy(),
+            UnrepresentablePolicy::Reject,
+            "reach guard: an open window selects the rejecting stamp"
+        );
+
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            !serialized.contains("ingress_life_window"),
+            "ingress_life_window must be skipped by serde: {serialized}"
+        );
+        let deserialized: GameState =
+            serde_json::from_str(&serialized).expect("state must deserialize");
+        assert_eq!(
+            deserialized.ingress_life_window, None,
+            "deserialized ingress_life_window must be None"
+        );
+
+        state.clear_player_action_transients();
+        assert_eq!(
+            state.ingress_life_window, None,
+            "the per-action reset must close the window"
+        );
+        assert_eq!(
+            state.ingress_life_policy(),
+            UnrepresentablePolicy::IgnoreImpossible
+        );
+    }
+
+    /// The replacement-quantity overflow record lives only inside one synchronous
+    /// action: it is never serialized, and the per-action reset clears it.
+    #[test]
+    fn replacement_quantity_overflow_is_skipped_by_serde_and_cleared_per_action() {
+        let mut state = GameState::new_two_player(7);
+        state.record_replacement_quantity_overflow(ObjectId(5));
+        state.record_replacement_quantity_overflow(ObjectId(6));
+        assert_eq!(
+            state.replacement_quantity_overflow,
+            Some(ReplacementQuantityOverflow {
+                source: ObjectId(5)
+            }),
+            "reach guard: the first recorded source wins"
+        );
+
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            !serialized.contains("replacement_quantity_overflow"),
+            "replacement_quantity_overflow must be skipped by serde: {serialized}"
+        );
+        let deserialized: GameState =
+            serde_json::from_str(&serialized).expect("state must deserialize");
+        assert_eq!(
+            deserialized.replacement_quantity_overflow, None,
+            "deserialized replacement_quantity_overflow must be None"
+        );
+
+        state.clear_player_action_transients();
+        assert_eq!(
+            state.replacement_quantity_overflow, None,
+            "the per-action reset must clear the record"
+        );
+
+        state.record_replacement_quantity_overflow(ObjectId(7));
+        assert_eq!(
+            state.take_replacement_quantity_overflow(),
+            Some(ReplacementQuantityOverflow {
+                source: ObjectId(7)
+            })
+        );
+        assert_eq!(state.take_replacement_quantity_overflow(), None);
+    }
+
+    fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
+        PendingReplacement {
+            proposed: ProposedEvent::LifeGain {
+                player_id: PlayerId(0),
+                amount: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: policy,
+        }
+    }
+
+    /// Wire shape of the parked-record policy: present as `"Reject"` and
+    /// round-trips; omitted for the ordinary policy; absent in older payloads.
+    #[test]
+    fn pending_replacement_unrepresentable_life_change_wire_shape() {
+        let reject = pending_life_gain_replacement(UnrepresentablePolicy::Reject);
+        let json = serde_json::to_value(&reject).expect("record must serialize");
+        assert_eq!(
+            json.get("unrepresentable_life_change"),
+            Some(&serde_json::json!("Reject"))
+        );
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, reject);
+
+        let ordinary = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let mut json = serde_json::to_value(&ordinary).expect("record must serialize");
+        assert!(
+            json.get("unrepresentable_life_change").is_none(),
+            "the ordinary policy must be omitted from the wire: {json}"
+        );
+        // An older payload (no key) deserializes to the ordinary policy.
+        json.as_object_mut()
+            .expect("record serializes as an object")
+            .remove("unrepresentable_life_change");
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert_eq!(
+            legacy.unrepresentable_life_change,
+            UnrepresentablePolicy::IgnoreImpossible
+        );
+    }
+
+    /// CR 616.1f: a re-parked record copies a `Reject` stamp from its
+    /// predecessor and never downgrades one it already carries.
+    #[test]
+    fn inherit_unrepresentable_life_change_copies_reject_and_never_downgrades() {
+        let mut reparked = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::IgnoreImpossible,
+            "an ordinary predecessor leaves the default record ordinary"
+        );
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::Reject);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::Reject,
+            "a rejecting predecessor stamps the default record"
+        );
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::Reject,
+            "an ordinary predecessor must not downgrade a rejecting record"
         );
     }
 

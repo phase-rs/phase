@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
-use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::error::{oracle_err, OracleError};
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
 use crate::types::ability::{
@@ -720,6 +720,16 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// Nom adapter over [`parse_count_expr`] — the single combinator-form entry to
+/// the shared count grammar, so nom pipelines (`terminated`, `alt`, scanners)
+/// compose with every count form `parse_count_expr` recognizes instead of each
+/// caller wrapping it locally.
+pub(crate) fn parse_count_expr_combinator(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_count_expr(input)
+        .map(|(quantity, rest)| (rest, quantity))
+        .ok_or_else(|| oracle_err(input))
 }
 
 /// Parse a multiplicative count prefix, such as `twice ` or `five times `.
